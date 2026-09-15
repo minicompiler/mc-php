@@ -1,0 +1,7 @@
+_php_error_docref T
+_php_info_print_table_end T
+_php_info_print_table_row T
+_php_info_print_table_start T
+_zend_wrong_parameter_error T
+_zend_wrong_parameters_count_error T
+_zend_zval_type_name T

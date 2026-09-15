@@ -1,0 +1,13 @@
+__DefaultRuneLocale
+___maskrune
+_isalnum
+_isalpha
+_iscntrl
+_isdigit
+_isgraph
+_islower
+_isprint
+_ispunct
+_isspace
+_isupper
+_isxdigit
