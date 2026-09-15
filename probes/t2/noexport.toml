@@ -1,0 +1,15 @@
+# T2 control: the same link WITHOUT -export_dynamic.
+[project]
+entry = "host.mc"
+out   = "build/host-ld-noexport"
+kind  = "exe"
+
+[target]
+os   = "macos"
+arch = "aarch64"
+
+[linker]
+cmd  = "ld"
+args = ["-arch", "arm64", "-platform_version", "macos", "13.0", "13.0",
+        "-syslibroot", "{sdk}", "-lSystem",
+        "-o", "{out}", "{obj}"]
