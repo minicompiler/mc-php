@@ -113,6 +113,21 @@ D7. DECIDED (owner, 2026-09-15): no VM and no GC -- "teko already proves automat
     concatenation in `while`) grows until its scope ends, so T5 gains a column, peak RSS against
     `php` on the same `.phpt`.
 
+D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixtures, any part of
+    the runtime or standard library written in PHP, examples -- carries TESTS that run in BOTH
+    worlds and BENCHMARKS between them. (a) Tests are PHPUnit test classes (`PHPUnit\Framework\
+    TestCase`, `assertSame` & co.) run under `php` with the real phpunit; the SAME files run under
+    mc-php through `mc-php test`, where a tiny `TestCase` shim provides the assertions and the
+    compiler discovers `test*` methods at COMPILE time (D6: no reflection -- phpunit's own runner
+    cannot run on mc-php, so discovery is the compiler's job and the generated `main` calls each
+    test). Green in both is the gate; a test that passes in one world and not the other is a bug
+    named by the test. (b) Benchmarks: `bench/` holds programs timed under `php` (version, opcache
+    and JIT settings recorded as the tool prints them) and as an mc-php binary, in the shape of
+    mc's bench cell (interleaved repetitions, medians, a committed dated `results.json`); the
+    number reported is `php / mc-php` per program, and it is printed on every run, never claimed
+    from memory. Nothing written in PHP lands without its test in both worlds and its row in the
+    bench table.
+
 D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connection shape from
     mc's bench) that fills the superglobals; no CGI/FCGI, no `url/file.php`. Later.
 

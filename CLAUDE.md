@@ -9,6 +9,8 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   carries its green/total number.
 - Comments, messages and docs in English; ASCII identifiers; no emojis.
 - Every probe under `probes/` prints one number and exits 0 only when it measured it.
+- Every `.php` written here has PHPUnit tests run under `php` AND under `mc-php test` (D8), and a
+  row in `bench/` timing `php` against the mc-php binary. No PHP lands without both.
 - One agent at a time; measurements before design; a decision in `docs/plan.md` § 3 is taken only
   by the probe that decides it.
 
