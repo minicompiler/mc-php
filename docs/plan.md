@@ -76,6 +76,18 @@ D6. DECIDED (owner, 2026-09-15): no reflection. A binary carries no run-time typ
     built on reflection-driven DI containers (Laravel, Symfony) are out of scope; the target is
     programs and libraries that do not introspect.
 
+D7. DECIDED (owner, 2026-09-15): no VM and no GC -- "teko already proves automatic arenas work".
+    Execution is AOT only (D1 already removed the interpreter). Memory is arenas: Zend's own
+    `emalloc` is a per-request allocator reset at request end, so the web shape is one arena per
+    request (with the fork-per-connection server the child's exit IS the release), and the CLI
+    shape is automatic per-scope arenas in teko's rule (what escapes a scope is copied up). There
+    is no refcount-driven free and no cycle collector. Consequence for D2b: the refcount fields
+    stay in the layouts (extensions read/write `GC_REFCOUNT` inline), and `zval_ptr_dtor`,
+    `zend_string_release`, `_efree` and friends are arena-aware no-ops -- T3 measures that a real
+    extension runs on it. The risk is measured, not assumed: a long loop that allocates (string
+    concatenation in `while`) grows until its scope ends, so T5 gains a column, peak RSS against
+    `php` on the same `.phpt`.
+
 D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connection shape from
     mc's bench) that fills the superglobals; no CGI/FCGI, no `url/file.php`. Later.
 
