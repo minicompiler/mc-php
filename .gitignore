@@ -4,3 +4,12 @@ php-src/
 *.so
 *.dylib
 .DS_Store
+
+# probe artefacts: binaries and per-run scratch. The measured LISTS under
+# probes/t1/out/*.txt are committed on purpose -- they are the result.
+probes/*/host-exe*
+probes/*/host-[0-9]*
+probes/*/host-[0-9]*.mc
+probes/t3/layout
+probes/t3/*.txt
+probes/t1/out/.names
