@@ -1,0 +1,10 @@
+# built by run.sh
+mc-lexprobe
+mc-php
+mc-claim
+mc-push
+mc-inplace
+mc-d
+out/
+g/0*
+!g/*.php

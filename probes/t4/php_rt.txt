@@ -1,0 +1,54 @@
+// php_rt.txt -- the crudest runtime that runs, pushed into every program this
+// probe compiles (php.mc's user_init: #embed + p_push_source). i64 for int, a
+// NUL-terminated byte string for string, one bump arena, no free. T4 measures
+// the PARSER; this is only enough to make a measured program print something.
+#include <sys>
+
+#define PH_ARENA 65536
+
+u8  ph_buf[PH_ARENA];
+i64 ph_top;
+
+uptr ph_alloc(i64 n) {
+    uptr p = ph_buf + ph_top;
+    ph_top = ph_top + n;
+    if (ph_top > PH_ARENA) { write(2, "php: out of arena\n", 18); exit(1); }
+    return p;
+}
+
+i64 ph_len(uptr s) {
+    i64 n = 0;
+    loop { if (!ld8(s + n)) break; n = n + 1; }
+    return n;
+}
+
+uptr php_concat(uptr a, uptr b) {
+    i64 la = ph_len(a);
+    i64 lb = ph_len(b);
+    uptr o = ph_alloc(la + lb + 1);
+    i64 i = 0;
+    loop { if (i >= la) break; st8(o + i, ld8(a + i)); i = i + 1; }
+    i64 j = 0;
+    loop { if (j >= lb) break; st8(o + la + j, ld8(b + j)); j = j + 1; }
+    st8(o + la + lb, 0);
+    return o;
+}
+
+uptr php_itoa(i64 v) {
+    uptr o = ph_alloc(24);
+    i64 neg = 0;
+    if (v < 0) { neg = 1; v = 0 - v; }
+    i64 i = 23;
+    st8(o + i, 0);
+    loop {
+        i = i - 1;
+        st8(o + i, 48 + v % 10);
+        v = v / 10;
+        if (!v) break;
+    }
+    if (neg) { i = i - 1; st8(o + i, 45); }
+    return o + i;
+}
+
+i64 php_echo_str(uptr s) { write(1, s, ph_len(s)); return 0; }
+i64 php_echo_int(i64 v) { uptr s = php_itoa(v); write(1, s, ph_len(s)); return 0; }
