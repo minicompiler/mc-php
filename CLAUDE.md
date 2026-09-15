@@ -3,7 +3,8 @@
 Read `docs/plan.md` first. This repository is a CONSUMER of mc 1.0.0 (frozen surface): it never
 edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patched around here.
 
-- A `.php` file is PHP: it must run under `php` unchanged. No dialect.
+- A `.php` file is PHP: it must run under `php` unchanged. No dialect. mc-php accepts a SUBSET:
+  no `eval`/interpreter (D1) and static variable types (D4); a refusal is a named compile error.
 - The oracle is php-src's `.phpt` corpus under `php` and under the mc-php build; every claim
   carries its green/total number.
 - Comments, messages and docs in English; ASCII identifiers; no emojis.

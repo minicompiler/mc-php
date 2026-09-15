@@ -21,10 +21,22 @@ every run. Nothing is claimed compatible that this grid does not show.
 
 ## 3. Decisions to take before code (with the measurement that decides each)
 
-D1. `include`/`require`/`eval` at run time. A binary is whole-program: every include is resolved
-    at compile time (the closure of the entry) and `eval` of source not present at compile time is
-    refused. An embedded interpreter is the later road, not the first. Decided by T0's corpus
-    breakdown: how many `.phpt` need run-time `eval`.
+D1. DECIDED (owner, 2026-09-15): there is no interpreter. A binary is whole-program -- every
+    `include`/`require` is resolved at compile time (the closure of the entry, literal paths only)
+    -- and `eval`, `create_function`, an `include` of a computed path, `$$name` and any call whose
+    target is a run-time string that cannot be resolved at compile time are REFUSED with a named
+    compile error, one per construct, listed in `docs/refused.md` (to be written with T4). T0's
+    corpus breakdown reports how many `.phpt` fall in that class, as a number, not as a claim.
+
+D4. DECIDED (owner, 2026-09-15): variables have a STATIC type. A variable's type is its declared
+    type or the type of its first assignment, and it never changes: `$a = "1"; $a = 10;` is a
+    compile error naming the variable and both types. Consequences: (a) mc-php accepts a SUBSET of
+    PHP -- every program it compiles runs unchanged under `php`, not the reverse; (b) a typed local
+    is a native value, not a zval, so the first optimization is free; (c) `mixed` and union types
+    exist only where PHP itself declares them (parameters, returns, properties) and a variable of
+    such a type is a zval; (d) arrays stay heterogeneous inside (elements are zvals) -- the static
+    type is the container's; (e) `null` needs a declared `?T` or a union, never an implicit one.
+    The `.phpt` grid gains a third column: green / wrong / refused-by-design.
 
 D2. Extensions. Two classes, two answers.
     (a) The engine, `ext/standard` and everything the distribution compiles in are not loadable:
