@@ -80,7 +80,10 @@ probe's own harness against php-src's own `run-tests.php` over `Zend/tests` and
 (a stray `--` corrupting `--ARGS--`, an unquoted space leaking out of `--INI--`, and a hardcoded
 `E_ALL` that does not match this PHP build's actual 30719).
 
-__T0_SUMMARY__
+The numbers: `phpt: green 0 / wrong 18109 / refused 0 / skip 2947 / php-fail 339 / total 21056`
+(21395 files, `sapi/` excluded; green requires the exit code too). Breakdown: of 21560 classifiable
+tests, D1 touches 143 (0.7%), D5 1569 (7.3%), D6 1719 (8.0%), D4-suspect 123 (0.6%) -- **18151
+(84.2%) are touched by none**; 9028 are extension-specific, 1899 of those touched.
 
 `sh probes/t0/run.sh` (`T0_CROSSCHECK=1` also re-runs php-src's own runner, ~8 minutes). Details:
 `probes/t0/RESULTS.md`.
