@@ -69,6 +69,22 @@ directive, `$name` is still a `T_HOLE` no registration reaches, and a region of 
 cannot be skipped. `sh probes/gap-lexer-ownership/run.sh` exits 0 only while it reproduces.
 Reported in `docs/plan.md` § 5, with the one additive function that would close three of the four.
 
+## T0 -- how far is 0 from N
+
+The grid: every `.phpt` under php-src, `php` against a placeholder executor B
+(`probes/t0/mcphp-stub.sh`, which does not exist as a compiler yet and always disagrees). Also the
+corpus breakdown -- how much of it `docs/plan.md` § 3's decisions actually touch, measured with
+the real tokenizer (`token_get_all()`, never a regex over PHP source) -- and a cross-check of this
+probe's own harness against php-src's own `run-tests.php` over `Zend/tests` and
+`ext/standard/tests/strings`, which found and fixed three real bugs in `phpt-run.py` along the way
+(a stray `--` corrupting `--ARGS--`, an unquoted space leaking out of `--INI--`, and a hardcoded
+`E_ALL` that does not match this PHP build's actual 30719).
+
+__T0_SUMMARY__
+
+`sh probes/t0/run.sh` (`T0_CROSSCHECK=1` also re-runs php-src's own runner, ~8 minutes). Details:
+`probes/t0/RESULTS.md`.
+
 ## Not run yet
 
-T0 and T5 (`docs/plan.md` § 4).
+T5 (`docs/plan.md` § 4).
