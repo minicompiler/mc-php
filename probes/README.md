@@ -43,6 +43,16 @@ abort, and none of them fired.
 
 `sh probes/t3/run.sh` (after T1, which builds `ctype.so`). Details: `probes/t3/RESULTS.md`.
 
+## T4 -- does Tier 3 take PHP's grammar
+
+**The grammar yes, the lexer no.** 14 grammar steps, 10 of them byte for byte what `php` prints,
+all hanging off **one** registration -- `syntax("<?php", &ph_program)`. What Tier 3 does not reach
+is the byte stream: of 31 PHP constructs, **10 die under the stock lexer, `tok_add` fixes 6, and 4
+are the lexer's own** (`'`, `#`, `#[`, and a region of raw bytes), plus `$name`, which is a
+`T_HOLE` no registration reaches. `mc build` with `[project].entry = "main.php"` works end to end.
+
+`sh probes/t4/run.sh`. Details: `probes/t4/RESULTS.md`.
+
 ## gap-bss-exports -- an mc gap T3 hit
 
 Not a plan probe: the minimal reproducer for the one mc gap these three found, kept so it can be
@@ -51,6 +61,14 @@ handed to mc and re-run when mc changes. An `mc --exe` binary's exported symbols
 segment numbers at four sizes and exits 0 only when it still reproduces. Reported in
 `docs/plan.md` § 5.
 
+## gap-lexer-ownership -- an mc gap T4 hit
+
+A module cannot own the lexing of a source it claims. With `source_claim` answering 1 for every
+source and every lexeme PHP needs added with `tok_add`, `'` is still a char literal, `#` is still a
+directive, `$name` is still a `T_HOLE` no registration reaches, and a region of raw bytes still
+cannot be skipped. `sh probes/gap-lexer-ownership/run.sh` exits 0 only while it reproduces.
+Reported in `docs/plan.md` § 5, with the one additive function that would close three of the four.
+
 ## Not run yet
 
-T0, T4 and T5 (`docs/plan.md` § 4).
+T0 and T5 (`docs/plan.md` § 4).
