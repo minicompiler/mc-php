@@ -48,6 +48,20 @@ D2. Extensions. Two classes, two answers.
         Decided by T1 (the size of that subset), T2 (mc can export symbols to a `.so` and receive
         a variadic call) and T3 (a real extension function runs on our zval).
 
+D5. DECIDED (owner, 2026-09-15): `require`/`require_once`/`include`/`include_once` are sugar over
+    mc's `#include` semantics -- the Tier 3 handler resolves the LITERAL path against the including
+    file and pushes the source with `p_push_source` (M21: a textual splice at that point, in the
+    includer's scope, errors attributed to the included file). All four are compile-time; the one
+    distinction kept is `_once`, by normalized path (PHP's own realpath rule). A missing file is a
+    compile error in all four (a binary has no "warn and continue"). `$x = include 'f.php';` where
+    `f.php` is a single top-level `return EXPR;` splices the expression; an expression-position
+    include whose file also runs statements is refused. Declarations (functions, classes) found in
+    an included file are hoisted to the program; an include that is conditional or inside a loop
+    and carries declarations is refused. A computed path is refused (D1). The real-world case,
+    Composer's `spl_autoload_register` + `include $file`, is resolved STATICALLY: the compiler reads
+    `vendor/composer/autoload_classmap.php` / the PSR-4 map (literal arrays) and includes the file
+    when the class is first referenced -- autoload becomes compile-time resolution.
+
 D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connection shape from
     mc's bench) that fills the superglobals; no CGI/FCGI, no `url/file.php`. Later.
 
