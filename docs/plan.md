@@ -144,7 +144,7 @@ D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connec
 
 | id | question | measured how | exit number |
 |---|---|---|---|
-| T0 | how far is 0 from N | php-src cloned, `probes/phpt-run.sh` runs `php` and `mc-php` | green/total |
+| T0 | how far is 0 from N | php-src cloned, `probes/t0/phpt-run.py` runs `php` and `mc-php` | green/total -- phpt: green 0 / wrong 18109 / refused 0 / skip 2947 / php-fail 339 / total 21056  (21395 tests; sapi/ excluded) (`probes/t0`) |
 | T1 | how big is the Zend shim | `phpize` on `ext/ctype` and `ext/pdo_sqlite`, `nm -u` on the `.so` | imported symbols per `.so` -- **measured: 169** (`probes/t1`) |
 | T2 | can an mc binary export a symbol to a `.so` and take a variadic call | `[linker]` with `-export_dynamic`, `dlopen`, a callback; a C caller of a variadic mc callee | yes/no per host -- **macos/aarch64: yes, yes** (`probes/t2`) |
 | T3 | does a real extension run on our zval | zval/`zend_string`/HashTable at `zend_types.h` offsets in mc, `ctype_digit` from `ctype.so` | yes/no -- **yes** (`probes/t3`) |
@@ -157,7 +157,17 @@ Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
 T1, T2, T3 and T4 are done (2026-09-15, macos/aarch64): see `probes/README.md` for the numbers and
 `probes/tN/RESULTS.md` for each. **D2(b) is taken.** T4 answers its own gate: the grammar fits
 Tier 3 with no mc change -- 14 grammar steps, 10 of them byte for byte what `php` prints -- and
-the LEXER does not, which is the gap above. T0 and T5 are not run.
+the LEXER does not, which is the gap above.
+
+T0 is done (2026-09-15, macos/aarch64; `probes/t0/RESULTS.md`): every `.phpt` under php-src run
+through `php` and through a placeholder executor B that does not implement a compiler yet
+(`probes/t0/mcphp-stub.sh`, exits 99, matches nothing) -- phpt: green 0 / wrong 18109 / refused 0 / skip 2947 / php-fail 339 / total 21056  (21395 tests; sapi/ excluded). The number that will move
+once mc-php exists is `green`. Also: the corpus breakdown -- how much of it the decisions above
+actually touch, with the real tokenizer, not a regex -- 21560 classifiable tests; D1 143 (0.7%), D5 1569 (7.3%), D6 1719 (8.0%), D4-suspect 123 (0.6%); touched by at least one 3409 (15.8%), by none 18151 (84.2%); extension-specific 9028, of which 1899 touched. Cross-checked
+against php-src's own `run-tests.php` over `Zend/tests` and `ext/standard/tests/strings`, which
+reconciles to the byte once three bugs this cross-check found in the harness itself were fixed
+(a stray `--` corrupting `--ARGS--`, `--INI--` leaking a space around `=`, and a hardcoded
+`error_reporting` value that was not this PHP build's actual `E_ALL`). T5 is not run.
 
 ## 5. What mc may need (reported, not worked around)
 

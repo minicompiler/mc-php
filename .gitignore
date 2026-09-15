@@ -13,3 +13,4 @@ probes/*/host-[0-9]*.mc
 probes/t3/layout
 probes/t3/*.txt
 probes/t1/out/.names
+probes/t0/out/

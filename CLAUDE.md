@@ -49,3 +49,5 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   `mc --exe` binary's exported symbols become invisible to `dlopen` once `__bss` makes `__DATA`'s
   vmsize exceed its filesize by one 16 KiB page (`__LINKEDIT`'s memory offset stops matching its
   file offset). The `[linker]` road is immune. Nothing was worked around: T3 uses `[linker]`.
+- T0 done (`probes/t0`): the phpt grid runs, `phpt: green 0 / wrong 18109 / refused 0 / skip 2947 / php-fail 339 / total 21056  (21395 tests; sapi/ excluded)`; oracle cross-checked against
+  php-src's own `run-tests.php` (`strings` exact, `Zend/tests` within 8 passes/5 skips); breakdown: 21560 classifiable tests; D1 143 (0.7%), D5 1569 (7.3%), D6 1719 (8.0%), D4-suspect 123 (0.6%); touched by at least one 3409 (15.8%), by none 18151 (84.2%); extension-specific 9028, of which 1899 touched.
