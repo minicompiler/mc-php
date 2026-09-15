@@ -1,0 +1,15 @@
+# T3: the [linker] road -- ld gives the host a real LC_DYLD_EXPORTS_TRIE.
+[project]
+entry = "host.mc"
+out   = "build/host-ld"
+kind  = "exe"
+
+[target]
+os   = "macos"
+arch = "aarch64"
+
+[linker]
+cmd  = "ld"
+args = ["-arch", "arm64", "-platform_version", "macos", "13.0", "13.0",
+        "-syslibroot", "{sdk}", "-lSystem", "-export_dynamic",
+        "-o", "{out}", "{obj}"]

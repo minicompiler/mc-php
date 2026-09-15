@@ -1,0 +1,1 @@
+dlopen failed: dlopen(../../php-src/ext/ctype/modules/ctype.so, 0x0002): symbol not found in flat namespace '_php_error_docref'
