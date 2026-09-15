@@ -137,6 +137,21 @@ D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixt
     from memory. Nothing written in PHP lands without its test in both worlds and its row in the
     bench table.
 
+D9. DECIDED (owner, 2026-09-15): the TYPE SYSTEM is PHP's, in full -- the manual's own list
+    (`null`, `bool`, `int`, `float`, `string` and numeric strings, `array`, `object`, enums,
+    resources, `callable`, `mixed`, `void`, `never`, `self`/`parent`/`static`, `?T`, unions
+    (`int|string`), intersections (`A&B`) and DNF, `iterable`, the `true`/`false`/`null` singletons,
+    type declarations on parameters/returns/properties/constants, and PHP's juggling and
+    coercion rules, strict_types included). A `.php` file spells PHP types and nothing else.
+    mc's types are the LOWERING behind them, never the surface: `int` -> `i64`, `float` -> `f64`
+    (`<float>`), `bool` -> `u8` with the two values, `string` -> a `zend_string`-shaped handle
+    (`uptr`), `array` -> the ordered-hash handle, an object -> its handle, `callable` -> a closure
+    record, `mixed`/a union/`?T` -> a zval (D4 (c)); `null` is a value of `?T`/unions only. T4's
+    probe mapped three names and refused `float`; that was a measurement, not the design.
+    The owner allows the mc names to stay ACCEPTED by the compiler as a lowering hint, but a
+    `.php` that uses one no longer runs unchanged under `php` (there `i64 $x` is a class type),
+    so it cannot pass D8's php side and is out of every gate -- an escape hatch for probes only.
+
 D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connection shape from
     mc's bench) that fills the superglobals; no CGI/FCGI, no `url/file.php`. Later.
 
