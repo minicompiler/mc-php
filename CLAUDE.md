@@ -14,3 +14,23 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
 
 ## State
 - 2026-09-15: repository created; plan and test grid written; no probe run yet.
+- T1 done (`probes/t1`): the Zend shim is **169 symbols** -- 157 functions + 12 data globals, the
+  union over `ctype`, `pdo_sqlite` and `mbstring` built as real `.so` by `phpize` against PHP
+  8.5.10. `ctype` alone needs 7 functions and no data global; the fast ZPP macros are inline in the
+  header, so the string path of an internal function calls nothing. `ext/json` cannot be built
+  shared at all -- it is D2(a), not shim.
+- T2 done (`probes/t2`): **export yes, variadic callee yes.** A `.so` built exactly as a php
+  extension resolves symbols an mc binary defines, on all three link roads including `mc --exe`
+  (`-export_dynamic` is not needed on macOS; dyld falls back to the classic symbol table, proved by
+  patching `LC_DYSYMTAB.nextdefsym` to 0 and watching it break). An mc function is a valid variadic
+  C callee with no mc change: on Apple arm64 variadic argument N is mc parameter 8 + N, capped at 4.
+- T3 done (`probes/t3`): **yes.** php-src's own `ctype.so` runs `ctype_digit` on a
+  `zend_execute_data` and a `zval` laid out by mc; `php` agrees on all five inputs, and the
+  extension calls back into a variadic `php_error_docref` written in mc and reads the right
+  argument. 39 layout facts are checked against the installed headers on every run. Two of the
+  seven imported Zend symbols are implemented and really reached; five are stubs that name
+  themselves and abort, and none fired.
+- One mc gap found, reported in `docs/plan.md` § 5 and reduced to `probes/gap-bss-exports/`: an
+  `mc --exe` binary's exported symbols become invisible to `dlopen` once `__bss` makes `__DATA`'s
+  vmsize exceed its filesize by one 16 KiB page (`__LINKEDIT`'s memory offset stops matching its
+  file offset). The `[linker]` road is immune. Nothing was worked around: T3 uses `[linker]`.
