@@ -32,6 +32,19 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   argument. 39 layout facts are checked against the installed headers on every run. Two of the
   seven imported Zend symbols are implemented and really reached; five are stubs that name
   themselves and abort, and none fired.
+- T4 done (`probes/t4`): **the grammar yes, the lexer no.** 14 grammar steps -- `echo`, typed
+  functions, `if`/`while`/`for`/`foreach`, a `class`, `"x=$x"` interpolation, `require`/`_once`,
+  and the D4 and D1 refusals -- all hanging off **one** registration, `syntax("<?php", &f)`;
+  10 of them are byte for byte what `php` prints, and `mc build` with `[project].entry =
+  "main.php"` works end to end. Of 31 PHP lexical constructs, 10 die under the stock lexer,
+  `tok_add` fixes 6, and 4 are the core lexer's own -- `'`, `#`, `#[` and a region of raw bytes --
+  plus `$name`, a `T_HOLE` that no registration reaches. D4 is implemented and proved: a second
+  assignment of another type is a named compile error.
+- A second mc gap found, reported in `docs/plan.md` § 5 and reduced to
+  `probes/gap-lexer-ownership/`: a module cannot own the lexing of a source it claims. The
+  workaround (rewriting the `on_source` buffer in place) is on record with what it costs, and the
+  smallest additive fix is named: one function, `p_skip_to(uptr q)`, the generalisation of
+  `p_take_lit`.
 - One mc gap found, reported in `docs/plan.md` § 5 and reduced to `probes/gap-bss-exports/`: an
   `mc --exe` binary's exported symbols become invisible to `dlopen` once `__bss` makes `__DATA`'s
   vmsize exceed its filesize by one 16 KiB page (`__LINKEDIT`'s memory offset stops matching its

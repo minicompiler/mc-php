@@ -25,7 +25,9 @@ D1. DECIDED (owner, 2026-09-15): there is no interpreter. A binary is whole-prog
     `include`/`require` is resolved at compile time (the closure of the entry, literal paths only)
     -- and `eval`, `create_function`, an `include` of a computed path, `$$name` and any call whose
     target is a run-time string that cannot be resolved at compile time are REFUSED with a named
-    compile error, one per construct, listed in `docs/refused.md` (to be written with T4). T0's
+    compile error, one per construct, listed in `docs/refused.md` (not written yet: T4 measured
+    the mechanism -- `eval('1')` is refused at its own line with a named error,
+    `probes/t4/g/09-eval.php` -- and the list belongs with the compiler, not with a probe). T0's
     corpus breakdown reports how many `.phpt` fall in that class, as a number, not as a claim.
 
 D4. DECIDED (owner, 2026-09-15): variables have a STATIC type. A variable's type is its declared
@@ -73,7 +75,14 @@ D2. Extensions. Two classes, two answers. **Decided by T1/T2/T3 (2026-09-15, mac
         imports are the next order of magnitude. And every number here is macos/aarch64; the ELF
         and PE hosts need their own run of `probes/t2/run.sh`.
 
-D5. DECIDED (owner, 2026-09-15): `require`/`require_once`/`include`/`include_once` are sugar over
+D5. DECIDED (owner, 2026-09-15), and **measured by T4** (`probes/t4/g/08-require.php`: `require`
+    then `require_once` of the same file, the program agrees with `php`). One thing the probe had
+    to learn: mc's own `lex_include` does the includer-relative resolution AND the once-only list,
+    but it is UNCONDITIONALLY once-only and its list is not the one a `p_push_source` enters, so a
+    module cannot use `lex_include` for `_once` and `p_push_source` for the plain form -- the
+    second splice then declares everything twice. All four spellings go through one road,
+    `path_norm(path_join(includer, rel))` + `read_file` + `p_push_source`, with the once-list the
+    module's own. `require`/`require_once`/`include`/`include_once` are sugar over
     mc's `#include` semantics -- the Tier 3 handler resolves the LITERAL path against the including
     file and pushes the source with `p_push_source` (M21: a textual splice at that point, in the
     includer's scope, errors attributed to the included file). All four are compile-time; the one
@@ -139,16 +148,112 @@ D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connec
 | T1 | how big is the Zend shim | `phpize` on `ext/ctype` and `ext/pdo_sqlite`, `nm -u` on the `.so` | imported symbols per `.so` -- **measured: 169** (`probes/t1`) |
 | T2 | can an mc binary export a symbol to a `.so` and take a variadic call | `[linker]` with `-export_dynamic`, `dlopen`, a callback; a C caller of a variadic mc callee | yes/no per host -- **macos/aarch64: yes, yes** (`probes/t2`) |
 | T3 | does a real extension run on our zval | zval/`zend_string`/HashTable at `zend_types.h` offsets in mc, `ctype_digit` from `ctype.so` | yes/no -- **yes** (`probes/t3`) |
-| T4 | does Tier 3 take PHP's grammar | lexer/parser for `<?php echo 1+2;`, functions, arrays, strings -> `--dump-ast` | gaps list |
+| T4 | does Tier 3 take PHP's grammar | lexer/parser for `<?php echo 1+2;`, functions, arrays, strings -> `--dump-ast` | gaps list -- **grammar yes, lexer no** (`probes/t4`) |
 | T5 | does the runtime agree with php | zval, ordered array, string, refcount; first ~100 `.phpt` of `Zend/tests` + `ext/standard/tests/strings` | green/total |
 
 Gate for the compiler proper: T2 + T3 decide `.so` reuse (D2b); T4 decides that the grammar fits
 Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
 
-T1, T2 and T3 are done (2026-09-15, macos/aarch64): see `probes/README.md` for the numbers and
-`probes/tN/RESULTS.md` for each. **D2(b) is taken.** T0, T4 and T5 are not run.
+T1, T2, T3 and T4 are done (2026-09-15, macos/aarch64): see `probes/README.md` for the numbers and
+`probes/tN/RESULTS.md` for each. **D2(b) is taken.** T4 answers its own gate: the grammar fits
+Tier 3 with no mc change -- 14 grammar steps, 10 of them byte for byte what `php` prints -- and
+the LEXER does not, which is the gap above. T0 and T5 are not run.
 
 ## 5. What mc may need (reported, not worked around)
+
+### Open: a module cannot own the LEXING of a source it claims (macos/aarch64)
+
+Found by T4, reduced to `probes/gap-lexer-ownership/` (`sh probes/gap-lexer-ownership/run.sh`,
+exits 0 only while it still reproduces). Measured on mc 1.0.0.
+
+`source_claim` says a source belongs to a module and the six word registrations then apply to it,
+but the core lexes every source **before any handler runs** and keeps four things for itself. The
+reproducer registers `source_claim` returning 1 for every source and `tok_add`s every lexeme PHP
+needs -- the whole of what the surface offers -- and still gets:
+
+```
+a-single-quote.php   $a = 'a php string';   -> a-single-quote.php:2: unterminated char literal
+b-single-char.php    $a = 'x';              -> 2 3 120      (T_CHAR: silently the integer 120)
+c-hash.php           # a php line comment   -> c-hash.php:2: unknown directive
+d-attribute.php      #[Attr]                -> d-attribute.php:2: unknown directive
+f-rawtext.php        ?> <p>don't</p> <?php  -> f-rawtext.php:2: unterminated char literal
+e-dollar.php         return $name;          -> hole $name has no rule binding it
+```
+
+Four separate things, in decreasing order of how much they cost:
+
+1. **`'`** is the char-literal rule. `tok_add("'", 1)` does not beat it. A PHP single-quoted string
+   of one character is silently an integer; of any other length it is `unterminated char literal`.
+2. **`#`** is a directive, and there is no `directive(name, &f)` registration. `#[Attr]` is the
+   same byte.
+3. **A region of raw bytes cannot be skipped.** Inline HTML between `?>` and `<?php`, and a heredoc
+   body, are text PHP does not lex. A handler can READ them -- `p_cp()` is the cursor and
+   `p_src_end()` the end, and T4 uses both to lex `0b101`/`0o17`/`1_000` correctly -- but it cannot
+   ADVANCE past them: `p_take_lit(q)` only extends a NUMERIC token and `p_resplit_punct(n)` only
+   rewinds.
+4. **`$name` is a `T_HOLE` and no registration reaches it.** `docs/reference/hooks.md`
+   § `syntax_expr` says `$` is claimable, and it is -- for `$"..."`. `$name` is lexed as a hole and
+   a registered `syntax_expr("$", &f)` does not fire for it; outside a `#rule` template that is
+   `hole $name has no rule binding it`. A handler that owns its grammar position can still read it
+   (`p_id() == T_HOLE`, `p_name()` is `"$x"`), so the cost is that a module wanting `$x` inside an
+   expression has to own the WHOLE expression grammar. For mc-php that is going to happen anyway
+   (PHP's precedence table is not mc's), so this is a cost and not a blocker.
+
+**The workaround T4 used, and what it costs.** `on_source` hands the module `src`/`len` -- the
+buffer the lexer is about to read -- and mutating it in place inside the callback reaches the
+lexer (measured: `'hello'` rewritten to `"hello"` lexes as a string; `probes/t4/entry/inplace.mc`).
+`probes/t4/php.mc` rewrites `'` to `"` and `#` to `//` that way, which is what makes
+`g/12-singlequote.php` and `g/13-hash.php` agree with `php`. Two costs, both measured: the rewrite
+must be byte for byte or every `err_at` column moves, and it is made by something that does not
+know PHP's lexical states -- in `probes/t4/g/14-inline-html.php` it turned `don't` inside an HTML
+fragment into `don"t`. `docs/reference/hooks.md` describes `on_source` as an announcement and
+documents only that "reading is unrestricted"; writing is undocumented behaviour this repository
+is relying on.
+
+**The smallest additive fix, and it is one function.** `void p_skip_to(uptr q)`: move the lexer
+cursor of the source being lexed to `q`, under `p_take_lit`'s own guard (`q` at or after `p_cp()`,
+not past `p_src_end()`, and only on a token just lexed from the source being read). That is the
+generalisation of `p_take_lit`, which already proves the mechanism is sound -- T4 calls it from a
+handler that never reaches `parse_primary` and the four PHP integer formats come out agreeing with
+`php`. With it, items 1, 2 and 3 all go away: the module's own expression parser, standing on `=`
+and seeing `ld8(p_cp()) == '\''`, scans to the closing quote, builds its own `N_STR` and skips the
+region. It does not address item 4, whose fix is separate and also one `if`: when a
+`syntax_expr("$", &f)` is registered, a `$` outside a `#rule` template lexes as the one-character
+`$` instead of as a hole (outside a template a hole is already an error, so nothing an untaught
+compiler does can change).
+
+The alternative shape, `syntax_source(&f)` -- `on_source` with a return value, a replacement
+buffer, called from `lex_push_mem` before the frame is read -- would make the in-place mutation an
+explicit contract instead of an undocumented side effect, but it is strictly weaker: a whole-buffer
+rewrite still cannot know PHP's lexical states, which is exactly the `don"t` above.
+
+### Open: 29 of the 46 `<mc/core>` names a Tier 3 module of this size needs are not frozen
+
+Measured by T4 over `probes/t4/php.mc` (`docs/reference/hooks.md` § 8 is the promise,
+`tests/golden/surface.txt` is what `make check-freeze` enforces). 17 of the 46 are in the frozen
+list -- `syntax`, `source_claim`, `on_source` and fourteen `p_*`. The other 29 are not, and **16 of
+them are named in `docs/reference/hooks.md` § 4 as "the parser's public API. Fixed names"**:
+`parse_expr`, `parse_stmt`, `parse_block`, `parse_params`, `parse_function`, `top_add`, `def_add`,
+`param_new`, `list_append`, `lex_set_libs`, `lex_root_of`, `lex_root_count`, `lex_root_name`,
+`lex_root_dir`, `lex_inc_count`, `lex_inc_at`. The remaining 13 are `<mc/core>` facilities a taught
+compiler cannot avoid: `node_new`, the `nd_*`/`set_nd_*` accessors, `tok_add`, `word_id`,
+`def_find`/`de_at`/`de_val`, `path_join`/`path_norm`, `read_file`, `xalloc`, `xstrdup`, `str_eq`,
+`cstrlen`, `err_at`/`err_at2`.
+
+Not a defect and nothing is worked around: it is a coverage question for
+`scripts/surface-extract.sh`'s prefix list, and mc-php would like to know which of the 29 it may
+depend on for 1.x.
+
+### Settled by T4
+
+- "does `syntax` work keyed on a PUNCTUATION token" -- **yes**. `tok_add("<?php", 5)` is one token
+  even though it contains letters, and `syntax("<?php", &f)` fires on it; `word_add` refuses the
+  core keyword range and nothing else. T4's whole grammar hangs off that one registration.
+- `word_id` answers only for ALPHA-initial lexemes (`te_word`, from `is_alpha` of the first byte),
+  so the id of `;` or `(` has to come from `tok_add`, which is idempotent.
+  `docs/reference/hooks.md` does not say this; `examples/lang` does it (`tok_add(".", 1)`).
+- A `p_push_source` from `user_init` does not replace the entry: `lex_init` has already pushed it,
+  so the pushed text is parsed and then the original is too (`main` declared twice, measured).
 
 ### Open: `mc --exe` loses its exports once `__bss` reaches one page (macos/aarch64)
 

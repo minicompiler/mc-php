@@ -1,0 +1,11 @@
+# everything run.sh builds
+mc-lexprobe
+mc-php
+build/
+out/
+entry/mc-claim
+entry/mc-push
+entry/mc-inplace
+dollar/mc-d
+g/[0-9]*
+!g/*.php

@@ -1,0 +1,3 @@
+<?php
+#[Attr]
+function f() {}
