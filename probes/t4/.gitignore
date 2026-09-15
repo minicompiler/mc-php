@@ -1,10 +1,11 @@
-# built by run.sh
+# everything run.sh builds
 mc-lexprobe
 mc-php
-mc-claim
-mc-push
-mc-inplace
-mc-d
+build/
 out/
-g/0*
+entry/mc-claim
+entry/mc-push
+entry/mc-inplace
+dollar/mc-d
+g/[0-9]*
 !g/*.php

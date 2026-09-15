@@ -1,0 +1,15 @@
+# T4 table 2 shape (i): the thing the user names IS the .php file.
+# `mc build probes/t4` writes build/mc-php (the core plus php.mc) and then
+# compiles main.php with it. Nothing here is special about the extension.
+[project]
+name  = "t4"
+entry = "main.php"
+out   = "build/t4"
+kind  = "exe"
+
+[compiler]
+modules = ["php.mc"]
+out     = "build/mc-php-built"
+
+[limits]
+tolerance = 1.0

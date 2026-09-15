@@ -100,8 +100,16 @@ void ph_rewrite(uptr name, uptr src, i64 len) {
 i64 ph_claim(uptr name) { return ph_ends(name, ".php"); }
 
 // ---- small helpers ---------------------------------------------------------
+// A php keyword that is ALSO an mc core keyword (if, else, return, break,
+// continue) arrives as its K_* id and never as T_IDENT, so the test is on the
+// LEXEME and not on the token class -- with the three classes whose lexeme is
+// not a name excluded, so the string "return" is not a keyword.
 i64 ph_is(uptr w) {
-    if (p_id() != T_IDENT) return 0;
+    i64 t = p_id();
+    if (t == T_STR)  return 0;
+    if (t == T_CHAR) return 0;
+    if (t == T_HOLE) return 0;
+    if (t == T_INT)  return 0;
     return str_eq(p_name(), w);
 }
 
@@ -202,14 +210,86 @@ i64 ph_expr(i64 minp);
 
 i64 ph_interp(uptr raw, i64 line, uptr fl);
 
+i64 ph_digit(i64 c, i64 base) {
+    i64 d = -1;
+    if (c >= 48) { if (c <= 57) d = c - 48; }
+    if (c >= 97) { if (c <= 102) d = c - 87; }
+    if (c >= 65) { if (c <= 70)  d = c - 55; }
+    if (d < 0) return -1;
+    if (d >= base) return -1;
+    return d;
+}
+
+// The number formats the core lexer does not have. It stops a number where ITS
+// grammar ends, so `0b101` is the token `0` with the cursor on `b101` and
+// `1_000` is `1` with the cursor on `_000`. p_cp() is that cursor and
+// p_take_lit(q) is how a handler says where its literal really ended -- the M24
+// syntax_lit contract, measured here from a handler that owns the whole
+// expression grammar and therefore never reaches parse_primary at all.
+i64 ph_number() {
+    i64 line = p_line();
+    uptr fl = p_file();
+    i64 v = p_val();
+    uptr q = p_cp();
+    uptr e = p_src_end();
+    i64 base = 0;
+    if (v == 0) { if (q < e) { if (ld8(q) == 98) base = 2; } }
+    if (v == 0) { if (q < e) { if (ld8(q) == 111) base = 8; } }
+    if (base) {
+        q = q + 1;
+        i64 acc = 0;
+        i64 n = 0;
+        loop {
+            if (q >= e) break;
+            i64 c = ld8(q);
+            if (c == 95) { q = q + 1; continue; }
+            i64 d = ph_digit(c, base);
+            if (d < 0) break;
+            acc = acc * base + d;
+            n = n + 1;
+            q = q + 1;
+        }
+        if (!n) err_at(fl, line, "a php integer literal with no digits");
+        p_take_lit(q);
+        p_next();
+        return ph_int(acc);
+    }
+    // `1_000`, and the float shapes, which this probe refuses by name rather
+    // than lexing them as `1 . 5` -- which is what php.mc did before the scan
+    // and is the one SILENT wrong answer the lexer sweep found.
+    loop {
+        if (q >= e) break;
+        i64 c = ld8(q);
+        if (c == 95) {
+            q = q + 1;
+            loop {
+                if (q >= e) break;
+                i64 d = ph_digit(ld8(q), 10);
+                if (d < 0) break;
+                v = v * 10 + d;
+                q = q + 1;
+            }
+            continue;
+        }
+        break;
+    }
+    if (q < e) {
+        i64 c = ld8(q);
+        i64 isf = 0;
+        if (c == 101) isf = 1;                       // 1e3
+        if (c == 69)  isf = 1;
+        if (c == 46) { if (q + 1 < e) { if (ph_digit(ld8(q + 1), 10) >= 0) isf = 1; } }
+        if (isf) err_at(fl, line, "php float is not in this probe (docs/plan.md D4)");
+    }
+    p_take_lit(q);
+    p_next();
+    return ph_int(v);
+}
+
 i64 ph_primary() {
     i64 line = p_line();
     uptr fl = p_file();
-    if (p_id() == T_INT) {
-        i64 v = p_val();
-        p_next();
-        return ph_int(v);
-    }
+    if (p_id() == T_INT) return ph_number();
     if (p_id() == T_STR) {
         uptr s = p_name();
         p_next();
@@ -234,6 +314,14 @@ i64 ph_primary() {
         uptr name = p_name();
         if (str_eq(name, "eval"))
             err_at(fl, line, "eval is refused: a binary has no interpreter (docs/plan.md D1)");
+        // a name def_add() registered (a class offset, below). The module owns
+        // the expression grammar, so it owns this lookup too: parse_primary's
+        // own def_find branch is never reached.
+        i64 di = def_find(name, cstrlen(name));
+        if (di >= 0) {
+            p_next();
+            return ph_int(de_val(de_at(di)));
+        }
         if (str_eq(name, "true"))  { p_next(); return ph_int(1); }
         if (str_eq(name, "false")) { p_next(); return ph_int(0); }
         p_next();
@@ -505,7 +593,13 @@ i64 ph_foreach(i64 line, uptr fl) {
     i64 lp = node_new(N_LOOP, line, fl);
     set_nd_a(lp, lb);
 
-    set_nd_next(iv, lp);
+    i64 vv = node_new(N_VAR, line, fl);              // the loop variable's slot
+    set_nd_name(vv, ph_mangle(d, "v_"));
+    set_nd_type(vv, TY_I64);
+    set_nd_a(vv, ph_int(0));
+
+    set_nd_next(iv, vv);
+    set_nd_next(vv, lp);
     i64 outer = node_new(N_BLOCK, line, fl);
     set_nd_a(outer, iv);
     return outer;
@@ -517,34 +611,44 @@ i64 ph_foreach(i64 line, uptr fl) {
 uptr ph_seen[PH_MAXINC];
 i64  ph_nseen;
 
+// D5: all four spellings are compile-time splices of a LITERAL path resolved
+// against the including file; the one distinction kept is _once, by normalised
+// path. One road for all four, and the once-list is the MODULE's: mc's own
+// lex_include keeps a list of its own that a p_push_source never enters, so a
+// module cannot mix the two roads and still have `require` then `require_once`
+// of the same file behave as php does (measured -- RESULTS.md).
 void ph_require(i64 once, i64 line, uptr fl) {
     p_next();                                              // require / include
     if (p_id() != T_STR) err_at(fl, line, "require takes a literal path (docs/plan.md D1)");
     uptr rel = p_name();
-    // the last token of the construct, as p_push_source requires
-    p_next();
-    p_expect(ph_tok(";", 1), "expected ; after require");
-    if (once) {
-        i64 i = 0;
-        loop {
-            if (i >= ph_nseen) break;
-            if (str_eq(ld64(ph_seen + i * 8), rel)) return;
-            i = i + 1;
-        }
+    p_next();                                              // now ON the `;`
+    if (p_id() != ph_tok(";", 1)) err_at(fl, line, "expected ; after require");
+    uptr full = path_norm(path_join(fl, rel));
+    i64 i = 0;
+    i64 seen = 0;
+    loop {
+        if (i >= ph_nseen) break;
+        if (str_eq(ld64(ph_seen + i * 8), full)) seen = 1;
+        i = i + 1;
+    }
+    if (once) { if (seen) { p_next(); return; } }
+    if (!seen) {
         if (ph_nseen >= PH_MAXINC) err_at(fl, line, "too many php requires");
-        st64(ph_seen + ph_nseen * 8, rel);
+        st64(ph_seen + ph_nseen * 8, full);
         ph_nseen = ph_nseen + 1;
     }
     i64 len = 0;
-    uptr txt = read_file(rel, &len);
-    if (!txt) err_at2(fl, line, "cannot open the required file", rel);
-    ph_rewrite(rel, txt, len);                             // the same rewrite
-    p_push_source(rel, txt, len);
+    uptr txt = read_file(full, &len);
+    if (!txt) err_at2(fl, line, "cannot open the required file", full);
+    p_push_source(full, txt, len);                         // on_source -> ph_rewrite
+    p_next();                                              // discard the `;`
 }
 
 i64 ph_stmt() {
     i64 line = p_line();
     uptr fl = p_file();
+    if (p_id() == ph_tok("<?php", 5)) { p_next(); return node_new(N_BLOCK, line, fl); }
+    if (p_id() == ph_tok("?>", 2))    { p_next(); return node_new(N_BLOCK, line, fl); }
     if (p_id() == ph_tok("{", 1)) return ph_block();
     if (ph_is("echo")) {
         p_next();
