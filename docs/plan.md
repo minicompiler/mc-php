@@ -152,6 +152,16 @@ D9. DECIDED (owner, 2026-09-15): the TYPE SYSTEM is PHP's, in full -- the manual
     `.php` that uses one no longer runs unchanged under `php` (there `i64 $x` is a class type),
     so it cannot pass D8's php side and is out of every gate -- an escape hatch for probes only.
 
+D10. DECIDED (owner, 2026-09-15): the lowering table, PHP -> mc.
+
+    | PHP | mc | notes |
+    |---|---|---|
+    | `bool` | `u8`, the two values 0 and 1 | |
+    | `int` | `i64` | PHP_INT_MAX/MIN are i64's; overflow to float is PHP's rule, implemented |
+    | `float` | `f64` (`<float>`) | |
+    | `string` | a NEW type: `len` as `i64` + the bytes, immutable | PHP strings are BINARY-SAFE byte sequences: `strlen("\xc3\xa9") == 2`, binary data travels in `string`, and the `.phpt` corpus asserts exactly that -- so the type stores bytes and never validates encoding; UTF-8 is the content convention `mb_*` interprets, not a property of the type. Immutable value: a write is a new string (PHP's copy-on-write, arena-friendly, D7). Laid out like `zend_string` (refcount, hash, len, val) so D2(b)'s shim gets it for free |
+    | the rest | developed one by one | `array` (ordered hash), objects, enums, `callable`, `iterable`, `mixed`/unions/`?T` (a zval), resources, each with its own `.phpt` slice and its bench row |
+
 D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connection shape from
     mc's bench) that fills the superglobals; no CGI/FCGI, no `url/file.php`. Later.
 
