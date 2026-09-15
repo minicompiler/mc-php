@@ -62,6 +62,20 @@ D5. DECIDED (owner, 2026-09-15): `require`/`require_once`/`include`/`include_onc
     `vendor/composer/autoload_classmap.php` / the PSR-4 map (literal arrays) and includes the file
     when the class is first referenced -- autoload becomes compile-time resolution.
 
+D6. DECIDED (owner, 2026-09-15): no reflection. A binary carries no run-time type tables, so
+    every `Reflection*` class is refused, and with it what needs those tables at run time:
+    `get_class_methods`, `get_object_vars`, `get_class_vars`, `property_exists`/`method_exists`
+    with a non-literal name, `$obj->$prop`, `$obj->$method()`, `new $class`, `$class::$member`,
+    a callable spelled as a string (`'Foo::bar'`, `[$o, 'm']` with a dynamic string),
+    `func_get_args` (`...$args` stays), `debug_backtrace`. Attributes `#[Attr]` are accepted by
+    the grammar and inert (only reflection read them). KEPT, because it is dispatch and not
+    introspection: `__get`/`__set`/`__call`/`__callStatic`/`__invoke`, `instanceof` with a
+    literal, `get_class($o)`, `$o::class`, typed closures/callables, `is_callable(Closure)`.
+    ANSWERED AT COMPILE TIME when the argument is a literal: `class_exists('Foo')`,
+    `method_exists($o, 'm')`, `function_exists('f')` fold to constants. Declared cost: frameworks
+    built on reflection-driven DI containers (Laravel, Symfony) are out of scope; the target is
+    programs and libraries that do not introspect.
+
 D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connection shape from
     mc's bench) that fills the superglobals; no CGI/FCGI, no `url/file.php`. Later.
 
