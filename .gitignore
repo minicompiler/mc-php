@@ -1,0 +1,6 @@
+build/
+php-src/
+*.o
+*.so
+*.dylib
+.DS_Store
