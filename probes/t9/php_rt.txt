@@ -647,8 +647,37 @@ uptr php_elabel(i64 lv) {
 void php_ecs(uptr s) { write(2, s, php_cstrlen(s)); }
 
 // msg is a NUL-terminated C string already assembled by the caller.
+uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5);
+uptr php_zstr(uptr s);
+uptr php_zlong(i64 v);
+uptr php_str_new(uptr b, i64 n);
+i64  php_zv_type(uptr z);
+
+// set_error_handler(): the callable, and the one the previous call replaced.
+// A handler that returns anything but `false` suppresses php's own output,
+// which is what most tests that install one are checking.
+uptr ph_ehz;                                  // the current handler, 0 = none
+uptr ph_ehprev;
+i64  ph_ehmask;
+i64  ph_ehin;                                 // 1 while it is running
+
 void php_raise(i64 lv, uptr msg) {
     if (ph_quiet && lv != PHE_USER_ERROR) return;
+    if (ph_ehz && !ph_ehin && (ph_ehmask & lv)) {
+        uptr fn = ph_dfile;
+        if (!fn) fn = "";
+        ph_ehin = 1;
+        uptr r = php_call_zv(ph_ehz, 4, php_zlong(lv),
+                             php_zstr(php_str_new(msg, php_cstrlen(msg))),
+                             php_zstr(php_str_new(fn, php_cstrlen(fn))),
+                             php_zlong(ph_dline), 0);
+        ph_ehin = 0;
+        // IS_FALSE is 2, and its #define is below this point in the file
+        if (php_zv_type(r) != 2) {
+            if (lv == PHE_USER_ERROR) { php_flush(); exit(255); }
+            return;
+        }
+    }
     if (!(ph_erep & lv)) return;
     uptr lb = php_elabel(lv);
     i64 ml = php_cstrlen(msg);
@@ -4895,6 +4924,17 @@ void php_bootstrap() {
 // an uncaught throwable, in php's own words
 void php_uncaught() {
     if (!ph_exc) return;
+    // set_exception_handler(): php hands an uncaught throwable to it and
+    // exits 255 afterwards, with none of the Fatal error text
+    if (ph_xhz) {
+        uptr hz = ph_xhz;
+        ph_xhz = 0;
+        uptr z = ph_exc;
+        ph_exc = 0;
+        php_call_zv(hz, 1, z, 0, 0, 0, 0);
+        // measured on php 8.5.10: a handled uncaught exception exits 0
+        if (!ph_exc) { php_shutdown(); php_flush(); exit(0); }
+    }
     uptr o = ld64(ph_exc);
     uptr s = php_str_concat(php_str_new("Uncaught ", 9), php_obj_cname(o));
     uptr m = php_zv_str(php_exm_message(o));
@@ -6702,6 +6742,45 @@ u8 php_f_is_file(uptr pz) {
     if (m < 0) return 0;
     if ((m & S_IFMT) == S_IFREG) return 1;
     return 0;
+}
+
+// set_error_handler(callable, levels) -> the previous handler or null.
+// register/restore is a one-deep stack, which is what the corpus uses.
+uptr php_f_set_error_handler(uptr hz, uptr lz) {
+    uptr old = ph_ehz;
+    ph_ehprev = old;
+    ph_ehmask = 32767;
+    if (lz) { if (php_zv_type(lz) != IS_NULL) ph_ehmask = php_zv_long(lz); }
+    if (!hz) ph_ehz = 0;
+    if (hz) { if (php_zv_type(hz) == IS_NULL) ph_ehz = 0; }
+    if (hz) { if (php_zv_type(hz) != IS_NULL) ph_ehz = hz; }
+    if (!old) return php_znull();
+    return old;
+}
+
+u8 php_f_restore_error_handler() {
+    ph_ehz = ph_ehprev;
+    ph_ehprev = 0;
+    return 1;
+}
+
+// set_exception_handler(): the callable an UNCAUGHT throwable reaches
+uptr ph_xhz;
+uptr ph_xhprev;
+
+uptr php_f_set_exception_handler(uptr hz) {
+    uptr old = ph_xhz;
+    ph_xhprev = old;
+    ph_xhz = 0;
+    if (hz) { if (php_zv_type(hz) != IS_NULL) ph_xhz = hz; }
+    if (!old) return php_znull();
+    return old;
+}
+
+u8 php_f_restore_exception_handler() {
+    ph_xhz = ph_xhprev;
+    ph_xhprev = 0;
+    return 1;
 }
 
 uptr php_f_getcwd() {
