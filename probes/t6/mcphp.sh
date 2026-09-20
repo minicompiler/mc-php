@@ -33,5 +33,17 @@ if ! "$MCPHP" --exe "$src" -o "$tmp" 2> "$err"; then
     grep -q 'is refused by design' "$err" && exit 3
     exit 2
 fi
-"$tmp" "$@"
-exit $?
+
+# A compiled program is bounded HERE and not only by the harness: python's
+# subprocess timeout kills the shell it spawned, not the binary the shell
+# spawned, so a program that loops for ever survives its own test and eats a
+# core until the machine is rebooted. Measured the hard way.
+"$tmp" "$@" &
+prog=$!
+( sleep "${MCPHP_TIMEOUT:-10}"; kill -9 "$prog" 2>/dev/null ) &
+dog=$!
+wait "$prog"
+rc=$?
+kill "$dog" 2>/dev/null
+wait "$dog" 2>/dev/null
+exit $rc
