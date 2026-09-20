@@ -1895,6 +1895,13 @@ i64 ph_primary() {
         i64 v = ph_expr(70);
         i64 t = ph_ety;
         if (t == PT_FLOAT) return ph_c1("php_fneg", v, ty_f64);
+        // -"1.2" is float(-1.2) and -"abc" is a TypeError: a zval keeps its
+        // own rules, and converting to int first threw the fraction away.
+        if (t == PT_MIXED || t == PT_STRING || t == PT_NULL) {
+            ph_can_throw = 1;
+            ph_ety = PT_MIXED;
+            return ph_c1("php_zv_neg", ph_to_mixed(v, t), ty_pzv);
+        }
         i64 iv = ph_to_int(v, t);
         ph_ety = PT_INT;
         return ph_bin(ph_tok("-", 1), ph_int(0), iv, TY_I64);

@@ -1297,8 +1297,11 @@ uptr php_zv_pow(uptr a, uptr b) {
 }
 
 uptr php_zv_neg(uptr a) {
+    if (!php_arith_ok(a, php_zlong(0), php_str_new("*", 1))) return php_znull();
     if (php_zv_isdouble(a)) return php_zdouble(0.0 - php_zv_double(a));
-    return php_zlong(0 - php_zv_long(a));
+    i64 v = php_zv_long(a);
+    if (v == -9223372036854775807 - 1) return php_zdouble(9223372036854775808.0);
+    return php_zlong(0 - v);
 }
 
 uptr php_zv_concat(uptr a, uptr b) { return php_zstr(php_str_concat(php_zv_str(a), php_zv_str(b))); }
@@ -1328,9 +1331,57 @@ i64 php_zv_ilong(uptr z) {
     return php_zv_long(z);
 }
 
-uptr php_zv_band(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) & php_zv_ilong(b)); }
-uptr php_zv_bor(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) | php_zv_ilong(b)); }
-uptr php_zv_bxor(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) ^ php_zv_ilong(b)); }
+// php: & | ^ between TWO strings are BYTEWISE, not numeric. & and ^ answer
+// min(len) bytes, | answers max(len) with the longer operand's tail kept.
+// One string and one number is the numeric road, as php has it.
+uptr php_str_bitop(uptr a, uptr b, i64 op) {
+    i64 la = php_strlen(a);
+    i64 lb = php_strlen(b);
+    i64 n = la;
+    if (lb < n) n = lb;
+    i64 out = n;
+    if (op == 1) { out = la; if (lb > out) out = lb; }
+    uptr s = php_str_alloc(out);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 x = ld8(a + ZS_HDR + i);
+        i64 y = ld8(b + ZS_HDR + i);
+        i64 r = x & y;
+        if (op == 1) r = x | y;
+        if (op == 2) r = x ^ y;
+        st8(s + ZS_HDR + i, r);
+        i = i + 1;
+    }
+    loop {
+        if (i >= out) break;
+        i64 c = 0;
+        if (i < la) c = ld8(a + ZS_HDR + i);
+        if (i < lb) c = ld8(b + ZS_HDR + i);
+        st8(s + ZS_HDR + i, c);
+        i = i + 1;
+    }
+    return s;
+}
+
+i64 php_both_str(uptr a, uptr b) {
+    if (php_zv_type(a) != IS_STRING) return 0;
+    if (php_zv_type(b) != IS_STRING) return 0;
+    return 1;
+}
+
+uptr php_zv_band(uptr a, uptr b) {
+    if (php_both_str(a, b)) return php_zstr(php_str_bitop(ld64(a), ld64(b), 0));
+    return php_zlong(php_zv_ilong(a) & php_zv_ilong(b));
+}
+uptr php_zv_bor(uptr a, uptr b) {
+    if (php_both_str(a, b)) return php_zstr(php_str_bitop(ld64(a), ld64(b), 1));
+    return php_zlong(php_zv_ilong(a) | php_zv_ilong(b));
+}
+uptr php_zv_bxor(uptr a, uptr b) {
+    if (php_both_str(a, b)) return php_zstr(php_str_bitop(ld64(a), ld64(b), 2));
+    return php_zlong(php_zv_ilong(a) ^ php_zv_ilong(b));
+}
 // php: a negative shift is an ArithmeticError, and a shift of 64 or more is
 // 0 (or -1 for a right shift of a negative value), never the hardware's
 // modulo-64 answer.
@@ -1344,6 +1395,7 @@ i64 php_shift_ok(i64 s) {
 }
 
 uptr php_zv_shl(uptr a, uptr b) {
+    if (!php_arith_ok(a, b, php_str_new("<<", 2))) return php_znull();
     i64 x = php_zv_ilong(a);
     i64 s = php_zv_ilong(b);
     if (!php_shift_ok(s)) return php_znull();
@@ -1352,6 +1404,7 @@ uptr php_zv_shl(uptr a, uptr b) {
 }
 
 uptr php_zv_shr(uptr a, uptr b) {
+    if (!php_arith_ok(a, b, php_str_new(">>", 2))) return php_znull();
     i64 x = php_zv_ilong(a);
     i64 s = php_zv_ilong(b);
     if (!php_shift_ok(s)) return php_znull();
