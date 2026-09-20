@@ -3744,6 +3744,49 @@ f64 php_f_log(uptr z, uptr bz) {
 }
 
 f64 php_f_log10(uptr z) { return php_f_log(z, php_zdouble(10.0)); }
+
+// The trigonometric family is libm's: php prints 14 significant digits and a
+// hand-rolled series does not survive that comparison. libSystem/libc carries
+// every one of these on all five targets mc writes for.
+extern f64 sin(f64 x);
+extern f64 cos(f64 x);
+extern f64 tan(f64 x);
+extern f64 asin(f64 x);
+extern f64 acos(f64 x);
+extern f64 atan(f64 x);
+extern f64 atan2(f64 y, f64 x);
+extern f64 sinh(f64 x);
+extern f64 cosh(f64 x);
+extern f64 tanh(f64 x);
+extern f64 asinh(f64 x);
+extern f64 acosh(f64 x);
+extern f64 atanh(f64 x);
+extern f64 hypot(f64 x, f64 y);
+extern f64 expm1(f64 x);
+extern f64 log1p(f64 x);
+extern f64 log2(f64 x);
+
+f64 php_f_sin(uptr z)   { return sin(php_zv_double(z)); }
+f64 php_f_cos(uptr z)   { return cos(php_zv_double(z)); }
+f64 php_f_tan(uptr z)   { return tan(php_zv_double(z)); }
+f64 php_f_asin(uptr z)  { return asin(php_zv_double(z)); }
+f64 php_f_acos(uptr z)  { return acos(php_zv_double(z)); }
+f64 php_f_atan(uptr z)  { return atan(php_zv_double(z)); }
+f64 php_f_sinh(uptr z)  { return sinh(php_zv_double(z)); }
+f64 php_f_cosh(uptr z)  { return cosh(php_zv_double(z)); }
+f64 php_f_tanh(uptr z)  { return tanh(php_zv_double(z)); }
+f64 php_f_asinh(uptr z) { return asinh(php_zv_double(z)); }
+f64 php_f_acosh(uptr z) { return acosh(php_zv_double(z)); }
+f64 php_f_atanh(uptr z) { return atanh(php_zv_double(z)); }
+f64 php_f_expm1(uptr z) { return expm1(php_zv_double(z)); }
+f64 php_f_log1p(uptr z) { return log1p(php_zv_double(z)); }
+f64 php_f_log2(uptr z)  { return log2(php_zv_double(z)); }
+f64 php_f_atan2(uptr a, uptr b) { return atan2(php_zv_double(a), php_zv_double(b)); }
+f64 php_f_hypot(uptr a, uptr b) { return hypot(php_zv_double(a), php_zv_double(b)); }
+f64 php_f_deg2rad(uptr z) { return php_zv_double(z) * 0.017453292519943295; }
+f64 php_f_rad2deg(uptr z) { return php_zv_double(z) * 57.29577951308232; }
+// php's fdiv is IEEE division: no warning, and inf/nan where php has them
+f64 php_f_fdiv(uptr a, uptr b) { return php_zv_double(a) / php_zv_double(b); }
 f64 php_f_pi() { return 3.141592653589793; }
 
 u8 php_f_is_nan(uptr z) { return ph_is_nan(php_zv_double(z)); }
