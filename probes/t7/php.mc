@@ -41,6 +41,7 @@ i64 ty_parr;
 i64 ty_pzv;               // `mixed`: a pointer to a 16-byte zval
 
 // forward declarations: mc is single pass
+extern void exit(i64 code);          // the compiler's own exit, for a php compile-time fatal
 uptr php_dec(i64 v);
 i64  ph_const_find(uptr n);
 void ph_const_add(uptr cn, i64 v, i64 t, uptr fl, i64 line);
@@ -120,6 +121,8 @@ i64  ph_var_find(uptr d);
 i64  ph_var_type(uptr d);
 i64  ph_var_bind(uptr d, i64 ty);
 void ph_refuse(uptr fl, i64 line, uptr what, uptr dref);
+void ph_phpfatal(uptr fl, i64 line, uptr msg);
+uptr ph_absfile(uptr fl);
 void ph_todo(uptr fl, i64 line, uptr what);
 void ph_todo2(uptr fl, i64 line, uptr what, uptr detail);
 void ph_refuse2(uptr fl, i64 line, uptr what, uptr detail, uptr dref);
@@ -203,6 +206,35 @@ void ph_refuse(uptr fl, i64 line, uptr what, uptr dref) {
     m = p_cat(m, dref, 0, cstrlen(dref));
     m = p_cat(m, ")", 0, 1);
     err_at(fl, line, m);
+}
+
+// A php COMPILE-TIME fatal: php reports these while parsing, prints the text
+// on stdout and exits 255, and that text IS the program's whole output. So
+// mc-php does the same from the compiler -- stdout, exit 255 -- and
+// probes/t7/mcphp.sh passes 255 through instead of calling it a compile
+// error. It is neither a refusal (the grid's third column) nor an mc
+// diagnostic: it is php's answer, produced where php produces it.
+void ph_phpfatal(uptr fl, i64 line, uptr msg) {
+    uptr a = ph_absfile(fl);
+    uptr d0 = php_dec(line);
+    // a plain `php file.php` has log_errors=On and writes the stderr form
+    // first; the phpt runner sets log_errors=0 and grades stdout alone.
+    write(2, "PHP Fatal error:  ", 18);
+    write(2, msg, cstrlen(msg));
+    write(2, " in ", 4);
+    write(2, a, cstrlen(a));
+    write(2, " on line ", 9);
+    write(2, d0, cstrlen(d0));
+    write(2, "\n", 1);
+    write(1, "\nFatal error: ", 14);
+    write(1, msg, cstrlen(msg));
+    write(1, " in ", 4);
+    write(1, a, cstrlen(a));
+    write(1, " on line ", 9);
+    uptr d = php_dec(line);
+    write(1, d, cstrlen(d));
+    write(1, "\n", 1);
+    exit(255);
 }
 
 // NOT a refusal: something T5 has not built yet. It is an ordinary compile
@@ -4170,11 +4202,19 @@ i64 ph_stmt_1() {
         return ph_empty();
     }
     if (ph_is("abstract") || ph_is("final")) {
-        i64 f = 1;
-        if (ph_is("final")) f = 2;
-        ph_next();
-        if (ph_is("abstract")) { ph_next(); f = f | 1; }
-        if (ph_is("final")) { ph_next(); f = f | 2; }
+        i64 f = 0;
+        i64 na = 0;
+        i64 nf = 0;
+        loop {
+            uptr cfl = ph_tfile;
+            i64 cln = ph_tline;
+            if (ph_is("abstract")) { ph_next(); f = f | 1; na = na + 1;
+                if (na > 1) ph_phpfatal(cfl, cln, "Multiple abstract modifiers are not allowed"); continue; }
+            if (ph_is("final")) { ph_next(); f = f | 2; nf = nf + 1;
+                if (nf > 1) ph_phpfatal(cfl, cln, "Multiple final modifiers are not allowed"); continue; }
+            if (ph_is("readonly")) { ph_next(); continue; }
+            break;
+        }
         if (!ph_is("class")) err_at(fl, line, "mc-php: expected class after abstract/final");
         ph_class(fl, line, f);
         return ph_empty();
@@ -4849,13 +4889,27 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             ph_cfill(ph_stmt_of(ph_c3("php_enum_case", ph_ceref(ceg), ph_strlit(en, cstrlen(en)), ev, ty_pzv)));
             continue;
         }
+        i64 nvis = 0;
+        i64 nstat = 0;
+        i64 nabs = 0;
+        i64 nfin = 0;
         loop {
-            if (ph_is("abstract")) { ph_next(); mflags = mflags | 1; continue; }
-            if (ph_is("final"))    { ph_next(); mflags = mflags | 2; continue; }
+            i64 mfl2 = ph_tfile;
+            i64 mln2 = ph_tline;
+            if (ph_is("abstract")) { ph_next(); mflags = mflags | 1; nabs = nabs + 1;
+                if (nabs > 1) ph_phpfatal(mfl2, mln2, "Multiple abstract modifiers are not allowed"); continue; }
+            if (ph_is("final"))    { ph_next(); mflags = mflags | 2; nfin = nfin + 1;
+                if (nfin > 1) ph_phpfatal(mfl2, mln2, "Multiple final modifiers are not allowed"); continue; }
             if (ph_is("readonly")) { ph_next(); continue; }
-            if (ph_is("static"))   { ph_next(); stat = 1; continue; }
+            if (ph_is("static"))   { ph_next(); stat = 1; nstat = nstat + 1;
+                if (nstat > 1) ph_phpfatal(mfl2, mln2, "Multiple static modifiers are not allowed"); continue; }
             i64 v = ph_visword();
-            if (v >= 0) { vis = v; continue; }
+            if (v >= 0) {
+                vis = v;
+                nvis = nvis + 1;
+                if (nvis > 1) ph_phpfatal(mfl2, mln2, "Multiple access type modifiers are not allowed");
+                continue;
+            }
             break;
         }
         if (vis < 0) vis = V_PUBLIC;

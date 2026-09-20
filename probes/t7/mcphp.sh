@@ -30,13 +30,24 @@ dir=${MCPHP_TMP:-${TMPDIR:-/tmp}}
 tmp=$dir/mcphp.$$.$(basename "$src" .php)
 err=$tmp.err
 
-if ! "$MCPHP" --exe "$src" -o "$tmp" 2> "$err"; then
+# Both of the compiler's streams are captured, because a php COMPILE-TIME
+# `Fatal error:` is written to BOTH in php's own order -- the stderr form
+# first -- and a shell that let stdout through live could not reproduce it.
+out=$tmp.out
+"$MCPHP" --exe "$src" -o "$tmp" > "$out" 2> "$err"
+rc=$?
+if [ "$rc" != 0 ]; then
     cat "$err" >&2
+    cat "$out"
+    # 255 is a php compile-time fatal: php reports those while parsing too,
+    # and exits 255. The text is already written; passing the code through is
+    # what makes the grid compare it.
+    [ "$rc" = 255 ] && exit 255
     grep -q 'is refused by design' "$err" && exit 3
     exit 2
 fi
 
-rm -f "$err"
+rm -f "$err" "$out"
 # EXEC, so this shell BECOMES the program: python's subprocess timeout kills
 # the process it spawned, and a program that loops for ever must be that same
 # process. Without the exec the timeout killed the shell and left the binary
