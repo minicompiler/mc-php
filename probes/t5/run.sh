@@ -29,6 +29,7 @@ fail=0
 
 echo ""
 echo "== 0. the compiler =="
+python3 probes/t5/lencheck.py
 "$MC" --exe probes/t5/mc-php.mc -o probes/t5/mc-php
 ls -l probes/t5/mc-php | awk '{ printf "  probes/t5/mc-php  %s bytes\n", $5 }'
 
@@ -94,13 +95,14 @@ grep -q '^phpt: green' "$OUT/all.summary" || fail=1
 printf '\n== 6. how many of the greens T0 calls "touched by none" ==\n'
 python3 probes/t0/breakdown.py --root "$SRC" --php "$PHP" --out "$OUT" > "$OUT/breakdown.txt"
 python3 - "$OUT/breakdown.tsv" "$OUT/all/green.txt" <<'PY'
-import sys
+import sys, os
+# breakdown.py writes ABSOLUTE paths, phpt-run.py writes what it was given
 rows = {}
 with open(sys.argv[1]) as f:
     head = f.readline().rstrip('\n').split('\t')
     for line in f:
         c = line.rstrip('\n').split('\t')
-        rows[c[0]] = dict(zip(head, c))
+        rows[os.path.relpath(c[0], os.getcwd())] = dict(zip(head, c))
 green = [l.split('\t')[0] for l in open(sys.argv[2])]
 def touched(r):
     return any(r.get(k) not in ('0', '', None) for k in ('d1', 'd5', 'autoload', 'd6', 'd4'))

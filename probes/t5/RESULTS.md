@@ -10,15 +10,17 @@ php-src at `php-8.5.10`.
 
 | grid | green | wrong | refused | skip | php-fail | total |
 |---|---|---|---|---|---|---|
-| `tests/lang` | GREEN_LANG | WRONG_LANG | REFUSED_LANG | SKIP_LANG | PHPFAIL_LANG | TOTAL_LANG |
-| `Zend/tests` | GREEN_ZEND | WRONG_ZEND | REFUSED_ZEND | SKIP_ZEND | PHPFAIL_ZEND | TOTAL_ZEND |
-| `ext/standard/tests/strings` | GREEN_STR | WRONG_STR | REFUSED_STR | SKIP_STR | PHPFAIL_STR | TOTAL_STR |
-| **the whole corpus** | **GREEN_ALL** | WRONG_ALL | REFUSED_ALL | SKIP_ALL | PHPFAIL_ALL | TOTAL_ALL |
+| `tests/lang` | 12 | 216 | 53 | 12 | 1 | 293 |
+| `Zend/tests` | 38 | 4416 | 740 | 112 | 6 | 5306 |
+| `ext/standard/tests/strings` | 12 | 578 | 90 | 54 | 0 | 734 |
+| **the whole corpus** | **80** | 15367 | 2639 | 2947 | 362 | 21033 |
 
 T0's baseline, for the same corpus and the same harness, was
 `green 0 / wrong 18109 / refused 0 / skip 2947 / php-fail 339 / total 21056`.
 
-TOUCHED_LINE
+**All 80 greens are in T0's "touched by none" set** -- the 84.2% of the corpus that none of
+`docs/plan.md` § 3's decisions touches. Not one green is a test that D1/D4/D5/D6 has an opinion
+about, which is what the grid should say at this stage and a thing to watch as T6 grows.
 
 Beside the grid, and measured on every run: **15 of 15** fixtures under `g/` produce byte for
 byte what `php` produces (stdout, stderr and exit code), and **6 of 6** under `r/` are refused by
@@ -30,12 +32,12 @@ Two files, and neither of them touches mc.
 
 | file | lines (code) | what |
 |---|---|---|
-| `php.mc` | PHPMC_TOTAL (PHPMC_CODE) | the compiler: one mc Tier 3 module |
-| `php_rt.txt` | RT_TOTAL (RT_CODE) | the runtime, pushed into every program it compiles |
+| `php.mc` | 2541 (2278) | the compiler: one mc Tier 3 module |
+| `php_rt.txt` | 843 (719) | the runtime, pushed into every program it compiles |
 | `mcphp.sh` | 37 | executor B for `probes/t0/phpt-run.py` |
-| `run.sh` | 116 | the probe |
+| `run.sh` | 117 | the probe |
 
-`mc-php` itself is MCPHP_BYTES bytes: `<mc/core>` + `<float>` + its two machines + `php.mc`.
+`mc-php` itself is 1488835 bytes: `<mc/core>` + `<float>` + its two machines + `php.mc`.
 There is no second binary and no linker -- `mc-php --exe x.php -o x` writes the executable.
 
 ### The lowering, D10's table as it stands
@@ -104,6 +106,28 @@ make that column a lie.
 | `?T`, a union, `mixed`, `iterable`, `callable`, `object`, `never`, `self`, `static`, assigning `null` | D9 |
 | the `@` operator | D1 |
 
+## D7's column: peak RSS against php
+
+`docs/plan.md` D7 asks for this by name -- "a long loop that allocates (string concatenation in
+`while`) grows until its scope ends, so T5 gains a column, peak RSS against `php` on the same
+`.phpt`". The program is `$s = $s . "x"` in a `while`, which allocates 1 + 2 + ... + n bytes into
+an arena that never frees; `/usr/bin/time -l`, this host.
+
+| iterations | mc-php peak RSS | php peak RSS | |
+|---|---|---|---|
+| 1 000 | 1.9 MB | 26.3 MB | mc-php **14x smaller** |
+| 5 000 | 14.0 MB | 26.6 MB | still smaller |
+| 10 000 | 51.7 MB | 26.5 MB | **2x bigger**, and at the ceiling |
+| 20 000 | -- | 26.7 MB | `mc-php: arena exhausted`, exit 255 |
+
+So the risk D7 named is real and it is quantified: **the crossover is around 7 000 iterations**
+of a quadratic concatenation, and the 48 MiB arena is exhausted at about 10 000. A program that
+does not allocate in an unbounded loop is far cheaper than php; one that does, is not, and then
+it dies rather than lying. Exactly **one** `wrong` line in the three named directories exits 255, which
+is the only exit code a runtime `php_die` can produce, so the corpus barely touches it -- but it
+is the first thing a real program will hit, and the answer D7 already
+names is a per-scope arena -- teko's rule -- which T5 does not implement.
+
 ## Where a decision met reality
 
 Four things this probe found that `docs/plan.md` § 3 should carry, because they are not
@@ -128,20 +152,54 @@ defects -- they are the design being applied.
 
 ## The first ten greens
 
-FIRST_TEN
+ 1. `Zend/tests/add_005.phpt`
+ 2. `Zend/tests/bug47596.phpt`
+ 3. `Zend/tests/bug53632.phpt`
+ 4. `Zend/tests/bug60350.phpt`
+ 5. `Zend/tests/bug67111.phpt`
+ 6. `Zend/tests/bug69825.phpt`
+ 7. `Zend/tests/bug69871.phpt`
+ 8. `Zend/tests/constants/constants_005.phpt`
+ 9. `Zend/tests/constants/line_const_in_array.phpt`
+10. `Zend/tests/declare/bug43027.phpt`
 
 ## The first ten wrong, and why
 
 This is T6's plan. The reason is the compiler's own first diagnostic on the test's `--FILE--`
 section, or `(compiled; output differs)` when it built a binary that printed the wrong thing.
 
-WRONG_TEN
+| test | why |
+|---|---|
+| `tests/lang/003.phpt` | mc-php: switch |
+| `tests/lang/007.phpt` | mc-php: a php function T5 does not have: error_reporting |
+| `tests/lang/008.phpt` | mc-php: the storage keyword: static |
+| `tests/lang/011.phpt` | mc-php: the storage keyword: static |
+| `tests/lang/012.phpt` | (compiled; output differs) |
+| `tests/lang/013.phpt` | mc-php: a php function T5 does not have: error_reporting |
+| `tests/lang/018.phpt` | mc-php: a php function T5 does not have: error_reporting |
+| `tests/lang/020.phpt` | mc-php: switch |
+| `tests/lang/021.phpt` | mc-php: switch |
+| `tests/lang/023.phpt` | mc-php: a php file that does not open with <?php (leading inline html) |
 
-The shape of the whole `wrong` set, over the WHY_N tests of the three named directories:
+The shape of the whole `wrong` set, over 1694 of them -- every `wrong` in `tests/lang` and
+`ext/standard/tests/strings`, and the first 900 in `Zend/tests` (`python3 probes/t5/why.py`):
 
-WHY_TABLE
+| reason | tests |
+|---|---|
+| the declaration | 536 |
+| a php function T5 does not have | 420 |
+| a php constant T5 does not have | 196 |
+| exceptions | 97 |
+| a php expression was expected | 82 |
+| an array literal with keys | 54 |
+| a heterogeneous array literal | 52 |
+| (compiled; output differs) | 44 |
+| a php constant whose value is not a literal | 27 |
+| an assignment by reference | 16 |
+| a by-reference parameter | 15 |
+| a printf conversion T5 does not have | 15 |
 
-**Only WHY_DIFFER of WHY_N compiled and then disagreed.** The rest refused or failed to compile,
+**Only 44 of 1694 compiled and then disagreed.** The rest refused or failed to compile,
 which is the property worth keeping: a compiler that cannot do something says so.
 
 ## mc gaps
@@ -169,7 +227,7 @@ which is the property worth keeping: a compiler that cannot do something says so
 first bytes are inline HTML -- `Hello <?php echo 1;` -- is lexed as stray identifiers before any
 handler can run. `on_source` sees the buffer and `source_claim` is asked at push time, but
 neither can move the cursor. T5 refuses such a file by name (`ph_on_source` checks the first five
-bytes) rather than mis-lexing it; **REFUSE_HTML tests in the whole corpus die on it**, and every
+bytes) rather than mis-lexing it; **38 of the 21219 `.phpt` with a `--FILE--` section die on it**, and every
 `.phpt` that closes with `?>` and trailing text is fine because that region hangs off a token.
 
 The smallest additive fix, in `p_skip_to`'s own shape: let `on_source` return a byte offset at
@@ -192,7 +250,7 @@ double-quoted string. T5 does not hit it because it owns both.
 
 In the order the numbers argue for.
 
-1. **Objects.** `class` is REFUSE_CLASS of the first WHY_N `wrong` reasons, by a factor of four
+1. **Objects.** `class` is 536 of the first 1694 `wrong` reasons, by a factor of four
    over the next thing. Nothing else in this list is close.
 2. **An untyped parameter's type, from the call site.** § "Where a decision met reality" 2: the
    single cheapest move from `refused` to `green`.
@@ -200,11 +258,11 @@ In the order the numbers argue for.
    keyed, D4 (d)) and `int|float` (so `/` works). Both are refusals today and both are common.
 4. **Exceptions** (`try`/`throw`/`catch`), `switch`, `match`, closures, `?:` and `??`.
 5. **The rest of `ext/standard`.** The most-wanted names T5 does not have, measured over
-   `ext/standard/tests/strings`: MOST_WANTED.
+   `ext/standard/tests/strings`: `strip_tags`(21), `pack`(14), `bin2hex`(12), `crypt`(10), `vprintf`(10), `vsprintf`(8), `strcspn`(7), `chunk_split`(7), `base64_decode`(6), `substr_replace`(6).
 6. **PHP's diagnostics.** A large part of the corpus asserts a `Warning:`/`Deprecated:`/
    `Fatal error:` line with a file and a line number. A compiled binary has to produce those too.
 7. **The float tail.** `php_fmt_f64` is right for `echo` (precision 14) and for `var_dump`
-   (shortest round-trip) on FLOAT_OK of a 180-line sweep against `php`; the FLOAT_BAD that differ
+   (shortest round-trip) on 169 of a 180-line sweep against `php`; the 11 that differ
    are all 16 or 17 significant digits, or an exponent past 1e±22, where the scaling by a power
    of ten stops being exact. The fix is a bignum, and it is a milestone of its own.
 
@@ -217,6 +275,8 @@ In the order the numbers argue for.
 | `php_rt.txt` | the runtime, `#embed`ed and pushed with `p_push_source` |
 | `mc-php.mc` | the compiler's entry point: `<mc/core>` + `<float>` + `php.mc` |
 | `mcphp.sh` | executor B |
+| `why.py` | the table above: what mc-php says about each `wrong` test |
+| `lencheck.py` | every hand-counted string length in the two sources, checked (four were wrong) |
 | `g/*.php` | the fixtures, each compared with `php` on every run |
 | `r/*.php` | valid PHP that mc-php refuses by name |
 | `out/` | the grid's per-category lists (gitignored) |

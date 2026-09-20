@@ -1877,7 +1877,7 @@ i64 ph_loop_of(i64 cond, i64 body, i64 step, i64 line, uptr fl) {
         ph_nonce = ph_nonce + 1;
         uptr fn = p_cat("phl_f", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
         ph_local(fn, TY_I64);
-        pre = ph_set(fn, ph_int(1));                 // emitted by the caller? no: here
+        pre = ph_set(fn, ph_int(1));                 // spliced in before the loop, below
         i64 fref = node_new(N_IDENT, line, fl);
         set_nd_name(fref, fn);
         set_nd_type(fref, TY_I64);
@@ -1887,14 +1887,9 @@ i64 ph_loop_of(i64 cond, i64 body, i64 step, i64 line, uptr fl) {
         set_nd_b(gate, clr);
         set_nd_c(gate, step);
         step = 0;
-        set_nd_next(gate, 0);
-        i64 nb = node_new(N_BLOCK, line, fl);        // gate, then the old body
-        set_nd_a(nb, gate);
-        i64 hold = body;
+        i64 hold = body;                             // gate, then the old body
         body = gate;
         set_nd_next(gate, hold);
-        // `pre` (the flag = 1) has to run before the loop: the caller splices
-        // it in through ph_loop_pre.
         ph_loop_pre = pre;
     }
     i64 neg = node_new(N_UNARY, line, fl);

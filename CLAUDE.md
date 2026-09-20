@@ -51,3 +51,27 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   file offset). The `[linker]` road is immune. Nothing was worked around: T3 uses `[linker]`.
 - T0 done (`probes/t0`): the phpt grid runs, `phpt: green 0 / wrong 18109 / refused 0 / skip 2947 / php-fail 339 / total 21056  (21395 tests; sapi/ excluded)`; oracle cross-checked against
   php-src's own `run-tests.php` (`strings` exact, `Zend/tests` within 8 passes/5 skips); breakdown: 21560 classifiable tests; D1 143 (0.7%), D5 1569 (7.3%), D6 1719 (8.0%), D4-suspect 123 (0.6%); touched by at least one 3409 (15.8%), by none 18151 (84.2%); extension-specific 9028, of which 1899 touched.
+- T5 done (`probes/t5`), on **mc 1.1.0**: the first runtime and the first compiler, and **green
+  moves off zero** -- `phpt: green 80 / wrong 15367 / refused 2639 / skip 2947 / php-fail 362 / total 21033` over the whole
+  corpus (T0's baseline on the same harness was `green 0 / wrong 18109 / refused 0`); per
+  directory `tests/lang` 12, `Zend/tests` 38, `ext/standard/tests/strings` 12.
+  All 80 greens are in T0's "touched by none" set -- the 84.2% of the corpus none of § 3's
+  decisions touches. Two files: `probes/t5/php.mc` (the compiler --
+  ONE `syntax("<?php")` plus `syntax_expr("$")`, the module's own expression grammar, D4's
+  static types with their named errors) and `probes/t5/php_rt.txt` (the runtime -- D10's table:
+  `string` is a `type_new` handle to T3's `zend_string` layout, binary-safe and never
+  encoding-validated, `float` is `<float>`'s `f64`, `array` is a packed HOMOGENEOUS vector with
+  keys 0..n-1, `int|false` is the one union and exists only because `strpos` has it; one 48 MiB
+  arena per D7, never freed). The grid's third column is real: a refusal is
+  `mc-php: <what> is refused by design (docs/plan.md D<n>)` and exit 3, and a construct T5 has
+  not built yet is a DIFFERENT message and an ordinary compile error -- counting the second as
+  the first would make the column a lie. Fifteen fixtures under `g/` are byte for byte php's on
+  every run and six under `r/` are refused by name.
+- mc 1.1.0 closed both open T4 gaps, measured by T5: `p_skip_to` owns `'...'`, `#`, `#[Attr]`
+  and inline HTML **and `"..."`** (which is what gives php's own `\xNN`/`\u{...}`/octal escapes
+  and an escaped `\$`; the core decodes its own set before any handler runs), `syntax_expr("$")`
+  makes `$name` two tokens -- **T4's in-place `on_source` rewrite is deleted** and the
+  `don't` -> `don"t` corruption with it -- and of the 48 external names `php.mc` calls, 45 are in
+  `tests/golden/surface.txt` and the three that are not are `<float>`'s. One new gap is reported
+  in `docs/plan.md` § 5: nothing can own the bytes before the FIRST token, so a `.php` opening
+  with inline HTML is refused by name (38 of 21219 `.phpt`).

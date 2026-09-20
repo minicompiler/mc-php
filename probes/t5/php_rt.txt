@@ -24,7 +24,7 @@ void php_die(uptr msg, i64 n) { write(2, msg, n); exit(255); }
 
 uptr php_alloc(i64 n) {
     i64 a = (ph_top + 7) / 8 * 8;
-    if (a + n > PH_ARENA) php_die("mc-php: arena exhausted\n", 25);
+    if (a + n > PH_ARENA) php_die("mc-php: arena exhausted\n", 24);
     ph_top = a + n;
     return ph_heap + a;
 }
@@ -482,7 +482,7 @@ i64 php_arr_get(uptr a, i64 i) {
 void php_arr_set(uptr a, i64 i, i64 v) {
     i64 n = ld64(a);
     if (i == n) { php_arr_push(a, v); return; }
-    if (i < 0 || i > n) php_die("mc-php: array keys are 0..n in this runtime\n", 43);
+    if (i < 0 || i > n) php_die("mc-php: array keys are 0..n in this runtime\n", 44);
     st64(ld64(a + 16) + i * 8, v);
 }
 
@@ -664,7 +664,7 @@ uptr php_explode(uptr sep, uptr s) {
 
 // ---- the numeric ones ------------------------------------------------------
 i64 php_intdiv(i64 a, i64 b) {
-    if (b == 0) php_die("mc-php: DivisionByZeroError: Division by zero\n", 45);
+    if (b == 0) php_die("mc-php: DivisionByZeroError: Division by zero\n", 46);
     return a / b;
 }
 i64 php_abs_i(i64 v) { if (v < 0) return 0 - v; return v; }
@@ -678,7 +678,7 @@ i64 php_mod(i64 a, i64 b) {
     return a - (a / b) * b;
 }
 i64 php_div_i(i64 a, i64 b) {
-    if (b == 0) php_die("mc-php: DivisionByZeroError: Division by zero\n", 45);
+    if (b == 0) php_die("mc-php: DivisionByZeroError: Division by zero\n", 46);
     return a / b;
 }
 f64 php_pow_f(f64 a, i64 e) {
