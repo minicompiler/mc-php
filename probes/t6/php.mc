@@ -153,7 +153,7 @@ void ph_refuse(uptr fl, i64 line, uptr what, uptr dref) {
 // with "not implemented" would make that column a lie.
 void ph_todo(uptr fl, i64 line, uptr what) {
     uptr m = p_cat("mc-php: ", what, 0, cstrlen(what));
-    m = p_cat(m, " is not implemented in T5 (probes/t5/RESULTS.md)", 0, 48);
+    m = p_cat(m, " is not implemented yet (probes/t6/RESULTS.md)", 0, 44);
     err_at(fl, line, m);
 }
 
@@ -755,6 +755,39 @@ void ph_const_add(uptr cn, i64 v, i64 t, uptr fl, i64 line) {
     st64(ph_cval + ph_nconst * 8, val);
     st64(ph_cstr + ph_nconst * 8, bytes);
     ph_nconst = ph_nconst + 1;
+}
+
+// ---- the library table -----------------------------------------------------
+// Every row is one php function whose arguments are zvals and whose result is
+// a native value of `ret`. Missing optional arguments are php_znull(), so the
+// runtime sees a fixed arity and does its own ZPP.
+#define PH_MAXLIB 384
+
+uptr ph_ln[PH_MAXLIB];
+uptr ph_lf[PH_MAXLIB];
+i64  ph_lmin[PH_MAXLIB];
+i64  ph_lmax[PH_MAXLIB];
+i64  ph_lret[PH_MAXLIB];
+i64  ph_nlib;
+
+void ph_lib(uptr name, uptr fn, i64 mn, i64 mx, i64 ret) {
+    if (ph_nlib >= PH_MAXLIB) err_at("php.mc", 1, "mc-php: too many library rows");
+    st64(ph_ln + ph_nlib * 8, name);
+    st64(ph_lf + ph_nlib * 8, fn);
+    st64(ph_lmin + ph_nlib * 8, mn);
+    st64(ph_lmax + ph_nlib * 8, mx);
+    st64(ph_lret + ph_nlib * 8, ret);
+    ph_nlib = ph_nlib + 1;
+}
+
+i64 ph_lib_find(uptr n) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_nlib) break;
+        if (str_eq(ld64(ph_ln + i * 8), n)) return i;
+        i = i + 1;
+    }
+    return -1;
 }
 
 // ---- the function table ----------------------------------------------------
@@ -1973,7 +2006,35 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
 
     // a php function this program declared
     i64 fi = ph_fn_find(name);
-    if (fi < 0) ph_todo2(fl, line, "a php function T5 does not have", name);
+    if (fi < 0) {
+        i64 li = ph_lib_find(name);
+        if (li >= 0) {
+            i64 mn = ld64(ph_lmin + li * 8);
+            i64 mx = ld64(ph_lmax + li * 8);
+            if (na < mn || na > mx) ph_todo2(fl, line, "the wrong number of arguments for", name);
+            i64 lhead = 0;
+            i64 ltail = 0;
+            i64 j = 0;
+            loop {
+                if (j >= mx) break;
+                i64 an = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
+                if (j < na) an = ph_to_mixed(ph_a(av, j), ph_aty(av, j));
+                if (ltail) set_nd_next(ltail, an);
+                if (!ltail) lhead = an;
+                ltail = an;
+                j = j + 1;
+            }
+            i64 lc = node_new(N_CALL, line, fl);
+            set_nd_name(lc, ld64(ph_lf + li * 8));
+            set_nd_a(lc, lhead);
+            i64 lr = ld64(ph_lret + li * 8);
+            set_nd_type(lc, ph_mcty(lr));
+            ph_ety = lr;
+            if (lr == PT_ARR) ph_efresh = 1;
+            return lc;
+        }
+        ph_todo2(fl, line, "a php function mc-php does not have", name);
+    }
     i64 np = ld64(ph_fnp + fi * 8);
     if (na != np) ph_todo2(fl, line, "the wrong number of arguments for", name);
     i64 head = 0;
@@ -2827,6 +2888,109 @@ i64 ph_function() {
     return f;
 }
 
+void ph_lib_init() {
+    ph_lib("array_key_exists", "php_f_array_key_exists", 2, 2, PT_BOOL);
+    ph_lib("key_exists", "php_f_array_key_exists", 2, 2, PT_BOOL);
+    ph_lib("array_keys", "php_f_array_keys", 1, 1, PT_ARR);
+    ph_lib("array_values", "php_f_array_values", 1, 1, PT_ARR);
+    ph_lib("in_array", "php_f_in_array", 2, 3, PT_BOOL);
+    ph_lib("array_search", "php_f_array_search", 2, 3, PT_MIXED);
+    ph_lib("array_merge", "php_f_array_merge", 1, 4, PT_ARR);
+    ph_lib("array_pop", "php_f_array_pop", 1, 1, PT_MIXED);
+    ph_lib("array_shift", "php_f_array_shift", 1, 1, PT_MIXED);
+    ph_lib("array_unshift", "php_f_array_unshift", 2, 2, PT_INT);
+    ph_lib("array_slice", "php_f_array_slice", 2, 4, PT_ARR);
+    ph_lib("array_reverse", "php_f_array_reverse", 1, 2, PT_ARR);
+    ph_lib("array_sum", "php_f_array_sum", 1, 1, PT_MIXED);
+    ph_lib("array_product", "php_f_array_product", 1, 1, PT_MIXED);
+    ph_lib("array_flip", "php_f_array_flip", 1, 1, PT_ARR);
+    ph_lib("array_unique", "php_f_array_unique", 1, 2, PT_ARR);
+    ph_lib("array_combine", "php_f_array_combine", 2, 2, PT_ARR);
+    ph_lib("array_fill", "php_f_array_fill", 3, 3, PT_ARR);
+    ph_lib("array_fill_keys", "php_f_array_fill_keys", 2, 2, PT_ARR);
+    ph_lib("array_key_first", "php_f_array_key_first", 1, 1, PT_MIXED);
+    ph_lib("array_key_last", "php_f_array_key_last", 1, 1, PT_MIXED);
+    ph_lib("range", "php_f_range", 2, 3, PT_ARR);
+    ph_lib("sort", "php_f_sort_a", 1, 2, PT_BOOL);
+    ph_lib("rsort", "php_f_rsort", 1, 2, PT_BOOL);
+    ph_lib("asort", "php_f_asort", 1, 2, PT_BOOL);
+    ph_lib("arsort", "php_f_arsort", 1, 2, PT_BOOL);
+    ph_lib("ksort", "php_f_ksort", 1, 2, PT_BOOL);
+    ph_lib("krsort", "php_f_krsort", 1, 2, PT_BOOL);
+    ph_lib("bin2hex", "php_f_bin2hex", 1, 1, PT_STRING);
+    ph_lib("hex2bin", "php_f_hex2bin", 1, 1, PT_STRING);
+    ph_lib("base64_encode", "php_f_base64_encode", 1, 1, PT_STRING);
+    ph_lib("base64_decode", "php_f_base64_decode", 1, 2, PT_STRING);
+    ph_lib("strspn", "php_f_strspn", 2, 4, PT_INT);
+    ph_lib("strcspn", "php_f_strcspn", 2, 4, PT_INT);
+    ph_lib("chunk_split", "php_f_chunk_split", 1, 3, PT_STRING);
+    ph_lib("substr_replace", "php_f_substr_replace", 3, 4, PT_STRING);
+    ph_lib("substr_count", "php_f_substr_count", 2, 2, PT_INT);
+    ph_lib("strrpos", "php_f_strrpos", 2, 3, PT_IFALSE);
+    ph_lib("stripos", "php_f_stripos", 2, 3, PT_IFALSE);
+    ph_lib("strripos", "php_f_strripos", 2, 3, PT_IFALSE);
+    ph_lib("strstr", "php_f_strstr", 2, 3, PT_MIXED);
+    ph_lib("stristr", "php_f_stristr", 2, 3, PT_MIXED);
+    ph_lib("strchr", "php_f_strstr", 2, 3, PT_MIXED);
+    ph_lib("strrchr", "php_f_strrchr", 2, 2, PT_MIXED);
+    ph_lib("strncmp", "php_f_strncmp", 3, 3, PT_INT);
+    ph_lib("strncasecmp", "php_f_strncasecmp", 3, 3, PT_INT);
+    ph_lib("str_ireplace", "php_f_str_ireplace", 3, 3, PT_STRING);
+    ph_lib("str_split", "php_f_str_split", 1, 2, PT_ARR);
+    ph_lib("ucwords", "php_f_ucwords", 1, 2, PT_STRING);
+    ph_lib("nl2br", "php_f_nl2br", 1, 2, PT_STRING);
+    ph_lib("strip_tags", "php_f_strip_tags", 1, 2, PT_STRING);
+    ph_lib("addslashes", "php_f_addslashes", 1, 1, PT_STRING);
+    ph_lib("stripslashes", "php_f_stripslashes", 1, 1, PT_STRING);
+    ph_lib("htmlspecialchars", "php_f_htmlspecialchars", 1, 4, PT_STRING);
+    ph_lib("htmlentities", "php_f_htmlspecialchars", 1, 4, PT_STRING);
+    ph_lib("wordwrap", "php_f_wordwrap", 1, 4, PT_STRING);
+    ph_lib("strtr", "php_f_strtr", 2, 3, PT_STRING);
+    ph_lib("number_format", "php_f_number_format", 1, 4, PT_STRING);
+    ph_lib("dechex", "php_f_dechex", 1, 1, PT_STRING);
+    ph_lib("decbin", "php_f_decbin", 1, 1, PT_STRING);
+    ph_lib("decoct", "php_f_decoct", 1, 1, PT_STRING);
+    ph_lib("hexdec", "php_f_hexdec", 1, 1, PT_INT);
+    ph_lib("bindec", "php_f_bindec", 1, 1, PT_INT);
+    ph_lib("octdec", "php_f_octdec", 1, 1, PT_INT);
+    ph_lib("base_convert", "php_f_base_convert", 3, 3, PT_STRING);
+    ph_lib("floor", "php_f_floor", 1, 1, PT_FLOAT);
+    ph_lib("ceil", "php_f_ceil", 1, 1, PT_FLOAT);
+    ph_lib("round", "php_f_round", 1, 3, PT_FLOAT);
+    ph_lib("sqrt", "php_f_sqrt", 1, 1, PT_FLOAT);
+    ph_lib("fmod", "php_f_fmod", 2, 2, PT_FLOAT);
+    ph_lib("exp", "php_f_exp", 1, 1, PT_FLOAT);
+    ph_lib("log", "php_f_log", 1, 2, PT_FLOAT);
+    ph_lib("log10", "php_f_log10", 1, 1, PT_FLOAT);
+    ph_lib("pi", "php_f_pi", 0, 0, PT_FLOAT);
+    ph_lib("is_nan", "php_f_is_nan", 1, 1, PT_BOOL);
+    ph_lib("is_infinite", "php_f_is_infinite", 1, 1, PT_BOOL);
+    ph_lib("is_finite", "php_f_is_finite", 1, 1, PT_BOOL);
+    ph_lib("pow", "php_f_pow", 2, 2, PT_MIXED);
+    ph_lib("mt_rand", "php_f_mt_rand", 0, 2, PT_INT);
+    ph_lib("rand", "php_f_mt_rand", 0, 2, PT_INT);
+    ph_lib("random_int", "php_f_mt_rand", 2, 2, PT_INT);
+    ph_lib("mt_srand", "php_f_srand", 0, 2, PT_VOID);
+    ph_lib("srand", "php_f_srand", 0, 2, PT_VOID);
+    ph_lib("mt_getrandmax", "php_f_mt_getrandmax", 0, 0, PT_INT);
+    ph_lib("getrandmax", "php_f_mt_getrandmax", 0, 0, PT_INT);
+    ph_lib("gettype", "php_f_gettype", 1, 1, PT_STRING);
+    ph_lib("get_debug_type", "php_f_get_debug_type", 1, 1, PT_STRING);
+    ph_lib("print_r", "php_f_print_r", 1, 2, PT_STRING);
+    ph_lib("var_export", "php_f_var_export", 1, 2, PT_STRING);
+    ph_lib("ob_start", "php_ob_start", 0, 0, PT_VOID);
+    ph_lib("ob_get_clean", "php_ob_get", 0, 0, PT_STRING);
+    ph_lib("ob_get_contents", "php_ob_get", 0, 0, PT_STRING);
+    ph_lib("error_reporting", "php_f_noop", 0, 1, PT_INT);
+    ph_lib("ini_set", "php_f_nullf", 0, 3, PT_MIXED);
+    ph_lib("ini_get", "php_f_nullf", 0, 1, PT_MIXED);
+    ph_lib("set_error_handler", "php_f_nullf", 0, 2, PT_MIXED);
+    ph_lib("setlocale", "php_f_nullf", 0, 2, PT_MIXED);
+    ph_lib("gc_collect_cycles", "php_f_noop", 0, 1, PT_INT);
+    ph_lib("error_log", "php_f_false1", 0, 1, PT_BOOL);
+    ph_lib("usleep", "php_f_noop", 0, 1, PT_INT);
+}
+
 // ---- the one registration --------------------------------------------------
 void ph_program() {
     i64 line = ph_tline;
@@ -2899,6 +3063,7 @@ void user_init() {
     ty_parr = type_new("php_arr", 8, 8, TK_INT);
     ty_pzv  = type_new("php_zval", 8, 8, TK_INT);
     ph_tokens();
+    ph_lib_init();
     syntax_expr("$", &ph_dollar_expr);            // makes `$name` lex as `$` + name
     on_source(&ph_on_source);
     syntax("<?php", &ph_program);

@@ -432,11 +432,38 @@ i64 ph_outn;
 
 void php_flush() { if (ph_outn) write(1, ph_out, ph_outn); ph_outn = 0; }
 
+// output capture: print_r($x, true), var_export($x, true), ob_start()
+uptr ph_cap;
+i64  ph_capn;
+i64  ph_capcap;
+i64  ph_capon;
+
+void php_ob_start() { ph_capon = ph_capon + 1; ph_capn = 0; ph_capcap = 0; ph_cap = 0; }
+
 void php_write(uptr b, i64 n) {
+    if (ph_capon) {
+        if (ph_capn + n > ph_capcap) {
+            i64 nc = ph_capcap * 2 + n + 256;
+            uptr nb = php_alloc(nc);
+            php_memcpy(nb, ph_cap, ph_capn);
+            ph_cap = nb;
+            ph_capcap = nc;
+        }
+        php_memcpy(ph_cap + ph_capn, b, n);
+        ph_capn = ph_capn + n;
+        return;
+    }
     if (n > 2048) { php_flush(); write(1, b, n); return; }
     if (ph_outn + n > 4096) php_flush();
     php_memcpy(ph_out + ph_outn, b, n);
     ph_outn = ph_outn + n;
+}
+
+uptr php_ob_get() {
+    uptr s = php_str_new(ph_cap, ph_capn);
+    ph_capon = ph_capon - 1;
+    ph_capn = 0;
+    return s;
 }
 
 i64 php_echo_str(uptr s) { php_write(s + ZS_HDR, php_strlen(s)); return 0; }
@@ -1174,7 +1201,6 @@ void php_vd_zv(uptr z, i64 depth) {
 // print_r: php's own indentation -- a nested level is 8 more spaces, and the
 // value of a nested array is followed by a blank line.
 void php_pr_ht(uptr a, i64 depth, i64 isobj) {
-    php_sp(depth);
     if (isobj) php_write(" Object\n", 8);
     if (!isobj) php_write("Array\n", 6);
     php_sp(depth);
@@ -1816,3 +1842,1293 @@ i64 php_zv_isscalar(uptr z) {
     if (t == IS_LONG || t == IS_DOUBLE || t == IS_STRING || t == IS_TRUE || t == IS_FALSE) return 1;
     return 0;
 }
+
+// ============================================================================
+// The library: every one of these takes zvals and answers a native value, so
+// the compiler needs one table row per function and no special case. php's own
+// coercion rules live here and not in the compiler (D9).
+// ============================================================================
+
+uptr php_f_ret(uptr a) { return a; }
+
+// ---- arrays ----------------------------------------------------------------
+u8 php_f_array_key_exists(uptr k, uptr a) {
+    if (php_zv_type(a) != IS_ARRAY) return 0;
+    return php_arr_has(ld64(a), k);
+}
+
+uptr php_f_array_keys(uptr a) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) php_arr_push(r, php_it_key(h, i));
+        i = i + 1;
+    }
+    return r;
+}
+
+uptr php_f_array_values(uptr a) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) php_arr_push(r, b);
+        i = i + 1;
+    }
+    return r;
+}
+
+i64 php_ht_pos(uptr h, uptr needle, i64 strict) {
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            if (strict) { if (php_zv_identical(b, needle)) return i; }
+            if (!strict) { if (php_zv_cmp(b, needle) == 0) return i; }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+u8 php_f_in_array(uptr n, uptr a, uptr strict) {
+    if (php_zv_type(a) != IS_ARRAY) return 0;
+    if (php_ht_pos(ld64(a), n, php_zv_bool(strict)) >= 0) return 1;
+    return 0;
+}
+
+uptr php_f_array_search(uptr n, uptr a, uptr strict) {
+    if (php_zv_type(a) != IS_ARRAY) return php_zbool(0);
+    i64 i = php_ht_pos(ld64(a), n, php_zv_bool(strict));
+    if (i < 0) return php_zbool(0);
+    return php_it_key(ld64(a), i);
+}
+
+void php_ht_append_all(uptr r, uptr z) {
+    if (php_zv_type(z) != IS_ARRAY) return;
+    uptr h = ld64(z);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            uptr k = ld64(b + 24);
+            if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), b);
+            if (!k) php_zv_cpv(php_arr_nextslot(r), b);
+        }
+        i = i + 1;
+    }
+}
+
+uptr php_f_array_merge(uptr a, uptr b, uptr c, uptr d) {
+    uptr r = php_arr_new(8);
+    php_ht_append_all(r, a);
+    php_ht_append_all(r, b);
+    php_ht_append_all(r, c);
+    php_ht_append_all(r, d);
+    return r;
+}
+
+i64 php_ht_last(uptr h) {
+    i64 i = php_ht_used(h) - 1;
+    loop {
+        if (i < 0) return -1;
+        if (ld8(php_ht_bkt(h, i) + 8) != IS_UNDEF) return i;
+        i = i - 1;
+    }
+    return -1;
+}
+
+uptr php_f_array_pop(uptr a) {
+    if (php_zv_type(a) != IS_ARRAY) return php_znull();
+    uptr h = ld64(a);
+    i64 i = php_ht_last(h);
+    if (i < 0) return php_znull();
+    uptr b = php_ht_bkt(h, i);
+    uptr v = php_zv_dup(b);
+    php_zv_settype(b, IS_UNDEF);
+    st32(h + 28, ld32(h + 28) - 1);
+    st32(h + 24, i);
+    if (!ld64(b + 24)) { if (ld64(h + 40) == ld64(b + 16) + 1) st64(h + 40, ld64(b + 16)); }
+    return v;
+}
+
+// shift renumbers the integer keys, as php does
+uptr php_f_array_shift(uptr a) {
+    if (php_zv_type(a) != IS_ARRAY) return php_znull();
+    uptr h = ld64(a);
+    i64 i = php_it_next(h, 0);
+    if (i < 0) return php_znull();
+    uptr v = php_zv_dup(php_ht_bkt(h, i));
+    uptr r = php_arr_new(ld32(h + 32));
+    i64 used = php_ht_used(h);
+    i64 j = i + 1;
+    loop {
+        if (j >= used) break;
+        uptr b = php_ht_bkt(h, j);
+        if (ld8(b + 8) != IS_UNDEF) {
+            uptr k = ld64(b + 24);
+            if (k) php_zv_cp(php_ht_slotfor(r, php_str_hash(k), k), b);
+            if (!k) php_zv_cp(php_arr_nextslot(r), b);
+        }
+        j = j + 1;
+    }
+    st64(a, r);
+    return v;
+}
+
+i64 php_f_array_unshift(uptr a, uptr v) {
+    if (php_zv_type(a) != IS_ARRAY) return 0;
+    uptr h = ld64(a);
+    uptr r = php_arr_new(ld32(h + 32));
+    php_arr_push(r, v);
+    php_ht_append_all(r, a);
+    st64(a, r);
+    return php_count(r);
+}
+
+uptr php_f_array_slice(uptr a, uptr off, uptr len, uptr pres) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 n = php_count(h);
+    i64 o = php_zv_long(off);
+    if (o < 0) { o = n + o; if (o < 0) o = 0; }
+    i64 l = n - o;
+    if (php_zv_type(len) != IS_NULL) {
+        l = php_zv_long(len);
+        if (l < 0) l = n - o + l;
+    }
+    i64 keep = php_zv_bool(pres);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    i64 seen = 0;
+    i64 taken = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            if (seen >= o && taken < l) {
+                uptr k = ld64(b + 24);
+                if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), b);
+                if (!k && keep) php_zv_cpv(php_arr_islot(r, ld64(b + 16)), b);
+                if (!k && !keep) php_zv_cpv(php_arr_nextslot(r), b);
+                taken = taken + 1;
+            }
+            seen = seen + 1;
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+uptr php_f_array_reverse(uptr a, uptr pres) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 keep = php_zv_bool(pres);
+    i64 i = php_ht_used(h) - 1;
+    loop {
+        if (i < 0) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            uptr k = ld64(b + 24);
+            if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), b);
+            if (!k && keep) php_zv_cpv(php_arr_islot(r, ld64(b + 16)), b);
+            if (!k && !keep) php_zv_cpv(php_arr_nextslot(r), b);
+        }
+        i = i - 1;
+    }
+    return r;
+}
+
+uptr php_f_array_sum(uptr a) {
+    uptr acc = php_zlong(0);
+    if (php_zv_type(a) != IS_ARRAY) return acc;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) acc = php_zv_add(acc, b);
+        i = i + 1;
+    }
+    return acc;
+}
+
+uptr php_f_array_product(uptr a) {
+    uptr acc = php_zlong(1);
+    if (php_zv_type(a) != IS_ARRAY) return acc;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) acc = php_zv_mul(acc, b);
+        i = i + 1;
+    }
+    return acc;
+}
+
+uptr php_f_array_flip(uptr a) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) php_zv_cp(php_arr_zslot(r, b), php_it_key(h, i));
+        i = i + 1;
+    }
+    return r;
+}
+
+uptr php_f_array_unique(uptr a) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            if (php_ht_pos(r, b, 0) < 0) {
+                uptr k = ld64(b + 24);
+                if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), b);
+                if (!k) php_zv_cpv(php_arr_islot(r, ld64(b + 16)), b);
+            }
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+uptr php_f_array_combine(uptr k, uptr v) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(k) != IS_ARRAY || php_zv_type(v) != IS_ARRAY) return r;
+    uptr hk = ld64(k);
+    uptr hv = ld64(v);
+    i64 i = php_it_next(hk, 0);
+    i64 j = php_it_next(hv, 0);
+    loop {
+        if (i < 0 || j < 0) break;
+        php_zv_cpv(php_arr_zslot(r, php_ht_bkt(hk, i)), php_ht_bkt(hv, j));
+        i = php_it_next(hk, i + 1);
+        j = php_it_next(hv, j + 1);
+    }
+    return r;
+}
+
+uptr php_f_array_fill(uptr st, uptr num, uptr v) {
+    uptr r = php_arr_new(8);
+    i64 s = php_zv_long(st);
+    i64 n = php_zv_long(num);
+    i64 i = 0;
+    loop { if (i >= n) break; php_zv_cpv(php_arr_islot(r, s + i), v); i = i + 1; }
+    return r;
+}
+
+uptr php_f_array_fill_keys(uptr k, uptr v) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(k) != IS_ARRAY) return r;
+    uptr h = ld64(k);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) php_zv_cpv(php_arr_zslot(r, b), v);
+        i = i + 1;
+    }
+    return r;
+}
+
+uptr php_f_array_key_first(uptr a) {
+    if (php_zv_type(a) != IS_ARRAY) return php_znull();
+    i64 i = php_it_next(ld64(a), 0);
+    if (i < 0) return php_znull();
+    return php_it_key(ld64(a), i);
+}
+
+uptr php_f_array_key_last(uptr a) {
+    if (php_zv_type(a) != IS_ARRAY) return php_znull();
+    i64 i = php_ht_last(ld64(a));
+    if (i < 0) return php_znull();
+    return php_it_key(ld64(a), i);
+}
+
+uptr php_f_range(uptr a, uptr b, uptr st) {
+    uptr r = php_arr_new(8);
+    i64 isf = 0;
+    if (php_zv_isdouble(a) || php_zv_isdouble(b) || php_zv_isdouble(st)) isf = 1;
+    // a single-character string range, php's own
+    if (php_zv_type(a) == IS_STRING && php_zv_type(b) == IS_STRING && !php_zv_isnum(a) && !php_zv_isnum(b)) {
+        i64 x = 0;
+        i64 y = 0;
+        if (php_strlen(ld64(a))) x = ld8(ld64(a) + ZS_HDR);
+        if (php_strlen(ld64(b))) y = ld8(ld64(b) + ZS_HDR);
+        i64 d = 1;
+        if (y < x) d = -1;
+        loop {
+            php_arr_push(r, php_zstr(php_chr(x)));
+            if (x == y) break;
+            x = x + d;
+        }
+        return r;
+    }
+    if (isf) {
+        f64 x = php_zv_double(a);
+        f64 y = php_zv_double(b);
+        f64 s = 1.0;
+        if (php_zv_type(st) != IS_NULL) s = php_abs_f(php_zv_double(st));
+        if (s == 0.0) s = 1.0;
+        if (y < x) s = 0.0 - s;
+        i64 n = (i64) (php_abs_f(y - x) / php_abs_f(s));
+        i64 i = 0;
+        loop { if (i > n) break; php_arr_push(r, php_zdouble(x + s * (f64) i)); i = i + 1; }
+        return r;
+    }
+    i64 x2 = php_zv_long(a);
+    i64 y2 = php_zv_long(b);
+    i64 s2 = 1;
+    if (php_zv_type(st) != IS_NULL) s2 = php_abs_i(php_zv_long(st));
+    if (s2 == 0) s2 = 1;
+    if (y2 < x2) s2 = 0 - s2;
+    loop {
+        php_arr_push(r, php_zlong(x2));
+        if (s2 > 0 && x2 + s2 > y2) break;
+        if (s2 < 0 && x2 + s2 < y2) break;
+        x2 = x2 + s2;
+    }
+    return r;
+}
+
+// ---- sorting: an insertion sort over the bucket order, stable -------------
+void php_ht_reindex(uptr h, uptr order, i64 n, i64 keepkeys) {
+    uptr r = php_arr_new(ld32(h + 32));
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        uptr b = php_ht_bkt(h, ld64(order + i * 8));
+        uptr k = ld64(b + 24);
+        if (keepkeys && k) php_zv_cp(php_ht_slotfor(r, php_str_hash(k), k), b);
+        if (keepkeys && !k) php_zv_cp(php_arr_islot(r, ld64(b + 16)), b);
+        if (!keepkeys) php_zv_cp(php_arr_nextslot(r), b);
+        i = i + 1;
+    }
+    // move the new table into the old header, so every handle stays valid
+    st32(h + 12, ld32(r + 12));
+    st64(h + 16, ld64(r + 16));
+    st32(h + 24, ld32(r + 24));
+    st32(h + 28, ld32(r + 28));
+    st32(h + 32, ld32(r + 32));
+    st64(h + 40, ld64(r + 40));
+}
+
+// mode: 0 by value ascending, 1 by value descending, 2 by key ascending,
+//       3 by key descending
+u8 php_f_sort(uptr a, i64 mode, i64 keepkeys) {
+    if (php_zv_type(a) != IS_ARRAY) return 0;
+    uptr h = ld64(a);
+    i64 n = php_count(h);
+    uptr order = php_alloc(n * 8 + 8);
+    i64 used = php_ht_used(h);
+    i64 w = 0;
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        if (ld8(php_ht_bkt(h, i) + 8) != IS_UNDEF) { st64(order + w * 8, i); w = w + 1; }
+        i = i + 1;
+    }
+    i = 1;
+    loop {
+        if (i >= w) break;
+        i64 cur = ld64(order + i * 8);
+        i64 j = i - 1;
+        loop {
+            if (j < 0) break;
+            i64 prev = ld64(order + j * 8);
+            i64 c = 0;
+            if (mode < 2) c = php_zv_cmp(php_ht_bkt(h, prev), php_ht_bkt(h, cur));
+            if (mode >= 2) c = php_zv_cmp(php_it_key(h, prev), php_it_key(h, cur));
+            if (mode == 1 || mode == 3) c = 0 - c;
+            if (c <= 0) break;
+            st64(order + (j + 1) * 8, prev);
+            j = j - 1;
+        }
+        st64(order + (j + 1) * 8, cur);
+        i = i + 1;
+    }
+    php_ht_reindex(h, order, w, keepkeys);
+    return 1;
+}
+
+u8 php_f_sort_a(uptr a) { return php_f_sort(a, 0, 0); }
+u8 php_f_rsort(uptr a) { return php_f_sort(a, 1, 0); }
+u8 php_f_asort(uptr a) { return php_f_sort(a, 0, 1); }
+u8 php_f_arsort(uptr a) { return php_f_sort(a, 1, 1); }
+u8 php_f_ksort(uptr a) { return php_f_sort(a, 2, 1); }
+u8 php_f_krsort(uptr a) { return php_f_sort(a, 3, 1); }
+
+// ---- strings ---------------------------------------------------------------
+i64 php_hexval(i64 c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+uptr php_f_bin2hex(uptr z) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n * 2);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        st8(o + ZS_HDR + i * 2, ld8("0123456789abcdef" + ((c >> 4) & 15)));
+        st8(o + ZS_HDR + i * 2 + 1, ld8("0123456789abcdef" + (c & 15)));
+        i = i + 1;
+    }
+    return o;
+}
+
+uptr php_f_hex2bin(uptr z) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s) / 2;
+    uptr o = php_str_alloc(n);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        st8(o + ZS_HDR + i, php_hexval(ld8(s + ZS_HDR + i * 2)) * 16 + php_hexval(ld8(s + ZS_HDR + i * 2 + 1)));
+        i = i + 1;
+    }
+    return o;
+}
+
+uptr php_f_base64_encode(uptr z) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    i64 ol = (n + 2) / 3 * 4;
+    uptr o = php_str_alloc(ol);
+    uptr t = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    i64 i = 0;
+    i64 w = 0;
+    loop {
+        if (i >= n) break;
+        i64 b0 = ld8(s + ZS_HDR + i);
+        i64 b1 = 0;
+        i64 b2 = 0;
+        i64 have = 1;
+        if (i + 1 < n) { b1 = ld8(s + ZS_HDR + i + 1); have = 2; }
+        if (i + 2 < n) { b2 = ld8(s + ZS_HDR + i + 2); have = 3; }
+        st8(o + ZS_HDR + w, ld8(t + (b0 >> 2)));
+        st8(o + ZS_HDR + w + 1, ld8(t + (((b0 & 3) << 4) | (b1 >> 4))));
+        if (have > 1) st8(o + ZS_HDR + w + 2, ld8(t + (((b1 & 15) << 2) | (b2 >> 6))));
+        if (have == 1) st8(o + ZS_HDR + w + 2, '=');
+        if (have > 2) st8(o + ZS_HDR + w + 3, ld8(t + (b2 & 63)));
+        if (have < 3) st8(o + ZS_HDR + w + 3, '=');
+        w = w + 4;
+        i = i + 3;
+    }
+    return o;
+}
+
+i64 php_b64val(i64 c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+uptr php_f_base64_decode(uptr z) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n);
+    i64 acc = 0;
+    i64 bits = 0;
+    i64 w = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 v = php_b64val(ld8(s + ZS_HDR + i));
+        i = i + 1;
+        if (v < 0) continue;
+        acc = (acc << 6) | v;
+        bits = bits + 6;
+        if (bits >= 8) { bits = bits - 8; st8(o + ZS_HDR + w, (acc >> bits) & 255); w = w + 1; }
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+i64 php_inset(uptr set, i64 c) {
+    i64 n = php_strlen(set);
+    i64 i = 0;
+    loop { if (i >= n) break; if (ld8(set + ZS_HDR + i) == c) return 1; i = i + 1; }
+    return 0;
+}
+
+i64 php_f_strspn(uptr a, uptr b) {
+    uptr s = php_zv_str(a);
+    uptr set = php_zv_str(b);
+    i64 n = php_strlen(s);
+    i64 i = 0;
+    loop { if (i >= n) break; if (!php_inset(set, ld8(s + ZS_HDR + i))) break; i = i + 1; }
+    return i;
+}
+
+i64 php_f_strcspn(uptr a, uptr b) {
+    uptr s = php_zv_str(a);
+    uptr set = php_zv_str(b);
+    i64 n = php_strlen(s);
+    i64 i = 0;
+    loop { if (i >= n) break; if (php_inset(set, ld8(s + ZS_HDR + i))) break; i = i + 1; }
+    return i;
+}
+
+uptr php_f_chunk_split(uptr a, uptr lz, uptr ez) {
+    uptr s = php_zv_str(a);
+    i64 n = php_strlen(s);
+    i64 l = 76;
+    if (php_zv_type(lz) != IS_NULL) l = php_zv_long(lz);
+    if (l < 1) l = 1;
+    uptr e = php_str_new("\r\n", 2);
+    if (php_zv_type(ez) != IS_NULL) e = php_zv_str(ez);
+    i64 el = php_strlen(e);
+    i64 nc = (n + l - 1) / l;
+    if (n == 0) nc = 0;
+    uptr o = php_str_alloc(n + nc * el);
+    i64 i = 0;
+    i64 w = 0;
+    loop {
+        if (i >= n) break;
+        i64 k = l;
+        if (n - i < k) k = n - i;
+        php_memcpy(o + ZS_HDR + w, s + ZS_HDR + i, k);
+        w = w + k;
+        php_memcpy(o + ZS_HDR + w, e + ZS_HDR, el);
+        w = w + el;
+        i = i + l;
+    }
+    return o;
+}
+
+uptr php_f_substr_replace(uptr sz, uptr rz, uptr oz, uptr lz) {
+    uptr s = php_zv_str(sz);
+    uptr r = php_zv_str(rz);
+    i64 n = php_strlen(s);
+    i64 o = php_zv_long(oz);
+    if (o < 0) { o = n + o; if (o < 0) o = 0; }
+    if (o > n) o = n;
+    i64 l = n - o;
+    if (php_zv_type(lz) != IS_NULL) {
+        l = php_zv_long(lz);
+        if (l < 0) { l = n - o + l; if (l < 0) l = 0; }
+    }
+    if (o + l > n) l = n - o;
+    i64 rl = php_strlen(r);
+    uptr out = php_str_alloc(n - l + rl);
+    php_memcpy(out + ZS_HDR, s + ZS_HDR, o);
+    php_memcpy(out + ZS_HDR + o, r + ZS_HDR, rl);
+    php_memcpy(out + ZS_HDR + o + rl, s + ZS_HDR + o + l, n - o - l);
+    return out;
+}
+
+i64 php_f_substr_count(uptr hz, uptr nz) {
+    uptr h = php_zv_str(hz);
+    uptr nd = php_zv_str(nz);
+    i64 nl = php_strlen(nd);
+    if (nl == 0) return 0;
+    i64 c = 0;
+    i64 i = 0;
+    loop {
+        i64 p = php_strpos(h, nd, i);
+        if (p < 0) break;
+        c = c + 1;
+        i = p + nl;
+    }
+    return c;
+}
+
+i64 php_f_strrpos(uptr hz, uptr nz, uptr oz) {
+    uptr h = php_zv_str(hz);
+    uptr nd = php_zv_str(nz);
+    i64 last = -1;
+    i64 i = 0;
+    loop {
+        i64 p = php_strpos(h, nd, i);
+        if (p < 0) break;
+        last = p;
+        i = p + 1;
+    }
+    return last;
+}
+
+i64 php_f_stripos(uptr hz, uptr nz, uptr oz) {
+    return php_strpos(php_case(php_zv_str(hz), 0), php_case(php_zv_str(nz), 0), php_zv_long(oz));
+}
+
+i64 php_f_strripos(uptr hz, uptr nz, uptr oz) {
+    uptr h = php_case(php_zv_str(hz), 0);
+    uptr nd = php_case(php_zv_str(nz), 0);
+    i64 last = -1;
+    i64 i = 0;
+    loop {
+        i64 p = php_strpos(h, nd, i);
+        if (p < 0) break;
+        last = p;
+        i = p + 1;
+    }
+    return last;
+}
+
+uptr php_f_strstr(uptr hz, uptr nz, uptr bz) {
+    uptr h = php_zv_str(hz);
+    uptr nd = php_zv_str(nz);
+    i64 p = php_strpos(h, nd, 0);
+    if (p < 0) return php_zbool(0);
+    if (php_zv_bool(bz)) return php_zstr(php_str_new(h + ZS_HDR, p));
+    return php_zstr(php_str_new(h + ZS_HDR + p, php_strlen(h) - p));
+}
+
+uptr php_f_stristr(uptr hz, uptr nz, uptr bz) {
+    uptr h = php_zv_str(hz);
+    i64 p = php_strpos(php_case(h, 0), php_case(php_zv_str(nz), 0), 0);
+    if (p < 0) return php_zbool(0);
+    if (php_zv_bool(bz)) return php_zstr(php_str_new(h + ZS_HDR, p));
+    return php_zstr(php_str_new(h + ZS_HDR + p, php_strlen(h) - p));
+}
+
+uptr php_f_strrchr(uptr hz, uptr nz) {
+    uptr h = php_zv_str(hz);
+    uptr nd = php_zv_str(nz);
+    if (php_strlen(nd) == 0) return php_zbool(0);
+    i64 c = ld8(nd + ZS_HDR);
+    i64 n = php_strlen(h);
+    i64 i = n - 1;
+    loop {
+        if (i < 0) return php_zbool(0);
+        if (ld8(h + ZS_HDR + i) == c) break;
+        i = i - 1;
+    }
+    return php_zstr(php_str_new(h + ZS_HDR + i, n - i));
+}
+
+i64 php_f_strncmp(uptr a, uptr b, uptr nz) {
+    i64 n = php_zv_long(nz);
+    uptr x = php_zv_str(a);
+    uptr y = php_zv_str(b);
+    if (php_strlen(x) > n) x = php_str_new(x + ZS_HDR, n);
+    if (php_strlen(y) > n) y = php_str_new(y + ZS_HDR, n);
+    return php_str_cmp(x, y);
+}
+
+i64 php_f_strncasecmp(uptr a, uptr b, uptr nz) {
+    i64 n = php_zv_long(nz);
+    uptr x = php_case(php_zv_str(a), 0);
+    uptr y = php_case(php_zv_str(b), 0);
+    if (php_strlen(x) > n) x = php_str_new(x + ZS_HDR, n);
+    if (php_strlen(y) > n) y = php_str_new(y + ZS_HDR, n);
+    return php_str_cmp(x, y);
+}
+
+uptr php_f_str_ireplace(uptr se, uptr re, uptr su) {
+    uptr s = php_zv_str(se);
+    uptr r = php_zv_str(re);
+    uptr h = php_zv_str(su);
+    i64 sl = php_strlen(s);
+    if (sl == 0) return h;
+    uptr lh = php_case(h, 0);
+    uptr ls = php_case(s, 0);
+    i64 rl = php_strlen(r);
+    i64 hn = php_strlen(h);
+    i64 cnt = 0;
+    i64 i = 0;
+    loop {
+        i64 p = php_strpos(lh, ls, i);
+        if (p < 0) break;
+        cnt = cnt + 1;
+        i = p + sl;
+    }
+    uptr o = php_str_alloc(hn + cnt * (rl - sl));
+    i64 w = 0;
+    i = 0;
+    loop {
+        i64 p = php_strpos(lh, ls, i);
+        if (p < 0) break;
+        php_memcpy(o + ZS_HDR + w, h + ZS_HDR + i, p - i);
+        w = w + p - i;
+        php_memcpy(o + ZS_HDR + w, r + ZS_HDR, rl);
+        w = w + rl;
+        i = p + sl;
+    }
+    php_memcpy(o + ZS_HDR + w, h + ZS_HDR + i, hn - i);
+    return o;
+}
+
+uptr php_f_str_split(uptr sz, uptr lz) {
+    uptr s = php_zv_str(sz);
+    i64 n = php_strlen(s);
+    i64 l = 1;
+    if (php_zv_type(lz) != IS_NULL) l = php_zv_long(lz);
+    if (l < 1) l = 1;
+    uptr r = php_arr_new(8);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 k = l;
+        if (n - i < k) k = n - i;
+        php_arr_push(r, php_zstr(php_str_new(s + ZS_HDR + i, k)));
+        i = i + l;
+    }
+    if (n == 0) php_arr_push(r, php_zstr(php_str_new("", 0)));
+    return r;
+}
+
+uptr php_f_ucwords(uptr sz, uptr dz) {
+    uptr s = php_zv_str(sz);
+    i64 n = php_strlen(s);
+    u8 dbuf[8];
+    st8(dbuf, 32); st8(dbuf + 1, 9); st8(dbuf + 2, 13); st8(dbuf + 3, 10); st8(dbuf + 4, 12); st8(dbuf + 5, 11);
+    uptr d = php_str_new(dbuf, 6);
+    if (php_zv_type(dz) != IS_NULL) d = php_zv_str(dz);
+    uptr o = php_str_new(s + ZS_HDR, n);
+    i64 up = 1;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(o + ZS_HDR + i);
+        if (up && c >= 'a' && c <= 'z') st8(o + ZS_HDR + i, c - 32);
+        up = php_inset(d, c);
+        i = i + 1;
+    }
+    return o;
+}
+
+uptr php_f_nl2br(uptr sz, uptr xz) {
+    uptr s = php_zv_str(sz);
+    i64 n = php_strlen(s);
+    uptr tag = php_str_new("<br />", 6);
+    if (php_zv_type(xz) != IS_NULL && !php_zv_bool(xz)) tag = php_str_new("<br>", 4);
+    i64 tl = php_strlen(tag);
+    i64 cnt = 0;
+    i64 i = 0;
+    loop { if (i >= n) break; i64 c = ld8(s + ZS_HDR + i); if (c == 10 || c == 13) cnt = cnt + 1; i = i + 1; }
+    uptr o = php_str_alloc(n + cnt * tl);
+    i64 w = 0;
+    i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        if (c == 10 || c == 13) {
+            php_memcpy(o + ZS_HDR + w, tag + ZS_HDR, tl);
+            w = w + tl;
+            st8(o + ZS_HDR + w, c);
+            w = w + 1;
+            if (i + 1 < n) {
+                i64 d = ld8(s + ZS_HDR + i + 1);
+                if ((c == 13 && d == 10) || (c == 10 && d == 13)) { st8(o + ZS_HDR + w, d); w = w + 1; i = i + 1; }
+            }
+            i = i + 1;
+            continue;
+        }
+        st8(o + ZS_HDR + w, c);
+        w = w + 1;
+        i = i + 1;
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+uptr php_f_strip_tags(uptr sz) {
+    uptr s = php_zv_str(sz);
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n);
+    i64 w = 0;
+    i64 depth = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        if (c == '<') { depth = depth + 1; i = i + 1; continue; }
+        if (c == '>') { if (depth) depth = depth - 1; i = i + 1; continue; }
+        if (!depth) { st8(o + ZS_HDR + w, c); w = w + 1; }
+        i = i + 1;
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+uptr php_f_addslashes(uptr sz) {
+    uptr s = php_zv_str(sz);
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n * 2);
+    i64 w = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        if (c == 39 || c == 34 || c == 92 || c == 0) { st8(o + ZS_HDR + w, 92); w = w + 1; }
+        if (c == 0) { st8(o + ZS_HDR + w, '0'); w = w + 1; i = i + 1; continue; }
+        st8(o + ZS_HDR + w, c);
+        w = w + 1;
+        i = i + 1;
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+uptr php_f_stripslashes(uptr sz) {
+    uptr s = php_zv_str(sz);
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n);
+    i64 w = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        if (c == 92 && i + 1 < n) {
+            i = i + 1;
+            i64 d = ld8(s + ZS_HDR + i);
+            if (d == '0') d = 0;
+            st8(o + ZS_HDR + w, d);
+            w = w + 1;
+            i = i + 1;
+            continue;
+        }
+        st8(o + ZS_HDR + w, c);
+        w = w + 1;
+        i = i + 1;
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+uptr php_f_htmlspecialchars(uptr sz) {
+    uptr s = php_zv_str(sz);
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n * 6);
+    i64 w = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        uptr rep = 0;
+        i64 rl = 0;
+        if (c == '&')  { rep = "&amp;"; rl = 5; }
+        if (c == '<')  { rep = "&lt;"; rl = 4; }
+        if (c == '>')  { rep = "&gt;"; rl = 4; }
+        if (c == 34)   { rep = "&quot;"; rl = 6; }
+        if (c == 39)   { rep = "&#039;"; rl = 6; }
+        if (rep) { php_memcpy(o + ZS_HDR + w, rep, rl); w = w + rl; }
+        if (!rep) { st8(o + ZS_HDR + w, c); w = w + 1; }
+        i = i + 1;
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+uptr php_f_wordwrap(uptr sz, uptr wz, uptr bz, uptr cz) {
+    uptr s = php_zv_str(sz);
+    i64 n = php_strlen(s);
+    i64 width = 75;
+    if (php_zv_type(wz) != IS_NULL) width = php_zv_long(wz);
+    uptr brk = php_str_new("\n", 1);
+    if (php_zv_type(bz) != IS_NULL) brk = php_zv_str(bz);
+    i64 bl = php_strlen(brk);
+    i64 cut = php_zv_bool(cz);
+    uptr o = php_str_alloc(n * 2 + bl * (n / 2 + 2));
+    i64 w = 0;
+    i64 line = 0;
+    i64 lastsp = -1;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        if (c == 10) { st8(o + ZS_HDR + w, c); w = w + 1; line = 0; lastsp = -1; i = i + 1; continue; }
+        st8(o + ZS_HDR + w, c);
+        if (c == 32) lastsp = w;
+        w = w + 1;
+        line = line + 1;
+        if (line > width) {
+            if (lastsp >= 0) {
+                i64 tail = w - lastsp - 1;
+                i64 k = tail;
+                loop { if (k <= 0) break; st8(o + ZS_HDR + lastsp + bl + k - 1, ld8(o + ZS_HDR + lastsp + k)); k = k - 1; }
+                php_memcpy(o + ZS_HDR + lastsp, brk + ZS_HDR, bl);
+                w = w + bl - 1;
+                line = tail;
+                lastsp = -1;
+            } else {
+                if (cut) { php_memcpy(o + ZS_HDR + w, brk + ZS_HDR, bl); w = w + bl; line = 0; }
+            }
+        }
+        i = i + 1;
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+uptr php_f_strtr(uptr sz, uptr az, uptr bz) {
+    uptr s = php_zv_str(sz);
+    i64 n = php_strlen(s);
+    if (php_zv_type(bz) == IS_NULL) {
+        // strtr($s, ["from" => "to", ...]), longest match first
+        if (php_zv_type(az) != IS_ARRAY) return s;
+        uptr h = ld64(az);
+        uptr o = php_str_alloc(n * 4 + 16);
+        i64 w = 0;
+        i64 i = 0;
+        loop {
+            if (i >= n) break;
+            i64 best = -1;
+            i64 bl = 0;
+            i64 used = php_ht_used(h);
+            i64 j = 0;
+            loop {
+                if (j >= used) break;
+                uptr b = php_ht_bkt(h, j);
+                if (ld8(b + 8) != IS_UNDEF) {
+                    uptr k = ld64(b + 24);
+                    uptr ks = k;
+                    if (!k) ks = php_itos(ld64(b + 16));
+                    i64 kl = php_strlen(ks);
+                    if (kl > bl && kl > 0 && i + kl <= n) {
+                        i64 m = 1;
+                        i64 q = 0;
+                        loop { if (q >= kl) break; if (ld8(s + ZS_HDR + i + q) != ld8(ks + ZS_HDR + q)) { m = 0; break; } q = q + 1; }
+                        if (m) { best = j; bl = kl; }
+                    }
+                }
+                j = j + 1;
+            }
+            if (best < 0) { st8(o + ZS_HDR + w, ld8(s + ZS_HDR + i)); w = w + 1; i = i + 1; continue; }
+            uptr rv = php_zv_str(php_ht_bkt(h, best));
+            php_memcpy(o + ZS_HDR + w, rv + ZS_HDR, php_strlen(rv));
+            w = w + php_strlen(rv);
+            i = i + bl;
+        }
+        st64(o + 16, w);
+        st8(o + ZS_HDR + w, 0);
+        return o;
+    }
+    uptr a = php_zv_str(az);
+    uptr b = php_zv_str(bz);
+    i64 m = php_strlen(a);
+    if (php_strlen(b) < m) m = php_strlen(b);
+    uptr o = php_str_new(s + ZS_HDR, n);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(o + ZS_HDR + i);
+        i64 j = 0;
+        loop {
+            if (j >= m) break;
+            if (ld8(a + ZS_HDR + j) == c) { st8(o + ZS_HDR + i, ld8(b + ZS_HDR + j)); break; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+// number_format, php's own rounding
+uptr php_f_number_format(uptr nz, uptr dz, uptr pz, uptr tz) {
+    f64 x = php_zv_double(nz);
+    i64 dec = 0;
+    if (php_zv_type(dz) != IS_NULL) dec = php_zv_long(dz);
+    if (dec < 0) dec = 0;
+    uptr dp = php_str_new(".", 1);
+    if (php_zv_type(pz) != IS_NULL) dp = php_zv_str(pz);
+    uptr ts = php_str_new(",", 1);
+    if (php_zv_type(tz) != IS_NULL) ts = php_zv_str(tz);
+    i64 neg = 0;
+    if (x < 0.0) { neg = 1; x = 0.0 - x; }
+    f64 scale = ph_pow10(dec);
+    f64 r = x * scale;
+    u64 iv = (u64) (r + 0.5);
+    uptr digits = php_itos(iv);
+    i64 dn = php_strlen(digits);
+    uptr dv = digits + ZS_HDR;
+    i64 ipl = dn - dec;
+    uptr pad = 0;
+    if (ipl <= 0) {
+        uptr t2 = php_str_alloc(dec + 1);
+        i64 z = 0;
+        loop { if (z >= dec + 1 - dn) break; st8(t2 + ZS_HDR + z, '0'); z = z + 1; }
+        php_memcpy(t2 + ZS_HDR + dec + 1 - dn, dv, dn);
+        digits = t2;
+        dv = digits + ZS_HDR;
+        dn = dec + 1;
+        ipl = 1;
+    }
+    i64 ngroups = (ipl - 1) / 3;
+    i64 tl = php_strlen(ts);
+    i64 dpl = php_strlen(dp);
+    uptr o = php_str_alloc(neg + ipl + ngroups * tl + dec * 1 + dpl + 4);
+    i64 w = 0;
+    if (neg) { st8(o + ZS_HDR, '-'); w = 1; }
+    i64 i = 0;
+    loop {
+        if (i >= ipl) break;
+        if (i > 0 && (ipl - i) % 3 == 0) { php_memcpy(o + ZS_HDR + w, ts + ZS_HDR, tl); w = w + tl; }
+        st8(o + ZS_HDR + w, ld8(dv + i));
+        w = w + 1;
+        i = i + 1;
+    }
+    if (dec > 0) {
+        php_memcpy(o + ZS_HDR + w, dp + ZS_HDR, dpl);
+        w = w + dpl;
+        php_memcpy(o + ZS_HDR + w, dv + ipl, dec);
+        w = w + dec;
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+// ---- number bases ----------------------------------------------------------
+uptr php_tobase(u64 v, i64 base) {
+    u8 t[70];
+    i64 k = 0;
+    loop {
+        st8(t + k, ld8("0123456789abcdefghijklmnopqrstuvwxyz" + v % base));
+        v = v / base;
+        k = k + 1;
+        if (v == 0) break;
+    }
+    uptr s = php_str_alloc(k);
+    i64 i = 0;
+    loop { if (i >= k) break; st8(s + ZS_HDR + i, ld8(t + k - 1 - i)); i = i + 1; }
+    return s;
+}
+
+i64 php_frombase(uptr s, i64 base) {
+    i64 n = php_strlen(s);
+    i64 acc = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        i64 d = -1;
+        if (c >= '0' && c <= '9') d = c - '0';
+        if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
+        if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+        if (d >= 0 && d < base) acc = acc * base + d;
+        i = i + 1;
+    }
+    return acc;
+}
+
+uptr php_f_dechex(uptr z) { return php_tobase(php_zv_long(z), 16); }
+uptr php_f_decbin(uptr z) { return php_tobase(php_zv_long(z), 2); }
+uptr php_f_decoct(uptr z) { return php_tobase(php_zv_long(z), 8); }
+i64  php_f_hexdec(uptr z) { return php_frombase(php_zv_str(z), 16); }
+i64  php_f_bindec(uptr z) { return php_frombase(php_zv_str(z), 2); }
+i64  php_f_octdec(uptr z) { return php_frombase(php_zv_str(z), 8); }
+uptr php_f_base_convert(uptr z, uptr f, uptr t) {
+    return php_tobase(php_frombase(php_zv_str(z), php_zv_long(f)), php_zv_long(t));
+}
+
+// ---- math ------------------------------------------------------------------
+f64 php_f_floor(uptr z) {
+    f64 x = php_zv_double(z);
+    i64 i = (i64) x;
+    f64 r = (f64) i;
+    if (r > x) r = r - 1.0;
+    return r;
+}
+
+f64 php_f_ceil(uptr z) {
+    f64 x = php_zv_double(z);
+    i64 i = (i64) x;
+    f64 r = (f64) i;
+    if (r < x) r = r + 1.0;
+    return r;
+}
+
+f64 php_f_round(uptr z, uptr pz) {
+    f64 x = php_zv_double(z);
+    i64 p = 0;
+    if (php_zv_type(pz) != IS_NULL) p = php_zv_long(pz);
+    f64 s = ph_pow10(p);
+    f64 y = x * s;
+    f64 h = 0.5;
+    if (y < 0.0) h = -0.5;
+    // php rounds half away from zero, after a pre-round that kills the noise
+    i64 iv = (i64) (y + h);
+    f64 d = y - (f64) iv;
+    if (d >= 0.5) iv = iv + 1;
+    if (d <= -0.5) iv = iv - 1;
+    return (f64) iv / s;
+}
+
+f64 php_f_sqrt(uptr z) {
+    f64 x = php_zv_double(z);
+    if (x < 0.0) return ph_unbits(0x7ff8000000000000);
+    if (x == 0.0) return 0.0;
+    f64 g = x;
+    if (g < 1.0) g = 1.0;
+    i64 i = 0;
+    loop { if (i >= 60) break; g = (g + x / g) * 0.5; i = i + 1; }
+    return g;
+}
+
+f64 php_f_fmod(uptr a, uptr b) {
+    f64 x = php_zv_double(a);
+    f64 y = php_zv_double(b);
+    if (y == 0.0) return ph_unbits(0x7ff8000000000000);
+    f64 q = x / y;
+    i64 iq = (i64) q;
+    return x - (f64) iq * y;
+}
+
+f64 php_f_exp(uptr z) {
+    f64 x = php_zv_double(z);
+    i64 k = (i64) (x * 1.4426950408889634);
+    f64 r = x - (f64) k * 0.6931471805599453;
+    f64 t = 1.0;
+    f64 acc = 1.0;
+    i64 i = 1;
+    loop {
+        if (i > 20) break;
+        t = t * r / (f64) i;
+        acc = acc + t;
+        i = i + 1;
+    }
+    f64 p = 1.0;
+    i64 n = k;
+    if (n < 0) n = 0 - n;
+    i = 0;
+    loop { if (i >= n) break; p = p * 2.0; i = i + 1; }
+    if (k < 0) return acc / p;
+    return acc * p;
+}
+
+f64 php_f_log(uptr z, uptr bz) {
+    f64 x = php_zv_double(z);
+    if (x <= 0.0) { if (x == 0.0) return ph_unbits(0xfff0000000000000); return ph_unbits(0x7ff8000000000000); }
+    i64 e = 0;
+    loop { if (x < 2.0) break; x = x / 2.0; e = e + 1; }
+    loop { if (x >= 1.0) break; x = x * 2.0; e = e - 1; }
+    f64 u = (x - 1.0) / (x + 1.0);
+    f64 u2 = u * u;
+    f64 t = u;
+    f64 acc = 0.0;
+    i64 i = 0;
+    loop {
+        if (i > 30) break;
+        acc = acc + t / (f64) (2 * i + 1);
+        t = t * u2;
+        i = i + 1;
+    }
+    f64 r = 2.0 * acc + (f64) e * 0.6931471805599453;
+    if (php_zv_type(bz) == IS_NULL) return r;
+    f64 b = php_zv_double(bz);
+    u8 t2[16];
+    stf64(t2, b);
+    uptr bz2 = php_zdouble(b);
+    f64 lb = php_f_log(bz2, php_znull());
+    return r / lb;
+}
+
+f64 php_f_log10(uptr z) { return php_f_log(z, php_zdouble(10.0)); }
+f64 php_f_pi() { return 3.141592653589793; }
+
+u8 php_f_is_nan(uptr z) { return ph_is_nan(php_zv_double(z)); }
+u8 php_f_is_infinite(uptr z) { return ph_is_inf(php_zv_double(z)); }
+u8 php_f_is_finite(uptr z) {
+    f64 x = php_zv_double(z);
+    if (ph_is_nan(x) || ph_is_inf(x)) return 0;
+    return 1;
+}
+
+uptr php_f_pow(uptr a, uptr b) { return php_zv_pow(a, b); }
+uptr php_f_abs(uptr z) {
+    if (php_zv_isdouble(z)) return php_zdouble(php_abs_f(php_zv_double(z)));
+    return php_zlong(php_abs_i(php_zv_long(z)));
+}
+
+// a deterministic generator: a binary must give the same answer twice (D7's
+// sibling rule, docs/determinism.md), so there is no entropy here.
+u64 ph_seed;
+i64 php_f_mt_rand(uptr a, uptr b) {
+    ph_seed = ph_seed * 6364136223846793005 + 1442695040888963407;
+    u64 r = (ph_seed >> 33) & 2147483647;
+    if (php_zv_type(a) == IS_NULL) return r;
+    i64 lo = php_zv_long(a);
+    i64 hi = php_zv_long(b);
+    if (hi <= lo) return lo;
+    return lo + (r % (hi - lo + 1));
+}
+void php_f_srand(uptr z) { ph_seed = php_zv_long(z); }
+i64 php_f_mt_getrandmax() { return 2147483647; }
+
+// ---- type and misc ---------------------------------------------------------
+uptr php_f_gettype(uptr z) {
+    i64 t = php_zv_type(z);
+    if (t == IS_LONG)   return php_str_new("integer", 7);
+    if (t == IS_DOUBLE) return php_str_new("double", 6);
+    if (t == IS_STRING) return php_str_new("string", 6);
+    if (t == IS_ARRAY)  return php_str_new("array", 5);
+    if (t == IS_OBJECT) return php_str_new("object", 6);
+    if (t == IS_TRUE || t == IS_FALSE) return php_str_new("boolean", 7);
+    return php_str_new("NULL", 4);
+}
+
+uptr php_f_get_debug_type(uptr z) {
+    i64 t = php_zv_type(z);
+    if (t == IS_LONG)   return php_str_new("int", 3);
+    if (t == IS_DOUBLE) return php_str_new("float", 5);
+    if (t == IS_STRING) return php_str_new("string", 6);
+    if (t == IS_ARRAY)  return php_str_new("array", 5);
+    if (t == IS_OBJECT) return php_obj_cname(ld64(z));
+    if (t == IS_TRUE || t == IS_FALSE) return php_str_new("bool", 4);
+    return php_str_new("null", 4);
+}
+
+uptr php_f_print_r(uptr z, uptr ret) {
+    if (!php_zv_bool(ret)) { php_print_r(z); return php_str_new("", 0); }
+    php_ob_start();
+    php_print_r(z);
+    return php_ob_get();
+}
+
+uptr php_f_var_export(uptr z, uptr ret) {
+    if (!php_zv_bool(ret)) { php_ex_zv(z, 0); return php_str_new("", 0); }
+    php_ob_start();
+    php_ex_zv(z, 0);
+    return php_ob_get();
+}
+
+i64 php_f_noop(uptr a) { return 0; }
+uptr php_f_nullf(uptr a) { return php_znull(); }
+u8 php_f_false1(uptr a) { return 0; }
+uptr php_f_strrev_z(uptr z) { return php_strrev(php_zv_str(z)); }
