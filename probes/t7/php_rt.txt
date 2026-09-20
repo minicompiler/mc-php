@@ -3069,22 +3069,6 @@ uptr php_f_substr_replace(uptr sz, uptr rz, uptr oz, uptr lz) {
     return out;
 }
 
-i64 php_f_substr_count(uptr hz, uptr nz) {
-    uptr h = php_zv_str(hz);
-    uptr nd = php_zv_str(nz);
-    i64 nl = php_strlen(nd);
-    if (nl == 0) return 0;
-    i64 c = 0;
-    i64 i = 0;
-    loop {
-        i64 p = php_strpos(h, nd, i);
-        if (p < 0) break;
-        c = c + 1;
-        i = p + nl;
-    }
-    return c;
-}
-
 i64 php_f_strrpos(uptr hz, uptr nz, uptr oz) {
     uptr h = php_zv_str(hz);
     uptr nd = php_zv_str(nz);
@@ -5106,6 +5090,87 @@ uptr php_f_ltrim(uptr z, uptr c) { return php_f_ltrim_c(z, c, 1); }
 uptr php_f_rtrim(uptr z, uptr c) { return php_f_ltrim_c(z, c, 2); }
 
 uptr php_f_ucfirst(uptr z) { return php_ucfirst(php_zv_str(z)); }
+
+// implode with ONE argument (php 8 allows implode($array)), explode with a
+// LIMIT, and substr_count with an offset and a length: the arities T6's rows
+// were one or two short of, which why.py counted 30 times under
+// "the wrong number of arguments for".
+uptr php_implode(uptr sep, uptr a);
+uptr php_arr_new(i64 cap);
+
+uptr php_f_explode3(uptr sz, uptr hz, uptr lz) {
+    uptr sep = php_zv_str(sz);
+    uptr s = php_zv_str(hz);
+    i64 lim = 9223372036854775807;
+    if (php_zv_type(lz) != IS_NULL) lim = php_zv_long(lz);
+    if (lim == 0) lim = 1;                       // php: a limit of 0 is a limit of 1
+    uptr all = php_explode(sep, s);
+    if (lim >= php_count(all) && lim > 0) return all;
+    i64 n = php_count(all);
+    uptr r = php_arr_new(8);
+    if (lim > 0) {
+        i64 i = 0;
+        loop {
+            if (i >= lim - 1) break;
+            php_zv_cpv(php_arr_nextslot(r), php_arr_iget(all, i));
+            i = i + 1;
+        }
+        // the tail, joined back with the separator
+        uptr acc = php_str_new("", 0);
+        i64 j = lim - 1;
+        loop {
+            if (j >= n) break;
+            if (j > lim - 1) acc = php_str_concat(acc, sep);
+            acc = php_str_concat(acc, php_zv_str(php_arr_iget(all, j)));
+            j = j + 1;
+        }
+        php_zv_cpv(php_arr_nextslot(r), php_zstr(acc));
+        return r;
+    }
+    // a negative limit drops that many elements from the end
+    i64 keep = n + lim;
+    i64 k = 0;
+    loop {
+        if (k >= keep) break;
+        php_zv_cpv(php_arr_nextslot(r), php_arr_iget(all, k));
+        k = k + 1;
+    }
+    return r;
+}
+
+i64 php_f_substr_count(uptr hz, uptr nz, uptr oz, uptr lz) {
+    uptr h = php_zv_str(hz);
+    uptr nd = php_zv_str(nz);
+    i64 hn = php_strlen(h);
+    i64 off = 0;
+    if (php_zv_type(oz) != IS_NULL) off = php_zv_long(oz);
+    if (off < 0) off = hn + off;
+    if (off < 0) off = 0;
+    i64 end = hn;
+    if (php_zv_type(lz) != IS_NULL) {
+        i64 len = php_zv_long(lz);
+        if (len < 0) end = hn + len;
+        if (len >= 0) end = off + len;
+    }
+    if (end > hn) end = hn;
+    i64 nn = php_strlen(nd);
+    if (nn == 0) return 0;
+    i64 c = 0;
+    i64 i = off;
+    loop {
+        if (i + nn > end) break;
+        i64 k = 0;
+        i64 eq = 1;
+        loop {
+            if (k >= nn) break;
+            if (ld8(h + ZS_HDR + i + k) != ld8(nd + ZS_HDR + k)) { eq = 0; break; }
+            k = k + 1;
+        }
+        if (eq) { c = c + 1; i = i + nn; continue; }
+        i = i + 1;
+    }
+    return c;
+}
 
 // ---- more of the library (T6's "most wanted" table) -----------------------
 // class_alias($class, $alias): a second NAME for a class entry. It is not

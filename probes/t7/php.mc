@@ -2930,6 +2930,14 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                      ph_to_str(ph_a(av, 2), ph_aty(av, 2)), ty_pstr);
     }
     if (str_eq(name, "implode") || str_eq(name, "join")) {
+        // php 8: implode($array) with no separator
+        if (na == 1) {
+            i64 one = a0;
+            if (t0 == PT_MIXED) one = ph_c1("php_zv_arr_r", one, ty_parr);
+            if (t0 != PT_MIXED && !ph_is_arr(t0)) ph_todo(fl, line, "implode() without an array");
+            ph_ety = PT_STRING;
+            return ph_c2("php_implode", ph_strlit("", 0), one, ty_pstr);
+        }
         ph_need(na, 2, name, fl, line);
         i64 sep = a0;
         i64 arr = ph_a(av, 1);
@@ -2947,10 +2955,12 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_c2("php_implode", ph_to_str(sep, ph_aty(av, 0)), arr, ty_pstr);
     }
     if (str_eq(name, "explode")) {
-        if (na != 2) ph_need(na, 2, name, fl, line);
+        if (na < 2 || na > 3) ph_need(na, 2, name, fl, line);
         ph_ety = PT_ARR;
         ph_efresh = 1;
-        return ph_c2("php_explode", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), ty_parr);
+        if (na == 2) return ph_c2("php_explode", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), ty_parr);
+        return ph_c3("php_f_explode3", ph_to_mixed(a0, t0), ph_to_mixed(ph_a(av, 1), ph_aty(av, 1)),
+                     ph_to_mixed(ph_a(av, 2), ph_aty(av, 2)), ty_parr);
     }
     if (str_eq(name, "intdiv")) {
         ph_need(na, 2, name, fl, line);
@@ -5540,7 +5550,7 @@ void ph_lib_init() {
     ph_lib("strcspn", "php_f_strcspn", 2, 4, PT_INT);
     ph_lib("chunk_split", "php_f_chunk_split", 1, 3, PT_STRING);
     ph_lib("substr_replace", "php_f_substr_replace", 3, 4, PT_STRING);
-    ph_lib("substr_count", "php_f_substr_count", 2, 2, PT_INT);
+    ph_lib("substr_count", "php_f_substr_count", 2, 4, PT_INT);
     ph_lib("strrpos", "php_f_strrpos", 2, 3, PT_IFALSE);
     ph_lib("stripos", "php_f_stripos", 2, 3, PT_IFALSE);
     ph_lib("strripos", "php_f_strripos", 2, 3, PT_IFALSE);
