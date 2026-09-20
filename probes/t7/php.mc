@@ -98,6 +98,8 @@ i64  ph_refset_has(uptr n);
 i64  ph_gset_has(uptr n);
 void ph_gset_add(uptr n);
 void ph_refset_add(uptr n);
+void ph_incset_add(uptr n);
+i64  ph_incset_has(uptr n);
 void ph_set_ref(uptr d);
 uptr ph_scope_save();
 void ph_scope_restore(uptr b);
@@ -989,6 +991,37 @@ i64 ph_refset_has(uptr n) {
     return 0;
 }
 
+// A php `$s++` on a STRING changes the variable's type -- "5"++ is int(6) --
+// which D4 forbids of a typed local. The same byte scan that finds `&$x`
+// finds `$x++`, and a variable whose first assignment is a string and which
+// is incremented somewhere is bound `mixed` instead: a zval can hold both
+// answers and php_zv_inc already has php's rules. An int or float counter is
+// untouched, which is what keeps every `for ($i = 0; ...; $i++)` a native i64.
+uptr ph_incn[PH_MAXREF];
+i64  ph_ninc;
+
+void ph_incset_add(uptr n) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_ninc) break;
+        if (str_eq(ld64(ph_incn + i * 8), n)) return;
+        i = i + 1;
+    }
+    if (ph_ninc >= PH_MAXREF) return;
+    st64(ph_incn + ph_ninc * 8, n);
+    ph_ninc = ph_ninc + 1;
+}
+
+i64 ph_incset_has(uptr n) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_ninc) break;
+        if (str_eq(ld64(ph_incn + i * 8), n)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
 void ph_set_ref(uptr d) {
     i64 i = ph_var_find(d);
     if (i >= 0) st64(ph_vref + i * 8, 1);
@@ -1038,6 +1071,7 @@ void ph_var_bind_raw(uptr d, i64 ty) {
 }
 
 i64 ph_var_bind(uptr d, i64 ty) {
+    if (ty == PT_STRING && ph_incset_has(d)) ty = PT_MIXED;
     i64 i = ph_var_find(d);
     if (i < 0) {
         if (ph_nvar >= PH_MAXVAR) err_at(ph_tfile, ph_tline, "mc-php: too many php variables");
@@ -3561,6 +3595,10 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         return ph_wrap(ph_expr_stmt_of(ph_c2("php_zv_store", lvr, ph_to_mixed(ph_own(v, vt), vt), ty_pzv)));
     }
     ph_var_bind(d, vt);
+    // ph_var_bind may widen a string to `mixed` (a variable this source also
+    // increments), so the value follows the type the variable actually got
+    i64 bt = ph_var_type(d);
+    if (bt != vt) return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_to_mixed(ph_own(v, vt), vt)));
     return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_own(v, vt)));
 }
 
@@ -5404,7 +5442,7 @@ void ph_lib_init() {
     ph_lib("ob_start", "php_ob_start", 0, 0, PT_VOID);
     ph_lib("ob_get_clean", "php_ob_get", 0, 0, PT_STRING);
     ph_lib("ob_get_contents", "php_ob_get", 0, 0, PT_STRING);
-    ph_lib("error_reporting", "php_f_noop", 0, 1, PT_INT);
+    ph_lib("error_reporting", "php_f_error_reporting", 0, 1, PT_INT);
     ph_lib("ini_set", "php_f_nullf", 0, 3, PT_MIXED);
     ph_lib("ini_get", "php_f_null1", 0, 1, PT_MIXED);
     ph_lib("set_error_handler", "php_f_null2", 0, 2, PT_MIXED);
@@ -5515,6 +5553,31 @@ void ph_scan_refs(uptr src, i64 len) {
             st64(pb, i + 2);
             uptr n = ph_scan_name(src, len, pb);
             if (n) { ph_refset_add(n); i = ld64(pb); continue; }
+        }
+        if (c == 36 && i + 1 < len) {                               // $name++ / $name--
+            u8 pb3[8];
+            st64(pb3, i + 1);
+            uptr n3 = ph_scan_name(src, len, pb3);
+            if (n3) {
+                i64 j3 = ld64(pb3);
+                loop { if (j3 >= len) break; if (!ph_space(ld8(src + j3))) break; j3 = j3 + 1; }
+                if (j3 + 1 < len) {
+                    i64 c1 = ld8(src + j3);
+                    if ((c1 == 43 || c1 == 45) && ld8(src + j3 + 1) == c1) ph_incset_add(n3);
+                }
+                i = ld64(pb3);
+                continue;
+            }
+        }
+        if ((c == 43 || c == 45) && i + 2 < len && ld8(src + i + 1) == c) {   // ++$name
+            i64 j4 = i + 2;
+            loop { if (j4 >= len) break; if (!ph_space(ld8(src + j4))) break; j4 = j4 + 1; }
+            if (j4 < len && ld8(src + j4) == 36) {
+                u8 pb4[8];
+                st64(pb4, j4 + 1);
+                uptr n4 = ph_scan_name(src, len, pb4);
+                if (n4) { ph_incset_add(n4); i = ld64(pb4); continue; }
+            }
         }
         if (c == 103 && i + 6 < len) {                              // global
             if (ld8(src + i + 1) == 108 && ld8(src + i + 2) == 111 && ld8(src + i + 3) == 98

@@ -943,6 +943,7 @@ uptr php_arr_zget_w(uptr a, uptr k) {
     i64 ik = php_zv_long(k);
     if (t == IS_DOUBLE) ik = php_dtoi_chk(ldf64(k));
     if (t == IS_NULL) {
+        php_depr1("Using null as an array offset is deprecated, use an empty string instead");
         uptr e = php_str_new("", 0);
         b = php_ht_find(a, php_str_hash(e), e);
         if (!b) { php_undef_skey(e); return php_znull(); }
@@ -957,7 +958,10 @@ uptr php_arr_zslot(uptr a, uptr k) {
     i64 t = php_zv_type(k);
     if (t == IS_STRING) return php_arr_sslot(a, ld64(k));
     if (t == IS_DOUBLE) return php_arr_islot(a, php_dtoi_chk(ldf64(k)));
-    if (t == IS_NULL)   return php_arr_sslot(a, php_str_new("", 0));
+    if (t == IS_NULL) {
+        php_depr1("Using null as an array offset is deprecated, use an empty string instead");
+        return php_arr_sslot(a, php_str_new("", 0));
+    }
     return php_arr_islot(a, php_zv_long(k));
 }
 
@@ -1231,9 +1235,9 @@ uptr php_zv_div(uptr a, uptr b) {
 }
 
 uptr php_zv_mod(uptr a, uptr b) {
-    i64 y = php_zv_long(b);
+    i64 y = php_zv_ilong(b);
     if (y == 0) { php_throw_str(php_str_new("DivisionByZeroError", 19), php_str_new("Modulo by zero", 14)); return php_znull(); }
-    return php_zlong(php_mod(php_zv_long(a), y));
+    return php_zlong(php_mod(php_zv_ilong(a), y));
 }
 
 uptr php_zv_pow(uptr a, uptr b) {
@@ -1249,11 +1253,37 @@ uptr php_zv_neg(uptr a) {
 }
 
 uptr php_zv_concat(uptr a, uptr b) { return php_zstr(php_str_concat(php_zv_str(a), php_zv_str(b))); }
-uptr php_zv_band(uptr a, uptr b) { return php_zlong(php_zv_long(a) & php_zv_long(b)); }
-uptr php_zv_bor(uptr a, uptr b) { return php_zlong(php_zv_long(a) | php_zv_long(b)); }
-uptr php_zv_bxor(uptr a, uptr b) { return php_zlong(php_zv_long(a) ^ php_zv_long(b)); }
-uptr php_zv_shl(uptr a, uptr b) { return php_zlong(php_zv_long(a) << php_zv_long(b)); }
-uptr php_zv_shr(uptr a, uptr b) { return php_zlong(php_zv_long(a) >> php_zv_long(b)); }
+
+// an INT context the program did not spell: php deprecates a float and a
+// float-string that lose precision there. An explicit (int) cast does not go
+// through this, which is why it is a second function and not php_zv_long.
+i64 php_zv_ilong(uptr z) {
+    i64 t = php_zv_type(z);
+    if (t == IS_DOUBLE) return php_dtoi_chk(ldf64(z));
+    if (t == IS_STRING) {
+        u8 lb[8];
+        u8 db[8];
+        if (php_str_isnum(ld64(z), lb, db) == 2) {
+            f64 d = ldf64(db);
+            i64 v = (i64) d;
+            if ((f64) v != d) {
+                php_mreset();
+                php_mc("Implicit conversion from float-string \"");
+                php_ms(ld64(z));
+                php_mc("\" to int loses precision");
+                php_raise_m(PHE_DEPRECATED);
+            }
+            return v;
+        }
+    }
+    return php_zv_long(z);
+}
+
+uptr php_zv_band(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) & php_zv_ilong(b)); }
+uptr php_zv_bor(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) | php_zv_ilong(b)); }
+uptr php_zv_bxor(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) ^ php_zv_ilong(b)); }
+uptr php_zv_shl(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) << php_zv_ilong(b)); }
+uptr php_zv_shr(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) >> php_zv_ilong(b)); }
 uptr php_zv_bnot(uptr a) {
     if (php_zv_type(a) == IS_STRING) {
         uptr s = ld64(a);
@@ -2079,6 +2109,7 @@ uptr php_zv_inc(uptr z) {
         i64 k = php_str_isnum(ld64(z), lb, db);
         if (k == 1) return php_zlong(ld64(lb) + 1);
         if (k == 2) return php_zdouble(ldf64(db) + 1.0);
+        php_depr1("Increment on non-numeric string is deprecated, use str_increment() instead");
         return php_zstr(php_str_inc(ld64(z)));
     }
     return php_zv_dup(z);
@@ -2099,6 +2130,7 @@ uptr php_zv_dec(uptr z) {
         i64 k = php_str_isnum(ld64(z), lb, db);
         if (k == 1) return php_zlong(ld64(lb) - 1);
         if (k == 2) return php_zdouble(ldf64(db) - 1.0);
+        php_depr1("Decrement on non-numeric string has no effect and is deprecated");
         return php_zv_dup(z);
     }
     return php_zv_dup(z);
@@ -5248,7 +5280,22 @@ uptr php_f_sha1(uptr z, uptr _p2) {
 
 uptr php_f_sapi() { return php_str_new("cli", 3); }
 uptr php_f_phpversion(uptr z) { return php_str_new("8.5.10", 6); }
-u8 php_f_trigger(uptr m, uptr l) { return 1; }
+// trigger_error($msg, $level = E_USER_NOTICE); E_USER_ERROR exits 255
+u8 php_f_trigger(uptr m, uptr l) {
+    i64 lv = PHE_USER_NOTICE;
+    if (php_zv_type(l) != IS_NULL) lv = php_zv_long(l);
+    php_mreset();
+    php_ms(php_zv_str(m));
+    php_raise_m(lv);
+    return 1;
+}
+
+// error_reporting([$level]): php answers the OLD mask and sets the new one
+i64 php_f_error_reporting(uptr l) {
+    i64 old = ph_erep;
+    if (php_zv_type(l) != IS_NULL) ph_erep = php_zv_long(l);
+    return old;
+}
 u8 php_f_contains(uptr h, uptr n) { return php_str_contains(php_zv_str(h), php_zv_str(n)); }
 i64 ph_ct_all(uptr z, i64 kind) {
     if (php_zv_type(z) != IS_STRING) return 0;
@@ -5295,5 +5342,12 @@ uptr php_zv_iter(uptr z) {
     i64 t = php_zv_type(z);
     if (t == IS_ARRAY) return ld64(z);
     if (t == IS_OBJECT) return php_obj_props(ld64(z));
+    php_mreset();
+    php_mc("foreach() argument must be of type array|object, ");
+    if (t == IS_TRUE) php_mc("true");
+    if (t == IS_FALSE) php_mc("false");
+    if (t != IS_TRUE && t != IS_FALSE) php_ms(php_f_get_debug_type(z));
+    php_mc(" given");
+    php_raise_m(PHE_WARNING);
     return php_arr_new(8);
 }
