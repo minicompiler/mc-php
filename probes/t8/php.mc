@@ -103,6 +103,8 @@ void ph_gset_add(uptr n);
 void ph_refset_add(uptr n);
 void ph_incset_add(uptr n);
 void ph_brf_add(uptr n);
+void ph_brf_init();
+void ph_bind_undef(uptr d, uptr fl, i64 line, i64 quiet);
 i64  ph_brf_has(uptr n);
 i64  ph_incset_has(uptr n);
 void ph_set_ref(uptr d);
@@ -126,6 +128,7 @@ i64  ph_var_bind(uptr d, i64 ty);
 void ph_refuse(uptr fl, i64 line, uptr what, uptr dref);
 void ph_phpfatal(uptr fl, i64 line, uptr msg);
 uptr ph_absfile(uptr fl);
+i64  ph_scan_hop(uptr src, i64 len, i64 i);
 void ph_todo(uptr fl, i64 line, uptr what);
 void ph_todo2(uptr fl, i64 line, uptr what, uptr detail);
 void ph_refuse2(uptr fl, i64 line, uptr what, uptr detail, uptr dref);
@@ -1078,6 +1081,22 @@ void ph_brf_add(uptr n) {
     if (ph_nbrf >= PH_MAXBRF) return;
     st64(ph_brfn + ph_nbrf * 8, n);
     ph_nbrf = ph_nbrf + 1;
+}
+
+// The BUILTINS that take a by-reference argument, seeded before the first
+// source is scanned: a call to one of them makes the variable it is passed a
+// zval, exactly as a call to a user `function f(&$x)` does. Every other
+// by-reference builtin here takes an ARRAY or an object, whose handle is
+// already a pointer.
+void ph_brf_init() {
+    ph_brf_add("settype");
+    ph_brf_add("parse_str");
+    ph_brf_add("array_splice");
+    ph_brf_add("similar_text");
+    ph_brf_add("str_replace");
+    ph_brf_add("str_ireplace");
+    ph_brf_add("preg_match");
+    ph_brf_add("preg_match_all");
 }
 
 i64 ph_brf_has(uptr n) {
@@ -2043,7 +2062,7 @@ i64 ph_primary() {
         ph_next();
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
-        if (ph_var_find(d) < 0) ph_refuse2(fl, line, "an undefined php variable", d, "D4");
+        if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         i64 t = ph_var_type(d);
         i64 lv = node_new(N_IDENT, line, fl);
         set_nd_name(lv, ph_mangle(d, "v_"));
@@ -2516,6 +2535,22 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
 // its own buffer: node at [i*16], php type at [i*16+8].
 i64 ph_nargs;
 
+// The parameters of the body being compiled, so that `func_num_args()` and
+// `func_get_arg(k)` can be answered where php answers them -- inside the
+// callee, from its OWN arguments. Neither needs a run-time type table, which
+// is what D6 refuses; `func_get_args` is named by D6 and stays refused
+// (docs/plan.md section 3, D6).
+#define PH_MAXCP 10
+uptr ph_cpn[PH_MAXCP];
+i64  ph_ncp;
+i64  ph_cpzv;                     // 1 when every one of them is a zval
+uptr ph_nargs_local;              // the prologue counter, 0 when not emitted
+
+// set by the source scan: no program that never writes the two names pays
+// for the counter
+i64 ph_uses_nargs;
+
+
 // inside a `function &f()`: a returned value is the callee's own cell
 i64 ph_fn_retref;
 
@@ -2791,14 +2826,15 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "PHP_INT_MAX"))  { ph_next(); ph_ety = PT_INT; return ph_int(9223372036854775807); }
     if (str_eq(name, "PHP_INT_MIN"))  { ph_next(); ph_ety = PT_INT; return ph_bin(ph_tok("-", 1), ph_int(-9223372036854775807), ph_int(1), TY_I64); }
     if (str_eq(name, "__LINE__")) { i64 l = ph_tline; ph_next(); ph_ety = PT_INT; return ph_int(l); }
+    // php's __FILE__ is the RESOLVED path, the same one its diagnostics print
     if (str_eq(name, "__FILE__")) {
-        uptr f = ph_tfile;
+        uptr f = ph_absfile(ph_tfile);
         ph_next();
         ph_ety = PT_STRING;
         return ph_strlit(f, cstrlen(f));
     }
     if (str_eq(name, "__DIR__")) {
-        uptr f = path_norm(path_join(ph_tfile, "."));
+        uptr f = path_norm(path_join(ph_absfile(ph_tfile), "."));
         ph_next();
         ph_ety = PT_STRING;
         return ph_strlit(f, cstrlen(f));
@@ -2984,6 +3020,74 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_c1("php_const_get", ph_strlit(name, cstrlen(name)), ty_pzv);
     }
 
+    // pack(format, ...$args): variadic, so the arguments go into an array the
+    // runtime walks -- the same shape a `...$rest` parameter is given
+    if (str_eq(name, "pack")) {
+        u8 pnp[8];
+        uptr avp = ph_read_args(16, fl, line, pnp);
+        i64 nap = ld64(pnp);
+        if (nap < 1) ph_todo2(fl, line, "the wrong number of arguments for", "pack");
+        ph_nonce = ph_nonce + 1;
+        uptr rn = p_cat("phpk_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+        ph_local(rn, ty_parr);
+        i64 mk = ph_set(rn, ph_c1("php_arr_new", ph_int(8), ty_parr));
+        i64 mt = mk;
+        i64 jp = 1;
+        loop {
+            if (jp >= nap) break;
+            i64 ar = node_new(N_IDENT, line, fl);
+            set_nd_name(ar, rn);
+            set_nd_type(ar, ty_parr);
+            i64 ps = ph_stmt_of(ph_c2("php_arr_push", ar, ph_to_mixed(ph_a(avp, jp), ph_aty(avp, jp)), TY_VOID));
+            set_nd_next(mt, ps);
+            mt = ps;
+            jp = jp + 1;
+        }
+        ph_pending_stmt(mk);
+        i64 ar2 = node_new(N_IDENT, line, fl);
+        set_nd_name(ar2, rn);
+        set_nd_type(ar2, ty_parr);
+        ph_ety = PT_MIXED;
+        return ph_c2("php_f_pack", ph_to_mixed(ph_a(avp, 0), ph_aty(avp, 0)), ph_c1("php_zarr", ar2, ty_pzv), ty_pzv);
+    }
+    // func_num_args() / func_get_arg(k): answered from the callee's OWN
+    // parameters, which need no run-time table -- D6 refuses `func_get_args`
+    // by name and that one stays refused (docs/plan.md section 3, D6).
+    if (str_eq(name, "func_num_args") || str_eq(name, "func_get_arg")) {
+        u8 pnf[8];
+        uptr avf = ph_read_args(4, fl, line, pnf);
+        i64 naf = ld64(pnf);
+        if (!ph_nargs_local)
+            ph_todo2(fl, line, "outside a php function with zval parameters", name);
+        i64 cnt = node_new(N_IDENT, line, fl);
+        set_nd_name(cnt, ph_nargs_local);
+        set_nd_type(cnt, TY_I64);
+        if (str_eq(name, "func_num_args")) {
+            if (naf) ph_todo2(fl, line, "the wrong number of arguments for", name);
+            ph_ety = PT_INT;
+            return cnt;
+        }
+        if (naf != 1) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        // the k-th parameter, chosen at run time out of the ones it has
+        u8 allf[128];
+        st64(allf, ph_to_int(ph_a(avf, 0), ph_aty(avf, 0)));
+        st64(allf + 8, cnt);
+        i64 kf = 0;
+        loop {
+            if (kf >= PH_MAXCP) break;
+            i64 pv = ph_int(0);
+            if (kf < ph_ncp) {
+                pv = node_new(N_IDENT, line, fl);
+                set_nd_name(pv, ph_mangle(ld64(ph_cpn + kf * 8), "v_"));
+                set_nd_type(pv, ty_pzv);
+            }
+            st64(allf + 16 + kf * 8, pv);
+            kf = kf + 1;
+        }
+        ph_ety = PT_MIXED;
+        ph_can_throw = 1;
+        return ph_calln("php_arg_at", allf, 12, ty_pzv);
+    }
     if (str_eq(name, "sprintf") || str_eq(name, "printf")
         || str_eq(name, "vsprintf") || str_eq(name, "vprintf")) {
         i64 vec = 0;
@@ -3000,6 +3104,18 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     u8 pnb[8];
     i64 fi0 = ph_fn_find(name);
     if (fi0 >= 0) ph_argref = ld64(ph_fpr + fi0 * 8);
+    // a BUILTIN with a by-reference parameter. The library table carries a
+    // row's arity and its return type, not which of its arguments php
+    // declares `&$x`, so the handful that have one are named here. Every
+    // other by-reference builtin in this runtime (sort, array_push, end, ...)
+    // takes an ARRAY, and an array handle is already a pointer.
+    if (fi0 < 0) {
+        if (str_eq(name, "settype")) ph_argref = 1;
+        if (str_eq(name, "parse_str")) ph_argref = 2;
+        if (str_eq(name, "array_splice")) ph_argref = 1;
+        if (str_eq(name, "similar_text")) ph_argref = 4;
+        if (str_eq(name, "str_replace")) ph_argref = 8;
+    }
     uptr av = ph_read_args(16, fl, line, pnb);
     i64 na = ld64(pnb);
     i64 a0 = 0;
@@ -3410,6 +3526,7 @@ i64 ph_inline_html(uptr fl, i64 line) {
 // function RETURNED, inside the same statement, reports the line that callee
 // last set. A statement whose warning comes before any user call -- which is
 // nearly all of them -- is exact.
+// realpath is <mc/host>'s own extern (src/host_macos.mc) -- not redeclared
 #define PH_MAXFL 64
 uptr ph_flsrc[PH_MAXFL];
 uptr ph_flabs[PH_MAXFL];
@@ -3427,6 +3544,11 @@ uptr ph_absfile(uptr fl) {
         uptr cwd = host_getcwd();
         if (cwd) a = path_norm(path_join(p_cat(cwd, "/x", 0, 2), fl));
     }
+    // php reports the path it RESOLVED, symlinks included: on macOS /tmp is a
+    // link to /private/tmp and every diagnostic raised by a script under it
+    // printed the wrong one of the two. T8: one realpath(3), at compile time.
+    uptr rp = xalloc(4200);
+    if (realpath(a, rp)) a = rp;
     if (ph_nfl < PH_MAXFL) {
         st64(ph_flsrc + ph_nfl * 8, fl);
         st64(ph_flabs + ph_nfl * 8, a);
@@ -3677,7 +3799,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
     ph_next();
 
     if (ph_at("->", 2) || ph_at("?->", 3)) {
-        if (ph_var_find(d) < 0) ph_refuse2(fl, line, "an undefined php variable", d, "D4");
+        if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         return ph_obj_stmt(d, fl, line, semi);
     }
     if (ph_at("[", 1)) {
@@ -3727,7 +3849,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
     if (incdec) {
         ph_next();
         if (semi) ph_semi("expected ; after ++/--");
-        if (ph_var_find(d) < 0) ph_refuse2(fl, line, "an undefined php variable", d, "D4");
+        if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         i64 t = ph_var_type(d);
         i64 lv = node_new(N_IDENT, line, fl);
         set_nd_name(lv, ph_mangle(d, "v_"));
@@ -3758,7 +3880,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
 
     if (op) {
         ph_next();
-        if (ph_var_find(d) < 0) ph_refuse2(fl, line, "an undefined php variable", d, "D4");
+        if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         i64 lt = ph_var_type(d);
         i64 lv = node_new(N_IDENT, line, fl);
         set_nd_name(lv, ph_mangle(d, "v_"));
@@ -3841,7 +3963,8 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         uptr src = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
         if (semi) ph_semi("expected ; after a php assignment");
-        if (ph_var_find(src) < 0) ph_refuse2(fl, line, "an undefined php variable", src, "D4");
+        // `$a = &$b` where $b does not exist: php creates it as null, silently
+        if (ph_var_find(src) < 0) ph_bind_undef(src, fl, line, 1);
         if (ph_var_type(src) != PT_MIXED)
             ph_todo2(fl, line, "a reference to a php variable of type", ph_tyname(ph_var_type(src)));
         if (!ph_is_ref(src)) ph_set_ref(src);
@@ -4093,6 +4216,48 @@ i64 ph_destructure(uptr fl, i64 line, i64 br, i64 semi) {
     return ph_wrap(b);
 }
 
+// php reads an undefined variable as null with a warning (T7's channel), and
+// every operation that WRITES one -- `$u++`, `$u .= "x"`, `$u->p = 1` -- does
+// the read first. So a name that is not bound yet is bound `mixed` here,
+// holding what php's read of it answers, instead of being refused: `mixed` is
+// a zval (D4 (c)) and null is one of its values.
+void ph_bind_undef(uptr d, uptr fl, i64 line, i64 quiet) {
+    ph_var_bind(d, PT_MIXED);
+    if (ph_refset_has(d)) ph_set_ref(d);
+    i64 v = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
+    if (!quiet) v = ph_c1("php_undef_var", ph_raw(d + 1, cstrlen(d) - 1), ty_pzv);
+    ph_pending_stmt(ph_set(ph_mangle(d, "v_"), ph_c1("php_zv_val", v, ty_pzv)));
+}
+
+// `phna = 0; if (v_p0) phna = 1; if (v_p1) phna = 2; ...`, emitted BEFORE
+// the defaults are filled in -- after them every parameter is non-zero and
+// the count is lost. php counts the arguments that were PASSED.
+i64 ph_nargs_prologue(uptr fl, i64 line) {
+    ph_nargs_local = 0;
+    if (!ph_uses_nargs) return 0;
+    if (!ph_cpzv) return 0;
+    ph_nonce = ph_nonce + 1;
+    uptr nn = p_cat("phna_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+    ph_local(nn, TY_I64);
+    ph_nargs_local = nn;
+    i64 head = ph_set(nn, ph_int(0));
+    i64 tail = head;
+    i64 i = 0;
+    loop {
+        if (i >= ph_ncp) break;
+        i64 pr = node_new(N_IDENT, line, fl);
+        set_nd_name(pr, ph_mangle(ld64(ph_cpn + i * 8), "v_"));
+        set_nd_type(pr, ty_pzv);
+        i64 iff = node_new(N_IF, line, fl);
+        set_nd_a(iff, ph_cast(TY_U8, pr));
+        set_nd_b(iff, ph_set(nn, ph_int(i + 1)));
+        set_nd_next(tail, iff);
+        tail = iff;
+        i = i + 1;
+    }
+    return head;
+}
+
 i64 ph_stmt_1() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
@@ -4160,8 +4325,13 @@ i64 ph_stmt_1() {
     if (ph_is("return")) {
         ph_next();
         i64 e = 0;
+        i64 rthrow = 0;
         if (!ph_at(";", 1)) {
+            i64 sctr = ph_can_throw;
+            ph_can_throw = 0;
             e = ph_expr(0);
+            rthrow = ph_can_throw;
+            ph_can_throw = ph_can_throw | sctr;
             if (ph_fn_ret == PT_MIXED && ph_fn_retref) e = ph_to_mixed(e, ph_ety);
             if (ph_fn_ret == PT_MIXED && !ph_fn_retref) e = ph_to_mixed(ph_own(e, ph_ety), ph_ety);
             if (ph_fn_ret == PT_STRING && ph_ety != PT_STRING) e = ph_to_str(e, ph_ety);
@@ -4171,6 +4341,22 @@ i64 ph_stmt_1() {
         }
         if (!e && ph_fn_ret == PT_MIXED) e = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
         ph_semi("expected ; after return");
+        // T8: the unwinding check has to go BETWEEN computing the value and
+        // returning it -- T6's own rule, which the return statement did not
+        // follow. After the return nothing runs, so `return f();` inside a
+        // try left the exception pending and the catch beside it never saw
+        // it (measured with a ValueError a library row raises).
+        if (rthrow) {
+            i64 tmp = ph_temp(e, ph_mcty(ph_fn_ret), "phrt_");
+            i64 ck = ph_check(line, fl);
+            i64 r2 = node_new(N_RETURN, line, fl);
+            set_nd_a(r2, ph_tref(tmp));
+            i64 h = ph_wrap(ck);
+            i64 t2 = h;
+            loop { if (!nd_next(t2)) break; t2 = nd_next(t2); }
+            set_nd_next(t2, r2);
+            return h;
+        }
         i64 r = node_new(N_RETURN, line, fl);
         set_nd_a(r, e);
         return ph_wrap(r);
@@ -4311,7 +4497,7 @@ i64 ph_stmt_1() {
             if (!ph_wordish()) err_at(fl, line, "mc-php: a php variable needs a name");
             uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
             ph_next();
-            if (ph_var_find(d) < 0) ph_refuse2(fl, line, "an undefined php variable", d, "D4");
+            if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 1);
             i64 one = 0;
             if (ph_at("[", 1)) {
                 u8 kb[8];
@@ -5718,6 +5904,11 @@ i64 ph_function() {
 
     ph_want("(", 1, "expected ( in a php function");
     uptr save = ph_scope_save();
+    i64 scp = ph_ncp;
+    i64 scz = ph_cpzv;
+    uptr snl = ph_nargs_local;
+    ph_ncp = 0;
+    ph_cpzv = 1;
     i64 head = 0;
     i64 tail = 0;
     i64 np = 0;
@@ -5750,6 +5941,8 @@ i64 ph_function() {
         if (np >= PH_MAXP) ph_todo(fl, line, "more than 12 parameters");
         ph_var_bind_raw(d, pt);
         if (byref) { ph_set_ref(d); st64(ph_fpr + fi * 8, ld64(ph_fpr + fi * 8) | (1 << np)); }
+        if (np < PH_MAXCP) st64(ph_cpn + np * 8, d);
+        if (pt != PT_MIXED) ph_cpzv = 0;
         st64(ph_fpt + (fi * PH_MAXP + np) * 8, pt);
         st64(ph_fpd + (fi * PH_MAXP + np) * 8, dflt);
         np = np + 1;
@@ -5781,6 +5974,8 @@ i64 ph_function() {
         if (!ph_accept(",", 1)) break;
     }
     ph_want(")", 1, "expected ) in a php function");
+    ph_ncp = np;
+    if (np > PH_MAXCP) ph_ncp = PH_MAXCP;
     st64(ph_fnp + fi * 8, np);
     i64 rt = PT_MIXED;
     if (ph_at(":", 1)) { ph_next(); rt = ph_type_word(1); }
@@ -5801,12 +5996,19 @@ i64 ph_function() {
     i64 ht = ph_hoist_tail;
     ph_hoist_head = 0;
     ph_hoist_tail = 0;
+    i64 nap = ph_nargs_prologue(fl, line);
     i64 body = ph_block();
     if (pre) {
         i64 t = pre;
         loop { if (!nd_next(t)) break; t = nd_next(t); }
         set_nd_next(t, nd_a(body));
         set_nd_a(body, pre);
+    }
+    if (nap) {
+        i64 t = nap;
+        loop { if (!nd_next(t)) break; t = nd_next(t); }
+        set_nd_next(t, nd_a(body));
+        set_nd_a(body, nap);
     }
     if (ph_hoist_head) {
         set_nd_next(ph_hoist_tail, nd_a(body));
@@ -5821,6 +6023,9 @@ i64 ph_function() {
     ph_hoist_head = hh;
     ph_hoist_tail = ht;
     ph_scope_restore(save);
+    ph_ncp = scp;
+    ph_cpzv = scz;
+    ph_nargs_local = snl;
     ph_cur_fn = savefn;
     ph_fn_ret = sret;
     ph_fn_retref = srr;
@@ -5854,6 +6059,20 @@ void ph_lib_init() {
     ph_lib("htmlspecialchars_decode", "php_f_hsd2", 1, 2, PT_STRING);
     ph_lib("html_entity_decode", "php_f_htmlspecialchars_decode", 1, 3, PT_STRING);
     ph_lib("str_increment", "php_f_str_increment", 1, 1, PT_STRING);
+    ph_lib("unpack", "php_f_unpack", 2, 3, PT_MIXED);
+    ph_lib("serialize", "php_f_serialize", 1, 1, PT_STRING);
+    ph_lib("unserialize", "php_f_unserialize", 1, 2, PT_MIXED);
+    ph_lib("str_getcsv", "php_f_str_getcsv", 1, 4, PT_ARR);
+    ph_lib("quoted_printable_encode", "php_f_quoted_printable_encode", 1, 1, PT_STRING);
+    ph_lib("quoted_printable_decode", "php_f_quoted_printable_decode", 1, 1, PT_STRING);
+    ph_lib("convert_uuencode", "php_f_convert_uuencode", 1, 1, PT_STRING);
+    ph_lib("convert_uudecode", "php_f_convert_uudecode", 1, 1, PT_STRING);
+    ph_lib("mb_internal_encoding", "php_f_mb_internal_encoding", 0, 1, PT_MIXED);
+    ph_lib("settype", "php_f_settype", 2, 2, PT_BOOL);
+    ph_lib("str_decrement", "php_f_str_decrement_n", 1, 1, PT_MIXED);
+    ph_lib("array_splice", "php_f_array_splice", 2, 4, PT_MIXED);
+    ph_lib("parse_str", "php_f_parse_str", 2, 2, PT_BOOL);
+    ph_lib("uniqid", "php_f_uniqid", 0, 2, PT_MIXED);
     // T8: files and streams
     ph_lib("fopen", "php_f_fopen", 2, 4, PT_MIXED);
     ph_lib("fclose", "php_f_fclose", 1, 1, PT_BOOL);
@@ -6043,9 +6262,17 @@ void ph_lib_init() {
     ph_lib("get_debug_type", "php_f_get_debug_type", 1, 1, PT_STRING);
     ph_lib("print_r", "php_f_print_r", 1, 2, PT_STRING);
     ph_lib("var_export", "php_f_var_export", 1, 2, PT_STRING);
-    ph_lib("ob_start", "php_ob_start", 0, 0, PT_VOID);
-    ph_lib("ob_get_clean", "php_ob_get", 0, 0, PT_STRING);
-    ph_lib("ob_get_contents", "php_ob_get", 0, 0, PT_STRING);
+    ph_lib("ob_start", "php_f_ob_start", 0, 3, PT_BOOL);
+    ph_lib("ob_get_clean", "php_f_ob_get_clean", 0, 0, PT_MIXED);
+    ph_lib("ob_get_contents", "php_f_ob_get_contents", 0, 0, PT_MIXED);
+    ph_lib("ob_get_length", "php_f_ob_get_length", 0, 0, PT_MIXED);
+    ph_lib("ob_get_level", "php_f_ob_get_level", 0, 0, PT_INT);
+    ph_lib("ob_end_clean", "php_f_ob_end_clean", 0, 0, PT_BOOL);
+    ph_lib("ob_end_flush", "php_f_ob_end_flush", 0, 0, PT_BOOL);
+    ph_lib("ob_get_flush", "php_f_ob_get_flush", 0, 0, PT_MIXED);
+    ph_lib("ob_flush", "php_f_ob_flush", 0, 0, PT_BOOL);
+    ph_lib("ob_implicit_flush", "php_f_ob_implicit_flush", 0, 1, PT_BOOL);
+    ph_lib("flush", "php_f_flush", 0, 0, PT_BOOL);
     ph_lib("error_reporting", "php_f_error_reporting", 0, 1, PT_INT);
     ph_lib("ini_set", "php_f_nullf", 0, 3, PT_MIXED);
     ph_lib("ini_get", "php_f_null1", 0, 1, PT_MIXED);
@@ -6153,10 +6380,56 @@ uptr ph_scan_name(uptr src, i64 len, uptr pi) {
     return o;
 }
 
+// The three source scans read BYTES, so a comment and a string literal look
+// exactly like code to them. That is not only untidy: T8 measured it costing
+// a D4 refusal, because `// array_splice(&$a, ...)` in the RUNTIME's own
+// comments put `$a` in the ref set and made every `$a` in every program a
+// zval. This hops over what is not code: `//`, `#` (but not `#[`), `/* */`
+// and both quote forms. A `&$x` inside a double-quoted string is an
+// interpolation and not a reference either, so skipping it is right too.
+i64 ph_scan_hop(uptr src, i64 len, i64 i) {
+    i64 c = ld8(src + i);
+    if (c == 47 && i + 1 < len && ld8(src + i + 1) == 47) {
+        i = i + 2;
+        loop { if (i >= len) break; if (ld8(src + i) == 10) break; i = i + 1; }
+        return i;
+    }
+    if (c == 35) {
+        if (i + 1 < len && ld8(src + i + 1) == 91) return i;        // #[Attr]
+        i = i + 1;
+        loop { if (i >= len) break; if (ld8(src + i) == 10) break; i = i + 1; }
+        return i;
+    }
+    if (c == 47 && i + 1 < len && ld8(src + i + 1) == 42) {
+        i = i + 2;
+        loop {
+            if (i + 1 >= len) { i = len; break; }
+            if (ld8(src + i) == 42 && ld8(src + i + 1) == 47) { i = i + 2; break; }
+            i = i + 1;
+        }
+        return i;
+    }
+    if (c == 39 || c == 34) {
+        i64 q = c;
+        i = i + 1;
+        loop {
+            if (i >= len) break;
+            i64 d = ld8(src + i);
+            if (d == 92) { i = i + 2; continue; }
+            if (d == q) { i = i + 1; break; }
+            i = i + 1;
+        }
+        return i;
+    }
+    return i;
+}
+
 void ph_scan_refs(uptr src, i64 len) {
     i64 i = 0;
     loop {
         if (i >= len) break;
+        i64 hop = ph_scan_hop(src, len, i);
+        if (hop != i) { i = hop; continue; }
         i64 c = ld8(src + i);
         if (c == 38 && i + 1 < len && ld8(src + i + 1) == 36) {     // &$name
             u8 pb[8];
@@ -6188,6 +6461,10 @@ void ph_scan_refs(uptr src, i64 len) {
                 uptr n4 = ph_scan_name(src, len, pb4);
                 if (n4) { ph_incset_add(n4); i = ld64(pb4); continue; }
             }
+        }
+        if (c == 102 && i + 13 < len) {                             // func_num_args / func_get_arg
+            if (ld8(src + i + 1) == 117 && ld8(src + i + 2) == 110 && ld8(src + i + 3) == 99
+                && ld8(src + i + 4) == 95) ph_uses_nargs = 1;
         }
         if (c == 103 && i + 6 < len) {                              // global
             if (ld8(src + i + 1) == 108 && ld8(src + i + 2) == 111 && ld8(src + i + 3) == 98
@@ -6221,6 +6498,8 @@ void ph_scan_brf(uptr src, i64 len) {
     i64 i = 0;
     loop {
         if (i + 8 >= len) break;
+        i64 hop = ph_scan_hop(src, len, i);
+        if (hop != i) { i = hop; continue; }
         if (ld8(src + i) == 102 && ld8(src + i + 1) == 117 && ld8(src + i + 2) == 110
             && ld8(src + i + 3) == 99 && ld8(src + i + 4) == 116 && ld8(src + i + 5) == 105
             && ld8(src + i + 6) == 111 && ld8(src + i + 7) == 110
@@ -6266,6 +6545,8 @@ void ph_scan_brf_calls(uptr src, i64 len) {
     i64 i = 0;
     loop {
         if (i >= len) break;
+        i64 hop = ph_scan_hop(src, len, i);
+        if (hop != i) { i = hop; continue; }
         if (ph_nmb(ld8(src + i), 1) && (i == 0 || !ph_nmb(ld8(src + i - 1), 0))) {
             i64 j = i;
             loop { if (j >= len) break; if (!ph_nmb(ld8(src + j), j == i)) break; j = j + 1; }
@@ -6325,6 +6606,7 @@ void user_init() {
     ph_tokens();
     ph_lib_init();
     ph_pre_init();
+    ph_brf_init();
     syntax_expr("$", &ph_dollar_expr);            // makes `$name` lex as `$` + name
     on_source(&ph_on_source);
     syntax("<?php", &ph_program);

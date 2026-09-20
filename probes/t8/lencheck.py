@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every (literal, length) pair in T5's sources must agree.
+"""Every (literal, length) pair in the sources must agree.
 
 php_die("...", N), php_write("...", N), php_memcpy(d, "...", N), p_cat(x, "...",
 off, N) and ph_strlit("...", N) all carry a HAND-COUNTED length beside a string
@@ -16,6 +16,11 @@ PATS = [
     (re.compile(r'(php_die|php_write)\(' + LIT + r',\s*(\d+)\)'), 1, 2, None),
     (re.compile(r'php_memcpy\([^,]+,\s*' + LIT + r',\s*(\d+)\)'), 0, 1, None),
     (re.compile(r'ph_strlit\(' + LIT + r',\s*(\d+)\)'), 0, 1, None),
+    # T8: php_str_new and php_mput carry a hand-counted length too, and the
+    # check did not cover either -- one of them was ten bytes long, which
+    # reads past the literal into whatever the linker put next.
+    (re.compile(r'php_str_new\(' + LIT + r',\s*(\d+)\)'), 0, 1, None),
+    (re.compile(r'php_mput\(' + LIT + r',\s*(\d+)\)'), 0, 1, None),
     (re.compile(r'p_cat\([^,"]+,\s*' + LIT + r',\s*(\d+),\s*(\d+)\)'), 0, 2, 1),
 ]
 
