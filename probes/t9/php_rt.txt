@@ -7661,6 +7661,81 @@ uptr php_ref_bind(uptr cell, uptr cur) {
     return cell;
 }
 
+// `f(...$args)`: the callee's arity is fixed at compile time and the array's
+// length is not, so the compiler emits one slot per parameter the callee
+// could take and this answers "the k-th element, or NOT PASSED". 0 is what
+// every zval parameter already reads as "not passed", which is what makes a
+// default value and ArgumentCountError both still work.
+uptr php_unpack_at(uptr z, i64 k) {
+    if (php_zv_type(z) != IS_ARRAY) return 0;
+    uptr a = ld64(z);
+    i64 i = php_it_next(a, 0);
+    loop {
+        if (i < 0) return 0;
+        if (k == 0) return php_it_val(a, i);
+        k = k - 1;
+        i = php_it_next(a, i + 1);
+    }
+    return 0;
+}
+
+// max()/min(): php takes either one array or two-or-more values, and the
+// comparison is php's own (php_zv_cmp), not a numeric one -- max("10", "9a")
+// is "9a" because both are compared as strings.
+uptr php_maxmin(i64 want, i64 n, uptr a0, uptr a1, uptr a2, uptr a3, uptr a4,
+                uptr a5, uptr a6, uptr a7, uptr a8, uptr a9) {
+    uptr best = 0;
+    if (n == 1) {
+        if (php_zv_type(a0) != IS_ARRAY) {
+            php_throw_str(php_str_new("TypeError", 9),
+                php_str_new("max(): Argument #1 ($value) must be of type array, given value is not an array", 78));
+            return php_znull();
+        }
+        uptr h = ld64(a0);
+        i64 i = php_it_next(h, 0);
+        loop {
+            if (i < 0) break;
+            uptr v = php_it_val(h, i);
+            if (!best) best = v;
+            if (best) { if (php_zv_cmp(v, best) * want > 0) best = v; }
+            i = php_it_next(h, i + 1);
+        }
+        if (!best) {
+            php_throw_str(php_str_new("ValueError", 10),
+                php_str_new("max(): Argument #1 ($value) must contain at least one element", 61));
+            return php_znull();
+        }
+        return best;
+    }
+    i64 k = 0;
+    loop {
+        if (k >= n) break;
+        uptr v = a0;
+        if (k == 1) v = a1;
+        if (k == 2) v = a2;
+        if (k == 3) v = a3;
+        if (k == 4) v = a4;
+        if (k == 5) v = a5;
+        if (k == 6) v = a6;
+        if (k == 7) v = a7;
+        if (k == 8) v = a8;
+        if (k == 9) v = a9;
+        if (!v) break;
+        if (!best) best = v;
+        if (best) { if (php_zv_cmp(v, best) * want > 0) best = v; }
+        k = k + 1;
+    }
+    if (!best) return php_znull();
+    return best;
+}
+
+// the library road wants php_znull() where the user road wants 0
+uptr php_nn(uptr z) { if (z) return z; return php_znull(); }
+
+// ...and a variadic callee's rest array must not collect the slots that
+// were not passed
+void php_arr_push_opt(uptr a, uptr v) { if (v) php_arr_push(a, v); }
+
 // `$a = &f()` where f does not return by reference: php keeps the value and
 // says so. The value is already a cell here, so the alias is harmless; the
 // notice is what the corpus grades.

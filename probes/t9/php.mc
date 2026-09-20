@@ -88,6 +88,8 @@ uptr ph_cur_fn;                // the php function or method being parsed, 0 out
 i64  ph_pre_find(uptr n);
 i64  ph_stmt_of(i64 c);
 i64  ph_nmb(i64 c, i64 first);
+i64  ph_temp(i64 v, i64 mcty, uptr pfx);
+i64  ph_tref(i64 t);
 i64  ph_mcall_node(i64 recv, uptr name, uptr fl, i64 line);
 i64  ph_scall_node(i64 ce, uptr name, uptr fl, i64 line);
 i64  ph_ce_of(uptr name, uptr fl, i64 line);
@@ -2627,15 +2629,44 @@ i64 ph_ref_arg(uptr fl, i64 line) {
     return n;
 }
 
+// `f(...$args)`: how many parameter slots the spread is expanded into. The
+// callee's arity is fixed and the array's length is not, so one slot per
+// parameter the callee could take is the answer, and php_unpack_at says
+// "not passed" for the ones the array does not reach. MAXPARAMS is 12 and
+// two are spent on `this` and the count in a method, so 10 covers every
+// callee this compiler can declare.
+#define PH_SPREADN 10
+i64 ph_had_spread;
+
 uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
-    uptr buf = xalloc(maxn * 16 + 16);
+    uptr buf = xalloc(maxn * 16 + 16 + PH_SPREADN * 16);
     i64 mask = ph_argref;
     ph_argref = 0;
     i64 n = 0;
+    i64 sspread = ph_had_spread;
+    ph_had_spread = 0;
     ph_want("(", 1, "expected ( in a php call");
     loop {
         if (ph_at(")", 1)) break;
-        if (ph_at("...", 3)) ph_todo(fl, line, "argument unpacking ...$args");
+        if (ph_at("...", 3)) {
+            ph_next();
+            i64 sp = ph_expr(0);
+            i64 spt = ph_ety;
+            i64 tmp = ph_temp(ph_to_mixed(sp, spt), ty_pzv, "phu_");
+            i64 nsp = PH_SPREADN;
+            if (maxn < nsp) nsp = maxn;
+            i64 k = 0;
+            loop {
+                if (k >= nsp) break;
+                st64(buf + n * 16, ph_c2("php_unpack_at", ph_tref(tmp), ph_int(k), ty_pzv));
+                st64(buf + n * 16 + 8, PT_MIXED);
+                n = n + 1;
+                k = k + 1;
+            }
+            ph_had_spread = 1;
+            if (ph_accept(",", 1)) continue;
+            break;
+        }
         i64 sct = ph_can_throw;
         ph_can_throw = 0;
         i64 a = 0;
@@ -2661,6 +2692,7 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
     }
     ph_want(")", 1, "expected ) in a php call");
     st64(pn, n);
+    if (!ph_had_spread) ph_had_spread = sspread;
     return buf;
 }
 
@@ -3300,18 +3332,41 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_c1("php_abs_i", ph_to_int(a0, t0), TY_I64);
     }
     if (str_eq(name, "max") || str_eq(name, "min")) {
-        ph_need(na, 2, name, fl, line);
-        i64 t1 = ph_aty(av, 1);
-        if (t0 == PT_FLOAT || t1 == PT_FLOAT) {
-            ph_ety = PT_FLOAT;
-            uptr f = "php_max_f";
-            if (str_eq(name, "min")) f = "php_min_f";
-            return ph_c2(f, ph_to_float(a0, t0), ph_to_float(ph_a(av, 1), t1), ty_f64);
+        // the two-number shape stays native; everything else is php's own
+        // comparison over zvals, which is what max("10", "9a") needs
+        i64 t1 = -1;
+        if (na > 1) t1 = ph_aty(av, 1);
+        if (na == 2 && !ph_had_spread) {
+            if ((t0 == PT_FLOAT || t0 == PT_INT) && (t1 == PT_FLOAT || t1 == PT_INT)) {
+                if (t0 == PT_FLOAT || t1 == PT_FLOAT) {
+                    ph_ety = PT_FLOAT;
+                    uptr f = "php_max_f";
+                    if (str_eq(name, "min")) f = "php_min_f";
+                    return ph_c2(f, ph_to_float(a0, t0), ph_to_float(ph_a(av, 1), t1), ty_f64);
+                }
+                ph_ety = PT_INT;
+                uptr f2 = "php_max_i";
+                if (str_eq(name, "min")) f2 = "php_min_i";
+                return ph_c2(f2, ph_to_int(a0, t0), ph_to_int(ph_a(av, 1), t1), TY_I64);
+            }
         }
-        ph_ety = PT_INT;
-        uptr f2 = "php_max_i";
-        if (str_eq(name, "min")) f2 = "php_min_i";
-        return ph_c2(f2, ph_to_int(a0, t0), ph_to_int(ph_a(av, 1), t1), TY_I64);
+        if (na < 1) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        u8 mm[96];
+        i64 want = 1;
+        if (str_eq(name, "min")) want = 0 - 1;
+        st64(mm, ph_int(want));
+        st64(mm + 8, ph_int(na));
+        i64 q = 0;
+        loop {
+            if (q >= 10) break;
+            i64 vv = ph_int(0);
+            if (q < na) vv = ph_to_mixed(ph_a(av, q), ph_aty(av, q));
+            st64(mm + 16 + q * 8, vv);
+            q = q + 1;
+        }
+        ph_ety = PT_MIXED;
+        ph_can_throw = 1;
+        return ph_calln("php_maxmin", mm, 12, ty_pzv);
     }
     if (str_eq(name, "define")) {
         ph_need(na, 2, name, fl, line);
@@ -3405,6 +3460,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (li >= 0) {
             i64 mn = ld64(ph_lmin + li * 8);
             i64 mx = ld64(ph_lmax + li * 8);
+            if (ph_had_spread) { if (na > mx) na = mx; if (na < mn) na = mn; }
             if (na < mn || na > mx) ph_todo2(fl, line, "the wrong number of arguments for", name);
             i64 lhead = 0;
             i64 ltail = 0;
@@ -3413,6 +3469,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                 if (j >= mx) break;
                 i64 an = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
                 if (j < na) an = ph_to_mixed(ph_a(av, j), ph_aty(av, j));
+                if (j < na && ph_had_spread) an = ph_c1("php_nn", an, ty_pzv);
                 if (ltail) set_nd_next(ltail, an);
                 if (!ltail) lhead = an;
                 ltail = an;
@@ -3431,7 +3488,8 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     }
     i64 np = ld64(ph_fnp + fi * 8);
     i64 vararg = ld64(ph_fvar + fi * 8);
-    if (na > np && !vararg) ph_todo2(fl, line, "the wrong number of arguments for", name);
+    i64 spread = ph_had_spread;
+    if (na > np && !vararg && !spread) ph_todo2(fl, line, "the wrong number of arguments for", name);
     i64 head = 0;
     i64 tail = 0;
     i64 i = 0;
@@ -3452,7 +3510,9 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                 i64 ar = node_new(N_IDENT, line, fl);
                 set_nd_name(ar, rn);
                 set_nd_type(ar, ty_parr);
-                i64 ps = ph_stmt_of(ph_c2("php_arr_push", ar, ph_to_mixed(ph_a(av, j), ph_aty(av, j)), TY_VOID));
+                uptr pushfn = "php_arr_push";
+                if (spread) pushfn = "php_arr_push_opt";
+                i64 ps = ph_stmt_of(ph_c2(pushfn, ar, ph_to_mixed(ph_a(av, j), ph_aty(av, j)), TY_VOID));
                 set_nd_next(mt, ps);
                 mt = ps;
                 j = j + 1;
@@ -3467,6 +3527,8 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             if (want != PT_MIXED) ph_todo2(fl, line, "the wrong number of arguments for", name);
             v = ph_int(0);
         }
+        if (!v && spread && want != PT_MIXED)
+            ph_todo2(fl, line, "argument unpacking into a typed parameter of", name);
         if (!v) {
             i64 have = ph_aty(av, i);
             v = ph_a(av, i);
