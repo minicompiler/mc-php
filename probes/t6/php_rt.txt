@@ -909,6 +909,51 @@ i64 php_zv_isdouble(uptr z) {
     return 0;
 }
 
+// php 8 refuses arithmetic on a value that is not a number and not a numeric
+// string: "abc" + 1 is a TypeError, not 1. A LEADING-numeric string ("5x") is
+// a warning and the number, which this takes without the warning.
+uptr php_f_get_debug_type(uptr z);
+
+i64 php_num_ok(uptr z) {
+    i64 t = php_zv_type(z);
+    if (t == IS_LONG || t == IS_DOUBLE || t == IS_NULL || t == IS_TRUE || t == IS_FALSE) return 1;
+    if (t == IS_STRING) {
+        u8 lb[8];
+        u8 db[8];
+        if (php_str_isnum(ld64(z), lb, db)) return 1;
+        uptr v = ld64(z);
+        i64 n = php_strlen(v);
+        i64 i = 0;
+        loop { if (i >= n) break; i64 c = ld8(v + ZS_HDR + i); if (c != 32 && c != 9 && c != 10 && c != 13) break; i = i + 1; }
+        if (i < n && (ld8(v + ZS_HDR + i) == 45 || ld8(v + ZS_HDR + i) == 43)) i = i + 1;
+        if (i < n && ld8(v + ZS_HDR + i) >= 48 && ld8(v + ZS_HDR + i) <= 57) return 2;
+        return 0;
+    }
+    return 0;
+}
+
+void php_arith_die(uptr a, uptr b, uptr op) {
+    uptr m = php_str_concat(php_str_new("Unsupported operand types: ", 27), php_f_get_debug_type(a));
+    m = php_str_concat(m, php_str_new(" ", 1));
+    m = php_str_concat(m, op);
+    m = php_str_concat(m, php_str_new(" ", 1));
+    m = php_str_concat(m, php_f_get_debug_type(b));
+    php_throw_cls(php_str_new("TypeError", 9), m);
+}
+
+i64 php_arith_ok(uptr a, uptr b, uptr op) {
+    if (php_num_ok(a) && php_num_ok(b)) return 1;
+    if (php_zv_type(a) == IS_STRING && php_num_ok(a) == 0) {
+        uptr m = php_str_concat(php_str_new("Unsupported operand types: string ", 34), op);
+        m = php_str_concat(m, php_str_new(" ", 1));
+        m = php_str_concat(m, php_f_get_debug_type(b));
+        php_throw_cls(php_str_new("TypeError", 9), m);
+        return 0;
+    }
+    php_arith_die(a, b, op);
+    return 0;
+}
+
 uptr php_zv_add(uptr a, uptr b) {
     if (php_zv_type(a) == IS_ARRAY && php_zv_type(b) == IS_ARRAY) {
         uptr r = php_arr_copy(ld64(a));
@@ -934,6 +979,7 @@ uptr php_zv_add(uptr a, uptr b) {
         }
         return php_zarr(r);
     }
+    if (!php_arith_ok(a, b, php_str_new("+", 1))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b)) return php_zdouble(php_zv_double(a) + php_zv_double(b));
     i64 x = php_zv_long(a);
     i64 y = php_zv_long(b);
@@ -944,6 +990,7 @@ uptr php_zv_add(uptr a, uptr b) {
 }
 
 uptr php_zv_sub(uptr a, uptr b) {
+    if (!php_arith_ok(a, b, php_str_new("-", 1))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b)) return php_zdouble(php_zv_double(a) - php_zv_double(b));
     i64 x = php_zv_long(a);
     i64 y = php_zv_long(b);
@@ -953,6 +1000,7 @@ uptr php_zv_sub(uptr a, uptr b) {
 }
 
 uptr php_zv_mul(uptr a, uptr b) {
+    if (!php_arith_ok(a, b, php_str_new("*", 1))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b)) return php_zdouble(php_zv_double(a) * php_zv_double(b));
     i64 x = php_zv_long(a);
     i64 y = php_zv_long(b);
@@ -962,6 +1010,7 @@ uptr php_zv_mul(uptr a, uptr b) {
 }
 
 uptr php_zv_div(uptr a, uptr b) {
+    if (!php_arith_ok(a, b, php_str_new("/", 1))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b)) {
         f64 d = php_zv_double(b);
         if (d == 0.0) { php_throw_str(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16)); return php_znull(); }
@@ -981,6 +1030,7 @@ uptr php_zv_mod(uptr a, uptr b) {
 }
 
 uptr php_zv_pow(uptr a, uptr b) {
+    if (!php_arith_ok(a, b, php_str_new("**", 2))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b) || php_zv_long(b) < 0)
         return php_zdouble(php_pow_f(php_zv_double(a), php_zv_long(b)));
     return php_zlong(php_pow_i(php_zv_long(a), php_zv_long(b)));
@@ -4957,3 +5007,8 @@ u8 php_f_ctype_xd(uptr z) { return ph_ct_all(z, 7); }
 
 i64 php_f_zero() { return 0; }
 uptr php_f_ver0() { return php_str_new("8.5.10", 6); }
+
+// arity-matched wrappers: the library table passes exactly `max` arguments
+uptr php_f_null1(uptr a) { return php_znull(); }
+uptr php_f_null2(uptr a, uptr b) { return php_znull(); }
+uptr php_f_hsd2(uptr a, uptr b) { return php_f_htmlspecialchars_decode(a, 0, 0); }

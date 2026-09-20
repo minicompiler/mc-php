@@ -5157,7 +5157,7 @@ void ph_lib_init() {
     ph_lib("rawurlencode", "php_f_rawurlencode", 1, 1, PT_STRING);
     ph_lib("urldecode", "php_f_urldecode", 1, 1, PT_STRING);
     ph_lib("rawurldecode", "php_f_urldecode", 1, 1, PT_STRING);
-    ph_lib("htmlspecialchars_decode", "php_f_htmlspecialchars_decode", 1, 2, PT_STRING);
+    ph_lib("htmlspecialchars_decode", "php_f_hsd2", 1, 2, PT_STRING);
     ph_lib("html_entity_decode", "php_f_htmlspecialchars_decode", 1, 3, PT_STRING);
     ph_lib("str_increment", "php_f_str_increment", 1, 1, PT_STRING);
     ph_lib("array_is_list", "php_f_array_is_list", 1, 1, PT_BOOL);
@@ -5186,7 +5186,7 @@ void ph_lib_init() {
     ph_lib("trigger_error", "php_f_trigger", 1, 2, PT_BOOL);
     ph_lib("set_time_limit", "php_f_noop", 0, 1, PT_BOOL);
     ph_lib("date_default_timezone_set", "php_f_noop", 0, 1, PT_BOOL);
-    ph_lib("assert_options", "php_f_nullf", 0, 2, PT_MIXED);
+    ph_lib("assert_options", "php_f_null2", 0, 2, PT_MIXED);
     ph_lib("flush", "php_f_zero", 0, 0, PT_VOID);
     ph_lib("constant", "php_f_constant", 1, 1, PT_MIXED);
     ph_lib("str_contains", "php_f_contains", 2, 2, PT_BOOL);
@@ -5308,9 +5308,9 @@ void ph_lib_init() {
     ph_lib("ob_get_contents", "php_ob_get", 0, 0, PT_STRING);
     ph_lib("error_reporting", "php_f_noop", 0, 1, PT_INT);
     ph_lib("ini_set", "php_f_nullf", 0, 3, PT_MIXED);
-    ph_lib("ini_get", "php_f_nullf", 0, 1, PT_MIXED);
-    ph_lib("set_error_handler", "php_f_nullf", 0, 2, PT_MIXED);
-    ph_lib("setlocale", "php_f_nullf", 0, 2, PT_MIXED);
+    ph_lib("ini_get", "php_f_null1", 0, 1, PT_MIXED);
+    ph_lib("set_error_handler", "php_f_null2", 0, 2, PT_MIXED);
+    ph_lib("setlocale", "php_f_null2", 0, 2, PT_MIXED);
     ph_lib("gc_collect_cycles", "php_f_noop", 0, 1, PT_INT);
     ph_lib("error_log", "php_f_false1", 0, 1, PT_BOOL);
     ph_lib("usleep", "php_f_noop", 0, 1, PT_INT);
