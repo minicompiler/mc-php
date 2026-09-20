@@ -253,10 +253,57 @@ D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connec
 
 | T7 | php's diagnostics, and the tests that compile and print the wrong thing | the diagnostic channel built (position, text, streams, exit codes) and T6's `(compiled; output differs)` block clustered by `probes/t7/diffgroup.py` and worked in descending order | green/total -- **phpt: green 1218 / wrong 13968 / refused 2917 / skip 2947 / php-fail 345 / total 21050** (`probes/t7`); per directory `tests/lang` 82, `Zend/tests` 539, `ext/standard/tests/strings` 194 |
 
+| T9 | func_get_args, the two blocks T8 inverted, and the generator decision | D6's correction built; the `(compiled; output differs)` and `(does not compile)` blocks re-clustered over a UNIFORM corpus-wide sample and worked in descending value; D8's first non-fixture `.php` with its tests in both worlds and its bench | green/total -- **phpt: green 1637 / wrong 14140 / refused 2309 / skip 2947 / php-fail 362 / total 21033** (`probes/t9`); per directory `tests/lang` 102, `Zend/tests` 709, `ext/standard/tests/strings` 262 |
+
 | T8 | the block that does not compile, and the names it asks for | T7's `(does not compile)` block grouped by `probes/t8/nocompile.py` and worked in descending order; the 288 missing names worked in descending frequency | green/total -- **phpt: green 1450 / wrong 13607 / refused 3026 / skip 2947 / php-fail 365 / total 21030** (`probes/t8`); per directory `tests/lang` 93, `Zend/tests` 635, `ext/standard/tests/strings` 223 |
 
 Gate for the compiler proper: T2 + T3 decide `.so` reuse (D2b); T4 decides that the grammar fits
 Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
+
+T9 is done (2026-09-20, macos/aarch64; `probes/t9/RESULTS.md`), on **mc 1.1.0**:
+D6's correction built, and T8's two blocks worked from a UNIFORM corpus-wide
+sample rather than an alphabetical slice:
+`phpt: green 1637 / wrong 14140 / refused 2309 / skip 2947 / php-fail 362 / total 21033`
+over the whole corpus, against T8's `green 1450` on the same harness. Per
+directory `tests/lang` **102** (was 93), `Zend/tests` **709** (was 635),
+`ext/standard/tests/strings` **262** (was 223). **1626 of the 1637 greens are
+in T0's "touched by none" set.** `refused` fell 3024 -> 2309, and that is one
+block: the php type words in a parameter or a return were refusals and are
+not any more.
+
+Eleven blocks, one commit each. The biggest by far removed a refusal rather
+than adding a feature: **T5's type table refused `array`, `mixed`,
+`iterable`, `callable`, `object`, `never`, `self`, `static`, `null`, `?T`,
+`T|U`, `A&B` and a class name because T5 had no zval, and T6 built one and
+the table was never re-measured** -- D4 (c) and D9 already said every one of
+them lowers to a zval. `Zend/tests`'s refused column fell by 229 on that
+alone. Then: `#[\Override]` checked rather than ignored (0 -> 28 of the 67
+Override tests, and it is not reflection -- php checks it while COMPILING the
+class); late static binding (`static::`, `new static`, `get_called_class`);
+`readonly` properties; argument unpacking `f(...$args)`; `ext/json` written
+in mc (D2 (a)); the three by-reference targets T8 left; `sscanf`, `setlocale`
+and five string-function edges that moved `ext/standard/tests/strings` 223 ->
+262; the trigonometric family from libm; and `set_error_handler` made real.
+
+**D8 was met for the first time**: nothing in this repository had ever
+written a `.php` outside a `.phpt` fixture. `probes/t9/bench/workload.php` is
+ordinary PHP (a JSON round trip, a template renderer, a sort-heavy pass), its
+PHPUnit `TestCase` runs **6 ok / 0 failed in BOTH worlds**, and
+`probes/t9/bench/bench9.sh` reports two ratios because they measure different
+things: mc-php wins the whole program (**5.85x** and **1.45x**) because php
+pays ~38 ms of start-up, and LOSES the work (php's own work is 1.5 ms of
+`heavy.php`'s 39.5 and mc-php takes 27, so the generated code is **8x to 23x
+slower than php's VM**). D7 names the cause and T9 does not dispute it.
+
+**The generator decision is recorded with its number and generators are NOT
+built**: 252 of the 13623 `wrong` tests use `yield` (1.8%; 260 of 5312 under
+`Zend/tests`), and **145 of the 252 use the manual Generator API**. The shape
+if it is built is a state machine the compiler makes out of the function body
+-- mc has no goto and D7 forbids a VM and a second stack -- which needs a CFG
+pass `php.mc` does not have and is the largest single piece of work in the
+probe. The cheap shape (inverting a `foreach`-only generator into a callback)
+is correct but serves at most 107 of the 252 and would make the other 145 a
+trap, so it was refused as a WRONG answer rather than a missing one.
 
 T8 is done (2026-09-20, macos/aarch64; `probes/t8/RESULTS.md`), on **mc 1.1.0**:
 the block T7 named -- `(does not compile)`, 878 of 1460 sampled `wrong`
@@ -588,6 +635,23 @@ region hangs off a token.
 The smallest additive fix, in `p_skip_to`'s own shape: let `on_source` return a byte offset at
 which lexing should begin (0 meaning the whole buffer), or give `p_push_source` an offset
 argument. Either is one parameter and changes nothing for a module that does not use it.
+
+### Confirmed by T9, and still the only one open
+
+T9 is the sixth probe to grow `probes/t*/php.mc` and it found **no new mc
+gap**. The one T5 reported is unchanged and T9 hits it exactly as often:
+**38 of the 21219 `.phpt` with a `--FILE--` section** open with inline HTML
+and are refused by name.
+
+Two things T9 needed from mc that were already there:
+
+* **`p_cp()` past the CURRENT token.** The module has no token lookahead, and
+  twice in T9 it needed one: to tell `static function` from `static::`, and
+  to tell an intersection type `A&B` from a by-reference parameter `A&$x`.
+  Both read the cursor, which sits just past the token the core last lexed --
+  the road `ph_number` has taken since T5 for a literal's tail.
+* **`type_new(name, 8, 8, TK_INT)`**, which is how the three php handle types
+  (`php_str`, `php_arr`, `php_zval`) exist at all.
 
 ### Confirmed by T8, and still the only one open
 
