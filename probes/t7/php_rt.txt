@@ -156,22 +156,29 @@ void ph_p10_init() {
 
 f64 ph_pow10(i64 e) {
     ph_p10_init();
-    if (e >= 0) {
-        if (e <= 22) return ldf64(ph_p10 + e * 8);
-        f64 r = ldf64(ph_p10 + 22 * 8);
-        i64 k = e - 22;
-        loop { if (k <= 0) break; r = r * 10.0; k = k - 1; }
-        return r;
+    i64 m = e;
+    if (m < 0) m = 0 - m;
+    f64 r = 1.0;
+    if (m <= 22) r = ldf64(ph_p10 + m * 8);
+    if (m > 22) {
+        f64 b = 10.0;
+        i64 k = m;
+        loop {
+            if (k == 0) break;
+            if (k & 1) r = r * b;
+            b = b * b;
+            k = k >> 1;
+        }
     }
-    i64 m = 0 - e;
-    if (m <= 22) return 1.0 / ldf64(ph_p10 + m * 8);
-    f64 r2 = 1.0 / ldf64(ph_p10 + 22 * 8);
-    i64 k2 = m - 22;
-    loop { if (k2 <= 0) break; r2 = r2 / 10.0; k2 = k2 - 1; }
-    return r2;
+    if (e < 0) return 1.0 / r;
+    return r;
 }
 
 u64 ph_bits(f64 x) { u8 t[8]; stf64(t, x); return ld64(t); }
+
+// IEEE negation, sign bit and all: `0.0 - x` gives +0 for x == 0 and php
+// prints -0 for the literal -0.0.
+f64 php_fneg(f64 x) { u8 t[8]; stf64(t, x); st64(t, ld64(t) ^ 0x8000000000000000); return ldf64(t); }
 f64 ph_unbits(u64 b) { u8 t[8]; st64(t, b); return ldf64(t); }
 
 i64 ph_is_nan(f64 x) {
@@ -190,6 +197,7 @@ i64 ph_is_inf(f64 x) {
 // digits * 10^e, exactly rounded whenever both halves are exact (|e| <= 22 and
 // digits < 2^53) -- Clinger's fast path.
 f64 ph_scale(i64 digits, i64 e) {
+    ph_p10_init();
     // Past 2^53 an i64 is no longer exactly a double, so split it: both halves
     // are exact and so is each power of ten, and only the final add rounds.
     if (digits >= 9007199254740992) {
@@ -199,9 +207,37 @@ f64 ph_scale(i64 digits, i64 e) {
     }
     f64 d = (f64) digits;
     if (e == 0) return d;
-    if (e > 0) { if (e <= 22) return d * ph_pow10(e); }
-    if (e < 0) { if (0 - e <= 22) return d / ph_pow10(0 - e); }
-    return d * ph_pow10(e);
+    // 10^0..10^22 are the powers of ten an IEEE double holds EXACTLY, so one
+    // multiply or divide by one of them is correctly rounded and that is the
+    // whole of the common case. Past 22 the power is built by SQUARING -- a
+    // handful of roundings -- and applied in ONE step, because scaling the
+    // value in chunks instead walks a small number through the subnormals and
+    // never comes back: 1e-300 came out 2.233720368547758e-300 and 1.7E-300
+    // came out 3.720368547758E-299.
+    i64 m = e;
+    if (m < 0) m = 0 - m;
+    if (m <= 22) {
+        if (e > 0) return d * ldf64(ph_p10 + e * 8);
+        return d / ldf64(ph_p10 + m * 8);
+    }
+    // 10^309 is already infinity, so a bigger power is applied in two halves
+    if (m > 300) {
+        f64 h = ph_scale(digits, e / 2);
+        if (e > 0) return h * ph_pow10(e - e / 2);
+        return h / ph_pow10(0 - (e - e / 2));
+    }
+    f64 p = ph_pow10(m);
+    if (e > 0) return d * p;
+    return d / p;
+}
+
+// x * 10^e with no intermediate overflow: 10^316 is infinity, and a single
+// multiply by it turns a perfectly good 1e-300 into garbage.
+f64 ph_scale2(f64 x, i64 e) {
+    if (e > 300)  return ph_scale2(x * ph_pow10(300), e - 300);
+    if (e < -300) return ph_scale2(x / ph_pow10(300), e + 300);
+    if (e >= 0) return x * ph_pow10(e);
+    return x / ph_pow10(0 - e);
 }
 
 // decimal exponent of |x| (x > 0): the k with 10^k <= x < 10^(k+1)
@@ -224,39 +260,52 @@ i64 ph_e10(f64 x) {
 // exponent written through `pe`: x ~= digits * 10^(*pe)
 i64 ph_digits(f64 x, i64 prec, uptr pe) {
     i64 k = ph_e10(x);
-    i64 e = k - prec + 1;
-    f64 y = x;
-    if (e > 0) y = y / ph_pow10(e);
-    if (e < 0) y = y * ph_pow10(0 - e);
-    // NOT (i64)(y + 0.5): once |y| >= 2^52 the spacing is 1 and y + 0.5 ties
-    // to even, which rounds an odd exact integer UP.
-    i64 d = (i64) y;
-    f64 fr = y - (f64) d;
-    if (fr > 0.5) d = d + 1;
-    if (fr == 0.5) { if (d & 1) d = d + 1; }   // an exact tie rounds to even
-    // the scaling above can be a ulp out: keep whichever of d-1, d, d+1
-    // reconstructs nearest to x.
-    i64 best = d;
-    f64 bd = -1.0;
-    i64 k = 0;
-    loop {
-        if (k > 2) break;
-        i64 c = d;                       // d first, so it keeps a tie
-        if (k == 1) c = d - 1;
-        if (k == 2) c = d + 1;
-        if (c > 0) {
-            f64 r = ph_scale(c, e);
-            f64 df = r - x;
-            if (df < 0.0) df = 0.0 - df;
-            if (bd < 0.0 || df < bd) { bd = df; best = c; }
-        }
-        k = k + 1;
-    }
-    d = best;
     i64 lim = 1;
     i64 i = 0;
     loop { if (i >= prec) break; lim = lim * 10; i = i + 1; }
-    if (d >= lim) { d = d / 10; e = e + 1; }
+    i64 tries = 0;
+    i64 e = 0;
+    i64 d = 0;
+    loop {
+        e = k - prec + 1;
+        // 10^316 is infinity, so a scale that big is applied in two steps --
+        // one shot made every |x| below about 1e-293 come out as the digits
+        // of 2^63 (1e-300 printed 2.233720368547758e-300).
+        f64 y = ph_scale2(x, 0 - e);
+        // NOT (i64)(y + 0.5): once |y| >= 2^52 the spacing is 1 and y + 0.5
+        // ties to even, which rounds an odd exact integer UP.
+        d = (i64) y;
+        f64 fr = y - (f64) d;
+        if (fr > 0.5) d = d + 1;
+        if (fr == 0.5) { if (d & 1) d = d + 1; }   // an exact tie rounds to even
+        // the scaling above can be a ulp out: keep whichever of d-1, d, d+1
+        // reconstructs nearest to x.
+        i64 best = d;
+        f64 bd = -1.0;
+        i64 j = 0;
+        loop {
+            if (j > 2) break;
+            i64 c = d;                       // d first, so it keeps a tie
+            if (j == 1) c = d - 1;
+            if (j == 2) c = d + 1;
+            if (c > 0) {
+                f64 r = ph_scale(c, e);
+                f64 df = r - x;
+                if (df < 0.0) df = 0.0 - df;
+                if (bd < 0.0 || df < bd) { bd = df; best = c; }
+            }
+            j = j + 1;
+        }
+        d = best;
+        if (d >= lim) { d = d / 10; e = e + 1; break; }
+        // ph_e10 leans on an inexact power of ten past 1e22, so it can be one
+        // too low and leave a leading zero (1e-290 printed 0.9999...e-290).
+        // One retry with the next exponent is enough.
+        if (d >= lim / 10) break;
+        tries = tries + 1;
+        if (tries > 1) break;
+        k = k - 1;
+    }
     st64(pe, e);
     return d;
 }
@@ -1427,15 +1476,51 @@ void php_vd_str(uptr s) {
 // int|false: the union strpos has, with -1 as the false
 void php_vd_ifalse(i64 v) { if (v < 0) { php_vd_bool(0); return; } php_vd_int(v); }
 
-void php_vd_key(uptr b) {
+uptr php_ce_lookup(uptr ce, i64 tab, uptr name);
+uptr php_ce_owner(uptr ce, i64 tab, uptr name);
+uptr php_obj_ce(uptr o);
+void php_vd_key_ce(uptr b, uptr ce);
+void php_vd_ht_ce(uptr a, i64 depth, uptr ce);
+void php_pr_ht_ce(uptr a, i64 depth, i64 isobj, uptr ce);
+
+#define V_PUBLIC    0
+#define V_PROTECTED 1
+#define V_PRIVATE   2
+
+// php marks a non-public property where it prints one: `["b":protected]` and
+// `["c":"P":private]` in var_dump, `[b:protected]` and `[c:P:private]` in
+// print_r. `ce` is 0 for a plain array, which is what makes it safe to call
+// from the array printer too.
+i64 php_prop_vis(uptr ce, uptr name) {
+    if (!ce) return V_PUBLIC;
+    uptr b = php_ce_lookup(ce, 72, name);
+    if (!b) return V_PUBLIC;
+    return ld64(b) / 8;
+}
+
+void php_vd_key(uptr b) { php_vd_key_ce(b, 0); }
+
+void php_vd_key_ce(uptr b, uptr ce) {
     uptr k = ld64(b + 24);
     php_write("[", 1);
     if (k) { php_write("\"", 1); php_echo_str(k); php_write("\"", 1); }
     if (!k) php_echo_int(ld64(b + 16));
+    if (k) {
+        i64 v = php_prop_vis(ce, k);
+        if (v == V_PROTECTED) php_write(":protected", 10);
+        if (v == V_PRIVATE) {
+            php_write(":\"", 2);
+            uptr ow = php_ce_owner(ce, 72, k);
+            if (ow) php_echo_str(ld64(ow));
+            php_write("\":private", 9);
+        }
+    }
     php_write("]=>\n", 4);
 }
 
-void php_vd_ht(uptr a, i64 depth) {
+void php_vd_ht(uptr a, i64 depth) { php_vd_ht_ce(a, depth, 0); }
+
+void php_vd_ht_ce(uptr a, i64 depth, uptr ce) {
     i64 used = php_ht_used(a);
     i64 i = 0;
     loop {
@@ -1443,7 +1528,7 @@ void php_vd_ht(uptr a, i64 depth) {
         uptr b = php_ht_bkt(a, i);
         if (ld8(b + 8) != IS_UNDEF) {
             php_ind(depth + 1);
-            php_vd_key(b);
+            php_vd_key_ce(b, ce);
             php_ind(depth + 1);
             php_vd_zv(b, depth + 1);
         }
@@ -1469,7 +1554,7 @@ void php_vd_obj(uptr o, i64 depth) {
     php_write(" (", 2);
     php_echo_int(php_count(p));
     php_write(") {\n", 4);
-    php_vd_ht(p, depth);
+    php_vd_ht_ce(p, depth, php_obj_ce(o));
     php_ind(depth);
     php_write("}\n", 2);
 }
@@ -1488,7 +1573,9 @@ void php_vd_zv(uptr z, i64 depth) {
 
 // print_r: php's own indentation -- a nested level is 8 more spaces, and the
 // value of a nested array is followed by a blank line.
-void php_pr_ht(uptr a, i64 depth, i64 isobj) {
+void php_pr_ht(uptr a, i64 depth, i64 isobj) { php_pr_ht_ce(a, depth, isobj, 0); }
+
+void php_pr_ht_ce(uptr a, i64 depth, i64 isobj, uptr ce) {
     if (isobj) php_write(" Object\n", 8);
     if (!isobj) php_write("Array\n", 6);
     php_sp(depth);
@@ -1504,6 +1591,16 @@ void php_pr_ht(uptr a, i64 depth, i64 isobj) {
             uptr k = ld64(b + 24);
             if (k) php_echo_str(k);
             if (!k) php_echo_int(ld64(b + 16));
+            if (k) {
+                i64 v = php_prop_vis(ce, k);
+                if (v == V_PROTECTED) php_write(":protected", 10);
+                if (v == V_PRIVATE) {
+                    php_write(":", 1);
+                    uptr ow = php_ce_owner(ce, 72, k);
+                    if (ow) php_echo_str(ld64(ow));
+                    php_write(":private", 8);
+                }
+            }
             php_write("] => ", 5);
             php_pr_zv(b, depth + 8);
             php_write("\n", 1);
@@ -1519,7 +1616,7 @@ void php_pr_zv(uptr z, i64 depth) {
     if (t == IS_ARRAY) { php_pr_ht(ld64(z), depth, 0); return; }
     if (t == IS_OBJECT) {
         php_echo_str(php_obj_cname(ld64(z)));
-        php_pr_ht(php_obj_props(ld64(z)), depth, 1);
+        php_pr_ht_ce(php_obj_props(ld64(z)), depth, 1, php_obj_ce(ld64(z)));
         return;
     }
     php_echo_str(php_zv_str(z));
@@ -1583,6 +1680,42 @@ void php_ex_zv(uptr z, i64 depth) {
         }
         php_sp(depth);
         php_write(")", 1);
+        return;
+    }
+    if (t == IS_OBJECT) {
+        // php writes \Foo::__set_state(array( ... )) for a class and
+        // (object) array( ... ) for stdClass; the indent is 3 per level, not 2
+        uptr o = ld64(z);
+        uptr cn = php_obj_cname(o);
+        i64 std = php_str_eq(cn, php_str_new("stdClass", 8));
+        if (std) php_write("(object) array(\n", 16);
+        if (!std) {
+            php_write("\\", 1);
+            php_echo_str(cn);
+            php_write("::__set_state(array(\n", 21);
+        }
+        uptr a = php_obj_props(o);
+        i64 used = php_ht_used(a);
+        i64 i = 0;
+        loop {
+            if (i >= used) break;
+            uptr b = php_ht_bkt(a, i);
+            if (ld8(b + 8) != IS_UNDEF) {
+                php_sp(depth + 3);
+                uptr k = ld64(b + 24);
+                php_write("'", 1);
+                if (k) php_echo_str(k);
+                if (!k) php_echo_int(ld64(b + 16));
+                php_write("' => ", 5);
+                if (php_zv_type(b) == IS_ARRAY) { php_write("\n", 1); php_sp(depth + 2); }
+                php_ex_zv(b, depth + 2);
+                php_write(",\n", 2);
+            }
+            i = i + 1;
+        }
+        php_sp(depth);
+        if (std) php_write(")", 1);
+        if (!std) php_write("))", 2);
         return;
     }
     php_write("NULL", 4);
@@ -3489,9 +3622,6 @@ uptr php_f_strrev_z(uptr z) { return php_strrev(php_zv_str(z)); }
 //   88 cases    HashTable  an enum's cases, name -> the case object
 // ============================================================================
 #define CE_SIZE 96
-#define V_PUBLIC    0
-#define V_PROTECTED 1
-#define V_PRIVATE   2
 
 uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6);
 uptr php_obj_get(uptr o, uptr name, uptr scope);

@@ -1888,7 +1888,7 @@ i64 ph_primary() {
         ph_next();
         i64 v = ph_expr(70);
         i64 t = ph_ety;
-        if (t == PT_FLOAT) return ph_bin(ph_tok("-", 1), ph_c1("php_fzero", ph_int(0), ty_f64), v, ty_f64);
+        if (t == PT_FLOAT) return ph_c1("php_fneg", v, ty_f64);
         i64 iv = ph_to_int(v, t);
         ph_ety = PT_INT;
         return ph_bin(ph_tok("-", 1), ph_int(0), iv, TY_I64);
@@ -2398,6 +2398,7 @@ i64 ph_vd(i64 v, i64 t, uptr fl, i64 line) {
     if (t == PT_NULL)   return ph_c2("php_vd_zv", v, ph_int(0), TY_VOID);
     if (t == PT_MIXED)  return ph_c2("php_vd_zv", v, ph_int(0), TY_VOID);
     if (t == PT_ARR)    return ph_c2("php_vd_arr", v, ph_int(0), TY_VOID);
+    if (t == PT_OBJ)    return ph_c2("php_vd_obj", v, ph_int(0), TY_VOID);
     ph_todo2(fl, line, "var_dump of", ph_tyname(t));
     return 0;
 }
