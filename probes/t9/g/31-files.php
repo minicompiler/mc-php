@@ -1,0 +1,23 @@
+<?php
+$t = tempnam(sys_get_temp_dir(), "t8");
+$n = file_put_contents($t, "one\ntwo\nthree\n");
+var_dump($n);
+var_dump(file_get_contents($t));
+var_dump(filesize($t));
+var_dump(is_file($t), is_dir($t), file_exists($t));
+$f = fopen($t, "r");
+var_dump(is_resource($f));
+var_dump(fgets($f));
+var_dump(fread($f, 3));
+var_dump(ftell($f));
+rewind($f);
+var_dump(fgets($f));
+fclose($f);
+var_dump(file($t, FILE_IGNORE_NEW_LINES));
+$g = fopen($t, "a");
+fwrite($g, "four\n");
+fclose($g);
+var_dump(file_get_contents($t));
+var_dump(unlink($t));
+var_dump(file_exists($t));
+var_dump(fopen("/nope/nope", "r"));
