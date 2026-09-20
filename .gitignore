@@ -14,3 +14,8 @@ probes/t3/layout
 probes/t3/*.txt
 probes/t1/out/.names
 probes/t0/out/
+
+probes/t5/mc-php
+probes/t6/mc-php
+probes/t5/out/
+probes/t6/out/

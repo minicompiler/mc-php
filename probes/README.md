@@ -115,3 +115,43 @@ and it is in `docs/plan.md` § 5: there is no way to own the bytes before the FI
 
 `sh probes/t5/run.sh` (about 12 minutes: fifteen fixtures, six refusals, four grids and the
 breakdown intersection). Details: `probes/t5/RESULTS.md`.
+
+## T6 -- how far does the wrong-reason table move
+
+**A factor of 13:**
+`phpt: green 1073 / wrong 13374 / refused 3657 / skip 2947 / php-fail 344 / total 21051`
+over the whole corpus, against T5's `green 80` on the same harness. Per directory:
+`tests/lang` **74** (was 12), `Zend/tests` **452** (was 38),
+`ext/standard/tests/strings` **180** (was 12). **1066 of the 1073 greens are in T0's
+"touched by none" set**; the other 7 are the first greens a decision in `docs/plan.md` § 3 has
+an opinion about.
+
+T5 left a table of WHY its 15367 `wrong` tests were wrong. T6 works it in descending value, one
+commit per block, re-measuring between blocks so the next one is chosen by a number:
+
+* **a zval and php's ORDERED HASH** -- `zend_array` field for field, a 32-byte Bucket, the u32
+  hash slots before `arData`, integer and string keys with php's numeric-string rule, insertion
+  order and the holes `unset` leaves. `mixed` is a php type whose lowering is that zval, which is
+  what D4 (c) always said a union lowers to -- and it answers three of the four places T5 said
+  D4 had no answer (an untyped parameter, `int / int`, `$x = null`).
+* **classes, interfaces, traits, enums and objects**, every member reached BY NAME through a
+  registry -- dispatch, not reflection (D6). Inheritance, promotion, statics, class constants,
+  `::class`, `clone`, `instanceof`, run-time visibility and the magic methods D6 keeps.
+* **functions** that are `mixed` by default, with defaults, `...$rest` and closures; a callable
+  as a VALUE, which is what `array_map`/`usort` take.
+* **exceptions** over a pending-exception flag, because mc's five targets include a bare board
+  with no libc and there is no setjmp to have. The flag is MEASURED against the alternative
+  (`probes/t6/bench/`): the check is 33% of the hot function's instructions and below the noise
+  floor of code layout in wall clock.
+* **constants, references, `static`/`global`, heredoc, `switch`, `match`, the full `printf`.**
+* **a library TABLE**, 173 rows, whose one invariant (`max` = the runtime's arity) the probe
+  checks -- it found 37 mismatches at once.
+
+Two things the probe measures that are decisions and not bugs: a php array is a VALUE and D7
+removed the mechanism php uses for it, so T6 copies EAGERLY and the 48 MiB arena is exhausted
+between 500 and 1000 copies of a 2000-element array (php stays at 25 MB); and **4657 of the
+21386 tests with an expect section -- 21.8% -- assert a `Warning:`/`Deprecated:`/`Notice:`/
+`Fatal error:` line**, which T6 does not produce and which is the largest single item left.
+
+`sh probes/t6/run.sh` (about 45 minutes: 24 fixtures, 5 refusals, four grids, the breakdown
+intersection and the wrong-reason table re-measured). Details: `probes/t6/RESULTS.md`.

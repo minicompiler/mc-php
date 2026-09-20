@@ -39,8 +39,18 @@ D4. DECIDED (owner, 2026-09-15): variables have a STATIC type. A variable's type
     such a type is a zval; (d) arrays stay heterogeneous inside (elements are zvals) -- the static
     type is the container's; (e) `null` needs a declared `?T` or a union, never an implicit one.
     The `.phpt` grid gains a third column: green / wrong / refused-by-design.
+    **Measured by T6** (`probes/t6/RESULTS.md` § "Where a decision met reality" 1): D4 (c)
+    answers three of the four places T5 said the rule had none, because `mixed` is a php type
+    and its lowering is a zval. `int / int` is `int|float` and so a zval; an UNTYPED PARAMETER
+    is what php declares `mixed` by omission, so it is one too -- which is the refusal T5
+    measured as "53 of the first 200" and named as the cheapest move from refused to green;
+    and `$x = null` gives `$x` the union's type. **What is left with no answer is an UNDEFINED
+    VARIABLE**: php warns and yields null, and a variable's type is its declaration or its first
+    assignment -- a read before either has neither. It is still refused by name.
+
     **Measured by T5** (`probes/t5/RESULTS.md` § "Where a decision met reality"), three places
-    where the rule as written has no answer and T5 therefore refuses:
+    where the rule as written had no answer and T5 therefore refused (i) and (ii) are ANSWERED
+    by T6, above; (iii) stands:
     (i) **`int / int`**. `10/2` is `int(5)` and `7/2` is `float(3.5)`, so the static type of `/`
         over two ints is `int|float` -- (c) sends that to a zval, which T5 does not have, so the
         operator is refused by name and the message names `intdiv()`. It is the commonest
@@ -207,8 +217,37 @@ D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connec
 | T4 | does Tier 3 take PHP's grammar | lexer/parser for `<?php echo 1+2;`, functions, arrays, strings -> `--dump-ast` | gaps list -- **grammar yes, lexer no** (`probes/t4`) |
 | T5 | does the runtime agree with php | the string/array/float runtime of D10 under a compiler for the php subset D4 allows; the whole `.phpt` corpus through `probes/t5/mcphp.sh` | green/total -- **phpt: green 80 / wrong 15367 / refused 2639 / skip 2947 / php-fail 362 / total 21033** (`probes/t5`); per directory `tests/lang` 12, `Zend/tests` 38, `ext/standard/tests/strings` 12 |
 
+| T6 | how far does the wrong-reason table move | T5's table worked in descending value -- arrays, objects, functions, exceptions, constants, the library -- and re-measured | green/total -- **phpt: green 1073 / wrong 13374 / refused 3657 / skip 2947 / php-fail 344 / total 21051** (`probes/t6`); per directory `tests/lang` 74, `Zend/tests` 452, `ext/standard/tests/strings` 180** (`probes/t6`) |
+
 Gate for the compiler proper: T2 + T3 decide `.so` reuse (D2b); T4 decides that the grammar fits
 Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
+
+T6 is done (2026-09-20, macos/aarch64; `probes/t6/RESULTS.md`), on **mc 1.1.0**:
+T5's wrong-reason table worked in
+descending value, and re-measured:
+`phpt: green 1073 / wrong 13374 / refused 3657 / skip 2947 / php-fail 344 / total 21051`
+over the whole corpus, against T5's `green 80` on the same harness -- a factor
+of **13**. Per directory `tests/lang` **74** (was 12), `Zend/tests` **452**
+(was 38), `ext/standard/tests/strings` **180** (was 12). **1066 of the 1073
+greens are in T0's "touched by none" set**; the other 7 are the first greens a
+decision has an opinion about.
+
+Six blocks, one commit each, each measured before the next was chosen: a zval
+and php's ORDERED HASH (keyed, heterogeneous, insertion order, holes -- which
+is `mixed`, and `mixed` is what D4 (c) always said a union lowers to);
+classes, interfaces, traits, enums and objects, reached BY NAME through a
+registry, which is dispatch and not reflection (D6); functions that are
+`mixed` by default with defaults, variadics and closures; exceptions over a
+pending-exception flag, because mc's five targets include a board with no
+libc and there is no setjmp to have; constants, references, `static`/`global`
+and the full `printf`; and a LIBRARY TABLE, 173 rows, whose arity invariant
+the probe checks.
+
+`probes/t5/` is untouched and still reproduces its own number. `probes/t6/` is
+its two files grown -- 2541 + 843 lines to 5477 + 5022 -- and it calls **51**
+names from outside itself, 48 of them frozen and the three that are not
+`<float>`'s. No mc gap was found that T5 had not already reported, and nothing
+was worked around.
 
 T5 is done (2026-09-20, macos/aarch64; `probes/t5/RESULTS.md`), on **mc 1.1.0**: the first
 runtime and the first compiler:
