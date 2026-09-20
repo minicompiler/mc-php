@@ -1,0 +1,144 @@
+--- #4 probes/t5/php.mc:440
+Because `ph_next` immediately advances whenever the current token is `T_STR`, the raw-quote scan below is unreachable for the core lexer’s string tokens. As a result, `ph_dq_read` never handles PHP’s escape/interpolation rules: for example, `echo "\\$x";` can be reinterpreted as an interpolation instead of printing the literal `$x`, contrary to the documented T5 string behavior. The token path needs to preserve the source span or otherwise route `T_STR` through the PHP scanner before advancing.
+--- #4 probes/t5/php.mc:1428
+`ph_sprintf` reads `ph_a(av, 0)` and then treats it as a node before checking that any arguments were supplied. A valid `sprintf()`/`printf()` call with zero arguments therefore reads uninitialized compiler memory and can dereference an invalid node instead of producing a controlled diagnostic; validate `na` before accessing argument 0.
+--- #4 probes/t5/php.mc:1661
+The separator is passed to `ph_to_str` with `PT_STRING` regardless of its actual static type. A valid weakly-coerced call such as `implode(1, ["a"])` therefore passes the integer value as a string handle and the runtime dereferences it as a `zend_string`; retain the selected separator's actual type and convert it.
+--- #4 probes/t5/php.mc:1756
+This advertised implementation always returns `false`, so `function_exists("strlen")` and `function_exists` for a declared PHP function silently disagree with PHP instead of being refused or answered from the compiler’s function tables. Do not accept this builtin with a hard-coded false result.
+--- #4 probes/t5/php.mc:2088
+`<?=` is registered and accepted by `ph_on_source`, but this branch only consumes the opener as an empty statement. PHP short-echo syntax must parse and emit the following expression up to `?>`; as written, the next expression is parsed as a normal statement and requires `;`, so a valid `<?= "x" ?>` program cannot produce PHP's `x` output.
+--- #4 probes/t5/why.py:28
+This fixed path is derived from the input `.phpt`; if a sibling `<test>.why.php` already exists, the script overwrites it and then unconditionally deletes it in `finally`. Use a unique temporary file in the test directory (preserving `__DIR__`/sibling resolution) so the diagnostic helper cannot destroy an unrelated source file.
+
+This issue also appears on line 31 of the same file.
+--- #4 probes/t5/RESULTS.md:289
+D8 explicitly includes fixtures, but this PR adds 21 `.php` files under `probes/t5/g` and `probes/t5/r` without PHPUnit tests in both worlds or `bench/` rows. The paragraph cannot waive the repository gate; add those artifacts or revise D8 before landing.
+--- #4 probes/t5/php.mc:1251
+An integer negative exponent is marked as `PT_INT` and lowered to `php_pow_i`, whose implementation returns 1 whenever the exponent is negative. PHP promotes `2 ** -1` to a float and produces `0.5`, so this accepted expression produces the wrong result; reject this case explicitly or lower it through the float path.
+--- #4 probes/t5/php.mc:1760
+Function lookup only sees declarations that have already been parsed, so `f(); function f(): int { return 1; }` is rejected as a missing T5 function even though PHP functions are available independently of source order. Pre-register declarations (or otherwise defer this lookup) before compiling calls.
+--- #4 probes/t5/php.mc:2413
+`ph_nvar` still contains variables parsed in the global scope when this function's parameters are bound. A valid `$g = "x"; function f(int $g): int { return $g; }` therefore reports a D4 retype instead of giving the function its own `$g`; reset the function variable table before parsing parameters and restore it after the body.
+--- #4 probes/t5/php.mc:2520
+`ph_todo` emits `is not implemented in T5`, so `mcphp.sh` returns exit 2 and the grid counts leading-inline-HTML files as ordinary wrong/compile failures. The surrounding docs and RESULTS claim this case is a named refusal with exit 3; use the refusal path with a documented reason, or change those claims and measurements consistently.
+--- #4 probes/t5/php_rt.txt:23
+`php_die` can run after output has been accumulated by `php_write`, but it exits without calling `php_flush`; for example, output before a division-by-zero or arena exhaustion is lost instead of matching PHP's already-emitted output. Flush the buffered stdout before writing the diagnostic and exiting.
+--- #5 probes/t6/php.mc:2202
+`&&` and `||` are emitted as an ordinary binary node after both operands have already been parsed into runtime expressions. The RHS therefore runs even when the LHS decides the result, changing valid PHP such as `false && thrower()` or `true || side_effect()`; lower these operators through conditional branches like `??`/`?:`.
+--- #5 probes/t6/php.mc:2635
+Static-property access supplies only the class entry and property name; `php_ce_sslot` has no caller scope and does not enforce the visibility table. Consequently private/protected static properties can be read or written from outside their declaring class, unlike the instance-property path. Include scope in this lookup and check before returning the slot.
+--- #5 probes/t6/php.mc:2968
+A user-defined `PT_MIXED` parameter is passed the caller's zval unchanged. Since PHP parameters are by value here, `function f($x) { $x[] = 2; }` must not mutate the caller's array, but this path gives `f` the original array handle. Copy the zval value at this call boundary before binding it to the callee.
+--- #5 probes/t6/php.mc:3101
+`ph_check` is appended after the complete statement, so a call in a control-flow condition can leave a pending exception while the generated `N_IF`/loop still executes its branch. For example, an exception from `if (throws()) { ... } else { side_effect(); }` can run the else body before this check. The condition/selectors need a propagation check before entering their bodies.
+
+This issue also appears on line 3098 of the same file.
+--- #5 probes/t6/php.mc:3935
+Appending the `break` after the try body does not model PHP's cleanup semantics: an `N_RETURN` in the try or catch executes before the later `finally` chain and exits directly, skipping `finally`. In addition, `ph_in_try` is restored before catch bodies are parsed, so a throw from a catch can propagate before `finally`; all exits need to pass through a cleanup path.
+--- #5 probes/t6/php.mc:4498
+Resolved method calls pass the original zval arguments directly to the generated method. An untyped method parameter that appends to an array will consequently mutate the caller's array; PHP's by-value parameters require a value/COW copy at this boundary.
+--- #5 probes/t6/php.mc:4850
+The method prologue has the same problem as the function prologue: after `php_argcount()` sets `ph_exc`, execution continues into the constructor/method body. A missing required method argument must exit before any body side effects, so emit and honor an unwind check here.
+
+This issue also appears on line 5084 of the same file.
+--- #5 probes/t6/php_rt.txt:3438
+A visibility failure records a pending exception but still returns the inaccessible property bucket. The caller can therefore read a private/protected property after `php_vis_die` instead of stopping at the access error. Return a null zval immediately after raising the exception.
+
+This issue also appears in the following locations of the same file:
+- line 3453
+- line 3494
+--- #5 probes/t6/php_rt.txt:3555
+Static method dispatch never checks `php_vis_ok` at all; `Class::privateMethod()`/`protectedMethod()` from an outside scope reaches `callp` normally. Pass the caller scope through the visibility check and raise the same access error before dispatch.
+--- #5 probes/t6/php.mc:1311
+This branch still rejects every explicit `mixed` declaration, even though D4 now defines `mixed` as a zval-backed PHP type. A valid `function f(mixed $x): mixed` therefore fails with a D4 refusal instead of using the same lowering as an omitted type; accept `mixed` here.
+--- #5 probes/t6/php.mc:1695
+`?->` is only recognized syntactically on this path; the statement lowering does not retain a nullsafe flag and always dispatches through the ordinary property/method access. A standalone `$x?->foo()` with a null receiver therefore throws instead of returning null. Add the same guarded nullsafe lowering used for expression access.
+
+This issue also appears on line 4935 of the same file.
+--- #5 probes/t6/php.mc:2921
+`ph_fn_find` only contains functions parsed so far, so a call from an earlier function to a later global function reaches this missing-function diagnostic. PHP hoists global function declarations; collect function signatures before parsing bodies or defer this lookup so declaration order does not change whether valid PHP compiles.
+--- #5 probes/t6/php.mc:4834
+All method parameters are parsed with `ph_skip_type()` and then bound as `PT_MIXED`, so a declaration such as `function f(int $x)` has no parameter conversion or type check. Passing a non-integer value consequently follows zval coercion in the body instead of PHP's declared-parameter behavior; preserve the declared type or refuse unsupported method types by name.
+
+This issue also appears in the following locations of the same file:
+- line 4874
+- line 5062
+--- #5 probes/t6/php.mc:5217
+`spl_object_hash()` returns a string in PHP, but this row routes it to the `i64` object-id function and declares `PT_INT`. Any call therefore produces a numeric id instead of the required object-hash string; add a string implementation or leave the function unsupported rather than registering an incorrect lowering.
+--- #5 probes/t6/php_rt.txt:1942
+`array_values()` copies each element with `php_arr_push`, which only copies the zval header. Under this runtime's eager-copy/no-refcount model, a nested array returned by `array_values` still aliases the source and a later nested mutation changes both; use the deep value-copy helper here.
+--- #5 probes/t6/php_rt.txt:4015
+`php_throw_cls` creates runtime-generated throwables with the default `file` and `line` properties and never records the operation's source location. DivisionByZeroError, TypeError, and undefined-constant errors therefore report an empty file/line 0 through `getFile()`, `getLine()`, and `php_uncaught()`, unlike PHP; this path needs a location-aware constructor.
+--- #5 probes/t6/php_rt.txt:4640
+The optional values are represented by `IS_NULL`, but PHP permits an explicit null as an element for the variadic `array_push` values. `array_push($a, 1, null)` therefore skips the explicit null here, because the runtime has no argument-presence bit. Carry the actual arity/omitted marker instead of using null for both cases.
+--- #6 probes/t7/arena.py:31
+Compilation failures, runtime timeouts, and every other exception are returned as `None`, exactly like a test that ran without an arena exhaustion. Because the denominator still uses `len(files)`, the script silently counts unmeasured tests as negative cases and cannot support the claimed `9 of 1460` result. Record a separate status or fail the measurement when a test was not compiled and run.
+--- #6 probes/t7/why.py:36
+A successful compiler invocation is labeled `(compiled; output differs)` here, but the generated binary is never executed. This makes the wrong-reason table claim an output mismatch for every source that merely compiles, including cases where runtime output agrees or only the exit code differs; the downstream filter at `run.sh:145` then treats that label as evidence. Execute the binary with the test's runtime inputs, or use a neutral `(compiled)` label and update the downstream filter.
+--- #6 probes/t7/bench/bench.sh:23
+This T7 benchmark builds and runs `probes/t6/php.mc`, `probes/t6/mc-php.mc`, and `probes/t6/bench/unwind.php`, while the added benchmark source is under `probes/t7/bench`. Running `probes/t7/bench/bench.sh` therefore measures the T6 compiler rather than the T7 changes, making the benchmark result unrelated to this PR. Use the T7 paths consistently or remove the duplicate benchmark.
+--- #6 probes/t7/diffgroup.py:82
+`phpt-run.py` treats both output and exit-code differences as `wrong` (see `probes/t0/phpt-run.py:403-410`), but this comparison only checks the captured text. An exit-only mismatch is therefore reported as `(agrees on this harness)`, so the first-difference table can silently omit a real source of wrong results. Include both return codes in the equality test.
+--- #6 probes/t7/run.sh:32
+The T7 runner reads `T6_JOBS`, while the new snapshot runner and the surrounding probes use the corresponding `T7_JOBS` setting. A caller setting `T7_JOBS` cannot control this run and the intended concurrency setting is silently ignored.
+
+This issue also appears on line 65 of the same file.
+--- #7 probes/t8/php.mc:2544
+`PH_MAXCP` is 10, while the parameter parser accepts up to `PH_MAXP` (12). For a function with 11 or 12 parameters, the emitted `func_num_args()` counter sees only the first ten and `func_get_arg(10)`/`(11)` cannot receive their actual values; the runtime's final fallback returns parameter 9. Support every accepted parameter or emit a named refusal instead of silently returning incorrect values, and add a fixture for this boundary.
+
+This issue also appears in the following locations of the same file:
+- line 6727
+- line 6765
+--- #7 probes/t8/arena.py:31
+Any compile failure, runtime failure, timeout, or other exception is silently converted to `None`, so the reported denominator includes tests that were never successfully compiled and run while the numerator simply omits them. This can undercount arena exhaustion and make a run look complete. Record these outcomes separately and fail the measurement when a listed test cannot be exercised.
+--- #7 probes/t8/bench/bench.sh:23
+This new T8 benchmark builds and runs the T6 compiler, runtime, and fixture (`probes/t6/...`) throughout, so executing it cannot measure T8's implementation or catch T8 regressions. Point the benchmark at `probes/t8` or remove this duplicate and invoke the T6 benchmark explicitly.
+--- #7 probes/t8/diffgroup.py:82
+The grid treats an exit-code mismatch as `wrong` even when stdout matches (`probes/t0/phpt-run.py:403-410`), but this analysis declares agreement from stdout alone. A test with identical output and a different status is therefore hidden as `(agrees on this harness)` and omitted from the failure groups. Include both return codes in this condition.
+--- #7 probes/t8/fixtures.sh:22
+The fixture gate does not compare the claimed byte-for-byte two-stream result: `2>&1` merges stdout and stderr, and command substitution strips all trailing newlines from both values. A fixture where the streams differ or where only the trailing-newline count differs can therefore pass this check. Capture stdout and stderr separately and compare them with `cmp` while retaining the exit codes.
+--- #7 probes/t8/run.sh:33
+The T8 runner reads `T6_JOBS`, so setting the T8-specific concurrency control used by `probes/t8/grid.sh` (`T8_JOBS`) has no effect here. This makes the top-level run unexpectedly use the inherited T6 setting and can defeat the intended resource control.
+--- #1 probes/t3/run.sh:42
+The gate accepts any 25 matching definitions even though `layout.c` emits 39 and the committed result claims all 39 are checked. A missing layout fact or stale hardcoded constant can therefore still exit successfully; require the exact expected set/count so the probe cannot report partial validation as complete.
+--- #1 docs/plan.md:63
+The same call-shape summary repeats the off-by-one: the T2 result proves four variadic stack slots are directly reachable, not three, and `"ll"` itself supplies two pointers. This should be corrected here too so the plan does not guide the shim implementation with a smaller limit than the probe measured.
+--- #1 probes/README.md:4
+The README says each probe prints one number, but the added T2, T3, and gap scripts emit per-case diagnostics and summaries (and T1 emits a table). This makes the documented output contract inaccurate; either normalize all probe output or document which line is the machine-readable result.
+--- #1 probes/t2/RESULTS.md:126
+This says the `"ll"` example has three pointers, but that format has two pointer arguments, and the preceding ABI result establishes four variadic slots directly reachable by the mc callee. Please correct the arithmetic so this result does not understate the supported call shape.
+--- #2 probes/t4/run.sh:85
+The `mc build` smoke test also ignores both process exit statuses; an executable/oracle failure can be mistaken for agreement when the captured files happen to match. The preceding check covers compilation only, not execution. Fail the measurement if either `./build/t4` or `php main.php` fails before comparing.
+
+This issue also appears in the following locations of the same file:
+- line 101
+- line 114
+--- #2 CLAUDE.md:36
+Only 9 rows are actually compared byte-for-byte with PHP: 01, 02, 04, 05, 06, 08, 11, 12, and 13. Rows 03/09/10/14 are refusals and row 07 explicitly has no PHP oracle, so this status line overstates the measured result.
+--- #2 docs/plan.md:144
+Only 9 rows are actually compared byte-for-byte with PHP: 01, 02, 04, 05, 06, 08, 11, 12, and 13. Rows 03/09/10/14 are refusals and row 07 explicitly has no PHP oracle, so the plan records an unsupported “10 of them” result.
+--- #2 probes/README.md:48
+Only 9 rows are actually compared byte-for-byte with PHP: 01, 02, 04, 05, 06, 08, 11, 12, and 13. Rows 03/09/10/14 are refusals and row 07 explicitly has no PHP oracle, so “10 of 14” overstates the measured result; either report 9 or add a tenth oracle-backed fixture.
+--- #3 probes/t0/phpt-run.py:386
+`--CLEAN--` is executed after the oracle but before the candidate. Cleanup is post-test logic, so the candidate can run after the oracle's filesystem side effects have been removed or altered and is not evaluated from the same initial state; run both executors in isolated workspaces and perform cleanup only after both runs.
+--- #3 probes/t0/phpt-run.py:476
+All futures run their subprocesses with the same `srcdir` as cwd, while the pool executes tests concurrently. PHPTs that use relative files can therefore observe or overwrite another test's artifacts, making the grid nondeterministic; use a per-test working directory (or serialize tests that share one).
+--- #3 probes/t0/breakdown.py:126
+`d5_only` is labeled “non-autoload computed path alone”, but it sums every row with `d5`, including rows that also set `autoload`. The 30-row overlap is therefore double-counted in that subtotal; count only rows where `r['d5']` is true and `r['autoload']` is false.
+--- #3 probes/t0/classify.php:119
+The classifier treats `assert("...")` as part of D1, but the D1 decision in `docs/plan.md:24-31` names eval/create_function, computed includes, dynamic names, and runtime call targets—not a string argument to assert. The published D1 count therefore measures a different refusal set unless the plan and compiler scope are updated deliberately.
+--- #3 probes/t0/classify.php:125
+The plan only refuses `property_exists`/`method_exists` when the name is non-literal and explicitly treats literal forms as compile-time answers. This unconditional check marks `method_exists($o, 'm')` and `property_exists($o, 'p')` as D6, inflating the reported touched count; inspect the call arguments for these two functions.
+--- #3 probes/t0/classify.php:234
+For the normal `--FILEEOF--` layout, the next marker is usually `--EXPECT*--`. This branch only returns when the previous section is `FILE`, so it resets `$body` on the `FILEEOF` transition and ultimately reports the test as `nofile`; treat `FILEEOF` as a terminal source section when the next marker is seen.
+--- #3 probes/t0/phpt-run.py:401
+The candidate's exit status is the only refusal signal here. A valid PHP test can itself exit with code 3, so a candidate that matches that test's output and exit code will still be classified as `refused` before the normal comparison; use an out-of-band refusal result or a non-colliding protocol.
+--- #3 probes/t0/run.sh:40
+`set -e` does not propagate failures from the left side of a POSIX pipeline, so if `breakdown.py` exits nonzero, `tee` still returns 0 and `fail` remains 0. This can make the probe report success with no valid breakdown; capture the Python status explicitly before printing the output.
+--- #3 probes/t0/RESULTS.md:218
+The `Zend/tests` row does not partition its 5312 files: 5194 passed + 112 skipped + 0 php-fail equals 5306. The surrounding text also names residual cases, so the table cannot support the later “reconciles to the byte” claim until the missing six files are assigned to an accurate bucket.
+--- #3 probes/t0/breakdown.py:28
+This usage line has the same issue as phpt-run.py: `breakdown.py` is Python, so running it with `sh` produces shell syntax errors. Document `python3 probes/t0/breakdown.py ...` instead.
+--- #3 probes/t0/phpt-run.py:49
+These usage examples invoke Python programs through `sh`; the shebang does not make Python syntax valid shell syntax, so both documented commands fail before the runner starts. Invoke the script with `python3` (as run.sh already does).
