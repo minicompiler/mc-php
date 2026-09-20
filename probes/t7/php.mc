@@ -82,6 +82,7 @@ void ph_var_bind_raw(uptr d, i64 ty);
 void ph_class(uptr fl, i64 line, i64 flags);
 i64  ph_scope();
 uptr ph_cur_cls;               // the class being parsed, 0 outside one
+uptr ph_cur_fn;                // the php function or method being parsed, 0 outside one
 i64  ph_pre_find(uptr n);
 i64  ph_stmt_of(i64 c);
 i64  ph_mcall_node(i64 recv, uptr name, uptr fl, i64 line);
@@ -1703,6 +1704,9 @@ void ph_pending_stmt(i64 s) {
 i64 ph_var_ref(uptr d) {
     if (ph_var_find(d) < 0) {
         ph_ety = PT_MIXED;
+        // `$x ?? d` reads without warning, and the token after the name is
+        // what says so -- the same test ph_index makes after its `]`.
+        if (ph_at("??", 2)) return ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
         return ph_c1("php_undef_var", ph_raw(d + 1, cstrlen(d) - 1), ty_pzv);
     }
     i64 t = ph_var_type(d);
@@ -1768,7 +1772,9 @@ i64 ph_postfix(i64 v, i64 vt) {
             i64 iscall = 0;
             if (ph_at("(", 1)) iscall = 1;
             if (iscall)  v = ph_mcall_node(recv, pn, fl2, line2);
-            if (!iscall) v = ph_c3("php_zv_pget", recv, ph_strlit(pn, cstrlen(pn)), ph_scope(), ty_pzv);
+            uptr pg = "php_zv_pget";
+            if (ph_at("??", 2)) pg = "php_zv_pget_q";       // `$o->p ?? d` is silent
+            if (!iscall) v = ph_c3(pg, recv, ph_strlit(pn, cstrlen(pn)), ph_scope(), ty_pzv);
             vt = PT_MIXED;
             continue;
         }
@@ -2603,11 +2609,14 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_strlit(f, cstrlen(f));
     }
     if (str_eq(name, "__FUNCTION__") || str_eq(name, "__METHOD__")) {
-        uptr f2 = p_decl_name();
+        i64 meth = str_eq(name, "__METHOD__");
         ph_next();
         ph_ety = PT_STRING;
-        if (!f2) return ph_strlit("", 0);
-        return ph_strlit(f2 + 2, cstrlen(f2 + 2));
+        if (!ph_cur_fn) return ph_strlit("", 0);
+        if (!meth || !ph_cur_cls) return ph_strlit(ph_cur_fn, cstrlen(ph_cur_fn));
+        uptr q = p_cat(ph_cur_cls, "::", 0, 2);
+        q = p_cat(q, ph_cur_fn, 0, cstrlen(ph_cur_fn));
+        return ph_strlit(q, cstrlen(q));
     }
     i64 pi = ph_pre_find(name);
     if (pi >= 0) {
@@ -4897,7 +4906,10 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             if (kind == 1) isabs = 1;
             i64 saves = ph_in_static;
             ph_in_static = stat;
+            uptr savefn = ph_cur_fn;
+            ph_cur_fn = mname;
             ph_method_body(mcname, cname, ceg, vis, stat, mline, mfl, isabs);
+            ph_cur_fn = savefn;
             ph_in_static = saves;
             if (!isabs) {
                 // mc's N_ADDR carries the NAME itself (res_addr reads
@@ -5255,6 +5267,8 @@ i64 ph_function() {
     st64(ph_fret + fi * 8, rt);
     uptr mn = ph_mangle(name, "f_");
     p_set_decl_name(mn);
+    uptr savefn = ph_cur_fn;
+    ph_cur_fn = name;
     i64 sret = ph_fn_ret;
     ph_fn_ret = rt;
     i64 stl2 = ph_toplevel;
@@ -5285,6 +5299,7 @@ i64 ph_function() {
     ph_hoist_head = hh;
     ph_hoist_tail = ht;
     ph_scope_restore(save);
+    ph_cur_fn = savefn;
     ph_fn_ret = sret;
     ph_toplevel = stl2;
     ph_nls = sls2;
@@ -5494,9 +5509,14 @@ void ph_program() {
     }
     i64 fin = node_new(N_EXPRSTMT, line, fl);
     set_nd_a(fin, ph_call("php_uncaught", 0, 0, 0, 0, 0, TY_VOID));
+    // D7 has no refcount, so the honest destructor point is the end of the
+    // program: php runs every surviving __destruct there too.
+    i64 fin1 = node_new(N_EXPRSTMT, line, fl);
+    set_nd_a(fin1, ph_call("php_shutdown", 0, 0, 0, 0, 0, TY_VOID));
     i64 fin2 = node_new(N_EXPRSTMT, line, fl);
     set_nd_a(fin2, ph_call("php_flush", 0, 0, 0, 0, 0, TY_VOID));
-    set_nd_next(fin, fin2);
+    set_nd_next(fin, fin1);
+    set_nd_next(fin1, fin2);
     if (ph_main_tail) set_nd_next(ph_main_tail, fin);
     if (!ph_main_tail) ph_main_head = fin;
     i64 r = node_new(N_RETURN, line, fl);

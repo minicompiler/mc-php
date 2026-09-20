@@ -1919,6 +1919,24 @@ i64 php_pow_i(i64 a, i64 e) {
 // the program's exit path: the buffer must reach fd 1 before _exit
 i64 php_end() { php_flush(); return 0; }
 
+uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3,
+               uptr a4, uptr a5, uptr a6);
+
+i64 ph_dt_ran;
+
+void php_shutdown() {
+    if (ph_dt_ran) return;
+    ph_dt_ran = 1;
+    uptr n = ph_dt_head;
+    loop {
+        if (!n) break;
+        uptr o = ld64(n);
+        n = ld64(n + 8);
+        php_mcall(o, php_str_new("__destruct", 10), 0, 0, 0, 0, 0, 0, 0, 0);
+        ph_exc = 0;
+    }
+}
+
 // ---- what the compiler needs beside the named php functions ---------------
 i64 php_truthy_s(uptr s) {
     i64 n = php_strlen(s);
@@ -1935,7 +1953,8 @@ f64 php_div_f(f64 a, f64 b) {
     return a / b;
 }
 i64 php_seq_i(i64 ignored, i64 v) { return v; }
-void php_exit(i64 code) { php_flush(); exit(code); }
+void php_shutdown();
+void php_exit(i64 code) { php_shutdown(); php_flush(); exit(code); }
 // printf's %f is php's: six digits after the point, always
 uptr php_ftos6(f64 x) {
     u8 t[64];
@@ -2074,6 +2093,19 @@ i64 php_strcasecmp(uptr a, uptr b) { return php_str_cmp(php_case(a, 0), php_case
 
 i64 ph_objid;
 
+// ---- __destruct (docs/plan.md D7) -----------------------------------------
+// php runs a destructor when the last reference goes away. D7 has no refcount
+// and no free, so that moment does not exist here; what does exist is the END
+// OF THE PROGRAM, and php runs every surviving destructor there too, in
+// REVERSE creation order (measured on 8.5.10: three globals created 1, 2, 6
+// come out d6, d2, d1). Every object whose class has a __destruct joins a
+// list newest-first, so walking it IS that order. What is NOT implemented,
+// and what RESULTS.md counts: the destructor of an object that dies early --
+// a function local, an `unset`, a reassignment, a temporary.
+uptr ph_dt_head;
+
+uptr php_ce_lookup(uptr ce, i64 tab, uptr name);
+
 uptr php_obj_new(uptr ce) {
     uptr o = php_alloc(OBJ_HDR);
     st32(o, 1);
@@ -2082,6 +2114,14 @@ uptr php_obj_new(uptr ce) {
     st32(o + 8, ph_objid);
     st64(o + 16, ce);
     st64(o + 24, php_arr_new(8));
+    if (ce) {
+        if (php_ce_lookup(ce, 24, php_str_new("__destruct", 10))) {
+            uptr n = php_alloc(16);
+            st64(n, o);
+            st64(n + 8, ph_dt_head);
+            ph_dt_head = n;
+        }
+    }
     return o;
 }
 
@@ -3895,6 +3935,15 @@ uptr php_obj_get(uptr o, uptr name, uptr scope) {
     return php_znull();
 }
 
+uptr php_obj_get_q(uptr o, uptr name, uptr scope) {
+    uptr ce = php_obj_ce(o);
+    uptr b = php_ht_find(php_obj_props(o), php_str_hash(name), name);
+    if (b) return b;
+    uptr g = php_ht_find(ld64(ce + 80), php_str_hash(php_str_new("__get", 5)), php_str_new("__get", 5));
+    if (g) return callp(ld64(g), o, php_zstr(name));
+    return php_znull();
+}
+
 void php_obj_set(uptr o, uptr name, uptr v, uptr scope) {
     uptr ce = php_obj_ce(o);
     uptr b = php_ht_find(php_obj_props(o), php_str_hash(name), name);
@@ -3907,6 +3956,15 @@ void php_obj_set(uptr o, uptr name, uptr v, uptr scope) {
 }
 
 // $o->p on a zval receiver
+// the quiet read `??` and isset() make: no "Undefined property" and no
+// "Attempt to read property on <type>"
+uptr php_obj_get_q(uptr o, uptr name, uptr scope);
+
+uptr php_zv_pget_q(uptr z, uptr name, uptr scope) {
+    if (php_zv_type(z) != IS_OBJECT) return php_znull();
+    return php_obj_get_q(ld64(z), name, scope);
+}
+
 uptr php_zv_pget(uptr z, uptr name, uptr scope) {
     if (php_zv_type(z) != IS_OBJECT) {
         // php reads a property of a non-object as null with a warning; it is
