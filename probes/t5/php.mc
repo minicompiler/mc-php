@@ -34,6 +34,9 @@ i64 ty_parr;
 
 // forward declarations: mc is single pass
 uptr php_dec(i64 v);
+i64  ph_const_find(uptr n);
+void ph_const_add(uptr cn, i64 v, i64 t, uptr fl, i64 line);
+i64  ph_array_lit(uptr close);
 void ph_local(uptr name, i64 mcty);
 i64  ph_set(uptr name, i64 val);
 void ph_pending_stmt(i64 s);
@@ -50,6 +53,8 @@ i64  ph_aty(uptr av, i64 i);
 i64  ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line);
 i64  ph_assign_stmt(uptr fl, i64 line, i64 semi);
 i64  ph_strlit(uptr bytes, i64 len);
+i64  ph_digit(i64 c, i64 base);
+i64  ph_dq_read(uptr q, uptr e, uptr pend);
 i64  ph_to_str(i64 n, i64 t);
 i64  ph_to_int(i64 n, i64 t);
 i64  ph_to_float(i64 n, i64 t);
@@ -64,6 +69,8 @@ i64  ph_var_find(uptr d);
 i64  ph_var_type(uptr d);
 i64  ph_var_bind(uptr d, i64 ty);
 void ph_refuse(uptr fl, i64 line, uptr what, uptr dref);
+void ph_todo(uptr fl, i64 line, uptr what);
+void ph_todo2(uptr fl, i64 line, uptr what, uptr detail);
 void ph_refuse2(uptr fl, i64 line, uptr what, uptr detail, uptr dref);
 i64  ph_int(i64 v);
 i64  ph_bool(i64 v);
@@ -86,6 +93,8 @@ i64  ph_wrap(i64 s);
 i64  ph_empty();
 i64  ph_expr_stmt_of(i64 e);
 i64  ph_loop_of(i64 cond, i64 body, i64 step, i64 line, uptr fl);
+i64  ph_loop_pre;
+i64  ph_pushing;
 i64  ph_type_word(i64 must);
 i64  ph_vd(i64 v, i64 t, uptr fl, i64 line);
 i64  ph_echo_of(i64 v, i64 t, uptr fl, i64 line);
@@ -133,6 +142,21 @@ void ph_refuse(uptr fl, i64 line, uptr what, uptr dref) {
     err_at(fl, line, m);
 }
 
+// NOT a refusal: something T5 has not built yet. It is an ordinary compile
+// error (the grid counts it `wrong`), because inflating the refused column
+// with "not implemented" would make that column a lie.
+void ph_todo(uptr fl, i64 line, uptr what) {
+    uptr m = p_cat("mc-php: ", what, 0, cstrlen(what));
+    m = p_cat(m, " is not implemented in T5 (probes/t5/RESULTS.md)", 0, 48);
+    err_at(fl, line, m);
+}
+
+void ph_todo2(uptr fl, i64 line, uptr what, uptr detail) {
+    uptr m = p_cat(what, ": ", 0, 2);
+    m = p_cat(m, detail, 0, cstrlen(detail));
+    ph_todo(fl, line, m);
+}
+
 void ph_refuse2(uptr fl, i64 line, uptr what, uptr detail, uptr dref) {
     uptr m = p_cat(what, ": ", 0, 2);
     m = p_cat(m, detail, 0, cstrlen(detail));
@@ -175,6 +199,8 @@ void ph_tokens() {
     tok_add("!==",  3);
     tok_add("++",   2);
     tok_add("--",   2);
+    tok_add("?",    1);
+    tok_add(":",    1);
     tok_add("@",    1);
     tok_add("`",    1);
 }
@@ -188,6 +214,7 @@ i64 ph_tok(uptr s, i64 n) { return tok_add(s, n); }
 // single destination before calling it.
 #define PHT_PSTR (-2)     // a php single-quoted string: raw bytes, no escapes but \\ and \'
 #define PHT_HTML (-3)     // a run of inline html between ?> and <?php
+#define PHT_DSTR (-4)     // a php double-quoted string, already lowered to a node
 
 i64  ph_tid;
 uptr ph_tname;
@@ -195,6 +222,7 @@ i64  ph_tlen;
 i64  ph_tval;
 i64  ph_tline;
 uptr ph_tfile;
+i64  ph_tnode;            // PHT_DSTR: the node the scanner already built
 i64  ph_nopeek;           // set right after a p_push_source: cur is in the old frame
 
 void ph_sync() {
@@ -241,8 +269,173 @@ uptr ph_sq_read(uptr q, uptr e, uptr pend, uptr plen) {
     return out;
 }
 
+
+// php's double-quoted string. Owning it is what makes `\xNN`, `\u{...}`, the
+// octal escapes and an ESCAPED `\$` possible at all: the core lexer decodes
+// its own (smaller) escape set before any handler runs, and by then `\$` and
+// `$` are the same byte. The interpolation is done here for the same reason,
+// so the node is built during the scan and ph_primary just returns it.
+uptr ph_dqbuf;
+i64  ph_dqcap;
+i64  ph_dqn;
+
+void ph_dq_put(i64 c) {
+    if (ph_dqn >= ph_dqcap) {
+        i64 nc = ph_dqcap * 2 + 64;
+        uptr nb = xalloc(nc);
+        i64 i = 0;
+        loop { if (i >= ph_dqn) break; st8(nb + i, ld8(ph_dqbuf + i)); i = i + 1; }
+        ph_dqbuf = nb;
+        ph_dqcap = nc;
+    }
+    st8(ph_dqbuf + ph_dqn, c);
+    ph_dqn = ph_dqn + 1;
+}
+
+void ph_dq_utf8(i64 cp) {
+    if (cp < 0x80) { ph_dq_put(cp); return; }
+    if (cp < 0x800) { ph_dq_put(0xc0 | (cp >> 6)); ph_dq_put(0x80 | (cp & 63)); return; }
+    if (cp < 0x10000) {
+        ph_dq_put(0xe0 | (cp >> 12));
+        ph_dq_put(0x80 | ((cp >> 6) & 63));
+        ph_dq_put(0x80 | (cp & 63));
+        return;
+    }
+    ph_dq_put(0xf0 | (cp >> 18));
+    ph_dq_put(0x80 | ((cp >> 12) & 63));
+    ph_dq_put(0x80 | ((cp >> 6) & 63));
+    ph_dq_put(0x80 | (cp & 63));
+}
+
+i64 ph_dq_flush(i64 acc) {
+    if (ph_dqn == 0) return acc;
+    i64 lit = ph_strlit(xstrdup(ph_dqbuf, ph_dqn), ph_dqn);
+    ph_dqn = 0;
+    if (!acc) return lit;
+    return ph_c2("php_str_concat", acc, lit, ty_pstr);
+}
+
+i64 ph_name_byte(i64 c, i64 first) {
+    if (c >= 97 && c <= 122) return 1;
+    if (c >= 65 && c <= 90)  return 1;
+    if (c == 95) return 1;
+    if (!first && c >= 48 && c <= 57) return 1;
+    return 0;
+}
+
+// returns the node; writes the byte just past the closing quote through pend
+i64 ph_dq_read(uptr q, uptr e, uptr pend) {
+    uptr p = q + 1;
+    i64 acc = 0;
+    ph_dqn = 0;
+    loop {
+        if (p >= e) err_at(ph_tfile, ph_tline, "mc-php: unterminated php string");
+        i64 c = ld8(p);
+        if (c == 34) { p = p + 1; break; }
+        if (c == 92) {
+            p = p + 1;
+            if (p >= e) break;
+            i64 d = ld8(p);
+            p = p + 1;
+            if (d == 110) { ph_dq_put(10); continue; }
+            if (d == 116) { ph_dq_put(9);  continue; }
+            if (d == 114) { ph_dq_put(13); continue; }
+            if (d == 118) { ph_dq_put(11); continue; }
+            if (d == 101) { ph_dq_put(27); continue; }
+            if (d == 102) { ph_dq_put(12); continue; }
+            if (d == 92)  { ph_dq_put(92); continue; }
+            if (d == 36)  { ph_dq_put(36); continue; }
+            if (d == 34)  { ph_dq_put(34); continue; }
+            if (d == 120 || d == 88) {                 // \xNN
+                i64 v = 0;
+                i64 k = 0;
+                loop {
+                    if (k >= 2 || p >= e) break;
+                    i64 h = ph_digit(ld8(p), 16);
+                    if (h < 0) break;
+                    v = v * 16 + h;
+                    p = p + 1;
+                    k = k + 1;
+                }
+                if (k == 0) { ph_dq_put(92); ph_dq_put(d); continue; }
+                ph_dq_put(v);
+                continue;
+            }
+            if (d == 117) {                            // \u{HHHH}
+                if (p < e && ld8(p) == 123) {
+                    p = p + 1;
+                    i64 v2 = 0;
+                    loop {
+                        if (p >= e) break;
+                        i64 h2 = ph_digit(ld8(p), 16);
+                        if (h2 < 0) break;
+                        v2 = v2 * 16 + h2;
+                        p = p + 1;
+                    }
+                    if (p < e && ld8(p) == 125) p = p + 1;
+                    ph_dq_utf8(v2);
+                    continue;
+                }
+                ph_dq_put(92); ph_dq_put(d);
+                continue;
+            }
+            if (d >= 48 && d <= 55) {                  // \NNN octal
+                i64 v3 = d - 48;
+                i64 k3 = 1;
+                loop {
+                    if (k3 >= 3 || p >= e) break;
+                    i64 o = ld8(p);
+                    if (o < 48 || o > 55) break;
+                    v3 = v3 * 8 + (o - 48);
+                    p = p + 1;
+                    k3 = k3 + 1;
+                }
+                ph_dq_put(v3 & 255);
+                continue;
+            }
+            ph_dq_put(92);                             // php keeps an unknown escape
+            ph_dq_put(d);
+            continue;
+        }
+        i64 nstart = 0;
+        i64 brace = 0;
+        if (c == 36 && p + 1 < e && ph_name_byte(ld8(p + 1), 1)) nstart = p + 1;
+        if (c == 123 && p + 2 < e && ld8(p + 1) == 36 && ph_name_byte(ld8(p + 2), 1)) { nstart = p + 2; brace = 1; }
+        if (!nstart) { ph_dq_put(c); p = p + 1; continue; }
+        uptr k4 = nstart;
+        loop {
+            if (k4 >= e) break;
+            if (!ph_name_byte(ld8(k4), 0)) break;
+            k4 = k4 + 1;
+        }
+        if (brace) {
+            if (k4 >= e || ld8(k4) != 125) { ph_dq_put(c); p = p + 1; continue; }
+        }
+        acc = ph_dq_flush(acc);
+        uptr d2 = xalloc(k4 - nstart + 2);
+        st8(d2, 36);
+        i64 z = 0;
+        loop { if (z >= k4 - nstart) break; st8(d2 + 1 + z, ld8(nstart + z)); z = z + 1; }
+        st8(d2 + 1 + (k4 - nstart), 0);
+        if (ph_var_find(d2) < 0) ph_refuse2(ph_tfile, ph_tline, "an undefined php variable in a string", d2, "D4");
+        i64 vt = ph_var_type(d2);
+        i64 v4 = node_new(N_IDENT, ph_tline, ph_tfile);
+        set_nd_name(v4, ph_mangle(d2, "v_"));
+        set_nd_type(v4, ph_mcty(vt));
+        i64 sv = ph_to_str(v4, vt);
+        if (acc) acc = ph_c2("php_str_concat", acc, sv, ty_pstr);
+        if (!acc) acc = sv;
+        p = k4;
+        if (brace) p = k4 + 1;
+    }
+    st64(pend, p);
+    acc = ph_dq_flush(acc);
+    if (!acc) acc = ph_strlit("", 0);
+    return acc;
+}
+
 void ph_next() {
-    if (ph_tid == PHT_PSTR || ph_tid == PHT_HTML) { p_next(); ph_sync(); return; }
+    if (ph_tid == PHT_PSTR || ph_tid == PHT_HTML || ph_tid == PHT_DSTR) { p_next(); ph_sync(); return; }
     if (ph_nopeek) { ph_nopeek = 0; p_next(); ph_sync(); return; }
     if (p_id() == T_STR || p_id() == T_CHAR || p_id() == T_EOF) { p_next(); ph_sync(); return; }
 
@@ -292,9 +485,10 @@ void ph_next() {
             continue;
         }
         if (c == 39) { quote = 1; break; }              // '
+        if (c == 34) { quote = 2; break; }              // "
         break;
     }
-    if (quote) {
+    if (quote == 1) {
         u8 eb[8];
         u8 lb[8];
         uptr s = ph_sq_read(q, e, eb, lb);
@@ -302,6 +496,16 @@ void ph_next() {
         ph_tid = PHT_PSTR;
         ph_tname = s;
         ph_tlen = ld64(lb);
+        return;
+    }
+    if (quote == 2) {
+        u8 eb2[8];
+        ph_tline = p_line();
+        ph_tfile = p_file();
+        i64 n2 = ph_dq_read(q, e, eb2);
+        p_skip_to(ld64(eb2));
+        ph_tid = PHT_DSTR;
+        ph_tnode = n2;
         return;
     }
     if (q != q0) p_skip_to(q);
@@ -319,6 +523,7 @@ i64 ph_is(uptr w) {
     if (ph_tid == T_INT)  return 0;
     if (ph_tid == PHT_PSTR) return 0;
     if (ph_tid == PHT_HTML) return 0;
+    if (ph_tid == PHT_DSTR) return 0;
     return str_eq(ph_tname, w);
 }
 
@@ -500,6 +705,52 @@ i64 ph_var_bind(uptr d, i64 ty) {
     return 0;
 }
 
+// ---- `const NAME = <literal>;` and define("NAME", <literal>) --------------
+// A constant is compile time here, which is what D1 already requires of every
+// name: there is no run-time symbol table to look one up in.
+#define PH_MAXCONST 256
+
+uptr ph_cname[PH_MAXCONST];
+i64  ph_cty[PH_MAXCONST];
+i64  ph_cval[PH_MAXCONST];
+uptr ph_cstr[PH_MAXCONST];
+i64  ph_nconst;
+
+i64 ph_const_find(uptr n) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_nconst) break;
+        if (str_eq(ld64(ph_cname + i * 8), n)) return i;
+        i = i + 1;
+    }
+    return -1;
+}
+
+// A constant's value has to be known at compile time: an int/bool literal or a
+// string literal, which is the php_str_lit call ph_strlit built.
+void ph_const_add(uptr cn, i64 v, i64 t, uptr fl, i64 line) {
+    if (ph_const_find(cn) >= 0) err_at2(fl, line, "mc-php: this php constant is declared twice", cn);
+    if (ph_nconst >= PH_MAXCONST) err_at(fl, line, "mc-php: too many php constants");
+    i64 val = 0;
+    uptr bytes = 0;
+    if (t == PT_INT || t == PT_BOOL) {
+        if (nd_kind(v) != N_INT) ph_todo2(fl, line, "a php constant whose value is not a literal", cn);
+        val = nd_val(v);
+    } else {
+        if (t != PT_STRING) ph_todo2(fl, line, "a php constant of type", ph_tyname(t));
+        if (nd_kind(v) != N_CALL || !str_eq(nd_name(v), "php_str_lit"))
+            ph_todo2(fl, line, "a php constant whose value is not a literal", cn);
+        i64 raw = nd_next(nd_a(v));
+        bytes = nd_name(raw);
+        val = nd_val(raw);
+    }
+    st64(ph_cname + ph_nconst * 8, cn);
+    st64(ph_cty + ph_nconst * 8, t);
+    st64(ph_cval + ph_nconst * 8, val);
+    st64(ph_cstr + ph_nconst * 8, bytes);
+    ph_nconst = ph_nconst + 1;
+}
+
 // ---- the function table ----------------------------------------------------
 #define PH_MAXFN  256
 #define PH_MAXP   12
@@ -605,6 +856,27 @@ i64 ph_number() {
         i64 c0 = ld8(q);
         if (c0 == 98 || c0 == 66)  base = 2;
         if (c0 == 111 || c0 == 79) base = 8;
+    }
+    // php's LEGACY octal: a leading 0 followed by a digit. The core lexer read
+    // it as decimal, so the digits have to be re-read from the source.
+    if (!base && ld8(p_start()) == 48) {
+        uptr r = p_start() + 1;
+        if (r < q && ph_digit(ld8(r), 8) >= 0) {
+            i64 oct = 0;
+            loop {
+                if (r >= q) break;
+                i64 c1 = ld8(r);
+                if (c1 == 95) { r = r + 1; continue; }
+                i64 d1 = ph_digit(c1, 8);
+                if (d1 < 0) break;
+                oct = oct * 8 + d1;
+                r = r + 1;
+            }
+            p_take_lit(q);
+            ph_next();
+            ph_ety = PT_INT;
+            return ph_int(oct);
+        }
     }
     if (base) {
         q = q + 1;
@@ -748,12 +1020,12 @@ i64 ph_array_lit(uptr close) {
         if (ph_at(close, 1)) break;
         i64 v = ph_expr(0);
         i64 vt = ph_ety;
-        if (ph_at("=>", 2)) ph_refuse(ph_tfile, ph_tline, "an array literal with keys", "T5");
+        if (ph_at("=>", 2)) ph_todo(ph_tfile, ph_tline, "an array literal with keys");
         if (et < 0) et = vt;
         if (et != vt) {
             uptr m = p_cat(ph_tyname(et), " then ", 0, 6);
             m = p_cat(m, ph_tyname(vt), 0, cstrlen(ph_tyname(vt)));
-            ph_refuse2(ph_tfile, ph_tline, "a heterogeneous array literal", m, "T5 (D4 (d) is not implemented yet)");
+            ph_todo2(ph_tfile, ph_tline, "a heterogeneous array literal", m);
         }
         i64 push = ph_c2("php_arr_push", 0, 0, TY_VOID);
         uptr fn = "php_arr_push";
@@ -825,6 +1097,12 @@ i64 ph_primary() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
 
+    if (ph_tid == PHT_DSTR) {
+        i64 n = ph_tnode;
+        ph_next();
+        ph_ety = PT_STRING;
+        return n;
+    }
     if (ph_tid == PHT_PSTR) {
         uptr s = ph_tname;
         i64 n = ph_tlen;
@@ -857,7 +1135,7 @@ i64 ph_primary() {
                 vt = ph_ety;
                 continue;
             }
-            if (ph_at("->", 2) || ph_at("?->", 3)) ph_refuse(fl, line, "an object property or method", "T5 (objects are not in this runtime)");
+            if (ph_at("->", 2) || ph_at("?->", 3)) ph_todo(fl, line, "an object property or method");
             break;
         }
         ph_ety = vt;
@@ -916,7 +1194,7 @@ i64 ph_primary() {
         return n;
     }
     if (ph_at("@", 1)) ph_refuse(fl, line, "the @ error-suppression operator", "D1");
-    if (ph_at("&", 1)) ph_refuse(fl, line, "a reference &$x", "T5 (references are not in this runtime)");
+    if (ph_at("&", 1)) ph_todo(fl, line, "a reference &$x");
     if (ph_at("\\", 1)) { ph_next(); return ph_primary(); }   // a root-namespaced name
     if (ph_tid == T_IDENT) {
         uptr name = ph_tname;
@@ -1027,7 +1305,7 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
             ph_refuse2(fl, line, "comparing a string with a number", ph_tyname(lt), "D4");
         }
     }
-    if (ph_is_arr(lt) || ph_is_arr(rt)) ph_refuse(fl, line, "comparing arrays", "T5");
+    if (ph_is_arr(lt) || ph_is_arr(rt)) ph_todo(fl, line, "comparing arrays");
     i64 flt = 0;
     if (lt == PT_FLOAT || rt == PT_FLOAT) flt = 1;
     i64 a = lhs;
@@ -1099,10 +1377,10 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
     ph_want("(", 1, "expected ( in a php call");
     loop {
         if (ph_at(")", 1)) break;
-        if (ph_at("...", 3)) ph_refuse(fl, line, "argument unpacking ...$args", "T5");
+        if (ph_at("...", 3)) ph_todo(fl, line, "argument unpacking ...$args");
         i64 a = ph_expr(0);
         i64 t = ph_ety;
-        if (n >= maxn) ph_refuse(fl, line, "too many arguments for this builtin", "T5");
+        if (n >= maxn) ph_todo(fl, line, "too many arguments for this builtin");
         st64(buf + n * 16, a);
         st64(buf + n * 16 + 8, t);
         n = n + 1;
@@ -1117,7 +1395,7 @@ i64 ph_a(uptr av, i64 i) { return ld64(av + i * 16); }
 i64 ph_aty(uptr av, i64 i) { return ld64(av + i * 16 + 8); }
 
 void ph_need(i64 have, i64 n, uptr name, uptr fl, i64 line) {
-    if (have != n) ph_refuse2(fl, line, "the wrong number of arguments for", name, "T5");
+    if (have != n) ph_todo2(fl, line, "the wrong number of arguments for", name);
 }
 
 // var_dump of one value, by its static type
@@ -1129,7 +1407,7 @@ i64 ph_vd(i64 v, i64 t, uptr fl, i64 line) {
     if (t == PT_STRING) return ph_c1("php_vd_str", v, TY_VOID);
     if (t == PT_NULL)   return ph_call("php_vd_null", 0, 0, 0, 0, 0, TY_VOID);
     if (ph_is_arr(t))   return ph_c3("php_vd_arr", v, ph_int(ph_elem(t)), ph_int(0), TY_VOID);
-    ph_refuse2(fl, line, "var_dump of", ph_tyname(t), "T5");
+    ph_todo2(fl, line, "var_dump of", ph_tyname(t));
     return 0;
 }
 
@@ -1138,7 +1416,7 @@ i64 ph_echo_of(i64 v, i64 t, uptr fl, i64 line) {
     if (t == PT_BOOL)   return ph_c1("php_echo_bool", v, TY_I64);
     if (t == PT_FLOAT)  return ph_c1("php_echo_float", v, TY_I64);
     if (t == PT_STRING) return ph_c1("php_echo_str", v, TY_I64);
-    ph_refuse2(fl, line, "echo of", ph_tyname(t), "T5");
+    ph_todo2(fl, line, "echo of", ph_tyname(t));
     return 0;
 }
 
@@ -1146,7 +1424,7 @@ i64 ph_echo_of(i64 v, i64 t, uptr fl, i64 line) {
 // into a chain of concatenations and there is no run-time format walker.
 i64 ph_sprintf(uptr av, i64 na, uptr fl, i64 line) {
     i64 f = ph_a(av, 0);
-    if (ph_aty(av, 0) != PT_STRING) ph_refuse(fl, line, "a printf format that is not a string", "T5");
+    if (ph_aty(av, 0) != PT_STRING) ph_todo(fl, line, "a printf format that is not a string");
     if (nd_kind(f) != N_CALL || !str_eq(nd_name(f), "php_str_lit"))
         ph_refuse(fl, line, "a printf format that is not a literal", "D1");
     i64 raw = nd_next(nd_a(f));                     // the N_STR argument
@@ -1169,7 +1447,7 @@ i64 ph_sprintf(uptr av, i64 na, uptr fl, i64 line) {
         i64 piece = 0;
         if (c == 37) piece = ph_strlit("%", 1);
         if (c == 100 || c == 115 || c == 102) {
-            if (ai >= na) ph_refuse(fl, line, "a printf format with more conversions than arguments", "T5");
+            if (ai >= na) ph_todo(fl, line, "a printf format with more conversions than arguments");
             i64 v = ph_a(av, ai);
             i64 vt = ph_aty(av, ai);
             ai = ai + 1;
@@ -1180,7 +1458,7 @@ i64 ph_sprintf(uptr av, i64 na, uptr fl, i64 line) {
         if (!piece) {
             uptr w = xalloc(4);
             st8(w, 37); st8(w + 1, c); st8(w + 2, 0);
-            ph_refuse2(fl, line, "a printf conversion T5 does not have", w, "T5 (only %d %s %f %%)");
+            ph_todo2(fl, line, "a printf conversion T5 does not have", w);
         }
         if (acc) acc = ph_c2("php_str_concat", acc, piece, ty_pstr);
         if (!acc) acc = piece;
@@ -1224,11 +1502,81 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "PHP_INT_MAX"))  { ph_next(); ph_ety = PT_INT; return ph_int(9223372036854775807); }
     if (str_eq(name, "PHP_INT_MIN"))  { ph_next(); ph_ety = PT_INT; return ph_bin(ph_tok("-", 1), ph_int(-9223372036854775807), ph_int(1), TY_I64); }
     if (str_eq(name, "PHP_INT_SIZE")) { ph_next(); ph_ety = PT_INT; return ph_int(8); }
+    if (str_eq(name, "PHP_FLOAT_DIG")) { ph_next(); ph_ety = PT_INT; return ph_int(15); }
+    if (str_eq(name, "STR_PAD_RIGHT")) { ph_next(); ph_ety = PT_INT; return ph_int(0); }
+    if (str_eq(name, "STR_PAD_LEFT"))  { ph_next(); ph_ety = PT_INT; return ph_int(1); }
+    if (str_eq(name, "STR_PAD_BOTH"))  { ph_next(); ph_ety = PT_INT; return ph_int(2); }
+    if (str_eq(name, "__LINE__")) { i64 l = ph_tline; ph_next(); ph_ety = PT_INT; return ph_int(l); }
+    if (str_eq(name, "__FILE__")) {
+        uptr f = ph_tfile;
+        ph_next();
+        ph_ety = PT_STRING;
+        return ph_strlit(f, cstrlen(f));
+    }
+    if (str_eq(name, "__DIR__")) {
+        uptr f = path_norm(path_join(ph_tfile, "."));
+        ph_next();
+        ph_ety = PT_STRING;
+        return ph_strlit(f, cstrlen(f));
+    }
+    if (str_eq(name, "__FUNCTION__") || str_eq(name, "__METHOD__")) {
+        uptr f2 = p_decl_name();
+        ph_next();
+        ph_ety = PT_STRING;
+        if (!f2) return ph_strlit("", 0);
+        return ph_strlit(f2 + 2, cstrlen(f2 + 2));
+    }
+    // a constant this program declared with `const` or define()
+    i64 ci = ph_const_find(name);
+    if (ci >= 0) {
+        ph_next();
+        i64 ct = ld64(ph_cty + ci * 8);
+        ph_ety = ct;
+        if (ct == PT_STRING) return ph_strlit(ld64(ph_cstr + ci * 8), ld64(ph_cval + ci * 8));
+        if (ct == PT_BOOL)   return ph_bool(ld64(ph_cval + ci * 8));
+        return ph_int(ld64(ph_cval + ci * 8));
+    }
 
+    if (str_eq(name, "array")) {
+        ph_next();
+        if (!ph_at("(", 1)) ph_todo2(fl, line, "a php constant T5 does not have", name);
+        ph_next();
+        return ph_array_lit(")");
+    }
+    // D4 makes these compile-time answers too: a variable HAS a type or it does
+    // not exist, and there is no null to be unset.
+    if (str_eq(name, "isset") || str_eq(name, "empty")) {
+        i64 isempty = str_eq(name, "empty");
+        ph_next();
+        ph_want("(", 1, "expected ( in a php call");
+        if (!ph_at("$", 1)) ph_todo2(fl, line, "isset/empty of", "something that is not a $variable");
+        ph_next();
+        if (ph_tid != T_IDENT) err_at(fl, line, "mc-php: a php variable needs a name");
+        uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
+        ph_next();
+        i64 known = 0;
+        if (ph_var_find(d) >= 0) known = 1;
+        if (ph_at("[", 1)) ph_todo(fl, line, "isset/empty of an array element");
+        ph_want(")", 1, "expected ) in a php call");
+        ph_ety = PT_BOOL;
+        if (!isempty) return ph_bool(known);
+        if (!known) return ph_bool(1);
+        i64 t = ph_var_type(d);
+        i64 v = node_new(N_IDENT, line, fl);
+        set_nd_name(v, ph_mangle(d, "v_"));
+        set_nd_type(v, ph_mcty(t));
+        i64 b = ph_to_bool(v, t);
+        i64 nn = node_new(N_UNARY, line, fl);
+        set_nd_op(nn, ph_tok("!", 1));
+        set_nd_a(nn, b);
+        set_nd_type(nn, TY_U8);
+        ph_ety = PT_BOOL;
+        return nn;
+    }
     ph_next();
     if (!ph_at("(", 1)) {
-        if (ph_at("::", 2)) ph_refuse(fl, line, "a class constant or static member", "T5 (objects are not in this runtime)");
-        ph_refuse2(fl, line, "a php constant T5 does not have", name, "T5");
+        if (ph_at("::", 2)) ph_todo(fl, line, "a class constant or static member");
+        ph_todo2(fl, line, "a php constant T5 does not have", name);
     }
 
     if (str_eq(name, "sprintf") || str_eq(name, "printf")) {
@@ -1269,7 +1617,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "strlen"))   { ph_need(na, 1, name, fl, line); ph_ety = PT_INT; return ph_c1("php_strlen", ph_to_str(a0, t0), TY_I64); }
     if (str_eq(name, "count") || str_eq(name, "sizeof")) {
         ph_need(na, 1, name, fl, line);
-        if (!ph_is_arr(t0)) ph_refuse2(fl, line, "count() of", ph_tyname(t0), "T5");
+        if (!ph_is_arr(t0)) ph_todo2(fl, line, "count() of", ph_tyname(t0));
         ph_ety = PT_INT;
         return ph_c1("php_count", a0, TY_I64);
     }
@@ -1307,8 +1655,8 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (!ph_is_arr(at)) {                            // implode($arr, $sep), the legacy order
             sep = ph_a(av, 1); arr = a0; at = t0;
         }
-        if (!ph_is_arr(at)) ph_refuse(fl, line, "implode() without an array", "T5");
-        if (ph_elem(at) != PT_STRING) ph_refuse2(fl, line, "implode() of", ph_tyname(at), "T5 (strings only)");
+        if (!ph_is_arr(at)) ph_todo(fl, line, "implode() without an array");
+        if (ph_elem(at) != PT_STRING) ph_todo2(fl, line, "implode() of", ph_tyname(at));
         ph_ety = PT_STRING;
         return ph_c2("php_implode", ph_to_str(sep, PT_STRING), arr, ty_pstr);
     }
@@ -1342,6 +1690,53 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (str_eq(name, "min")) f2 = "php_min_i";
         return ph_c2(f2, ph_to_int(a0, t0), ph_to_int(ph_a(av, 1), t1), TY_I64);
     }
+    if (str_eq(name, "define")) {
+        ph_need(na, 2, name, fl, line);
+        if (t0 != PT_STRING || nd_kind(a0) != N_CALL || !str_eq(nd_name(a0), "php_str_lit"))
+            ph_refuse(fl, line, "define() with a computed name", "D1");
+        i64 rawn = nd_next(nd_a(a0));
+        ph_const_add(xstrdup(nd_name(rawn), nd_val(rawn)), ph_a(av, 1), ph_aty(av, 1), fl, line);
+        ph_ety = PT_BOOL;
+        return ph_bool(1);
+    }
+    if (str_eq(name, "defined")) {
+        ph_need(na, 1, name, fl, line);
+        if (t0 != PT_STRING || nd_kind(a0) != N_CALL || !str_eq(nd_name(a0), "php_str_lit"))
+            ph_refuse(fl, line, "defined() with a computed name", "D1");
+        i64 rawd = nd_next(nd_a(a0));
+        ph_ety = PT_BOOL;
+        if (ph_const_find(xstrdup(nd_name(rawd), nd_val(rawd))) >= 0) return ph_bool(1);
+        return ph_bool(0);
+    }
+    if (str_eq(name, "chr")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_chr", ph_to_int(a0, t0), ty_pstr); }
+    if (str_eq(name, "ord")) { ph_need(na, 1, name, fl, line); ph_ety = PT_INT; return ph_c1("php_ord", ph_to_str(a0, t0), TY_I64); }
+    if (str_eq(name, "strtoupper")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_strtoupper", ph_to_str(a0, t0), ty_pstr); }
+    if (str_eq(name, "strtolower")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_strtolower", ph_to_str(a0, t0), ty_pstr); }
+    if (str_eq(name, "ucfirst")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_ucfirst", ph_to_str(a0, t0), ty_pstr); }
+    if (str_eq(name, "lcfirst")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_lcfirst", ph_to_str(a0, t0), ty_pstr); }
+    if (str_eq(name, "strrev")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_strrev", ph_to_str(a0, t0), ty_pstr); }
+    if (str_eq(name, "trim") || str_eq(name, "ltrim") || str_eq(name, "rtrim")) {
+        if (na != 1) ph_todo2(fl, line, "a trim with a charlist", name);
+        i64 mode = 0;
+        if (str_eq(name, "ltrim")) mode = 1;
+        if (str_eq(name, "rtrim")) mode = 2;
+        ph_ety = PT_STRING;
+        return ph_c2("php_trim", ph_to_str(a0, t0), ph_int(mode), ty_pstr);
+    }
+    if (str_eq(name, "str_pad")) {
+        if (na < 2 || na > 4) ph_need(na, 2, name, fl, line);
+        i64 pad = ph_strlit(" ", 1);
+        i64 type = ph_int(0);
+        if (na >= 3) pad = ph_to_str(ph_a(av, 2), ph_aty(av, 2));
+        if (na >= 4) type = ph_to_int(ph_a(av, 3), ph_aty(av, 3));
+        ph_ety = PT_STRING;
+        return ph_c4("php_str_pad", ph_to_str(a0, t0), ph_to_int(ph_a(av, 1), ph_aty(av, 1)), pad, type, ty_pstr);
+    }
+    if (str_eq(name, "str_contains")) { ph_need(na, 2, name, fl, line); ph_ety = PT_BOOL; return ph_c2("php_str_contains", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), TY_U8); }
+    if (str_eq(name, "str_starts_with")) { ph_need(na, 2, name, fl, line); ph_ety = PT_BOOL; return ph_c2("php_str_starts", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), TY_U8); }
+    if (str_eq(name, "str_ends_with")) { ph_need(na, 2, name, fl, line); ph_ety = PT_BOOL; return ph_c2("php_str_ends", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), TY_U8); }
+    if (str_eq(name, "strcmp")) { ph_need(na, 2, name, fl, line); ph_ety = PT_INT; return ph_c2("php_str_cmp", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), TY_I64); }
+    if (str_eq(name, "strcasecmp")) { ph_need(na, 2, name, fl, line); ph_ety = PT_INT; return ph_c2("php_strcasecmp", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), TY_I64); }
     if (str_eq(name, "intval")) { ph_need(na, 1, name, fl, line); ph_ety = PT_INT;    return ph_to_int(a0, t0); }
     if (str_eq(name, "strval")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_to_str(a0, t0); }
     if (str_eq(name, "floatval") || str_eq(name, "doubleval")) { ph_need(na, 1, name, fl, line); ph_ety = PT_FLOAT; return ph_to_float(a0, t0); }
@@ -1362,9 +1757,9 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
 
     // a php function this program declared
     i64 fi = ph_fn_find(name);
-    if (fi < 0) ph_refuse2(fl, line, "a php function T5 does not have", name, "T5 (the list is in probes/t5/RESULTS.md)");
+    if (fi < 0) ph_todo2(fl, line, "a php function T5 does not have", name);
     i64 np = ld64(ph_fnp + fi * 8);
-    if (na != np) ph_refuse2(fl, line, "the wrong number of arguments for", name, "T5");
+    if (na != np) ph_todo2(fl, line, "the wrong number of arguments for", name);
     i64 head = 0;
     i64 tail = 0;
     i64 i = 0;
@@ -1471,7 +1866,37 @@ i64 ph_block_or_stmt() {
     return ph_stmt();
 }
 
+// `continue` jumps to the top of an mc `loop`, so a step appended after the
+// body would be SKIPPED by it -- an infinite loop, measured on
+// `for (...; $i++) { if (c) continue; }`. The step therefore runs at the TOP,
+// guarded by a first-iteration flag, which is the one lowering where every
+// edge into the next iteration passes through it.
 i64 ph_loop_of(i64 cond, i64 body, i64 step, i64 line, uptr fl) {
+    i64 pre = 0;
+    if (step) {
+        ph_nonce = ph_nonce + 1;
+        uptr fn = p_cat("phl_f", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+        ph_local(fn, TY_I64);
+        pre = ph_set(fn, ph_int(1));                 // emitted by the caller? no: here
+        i64 fref = node_new(N_IDENT, line, fl);
+        set_nd_name(fref, fn);
+        set_nd_type(fref, TY_I64);
+        i64 clr = ph_set(fn, ph_int(0));
+        i64 gate = node_new(N_IF, line, fl);
+        set_nd_a(gate, fref);
+        set_nd_b(gate, clr);
+        set_nd_c(gate, step);
+        step = 0;
+        set_nd_next(gate, 0);
+        i64 nb = node_new(N_BLOCK, line, fl);        // gate, then the old body
+        set_nd_a(nb, gate);
+        i64 hold = body;
+        body = gate;
+        set_nd_next(gate, hold);
+        // `pre` (the flag = 1) has to run before the loop: the caller splices
+        // it in through ph_loop_pre.
+        ph_loop_pre = pre;
+    }
     i64 neg = node_new(N_UNARY, line, fl);
     set_nd_op(neg, ph_tok("!", 1));
     set_nd_a(neg, cond);
@@ -1481,14 +1906,31 @@ i64 ph_loop_of(i64 cond, i64 body, i64 step, i64 line, uptr fl) {
     i64 iff = node_new(N_IF, line, fl);
     set_nd_a(iff, neg);
     set_nd_b(iff, brk);
-    set_nd_next(iff, body);
-    i64 t = body;
-    loop { if (!nd_next(t)) break; t = nd_next(t); }
-    if (step) set_nd_next(t, step);
+    // body already begins with the step gate when there is a step
+    i64 first = body;
+    if (nd_kind(body) == N_IF && ph_loop_pre) {
+        // the gate is first; the condition test goes between it and the body
+        i64 rest = nd_next(body);
+        set_nd_next(body, iff);
+        set_nd_next(iff, rest);
+        first = body;
+    }
+    if (!ph_loop_pre) {
+        set_nd_next(iff, body);
+        first = iff;
+    }
     i64 b = node_new(N_BLOCK, line, fl);
-    set_nd_a(b, iff);
+    set_nd_a(b, first);
     i64 lp = node_new(N_LOOP, line, fl);
     set_nd_a(lp, b);
+    if (ph_loop_pre) {
+        i64 pr = ph_loop_pre;
+        ph_loop_pre = 0;
+        set_nd_next(pr, lp);
+        i64 ob = node_new(N_BLOCK, line, fl);
+        set_nd_a(ob, pr);
+        return ob;
+    }
     return lp;
 }
 
@@ -1516,7 +1958,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         if (vt != et) {
             uptr m = p_cat(ph_tyname(et), " assigned ", 0, 10);
             m = p_cat(m, ph_tyname(vt), 0, cstrlen(ph_tyname(vt)));
-            ph_refuse2(fl, line, "a heterogeneous array", m, "T5 (D4 (d) is not implemented yet)");
+            ph_todo2(fl, line, "a heterogeneous array", m);
         }
         ph_want(";", 1, "expected ; after a php assignment");
         i64 aref = node_new(N_IDENT, line, fl);
@@ -1589,10 +2031,10 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
 
     if (!ph_at("=", 1)) {
         if (ph_at("=>", 2)) err_at(fl, line, "mc-php: unexpected => outside foreach");
-        ph_refuse2(fl, line, "a php variable used as a statement", d, "T5");
+        ph_todo2(fl, line, "a php variable used as a statement", d);
     }
     ph_next();
-    if (ph_at("&", 1)) ph_refuse(fl, line, "an assignment by reference", "T5");
+    if (ph_at("&", 1)) ph_todo(fl, line, "an assignment by reference");
     i64 v = ph_expr(0);
     i64 vt = ph_ety;
     if (semi) ph_want(";", 1, "expected ; after a php assignment");
@@ -1634,8 +2076,10 @@ void ph_require(i64 once, uptr fl, i64 line) {
     uptr txt = read_file(full, &len);
     if (!txt) err_at2(fl, line, "mc-php: cannot open the required file", full);
     if (len < 5 || !str_eq(xstrdup(txt, 5), "<?php"))
-        ph_refuse2(fl, line, "an included file that does not open with <?php", full, "T5");
+        ph_todo2(fl, line, "an included file that does not open with <?php", full);
+    ph_pushing = 1;
     p_push_source(full, txt + 5, len - 5);
+    ph_pushing = 0;
     ph_nopeek = 1;
     ph_next();
 }
@@ -1686,9 +2130,9 @@ i64 ph_stmt() {
         ph_next();
         ph_want("(", 1, "expected ( after while");
         i64 c = ph_to_bool(ph_expr(0), ph_ety);
-        if (ph_pend_head) ph_refuse(fl, line, "a while condition that needs a temporary", "T5");
+        if (ph_pend_head) ph_todo(fl, line, "a while condition that needs a temporary");
         ph_want(")", 1, "expected ) after while");
-        if (ph_at(":", 1)) ph_refuse(fl, line, "the alternative while: endwhile; syntax", "T5");
+        if (ph_at(":", 1)) ph_todo(fl, line, "the alternative while: endwhile; syntax");
         i64 body = ph_block_or_stmt();
         return ph_loop_of(c, body, 0, line, fl);
     }
@@ -1733,7 +2177,7 @@ i64 ph_stmt() {
             step = ph_assign_stmt(fl, line, 0);         // $i++ / $i += e, no ;
         }
         ph_want(")", 1, "expected ) after for");
-        if (ph_at(":", 1)) ph_refuse(fl, line, "the alternative for: endfor; syntax", "T5");
+        if (ph_at(":", 1)) ph_todo(fl, line, "the alternative for: endfor; syntax");
         i64 body = ph_block_or_stmt();
         i64 lp = ph_loop_of(c, body, step, line, fl);
         i64 t2 = init;
@@ -1773,14 +2217,28 @@ i64 ph_stmt() {
         ph_accept(";", 1);
         return ph_empty();
     }
+    if (ph_is("const")) {
+        ph_next();
+        loop {
+            if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php constant needs a name", ph_tname);
+            uptr cn = ph_tname;
+            ph_next();
+            ph_want("=", 1, "expected = in a php const");
+            i64 v = ph_expr(0);
+            ph_const_add(cn, v, ph_ety, fl, line);
+            if (!ph_accept(",", 1)) break;
+        }
+        ph_want(";", 1, "expected ; after a php const");
+        return ph_empty();
+    }
     if (ph_is("unset")) ph_refuse(fl, line, "unset()", "D4 (a variable's type is its declaration)");
-    if (ph_is("global") || ph_is("static")) ph_refuse2(fl, line, "the storage keyword", ph_tname, "T5");
-    if (ph_is("switch")) ph_refuse(fl, line, "switch", "T5");
-    if (ph_is("match"))  ph_refuse(fl, line, "match", "T5");
-    if (ph_is("try") || ph_is("throw") || ph_is("catch")) ph_refuse(fl, line, "exceptions", "T5");
+    if (ph_is("global") || ph_is("static")) ph_todo2(fl, line, "the storage keyword", ph_tname);
+    if (ph_is("switch")) ph_todo(fl, line, "switch");
+    if (ph_is("match"))  ph_todo(fl, line, "match");
+    if (ph_is("try") || ph_is("throw") || ph_is("catch")) ph_todo(fl, line, "exceptions");
     if (ph_is("class") || ph_is("interface") || ph_is("trait") || ph_is("enum"))
-        ph_refuse2(fl, line, "the declaration", ph_tname, "T5 (objects are not in this runtime)");
-    if (ph_is("goto")) ph_refuse(fl, line, "goto", "T5");
+        ph_todo2(fl, line, "the declaration", ph_tname);
+    if (ph_is("goto")) ph_todo(fl, line, "goto");
     if (ph_is("exit") || ph_is("die")) {
         ph_next();
         i64 code = ph_int(0);
@@ -1805,7 +2263,10 @@ i64 ph_stmt() {
 
     i64 e = ph_expr(0);
     if (!ph_at(")", 1)) ph_want(";", 1, "expected ; after a php expression");
-    if (ph_ety == PT_VOID || ph_ety == PT_NULL) return ph_expr_stmt_of(ph_int(0));
+    // var_dump() and the null literal have already emitted everything they do
+    // (ph_pending_stmt) and their value is a constant: dropping it keeps the
+    // statement list free of dead expressions. A VOID CALL is not that.
+    if (nd_kind(e) == N_INT) return ph_wrap(ph_empty());
     return ph_expr_stmt_of(e);
 }
 
@@ -1815,7 +2276,7 @@ i64 ph_if(uptr fl, i64 line) {
     ph_want("(", 1, "expected ( after if");
     i64 c = ph_to_bool(ph_expr(0), ph_ety);
     ph_want(")", 1, "expected ) after if");
-    if (ph_at(":", 1)) ph_refuse(fl, line, "the alternative if: endif; syntax", "T5");
+    if (ph_at(":", 1)) ph_todo(fl, line, "the alternative if: endif; syntax");
     i64 pre = ph_pend_head;
     i64 pret = ph_pend_tail;
     ph_pend_head = 0;
@@ -1846,25 +2307,25 @@ i64 ph_foreach(uptr fl, i64 line) {
     ph_want("(", 1, "expected ( after foreach");
     i64 src = ph_expr(0);
     i64 st = ph_ety;
-    if (!ph_is_arr(st)) ph_refuse2(fl, line, "foreach over", ph_tyname(st), "T5 (arrays only)");
+    if (!ph_is_arr(st)) ph_todo2(fl, line, "foreach over", ph_tyname(st));
     i64 et = ph_elem(st);
     if (!ph_is("as")) err_at(fl, line, "mc-php: expected as in foreach");
     ph_next();
-    if (!ph_at("$", 1)) ph_refuse(fl, line, "foreach without a $variable", "T5");
+    if (!ph_at("$", 1)) ph_todo(fl, line, "foreach without a $variable");
     ph_next();
     uptr k1 = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
     ph_next();
     uptr kv = 0;
     if (ph_at("=>", 2)) {
         ph_next();
-        if (ph_at("&", 1)) ph_refuse(fl, line, "foreach by reference", "T5");
-        if (!ph_at("$", 1)) ph_refuse(fl, line, "foreach without a $variable", "T5");
+        if (ph_at("&", 1)) ph_todo(fl, line, "foreach by reference");
+        if (!ph_at("$", 1)) ph_todo(fl, line, "foreach without a $variable");
         ph_next();
         kv = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
     }
     ph_want(")", 1, "expected ) after foreach");
-    if (ph_at(":", 1)) ph_refuse(fl, line, "the alternative foreach: endforeach; syntax", "T5");
+    if (ph_at(":", 1)) ph_todo(fl, line, "the alternative foreach: endforeach; syntax");
 
     uptr key = 0;
     uptr val = k1;
@@ -1940,8 +2401,8 @@ i64 ph_function() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
     ph_next();                                    // function
-    if (ph_at("&", 1)) ph_refuse(fl, line, "a function returning by reference", "T5");
-    if (ph_tid != T_IDENT) ph_refuse(fl, line, "an anonymous function or closure", "T5");
+    if (ph_at("&", 1)) ph_todo(fl, line, "a function returning by reference");
+    if (ph_tid != T_IDENT) ph_todo(fl, line, "an anonymous function or closure");
     uptr name = ph_tname;
     ph_next();
     if (ph_fn_find(name) >= 0) err_at2(fl, line, "mc-php: this php function is declared twice", name);
@@ -1959,17 +2420,17 @@ i64 ph_function() {
     i64 np = 0;
     loop {
         if (ph_at(")", 1)) break;
-        if (ph_at("...", 3)) ph_refuse(fl, line, "a variadic parameter ...$args", "T5");
-        if (ph_at("&", 1)) ph_refuse(fl, line, "a by-reference parameter", "T5");
+        if (ph_at("...", 3)) ph_todo(fl, line, "a variadic parameter ...$args");
+        if (ph_at("&", 1)) ph_todo(fl, line, "a by-reference parameter");
         i64 pt = -1;
         if (!ph_at("$", 1)) pt = ph_type_word(1);
         if (pt < 0) ph_refuse(fl, line, "an untyped php parameter (D4 needs the type)", "D4");
-        if (!ph_at("$", 1)) ph_refuse(fl, line, "a php parameter without $name", "T5");
+        if (!ph_at("$", 1)) ph_todo(fl, line, "a php parameter without $name");
         ph_next();
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
-        if (ph_at("=", 1)) ph_refuse(fl, line, "a default parameter value", "T5");
-        if (np >= PH_MAXP) ph_refuse(fl, line, "more than 12 parameters", "T5 (mc's MAXPARAMS)");
+        if (ph_at("=", 1)) ph_todo(fl, line, "a default parameter value");
+        if (np >= PH_MAXP) ph_todo(fl, line, "more than 12 parameters");
         ph_var_bind(d, pt);
         st64(ph_fpt + (fi * PH_MAXP + np) * 8, pt);
         np = np + 1;
@@ -2057,10 +2518,11 @@ i64 ph_ends(uptr s, uptr sfx) {
 }
 
 void ph_on_source(uptr name, uptr src, i64 len) {
+    if (ph_pushing) return;                  // the body of a require: <?php already eaten
     if (!ph_ends(name, ".php")) return;
     if (len >= 5 && str_eq(xstrdup(src, 5), "<?php")) return;
     if (len >= 3 && str_eq(xstrdup(src, 3), "<?=")) return;
-    ph_refuse(name, 1, "a php file that does not open with <?php (leading inline html)", "T5");
+    ph_todo(name, 1, "a php file that does not open with <?php (leading inline html)");
 }
 
 i64 ph_dollar_expr() {

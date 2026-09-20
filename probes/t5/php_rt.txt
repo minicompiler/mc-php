@@ -737,3 +737,107 @@ uptr php_ftos6(f64 x) {
     }
     return php_str_new(t, n);
 }
+
+// ---- the rest of the string set T5 implements -----------------------------
+uptr php_chr(i64 c) {
+    i64 b = c % 256;
+    if (b < 0) b = b + 256;
+    u8 t[1];
+    st8(t, b);
+    return php_str_new(t, 1);
+}
+i64 php_ord(uptr s) { if (php_strlen(s) == 0) return 0; return ld8(s + ZS_HDR); }
+
+uptr php_case(uptr s, i64 up) {
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        if (up && c >= 'a' && c <= 'z') c = c - 32;
+        if (!up && c >= 'A' && c <= 'Z') c = c + 32;
+        st8(o + ZS_HDR + i, c);
+        i = i + 1;
+    }
+    return o;
+}
+uptr php_strtoupper(uptr s) { return php_case(s, 1); }
+uptr php_strtolower(uptr s) { return php_case(s, 0); }
+
+uptr php_ucfirst(uptr s) {
+    i64 n = php_strlen(s);
+    if (n == 0) return s;
+    uptr o = php_str_new(s + ZS_HDR, n);
+    i64 c = ld8(o + ZS_HDR);
+    if (c >= 'a' && c <= 'z') st8(o + ZS_HDR, c - 32);
+    return o;
+}
+uptr php_lcfirst(uptr s) {
+    i64 n = php_strlen(s);
+    if (n == 0) return s;
+    uptr o = php_str_new(s + ZS_HDR, n);
+    i64 c = ld8(o + ZS_HDR);
+    if (c >= 'A' && c <= 'Z') st8(o + ZS_HDR, c + 32);
+    return o;
+}
+
+// php's default charlist for trim: " \t\n\r\0\x0B"
+i64 php_trimset(i64 c) {
+    if (c == 32 || c == 9 || c == 10 || c == 13 || c == 0 || c == 11) return 1;
+    return 0;
+}
+uptr php_trim(uptr s, i64 mode) {         // 0 both, 1 left, 2 right
+    i64 n = php_strlen(s);
+    i64 a = 0;
+    i64 b = n;
+    if (mode != 2) { loop { if (a >= b) break; if (!php_trimset(ld8(s + ZS_HDR + a))) break; a = a + 1; } }
+    if (mode != 1) { loop { if (b <= a) break; if (!php_trimset(ld8(s + ZS_HDR + b - 1))) break; b = b - 1; } }
+    return php_str_new(s + ZS_HDR + a, b - a);
+}
+
+uptr php_strrev(uptr s) {
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n);
+    i64 i = 0;
+    loop { if (i >= n) break; st8(o + ZS_HDR + i, ld8(s + ZS_HDR + n - 1 - i)); i = i + 1; }
+    return o;
+}
+
+uptr php_str_pad(uptr s, i64 len, uptr pad, i64 type) {    // 0 right, 1 left, 2 both
+    i64 n = php_strlen(s);
+    i64 pl = php_strlen(pad);
+    if (len <= n || pl == 0) return s;
+    i64 need = len - n;
+    i64 left = 0;
+    if (type == 1) left = need;
+    if (type == 2) left = need / 2;
+    i64 right = need - left;
+    uptr o = php_str_alloc(len);
+    i64 w = 0;
+    i64 i = 0;
+    loop { if (i >= left) break; st8(o + ZS_HDR + w, ld8(pad + ZS_HDR + i % pl)); w = w + 1; i = i + 1; }
+    php_memcpy(o + ZS_HDR + w, s + ZS_HDR, n);
+    w = w + n;
+    i = 0;
+    loop { if (i >= right) break; st8(o + ZS_HDR + w, ld8(pad + ZS_HDR + i % pl)); w = w + 1; i = i + 1; }
+    return o;
+}
+
+u8 php_str_contains(uptr h, uptr n) { if (php_strlen(n) == 0) return 1; if (php_strpos(h, n, 0) >= 0) return 1; return 0; }
+u8 php_str_starts(uptr h, uptr n) {
+    i64 ln = php_strlen(n);
+    if (ln > php_strlen(h)) return 0;
+    i64 i = 0;
+    loop { if (i >= ln) break; if (ld8(h + ZS_HDR + i) != ld8(n + ZS_HDR + i)) return 0; i = i + 1; }
+    return 1;
+}
+u8 php_str_ends(uptr h, uptr n) {
+    i64 ln = php_strlen(n);
+    i64 lh = php_strlen(h);
+    if (ln > lh) return 0;
+    i64 i = 0;
+    loop { if (i >= ln) break; if (ld8(h + ZS_HDR + lh - ln + i) != ld8(n + ZS_HDR + i)) return 0; i = i + 1; }
+    return 1;
+}
+i64 php_strcasecmp(uptr a, uptr b) { return php_str_cmp(php_case(a, 0), php_case(b, 0)); }
