@@ -87,6 +87,15 @@ i64  ph_recv(i64 v, i64 t);
 void ph_skip_type();
 i64  ph_obj_stmt(uptr d, uptr fl, i64 line, i64 semi);
 i64  ph_calln(uptr fn, uptr args, i64 n, i64 ty);
+i64  ph_take_pend();
+uptr ph_scope_save();
+void ph_scope_restore(uptr b);
+i64  ph_closure(uptr fl, i64 line, i64 arrow);
+i64  ph_prefix_stmts(i64 pre, i64 s);
+void ph_ls_push(i64 kind);
+void ph_ls_pop();
+i64  ph_ls_level(i64 n, uptr fl, i64 line);
+i64  ph_check(i64 line, uptr fl);
 i64  ph_lv_walk(uptr d, uptr fl, i64 line, uptr pkey, i64 hoist);
 i64  ph_index(i64 base, i64 bt);
 i64  ph_zkey(i64 n, i64 t);
@@ -122,6 +131,16 @@ i64  ph_empty();
 i64  ph_expr_stmt_of(i64 e);
 i64  ph_loop_of(i64 cond, i64 body, i64 step, i64 line, uptr fl);
 i64  ph_loop_pre;
+
+// `break N` counts php LOOPS; a try block is lowered as a one-iteration mc
+// loop so a throw can break out of it, so the mc level is the php level plus
+// the try wrappers in between.
+#define PH_MAXLS 64
+i64 ph_lstack[PH_MAXLS];
+i64 ph_nls;
+i64 ph_can_throw;              // this statement contains a call
+i64 ph_in_try;
+i64 ph_toplevel;               // parsing main: an uncaught throwable is fatal
 i64  ph_pushing;
 i64  ph_type_word(i64 must);
 i64  ph_vd(i64 v, i64 t, uptr fl, i64 line);
@@ -174,7 +193,7 @@ void ph_refuse(uptr fl, i64 line, uptr what, uptr dref) {
 // with "not implemented" would make that column a lie.
 void ph_todo(uptr fl, i64 line, uptr what) {
     uptr m = p_cat("mc-php: ", what, 0, cstrlen(what));
-    m = p_cat(m, " is not implemented yet (probes/t6/RESULTS.md)", 0, 44);
+    m = p_cat(m, " is not implemented yet (probes/t6/RESULTS.md)", 0, 46);
     err_at(fl, line, m);
 }
 
@@ -589,6 +608,7 @@ i64 ph_raw(uptr bytes, i64 len) {
 }
 
 i64 ph_call(uptr name, i64 nargs, i64 a0, i64 a1, i64 a2, i64 a3, i64 ty) {
+    ph_can_throw = 1;
     i64 c = node_new(N_CALL, ph_tline, ph_tfile);
     set_nd_name(c, name);
     if (nargs >= 1) set_nd_a(c, a0);
@@ -708,6 +728,35 @@ i64 ph_var_find(uptr d) {
 }
 
 i64 ph_var_type(uptr d) { return ld64(ph_vtype + ph_var_find(d) * 8); }
+
+// a php function body has its OWN scope: it sees no enclosing variable (a
+// closure's captures are copied in explicitly). The table is flat, so the
+// outer entries are saved and put back rather than just counted.
+uptr ph_scope_save() {
+    uptr b = xalloc(ph_nvar * 16 + 16);
+    st64(b, ph_nvar);
+    i64 i = 0;
+    loop {
+        if (i >= ph_nvar) break;
+        st64(b + 8 + i * 16, ld64(ph_vname + i * 8));
+        st64(b + 16 + i * 16, ld64(ph_vtype + i * 8));
+        i = i + 1;
+    }
+    ph_nvar = 0;
+    return b;
+}
+
+void ph_scope_restore(uptr b) {
+    i64 n = ld64(b);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        st64(ph_vname + i * 8, ld64(b + 8 + i * 16));
+        st64(ph_vtype + i * 8, ld64(b + 16 + i * 16));
+        i = i + 1;
+    }
+    ph_nvar = n;
+}
 
 // 1 when this is the variable's FIRST assignment (the caller emits N_VAR, not
 // N_ASSIGN). A second assignment of another type is D4's named compile error.
@@ -1167,6 +1216,24 @@ i64 ph_array_lit(uptr close) {
 i64 ph_pend_head;
 i64 ph_pend_tail;
 
+// take the pending statements out of the way before parsing a BODY, which
+// would otherwise steal them into itself (a foreach over an array literal
+// would then rebuild the array inside its own loop)
+i64 ph_take_pend() {
+    i64 h = ph_pend_head;
+    ph_pend_head = 0;
+    ph_pend_tail = 0;
+    return h;
+}
+
+i64 ph_prefix_stmts(i64 pre, i64 s) {
+    if (!pre) return s;
+    i64 t = pre;
+    loop { if (!nd_next(t)) break; t = nd_next(t); }
+    set_nd_next(t, s);
+    return pre;
+}
+
 void ph_pending_stmt(i64 s) {
     i64 t = s;
     loop { if (!nd_next(t)) break; t = nd_next(t); }
@@ -1355,7 +1422,7 @@ i64 ph_primary() {
         uptr cn = ph_tname;
         ph_next();
         loop { if (!ph_accept("\\", 1)) break; cn = ph_tname; ph_next(); }
-        i64 ob = ph_c1("php_new", ph_strlit(cn, cstrlen(cn)), TY_UPTR);
+        i64 ob = ph_c3("php_new_at", ph_strlit(cn, cstrlen(cn)), ph_strlit(fl, cstrlen(fl)), ph_int(line), TY_UPTR);
         i64 tmp = ph_temp(ob, TY_UPTR, "phw_");
         i64 hasargs = 0;
         if (ph_at("(", 1)) hasargs = 1;
@@ -1374,6 +1441,69 @@ i64 ph_primary() {
         if (!hasargs) ph_pending_stmt(ph_stmt_of(ph_c1("php_ctor0", ph_tref(tmp), ty_pzv)));
         ph_ety = PT_OBJ;
         return ph_tref(tmp);
+    }
+    if (ph_is("fn")) { ph_next(); return ph_closure(fl, line, 1); }
+    if (ph_is("function")) { ph_next(); ph_accept("&", 1); return ph_closure(fl, line, 0); }
+    if (ph_is("static")) {
+        // `static function () {}` / `static fn() =>`: a closure with no $this
+        ph_next();
+        if (ph_is("fn")) { ph_next(); return ph_closure(fl, line, 1); }
+        if (ph_is("function")) { ph_next(); ph_accept("&", 1); return ph_closure(fl, line, 0); }
+        ph_todo2(fl, line, "the storage keyword", "static");
+    }
+    if (ph_is("match")) {
+        ph_next();
+        ph_want("(", 1, "expected ( after match");
+        i64 sv = ph_expr(0);
+        i64 svt = ph_ety;
+        ph_want(")", 1, "expected ) after match");
+        ph_want("{", 1, "expected { after match");
+        i64 subj = ph_temp(ph_to_mixed(sv, svt), ty_pzv, "phm_");
+        i64 res = ph_temp(ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv), ty_pzv, "phr_");
+        i64 chain = 0;
+        i64 last = 0;
+        i64 hasdef = 0;
+        loop {
+            if (ph_at("}", 1)) break;
+            if (ph_tid == T_EOF) err_at(fl, line, "mc-php: unterminated match");
+            i64 cond = 0;
+            i64 isdef = 0;
+            if (ph_is("default")) { ph_next(); isdef = 1; }
+            if (!isdef) {
+                loop {
+                    i64 cv = ph_expr(0);
+                    i64 one = ph_cast(TY_U8, ph_c2("php_zv_identical", ph_tref(subj), ph_to_mixed(cv, ph_ety), TY_I64));
+                    if (!cond) cond = one;
+                    if (cond != one) cond = ph_bin(ph_tok("||", 2), cond, one, TY_U8);
+                    if (!ph_accept(",", 1)) break;
+                    if (ph_at("=>", 2)) break;
+                }
+            }
+            ph_want("=>", 2, "expected => in a match arm");
+            i64 rv = ph_expr(0);
+            i64 asg = ph_set(nd_name(res), ph_to_mixed(rv, ph_ety));
+            if (isdef) {
+                hasdef = 1;
+                if (last) set_nd_c(last, asg);
+                if (!chain) chain = asg;
+                last = 0;
+            }
+            if (!isdef) {
+                i64 iff = node_new(N_IF, line, fl);
+                set_nd_a(iff, cond);
+                set_nd_b(iff, asg);
+                if (last) set_nd_c(last, iff);
+                if (!chain) chain = iff;
+                last = iff;
+            }
+            if (!ph_accept(",", 1)) break;
+        }
+        ph_want("}", 1, "expected } after match");
+        if (!hasdef && last)
+            set_nd_c(last, ph_stmt_of(ph_c1("php_unhandled_match", ph_tref(subj), ty_pzv)));
+        if (chain) ph_pending_stmt(chain);
+        ph_ety = PT_MIXED;
+        return ph_tref(res);
     }
     if (ph_is("clone")) {
         ph_next();
@@ -1449,7 +1579,7 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         // int / int is int|float in php -- a union, so a zval (D4 (c))
         if (!flt) return ph_arith_zv(op, lhs, lt, rhs, rt);
         ph_ety = PT_FLOAT;
-        return ph_bin(op, ph_to_float(lhs, lt), ph_to_float(rhs, rt), ty_f64);
+        return ph_c2("php_div_f", ph_to_float(lhs, lt), ph_to_float(rhs, rt), ty_f64);
     }
     if (op == ph_tok("%", 1)) {
         ph_ety = PT_INT;
@@ -2237,6 +2367,57 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     return c;
 }
 
+
+// ---- unwinding -------------------------------------------------------------
+void ph_ls_push(i64 kind) {
+    if (ph_nls >= PH_MAXLS) err_at(ph_tfile, ph_tline, "mc-php: loops nested too deep");
+    st64(ph_lstack + ph_nls * 8, kind);
+    ph_nls = ph_nls + 1;
+}
+
+void ph_ls_pop() { if (ph_nls) ph_nls = ph_nls - 1; }
+
+// the mc break level for a php level of n LOOPS
+i64 ph_ls_level(i64 n, uptr fl, i64 line) {
+    i64 want = n;
+    i64 lv = 0;
+    i64 i = ph_nls - 1;
+    loop {
+        if (i < 0) break;
+        lv = lv + 1;
+        if (!ld64(ph_lstack + i * 8)) {
+            want = want - 1;
+            if (want == 0) return lv;
+        }
+        i = i - 1;
+    }
+    return lv;
+}
+
+// the propagation check emitted after a statement that can throw: break out
+// of the innermost try, or leave the function
+i64 ph_check(i64 line, uptr fl) {
+    i64 cond = ph_call("php_thrown", 0, 0, 0, 0, 0, TY_I64);
+    i64 act = 0;
+    if (ph_in_try) {
+        act = node_new(N_BREAK, line, fl);
+        set_nd_val(act, 1);
+    }
+    if (!ph_in_try && ph_toplevel) act = ph_stmt_of(ph_call("php_uncaught", 0, 0, 0, 0, 0, TY_VOID));
+    if (!ph_in_try && !ph_toplevel) {
+        act = node_new(N_RETURN, line, fl);
+        if (ph_fn_ret == PT_MIXED) set_nd_a(act, ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv));
+        if (ph_fn_ret == PT_INT || ph_fn_ret == PT_BOOL || ph_fn_ret == PT_IFALSE) set_nd_a(act, ph_int(0));
+        if (ph_fn_ret == PT_FLOAT) set_nd_a(act, ph_cast(ty_f64, ph_int(0)));
+        if (ph_fn_ret == PT_STRING) set_nd_a(act, ph_strlit("", 0));
+        if (ph_fn_ret == PT_ARR) set_nd_a(act, ph_c1("php_arr_new", ph_int(8), ty_parr));
+    }
+    i64 iff = node_new(N_IF, line, fl);
+    set_nd_a(iff, ph_cast(TY_U8, cond));
+    set_nd_b(iff, act);
+    return iff;
+}
+
 // ---- statements ------------------------------------------------------------
 // the pending statements an expression asked for (an array literal, var_dump)
 // the pending statements are SPLICED into the enclosing list, never wrapped in
@@ -2291,6 +2472,22 @@ i64 ph_inline_html(uptr fl, i64 line) {
     return s;
 }
 
+// a statement, followed by the unwinding check when it contains a call
+i64 ph_stmt_checked() {
+    i64 save = ph_can_throw;
+    ph_can_throw = 0;
+    i64 line = ph_tline;
+    uptr fl = ph_tfile;
+    i64 st = ph_stmt();
+    if (ph_can_throw) {
+        i64 t = st;
+        loop { if (!nd_next(t)) break; t = nd_next(t); }
+        set_nd_next(t, ph_check(line, fl));
+    }
+    ph_can_throw = save;
+    return st;
+}
+
 i64 ph_block() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
@@ -2300,7 +2497,7 @@ i64 ph_block() {
     loop {
         if (ph_at("}", 1)) break;
         if (ph_tid == T_EOF) err_at(fl, line, "mc-php: unterminated php block");
-        i64 s = ph_stmt();
+        i64 s = ph_stmt_checked();
         if (tail) set_nd_next(tail, s);
         if (!tail) head = s;
         tail = s;
@@ -2314,7 +2511,12 @@ i64 ph_block() {
 
 i64 ph_block_or_stmt() {
     if (ph_at("{", 1)) return ph_block();
-    return ph_stmt();
+    i64 line = ph_tline;
+    uptr fl = ph_tfile;
+    i64 s = ph_stmt_checked();
+    i64 b = node_new(N_BLOCK, line, fl);
+    set_nd_a(b, s);
+    return b;
 }
 
 // `continue` jumps to the top of an mc `loop`, so a step appended after the
@@ -2641,14 +2843,39 @@ i64 ph_stmt() {
         i64 head = 0;
         i64 tail = 0;
         loop {
+            i64 sct = ph_can_throw;
+            ph_can_throw = 0;
             i64 e = ph_expr(0);
             i64 t = ph_ety;
+            i64 thr = ph_can_throw;
+            ph_can_throw = sct;
+            // an argument that can throw is computed into a temporary first,
+            // so the check sits BETWEEN computing it and printing it: php
+            // stops the whole echo at the throwing argument.
+            i64 pre = 0;
+            if (thr) {
+                ph_nonce = ph_nonce + 1;
+                uptr tn = p_cat("phe_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+                ph_local(tn, ph_mcty(t));
+                pre = ph_set(tn, e);
+                e = node_new(N_IDENT, line, fl);
+                set_nd_name(e, tn);
+                set_nd_type(e, ph_mcty(t));
+            }
             i64 c = ph_echo_of(e, t, fl, line);
             i64 s = node_new(N_EXPRSTMT, line, fl);
             set_nd_a(s, c);
+            if (thr) {
+                ph_can_throw = 1;
+                i64 ck = ph_check(line, fl);
+                set_nd_next(pre, ck);
+                set_nd_next(ck, s);
+                s = pre;
+            }
             if (tail) set_nd_next(tail, s);
             if (!tail) head = s;
             tail = s;
+            loop { if (!nd_next(tail)) break; tail = nd_next(tail); }
             if (isprint) break;
             if (!ph_accept(",", 1)) break;
         }
@@ -2682,12 +2909,16 @@ i64 ph_stmt() {
         if (ph_pend_head) ph_todo(fl, line, "a while condition that needs a temporary");
         ph_want(")", 1, "expected ) after while");
         if (ph_at(":", 1)) ph_todo(fl, line, "the alternative while: endwhile; syntax");
+        ph_ls_push(0);
         i64 body = ph_block_or_stmt();
+        ph_ls_pop();
         return ph_loop_of(c, body, 0, line, fl);
     }
     if (ph_is("do")) {
         ph_next();
+        ph_ls_push(0);
         i64 body = ph_block_or_stmt();
+        ph_ls_pop();
         if (!ph_is("while")) err_at(fl, line, "mc-php: expected while after do");
         ph_next();
         ph_want("(", 1, "expected ( after do-while");
@@ -2726,15 +2957,18 @@ i64 ph_stmt() {
             step = ph_assign_stmt(fl, line, 0);         // $i++ / $i += e, no ;
         }
         ph_want(")", 1, "expected ) after for");
+        i64 fopre = ph_take_pend();
         if (ph_at(":", 1)) ph_todo(fl, line, "the alternative for: endfor; syntax");
+        ph_ls_push(0);
         i64 body = ph_block_or_stmt();
+        ph_ls_pop();
         i64 lp = ph_loop_of(c, body, step, line, fl);
         i64 t2 = init;
         loop { if (!nd_next(t2)) break; t2 = nd_next(t2); }
         set_nd_next(t2, lp);
         i64 outer = node_new(N_BLOCK, line, fl);
         set_nd_a(outer, init);
-        return outer;
+        return ph_wrap(ph_prefix_stmts(fopre, outer));
     }
     if (ph_is("foreach")) return ph_foreach(fl, line);
     if (ph_is("break") || ph_is("continue")) {
@@ -2745,7 +2979,7 @@ i64 ph_stmt() {
         ph_want(";", 1, "expected ; after break/continue");
         i64 n = node_new(N_BREAK, line, fl);
         if (!isbrk) n = node_new(N_CONTINUE, line, fl);
-        set_nd_val(n, lv);
+        set_nd_val(n, ph_ls_level(lv, fl, line));
         return n;
     }
     if (ph_is("require_once")) { ph_require(1, fl, line); return ph_empty(); }
@@ -2824,9 +3058,184 @@ i64 ph_stmt() {
         return ph_wrap(b);
     }
     if (ph_is("global") || ph_is("static")) ph_todo2(fl, line, "the storage keyword", ph_tname);
-    if (ph_is("switch")) ph_todo(fl, line, "switch");
+    if (ph_is("switch")) {
+        // php numbers the arms; `m` is the first arm to run, so fall-through
+        // is `if (m <= k)` and `default` is just another number.
+        ph_next();
+        ph_want("(", 1, "expected ( after switch");
+        i64 sv = ph_expr(0);
+        i64 svt = ph_ety;
+        ph_want(")", 1, "expected ) after switch");
+        i64 spre = ph_take_pend();
+        if (ph_at(":", 1)) ph_todo(fl, line, "the alternative switch: endswitch; syntax");
+        ph_want("{", 1, "expected { after switch");
+        ph_nonce = ph_nonce + 1;
+        uptr tn = p_cat("phsw_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+        uptr mn2 = p_cat("phsm_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+        ph_local(tn, ty_pzv);
+        ph_local(mn2, TY_I64);
+        i64 setv = ph_set(tn, ph_to_mixed(sv, svt));
+        // pass 1: the tests, in source order, as one else-if chain
+        i64 thead = 0;
+        i64 tlast = 0;
+        i64 bhead = 0;
+        i64 btail = 0;
+        i64 k = 0;
+        i64 dflt = 0;
+        ph_ls_push(0);
+        loop {
+            if (ph_at("}", 1)) break;
+            if (ph_tid == T_EOF) err_at(fl, line, "mc-php: unterminated switch");
+            i64 isdef = 0;
+            if (ph_is("default")) { ph_next(); isdef = 1; }
+            if (!isdef) {
+                if (!ph_is("case")) err_at2(fl, line, "mc-php: expected case or default in switch", ph_tname);
+                ph_next();
+            }
+            k = k + 1;
+            if (!isdef) {
+                i64 cv = ph_expr(0);
+                i64 cvt = ph_ety;
+                i64 tref2 = node_new(N_IDENT, line, fl);
+                set_nd_name(tref2, tn);
+                set_nd_type(tref2, ty_pzv);
+                i64 eq = ph_cast(TY_U8, ph_bin(ph_tok("==", 2),
+                    ph_c2("php_zv_cmp", tref2, ph_to_mixed(cv, cvt), TY_I64), ph_int(0), TY_U8));
+                i64 iff = node_new(N_IF, line, fl);
+                set_nd_a(iff, eq);
+                set_nd_b(iff, ph_set(mn2, ph_int(k)));
+                if (tlast) set_nd_c(tlast, iff);
+                if (!thead) thead = iff;
+                tlast = iff;
+            }
+            if (isdef) dflt = k;
+            if (!ph_accept(":", 1)) ph_accept(";", 1);
+            // the arm body: every statement until the next case/default/}
+            i64 ahead = 0;
+            i64 atail = 0;
+            loop {
+                if (ph_at("}", 1)) break;
+                if (ph_is("case") || ph_is("default")) break;
+                if (ph_tid == T_EOF) break;
+                i64 st2 = ph_stmt_checked();
+                if (atail) set_nd_next(atail, st2);
+                if (!ahead) ahead = st2;
+                atail = st2;
+                loop { if (!nd_next(atail)) break; atail = nd_next(atail); }
+            }
+            i64 mref = node_new(N_IDENT, line, fl);
+            set_nd_name(mref, mn2);
+            set_nd_type(mref, TY_I64);
+            i64 gate = node_new(N_IF, line, fl);
+            set_nd_a(gate, ph_cast(TY_U8, ph_bin(ph_tok("<=", 2), mref, ph_int(k), TY_U8)));
+            i64 ab = node_new(N_BLOCK, line, fl);
+            set_nd_a(ab, ahead);
+            set_nd_b(gate, ab);
+            if (btail) set_nd_next(btail, gate);
+            if (!bhead) bhead = gate;
+            btail = gate;
+        }
+        ph_ls_pop();
+        ph_next();
+        i64 none = k + 1;
+        if (dflt) none = dflt;
+        i64 setm = ph_set(mn2, ph_int(none));
+        set_nd_next(setv, setm);
+        if (thead) set_nd_next(setm, thead);
+        i64 brk2 = node_new(N_BREAK, line, fl);
+        set_nd_val(brk2, 1);
+        if (btail) set_nd_next(btail, brk2);
+        if (!bhead) bhead = brk2;
+        i64 lb = node_new(N_BLOCK, line, fl);
+        set_nd_a(lb, bhead);
+        i64 lp2 = node_new(N_LOOP, line, fl);
+        set_nd_a(lp2, lb);
+        i64 t3 = setv;
+        loop { if (!nd_next(t3)) break; t3 = nd_next(t3); }
+        set_nd_next(t3, lp2);
+        i64 ob2 = node_new(N_BLOCK, line, fl);
+        set_nd_a(ob2, setv);
+        return ph_wrap(ph_prefix_stmts(spre, ob2));
+    }
     if (ph_is("match"))  ph_todo(fl, line, "match");
-    if (ph_is("try") || ph_is("throw") || ph_is("catch")) ph_todo(fl, line, "exceptions");
+    if (ph_is("throw")) {
+        ph_next();
+        i64 e = ph_expr(0);
+        i64 et = ph_ety;
+        ph_want(";", 1, "expected ; after throw");
+        ph_can_throw = 1;
+        return ph_expr_stmt_of(ph_c1("php_throw", ph_recv(e, et), ty_pzv));
+    }
+    if (ph_is("try")) {
+        ph_next();
+        i64 sin = ph_in_try;
+        ph_in_try = 1;
+        ph_ls_push(1);
+        i64 body = ph_block();
+        ph_ls_pop();
+        ph_in_try = sin;
+        i64 brk = node_new(N_BREAK, line, fl);
+        set_nd_val(brk, 1);
+        i64 bt = nd_a(body);
+        if (!bt) set_nd_a(body, brk);
+        if (bt) { loop { if (!nd_next(bt)) break; bt = nd_next(bt); } set_nd_next(bt, brk); }
+        i64 lp = node_new(N_LOOP, line, fl);
+        set_nd_a(lp, body);
+        // the catches, as one if/else chain over the pending throwable
+        i64 chain = 0;
+        i64 last = 0;
+        loop {
+            if (!ph_is("catch")) break;
+            ph_next();
+            ph_want("(", 1, "expected ( after catch");
+            i64 cond = 0;
+            loop {
+                ph_accept("\\", 1);
+                if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php class name was expected in catch", ph_tname);
+                uptr cn = ph_tname;
+                ph_next();
+                loop { if (!ph_accept("\\", 1)) break; cn = ph_tname; ph_next(); }
+                i64 one = ph_cast(TY_U8, ph_c1("php_catches", ph_strlit(cn, cstrlen(cn)), TY_I64));
+                if (!cond) cond = one;
+                if (cond != one) cond = ph_bin(ph_tok("||", 2), cond, one, TY_U8);
+                if (!ph_accept("|", 1)) break;
+            }
+            uptr cv = 0;
+            if (ph_at("$", 1)) {
+                ph_next();
+                cv = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
+                ph_next();
+            }
+            ph_want(")", 1, "expected ) after catch");
+            i64 take = 0;
+            if (cv) {
+                ph_var_bind(cv, PT_MIXED);
+                take = ph_set(ph_mangle(cv, "v_"), ph_call("php_catch_take", 0, 0, 0, 0, 0, ty_pzv));
+            }
+            if (!cv) take = ph_stmt_of(ph_call("php_catch_take", 0, 0, 0, 0, 0, ty_pzv));
+            i64 cbody = ph_block();
+            set_nd_next(take, cbody);
+            i64 cb = node_new(N_BLOCK, line, fl);
+            set_nd_a(cb, take);
+            i64 cif = node_new(N_IF, line, fl);
+            set_nd_a(cif, cond);
+            set_nd_b(cif, cb);
+            if (last) set_nd_c(last, cif);
+            if (!chain) chain = cif;
+            last = cif;
+        }
+        i64 fin = 0;
+        if (ph_is("finally")) { ph_next(); fin = ph_block(); }
+        i64 head = lp;
+        i64 t = lp;
+        if (chain) { set_nd_next(t, chain); t = chain; }
+        if (fin) { set_nd_next(t, fin); t = fin; }
+        ph_can_throw = 1;
+        i64 ob = node_new(N_BLOCK, line, fl);
+        set_nd_a(ob, head);
+        return ob;
+    }
+    if (ph_is("catch") || ph_is("finally")) err_at(fl, line, "mc-php: catch without try");
     if (ph_is("class") || ph_is("interface") || ph_is("trait")) { ph_class(fl, line, 0); return ph_empty(); }
     if (ph_is("enum")) {
         // `enum` is only a declaration when a NAME follows (php 8 keeps it
@@ -2924,6 +3333,7 @@ i64 ph_foreach(uptr fl, i64 line) {
     i64 st = ph_ety;
     if (st == PT_MIXED) { src = ph_c1("php_zv_arr_r", src, ty_parr); st = PT_ARR; }
     if (!ph_is_arr(st)) ph_todo2(fl, line, "foreach over", ph_tyname(st));
+    i64 fpre = ph_take_pend();
     if (!ph_is("as")) err_at(fl, line, "mc-php: expected as in foreach");
     ph_next();
     i64 byref = 0;
@@ -2993,7 +3403,9 @@ i64 ph_foreach(uptr fl, i64 line) {
         set_nd_next(setk, setv);
         head = setk;
     }
+    ph_ls_push(0);
     i64 body = ph_block_or_stmt();
+    ph_ls_pop();
     i64 t = head;
     loop { if (!nd_next(t)) break; t = nd_next(t); }
     set_nd_next(t, body);
@@ -3011,7 +3423,227 @@ i64 ph_foreach(uptr fl, i64 line) {
     set_nd_next(iv, lp);
     i64 outer = node_new(N_BLOCK, line, fl);
     set_nd_a(outer, av);
-    return outer;
+    return ph_wrap(ph_prefix_stmts(fpre, outer));
+}
+
+
+// ---- closures --------------------------------------------------------------
+// `function (...) use (...) {}` and `fn(...) => expr` lower to
+// `uptr cl_N(uptr use, uptr thisp, uptr a1..a5)` plus a Closure object holding
+// the function pointer, the captured array and the bound $this -- which is
+// exactly what php_call_zv calls through. D6 refuses a callable spelled as a
+// STRING; this is the value form, and it is kept.
+i64 ph_closure(uptr fl, i64 line, i64 arrow) {
+    ph_nonce = ph_nonce + 1;
+    uptr cn = p_cat("cl_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+
+    // the parameters, read in the ENCLOSING scope's tokens but bound in the new one
+    u8 pnames[64];
+    u8 pdefs[64];
+    i64 np = 0;
+    ph_want("(", 1, "expected ( in a php closure");
+    loop {
+        if (ph_at(")", 1)) break;
+        if (ph_at("...", 3)) ph_todo(fl, line, "a variadic parameter in a closure");
+        if (!ph_at("$", 1)) ph_skip_type();
+        if (ph_at("&", 1)) ph_todo(fl, line, "a by-reference parameter in a closure");
+        if (!ph_at("$", 1)) ph_todo2(fl, line, "a php parameter", ph_tname);
+        ph_next();
+        uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
+        ph_next();
+        i64 dflt = 0;
+        if (ph_accept("=", 1)) { i64 dv = ph_expr(0); dflt = ph_to_mixed(dv, ph_ety); }
+        if (np >= 5) ph_todo(fl, line, "more than five parameters in a closure");
+        st64(pnames + np * 8, d);
+        st64(pdefs + np * 8, dflt);
+        np = np + 1;
+        if (!ph_accept(",", 1)) break;
+    }
+    ph_want(")", 1, "expected ) in a php closure");
+
+    // what it captures, and from which enclosing variable
+    u8 unames[128];
+    i64 nu = 0;
+    if (arrow) {
+        // fn() captures every enclosing variable by value
+        i64 i = 0;
+        loop {
+            if (i >= ph_nvar) break;
+            if (nu < 16) {
+                uptr vn = ld64(ph_vname + i * 8);
+                if (!str_eq(vn, "$this")) { st64(unames + nu * 8, vn); nu = nu + 1; }
+            }
+            i = i + 1;
+        }
+    }
+    if (!arrow) {
+        if (ph_is("use")) {
+            ph_next();
+            ph_want("(", 1, "expected ( after use");
+            loop {
+                if (ph_at(")", 1)) break;
+                if (ph_at("&", 1)) ph_todo(fl, line, "a by-reference use in a closure");
+                if (!ph_at("$", 1)) err_at(fl, line, "mc-php: a php variable was expected in use");
+                ph_next();
+                uptr un = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
+                ph_next();
+                if (ph_var_find(un) < 0) ph_refuse2(fl, line, "an undefined php variable in use", un, "D4");
+                if (nu >= 16) ph_todo(fl, line, "more than sixteen captured variables");
+                st64(unames + nu * 8, un);
+                nu = nu + 1;
+                if (!ph_accept(",", 1)) break;
+            }
+            ph_want(")", 1, "expected ) after use");
+        }
+    }
+    if (ph_at(":", 1)) { ph_next(); ph_skip_type(); }
+
+    // the creation site, built while the enclosing variables are still in scope
+    ph_nonce = ph_nonce + 1;
+    uptr an = p_cat("phu_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+    ph_local(an, ty_parr);
+    i64 mk = ph_set(an, ph_c1("php_arr_new", ph_int(8), ty_parr));
+    i64 mt = mk;
+    i64 ui = 0;
+    loop {
+        if (ui >= nu) break;
+        uptr un2 = ld64(unames + ui * 8);
+        i64 vt = ph_var_type(un2);
+        i64 vr = node_new(N_IDENT, line, fl);
+        set_nd_name(vr, ph_mangle(un2, "v_"));
+        set_nd_type(vr, ph_mcty(vt));
+        i64 ar = node_new(N_IDENT, line, fl);
+        set_nd_name(ar, an);
+        set_nd_type(ar, ty_parr);
+        i64 st2 = ph_stmt_of(ph_c3("php_arr_set", ar, ph_to_mixed(ph_strlit(un2 + 1, cstrlen(un2 + 1)), PT_STRING),
+                                   ph_to_mixed(vr, vt), TY_VOID));
+        set_nd_next(mt, st2);
+        mt = st2;
+        ui = ui + 1;
+    }
+    ph_pending_stmt(mk);
+    i64 thisp = ph_int(0);
+    if (ph_in_method && !ph_in_static) thisp = ph_this(fl, line);
+    i64 fp = node_new(N_ADDR, line, fl);
+    set_nd_name(fp, cn);
+    set_nd_type(fp, TY_UPTR);
+    i64 aref = node_new(N_IDENT, line, fl);
+    set_nd_name(aref, an);
+    set_nd_type(aref, ty_parr);
+    i64 made = ph_c3("php_closure_new", fp, aref, thisp, ty_pzv);
+
+    // now the body, in its own scope
+    uptr savenv = ph_scope_save();
+    i64 hh = ph_hoist_head;
+    i64 ht = ph_hoist_tail;
+    i64 sret = ph_fn_ret;
+    i64 sm = ph_in_method;
+    i64 sst = ph_in_static;
+    i64 stl = ph_toplevel;
+    i64 sls = ph_nls;
+    i64 sph = ph_pend_head;
+    i64 spt = ph_pend_tail;
+    ph_pend_head = 0;
+    ph_pend_tail = 0;
+    ph_hoist_head = 0;
+    ph_hoist_tail = 0;
+    ph_fn_ret = PT_MIXED;
+    ph_toplevel = 0;
+    ph_nls = 0;
+    ph_in_method = 1;
+    ph_in_static = 0;
+
+    i64 head = param_new(TY_UPTR, "v_use");
+    i64 tail = head;
+    i64 tp = param_new(TY_UPTR, "v_this");
+    set_nd_next(tail, tp);
+    tail = tp;
+    ph_var_bind_raw("$this", PT_OBJ);
+    i64 pre = 0;
+    i64 pret = 0;
+    i64 i2 = 0;
+    loop {
+        if (i2 >= np) break;
+        uptr d2 = ld64(pnames + i2 * 8);
+        ph_var_bind_raw(d2, PT_MIXED);
+        i64 pn = param_new(TY_UPTR, ph_mangle(d2, "v_"));
+        set_nd_next(tail, pn);
+        tail = pn;
+        i64 miss = node_new(N_UNARY, line, fl);
+        set_nd_op(miss, ph_tok("!", 1));
+        i64 pr = node_new(N_IDENT, line, fl);
+        set_nd_name(pr, ph_mangle(d2, "v_"));
+        set_nd_type(pr, ty_pzv);
+        set_nd_a(miss, pr);
+        set_nd_type(miss, TY_U8);
+        i64 dflt2 = ld64(pdefs + i2 * 8);
+        if (!dflt2) dflt2 = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
+        i64 iff = node_new(N_IF, line, fl);
+        set_nd_a(iff, miss);
+        set_nd_b(iff, ph_set(ph_mangle(d2, "v_"), dflt2));
+        if (pret) set_nd_next(pret, iff);
+        if (!pret) pre = iff;
+        pret = iff;
+        i2 = i2 + 1;
+    }
+    // the captured variables, read out of the use array
+    i64 ui2 = 0;
+    loop {
+        if (ui2 >= nu) break;
+        uptr un3 = ld64(unames + ui2 * 8);
+        ph_var_bind(un3, PT_MIXED);
+        i64 ur = node_new(N_IDENT, line, fl);
+        set_nd_name(ur, "v_use");
+        set_nd_type(ur, ty_parr);
+        i64 get = ph_c2("php_arr_zget", ur, ph_to_mixed(ph_strlit(un3 + 1, cstrlen(un3 + 1)), PT_STRING), ty_pzv);
+        i64 asg = ph_set(ph_mangle(un3, "v_"), get);
+        if (pret) set_nd_next(pret, asg);
+        if (!pret) pre = asg;
+        pret = asg;
+        ui2 = ui2 + 1;
+    }
+    i64 body = 0;
+    if (arrow) {
+        ph_want("=>", 2, "expected => in a php arrow function");
+        i64 rv = ph_expr(0);
+        i64 r = node_new(N_RETURN, line, fl);
+        set_nd_a(r, ph_to_mixed(ph_own(rv, ph_ety), ph_ety));
+        body = node_new(N_BLOCK, line, fl);
+        set_nd_a(body, ph_wrap(r));
+    }
+    if (!arrow) body = ph_block();
+    if (pre) {
+        i64 t = pre;
+        loop { if (!nd_next(t)) break; t = nd_next(t); }
+        set_nd_next(t, nd_a(body));
+        set_nd_a(body, pre);
+    }
+    if (ph_hoist_head) {
+        set_nd_next(ph_hoist_tail, nd_a(body));
+        set_nd_a(body, ph_hoist_head);
+    }
+    i64 t2 = nd_a(body);
+    if (!t2) set_nd_a(body, ph_ret_null(line, fl));
+    if (t2) { loop { if (!nd_next(t2)) break; t2 = nd_next(t2); } set_nd_next(t2, ph_ret_null(line, fl)); }
+    i64 f = node_new(N_FUNC, line, fl);
+    set_nd_name(f, cn);
+    set_nd_type(f, TY_UPTR);
+    set_nd_a(f, head);
+    set_nd_b(f, body);
+    top_add(f);
+
+    ph_scope_restore(savenv);
+    ph_hoist_head = hh;
+    ph_hoist_tail = ht;
+    ph_fn_ret = sret;
+    ph_in_method = sm;
+    ph_in_static = sst;
+    ph_toplevel = stl;
+    ph_nls = sls;
+    ph_pend_head = sph;
+    ph_pend_tail = spt;
+    ph_ety = PT_MIXED;
+    return made;
 }
 
 // ---- classes, interfaces, traits and enums --------------------------------
@@ -3117,6 +3749,7 @@ uptr ph_margs(uptr pn, uptr fl, i64 line) {
 }
 
 i64 ph_calln(uptr fn, uptr args, i64 n, i64 ty) {
+    ph_can_throw = 1;
     i64 c = node_new(N_CALL, ph_tline, ph_tfile);
     set_nd_name(c, fn);
     i64 head = 0;
@@ -3396,7 +4029,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
 // passed arrives as 0 -- which is what makes a default value and
 // ArgumentCountError both expressible without the caller knowing the arity.
 void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 line, uptr fl, i64 abstract) {
-    i64 savenv = ph_nvar;
+    uptr savenv = ph_scope_save();
     i64 hh = ph_hoist_head;
     i64 ht = ph_hoist_tail;
     i64 sret = ph_fn_ret;
@@ -3405,6 +4038,10 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     ph_hoist_tail = 0;
     ph_fn_ret = PT_MIXED;
     ph_in_method = 1;
+    i64 stl = ph_toplevel;
+    ph_toplevel = 0;
+    i64 sls = ph_nls;
+    ph_nls = 0;
 
     i64 head = 0;
     i64 tail = 0;
@@ -3482,7 +4119,7 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     if (abstract) {
         ph_accept(";", 1);
         if (ph_at("{", 1)) ph_block();
-        ph_nvar = savenv;
+        ph_scope_restore(savenv);
         ph_hoist_head = hh;
         ph_hoist_tail = ht;
         ph_fn_ret = sret;
@@ -3514,11 +4151,13 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     set_nd_a(f, head);
     set_nd_b(f, body);
     top_add(f);
-    ph_nvar = savenv;
+    ph_scope_restore(savenv);
     ph_hoist_head = hh;
     ph_hoist_tail = ht;
     ph_fn_ret = sret;
     ph_in_method = sm;
+    ph_toplevel = stl;
+    ph_nls = sls;
 }
 
 
@@ -3587,19 +4226,20 @@ i64 ph_obj_stmt(uptr d, uptr fl, i64 line, i64 semi) {
         if (ph_at("--", 2)) incdec = -1;
         if (ph_at("=", 1) || op || incdec) {
             i64 rt = ph_temp(recv, ty_pzv, "pho_");
-            i64 nm = ph_strlit(pname, cstrlen(pname));
+            // every use of the property name needs its OWN node: nd_next is
+            // the argument link, so one node in two argument lists is a CYCLE
             i64 v = 0;
             if (incdec) {
                 ph_next();
                 uptr f = "php_zv_inc";
                 if (incdec < 0) f = "php_zv_dec";
-                v = ph_c1(f, ph_c3("php_zv_pget", ph_tref(rt), nm, ph_scope(), ty_pzv), ty_pzv);
+                v = ph_c1(f, ph_c3("php_zv_pget", ph_tref(rt), ph_strlit(pname, cstrlen(pname)), ph_scope(), ty_pzv), ty_pzv);
             }
             if (!incdec && op) {
                 ph_next();
                 i64 r = ph_expr(0);
                 i64 rrt = ph_ety;
-                i64 old = ph_c3("php_zv_pget", ph_tref(rt), nm, ph_scope(), ty_pzv);
+                i64 old = ph_c3("php_zv_pget", ph_tref(rt), ph_strlit(pname, cstrlen(pname)), ph_scope(), ty_pzv);
                 if (op == ph_tok(".", 1)) v = ph_c2("php_zv_concat", old, ph_to_mixed(r, rrt), ty_pzv);
                 if (op != ph_tok(".", 1)) v = ph_arith_zv(op, old, PT_MIXED, r, rrt);
             }
@@ -3610,7 +4250,7 @@ i64 ph_obj_stmt(uptr d, uptr fl, i64 line, i64 semi) {
                 v = ph_to_mixed(ph_own(r2, ph_ety), ph_ety);
             }
             if (semi) ph_want(";", 1, "expected ; after a php assignment");
-            return ph_expr_stmt_of(ph_c4("php_zv_pset", ph_tref(rt), nm, v, ph_scope(), TY_VOID));
+            return ph_expr_stmt_of(ph_c4("php_zv_pset", ph_tref(rt), ph_strlit(pname, cstrlen(pname)), v, ph_scope(), TY_VOID));
         }
         cur = ph_c3("php_zv_pget", recv, ph_strlit(pname, cstrlen(pname)), ph_scope(), ty_pzv);
         t = PT_MIXED;
@@ -3641,7 +4281,7 @@ i64 ph_function() {
     st64(ph_fnp + fi * 8, 0);
 
     ph_want("(", 1, "expected ( in a php function");
-    i64 save = ph_nvar;
+    uptr save = ph_scope_save();
     i64 head = 0;
     i64 tail = 0;
     i64 np = 0;
@@ -3677,6 +4317,10 @@ i64 ph_function() {
     p_set_decl_name(mn);
     i64 sret = ph_fn_ret;
     ph_fn_ret = rt;
+    i64 stl2 = ph_toplevel;
+    ph_toplevel = 0;
+    i64 sls2 = ph_nls;
+    ph_nls = 0;
     i64 hh = ph_hoist_head;
     i64 ht = ph_hoist_tail;
     ph_hoist_head = 0;
@@ -3688,8 +4332,10 @@ i64 ph_function() {
     }
     ph_hoist_head = hh;
     ph_hoist_tail = ht;
-    ph_nvar = save;
+    ph_scope_restore(save);
     ph_fn_ret = sret;
+    ph_toplevel = stl2;
+    ph_nls = sls2;
     i64 f = node_new(N_FUNC, line, fl);
     set_nd_name(f, mn);
     set_nd_type(f, ph_mcty(rt));
@@ -3821,6 +4467,8 @@ void ph_lib_init() {
 void ph_program() {
     i64 line = ph_tline;
     uptr fl = p_file();
+    ph_toplevel = 1;
+    ph_fn_ret = PT_VOID;
     ph_sync();
     ph_next();                                    // <?php
     loop {
@@ -3829,25 +4477,31 @@ void ph_program() {
             top_add(ph_function());
             continue;
         }
-        i64 s = ph_stmt();
+        i64 s = ph_stmt_checked();
         if (ph_main_tail) set_nd_next(ph_main_tail, s);
         if (!ph_main_tail) ph_main_head = s;
         ph_main_tail = s;
         loop { if (!nd_next(ph_main_tail)) break; ph_main_tail = nd_next(ph_main_tail); }
     }
     i64 fin = node_new(N_EXPRSTMT, line, fl);
-    set_nd_a(fin, ph_call("php_flush", 0, 0, 0, 0, 0, TY_VOID));
+    set_nd_a(fin, ph_call("php_uncaught", 0, 0, 0, 0, 0, TY_VOID));
+    i64 fin2 = node_new(N_EXPRSTMT, line, fl);
+    set_nd_a(fin2, ph_call("php_flush", 0, 0, 0, 0, 0, TY_VOID));
+    set_nd_next(fin, fin2);
     if (ph_main_tail) set_nd_next(ph_main_tail, fin);
     if (!ph_main_tail) ph_main_head = fin;
     i64 r = node_new(N_RETURN, line, fl);
     set_nd_a(r, ph_int(0));
-    set_nd_next(fin, r);
+    set_nd_next(fin2, r);
     // every class entry is created first, then filled: a class may extend one
     // that is declared later in the file, which php hoists too.
     if (ph_cfill_head) {
         if (ph_cnew_tail) set_nd_next(ph_cnew_tail, ph_cfill_head);
         if (!ph_cnew_tail) ph_cnew_head = ph_cfill_head;
     }
+    i64 boot = ph_stmt_of(ph_call("php_bootstrap", 0, 0, 0, 0, 0, TY_VOID));
+    set_nd_next(boot, ph_cnew_head);
+    ph_cnew_head = boot;
     if (ph_cnew_head) {
         i64 ct = ph_cnew_head;
         loop { if (!nd_next(ct)) break; ct = nd_next(ct); }

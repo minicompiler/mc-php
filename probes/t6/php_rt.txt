@@ -20,7 +20,8 @@
 u8  ph_heap[50331648];
 i64 ph_top;
 
-void php_die(uptr msg, i64 n) { write(2, msg, n); exit(255); }
+void php_flush();
+void php_die(uptr msg, i64 n) { php_flush(); write(2, msg, n); exit(255); }
 
 uptr php_alloc(i64 n) {
     i64 a = (ph_top + 7) / 8 * 8;
@@ -1425,7 +1426,7 @@ uptr php_explode(uptr sep, uptr s) {
 }
 
 i64 php_intdiv(i64 a, i64 b) {
-    if (b == 0) php_die("mc-php: DivisionByZeroError: Division by zero\n", 46);
+    if (b == 0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16)); return 0; }
     return a / b;
 }
 i64 php_abs_i(i64 v) { if (v < 0) return 0 - v; return v; }
@@ -1435,11 +1436,11 @@ i64 php_min_i(i64 a, i64 b) { if (a <= b) return a; return b; }
 f64 php_max_f(f64 a, f64 b) { if (a >= b) return a; return b; }
 f64 php_min_f(f64 a, f64 b) { if (a <= b) return a; return b; }
 i64 php_mod(i64 a, i64 b) {
-    if (b == 0) php_die("mc-php: Modulo by zero\n", 23);
+    if (b == 0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Modulo by zero", 14)); return 0; }
     return a - (a / b) * b;
 }
 i64 php_div_i(i64 a, i64 b) {
-    if (b == 0) php_die("mc-php: DivisionByZeroError: Division by zero\n", 46);
+    if (b == 0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16)); return 0; }
     return a / b;
 }
 f64 php_pow_f(f64 a, i64 e) {
@@ -1472,6 +1473,10 @@ i64 php_truthy_f(f64 x) { if (x == 0.0) return 0; return 1; }
 f64 php_fzero(i64 ignored) { return 0.0; }
 i64 php_cmp_i(i64 a, i64 b) { if (a < b) return -1; if (a > b) return 1; return 0; }
 i64 php_cmp_f(f64 a, f64 b) { if (a < b) return -1; if (a > b) return 1; return 0; }
+f64 php_div_f(f64 a, f64 b) {
+    if (b == 0.0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16)); return 0.0; }
+    return a / b;
+}
 i64 php_seq_i(i64 ignored, i64 v) { return v; }
 void php_exit(i64 code) { php_flush(); exit(code); }
 // printf's %f is php's: six digits after the point, always
@@ -1644,22 +1649,22 @@ uptr php_obj_cname(uptr o) { return ld64(ld64(o + 16)); }
 
 // ---- errors ----------------------------------------------------------------
 // php's uncaught-throwable text, on stdout as the cli sapi prints it.
+// php's cli writes the diagnostic to BOTH streams: "PHP Fatal error:  ..." on
+// stderr and "\nFatal error: ..." on stdout. The grid reads stdout.
 void php_fatal(uptr s) {
-    php_flush();
-    php_write("PHP Fatal error:  ", 18);
+    php_write("\nFatal error: ", 14);
     php_echo_str(s);
     php_write("\n", 1);
     php_flush();
+    write(2, "PHP Fatal error:  ", 18);
+    write(2, s + ZS_HDR, php_strlen(s));
+    write(2, "\n", 1);
     exit(255);
 }
 
-i64 php_throw_str(uptr cls, uptr msg) {
-    uptr s = php_str_concat(php_str_new("Uncaught ", 9), cls);
-    s = php_str_concat(s, php_str_new(": ", 2));
-    s = php_str_concat(s, msg);
-    php_fatal(s);
-    return 0;
-}
+// defined for real further down, once the class hierarchy exists
+i64 php_throw_cls(uptr cls, uptr msg);
+i64 php_throw_str(uptr cls, uptr msg) { return php_throw_cls(cls, msg); }
 
 // ---- array value semantics -------------------------------------------------
 // A php array is a VALUE: `$b = $a; $b[] = 1;` must leave $a alone. php does
@@ -3165,6 +3170,8 @@ uptr php_f_strrev_z(uptr z) { return php_strrev(php_zv_str(z)); }
 
 uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6);
 uptr php_obj_get(uptr o, uptr name, uptr scope);
+uptr php_enum_cases(uptr ce);
+uptr php_enum_from(uptr ce, uptr v, i64 try);
 
 uptr ph_classes;
 
@@ -3314,16 +3321,24 @@ uptr php_new_ce(uptr ce) {
     return o;
 }
 
-uptr php_new(uptr name) {
+uptr php_new_at(uptr name, uptr file, i64 line) {
     uptr ce = php_ce_find(name);
     if (!ce) {
         uptr m = php_str_concat(php_str_new("Class \"", 7), name);
         m = php_str_concat(m, php_str_new("\" not found", 11));
         php_throw_str(php_str_new("Error", 5), m);
-        return 0;
+        return php_obj_new(ph_ce_stdclass);
     }
-    return php_new_ce(ce);
+    uptr o = php_new_ce(ce);
+    // php records where a throwable was CREATED, not where it was thrown
+    if (php_ce_is(ce, php_str_new("Throwable", 9))) {
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)), php_zstr(file));
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(line));
+    }
+    return o;
 }
+
+uptr php_new(uptr name) { return php_new_at(name, php_str_new("", 0), 0); }
 
 uptr php_clone(uptr z) {
     if (php_zv_type(z) != IS_OBJECT) return z;
@@ -3464,6 +3479,12 @@ uptr php_zv_mcall(uptr z, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a
 uptr php_scall(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
     uptr lk = php_case(name, 0);
     uptr b = php_ce_lookup(ce, 24, lk);
+    if (!b && (ld64(ce + 64) & 8)) {
+        // an enum's three built-in static methods
+        if (php_str_eq(lk, php_str_new("cases", 5))) return php_zarr(php_enum_cases(ce));
+        if (php_str_eq(lk, php_str_new("from", 4))) return php_enum_from(ce, a1, 0);
+        if (php_str_eq(lk, php_str_new("tryfrom", 7))) return php_enum_from(ce, a1, 1);
+    }
     if (!b) {
         uptr c = php_ht_find(ld64(ce + 80), php_str_hash(php_str_new("__callstatic", 12)), php_str_new("__callstatic", 12));
         if (c) {
@@ -3778,3 +3799,191 @@ uptr php_ctor0(uptr o) {
 uptr php_zv_store(uptr slot, uptr v) { php_zv_cpv(slot, v); return slot; }
 
 i64 php_f_obj_id(uptr z) { if (php_zv_type(z) != IS_OBJECT) return 0; return php_obj_id(ld64(z)); }
+
+// ============================================================================
+// Exceptions.
+//
+// There is no VM and no setjmp: mc's five targets include a bare board with no
+// libc, and a per-architecture setjmp written in #opcode would be five copies
+// of the hardest code in the runtime. So unwinding is a PENDING-EXCEPTION FLAG
+// that the compiler checks after every statement that can throw, and a throw
+// returns from the function it is in. RESULTS.md measures what the check costs
+// against the alternative.
+//
+// The consequence, named and not hidden: a side effect between the throwing
+// call and the end of the same STATEMENT still happens -- `f(g(), h())` runs
+// h() even when g() threw. The value is then discarded, because the check
+// fires before the next statement.
+// ============================================================================
+uptr ph_exc;                                  // the pending throwable, 0 = none
+uptr ph_ce_stdclass;
+
+i64 php_thrown() { if (ph_exc) return 1; return 0; }
+uptr php_exc_get() { return ph_exc; }
+void php_exc_clear() { ph_exc = 0; }
+
+uptr php_throw(uptr z) {
+    if (php_zv_type(z) != IS_OBJECT) {
+        uptr m = php_str_new("Can only throw objects", 22);
+        ph_exc = 0;
+        php_throw_str(php_str_new("Error", 5), m);
+        return php_znull();
+    }
+    ph_exc = z;
+    return php_znull();
+}
+
+uptr php_exm_get(uptr o, uptr k) {
+    uptr b = php_ht_find(php_obj_props(o), php_str_hash(k), k);
+    if (!b) return php_znull();
+    return b;
+}
+
+uptr php_exm_message(uptr o) { return php_exm_get(o, php_str_new("message", 7)); }
+uptr php_exm_code(uptr o) { return php_exm_get(o, php_str_new("code", 4)); }
+uptr php_exm_file(uptr o) { return php_exm_get(o, php_str_new("file", 4)); }
+uptr php_exm_line(uptr o) { return php_exm_get(o, php_str_new("line", 4)); }
+uptr php_exm_prev(uptr o) { return php_exm_get(o, php_str_new("previous", 8)); }
+uptr php_exm_trace(uptr o) { return php_zstr(php_str_new("#0 {main}", 9)); }
+uptr php_exm_tracearr(uptr o) { return php_zarr(php_arr_new(8)); }
+
+uptr php_exm_ctor(uptr o, uptr msg, uptr code, uptr prev) {
+    if (msg) php_zv_cpv(php_arr_sslot(php_obj_props(o), php_str_new("message", 7)), msg);
+    if (code) php_zv_cpv(php_arr_sslot(php_obj_props(o), php_str_new("code", 4)), code);
+    if (prev) php_zv_cpv(php_arr_sslot(php_obj_props(o), php_str_new("previous", 8)), prev);
+    return php_znull();
+}
+
+uptr php_exm_tostring(uptr o) {
+    uptr s = php_obj_cname(o);
+    s = php_str_concat(s, php_str_new(": ", 2));
+    s = php_str_concat(s, php_zv_str(php_exm_message(o)));
+    return php_zstr(s);
+}
+
+void php_ex_members(uptr ce) {
+    php_ce_prop(ce, php_str_new("message", 7), php_zstr(php_str_new("", 0)), V_PROTECTED);
+    php_ce_prop(ce, php_str_new("code", 4), php_zlong(0), V_PROTECTED);
+    php_ce_prop(ce, php_str_new("file", 4), php_zstr(php_str_new("", 0)), V_PROTECTED);
+    php_ce_prop(ce, php_str_new("line", 4), php_zlong(0), V_PROTECTED);
+    php_ce_prop(ce, php_str_new("previous", 8), php_znull(), V_PRIVATE);
+    php_ce_method(ce, php_str_new("__construct", 11), &php_exm_ctor, V_PUBLIC);
+    php_ce_method(ce, php_str_new("getMessage", 10), &php_exm_message, V_PUBLIC);
+    php_ce_method(ce, php_str_new("getCode", 7), &php_exm_code, V_PUBLIC);
+    php_ce_method(ce, php_str_new("getFile", 7), &php_exm_file, V_PUBLIC);
+    php_ce_method(ce, php_str_new("getLine", 7), &php_exm_line, V_PUBLIC);
+    php_ce_method(ce, php_str_new("getPrevious", 11), &php_exm_prev, V_PUBLIC);
+    php_ce_method(ce, php_str_new("getTraceAsString", 16), &php_exm_trace, V_PUBLIC);
+    php_ce_method(ce, php_str_new("getTrace", 8), &php_exm_tracearr, V_PUBLIC);
+    php_ce_method(ce, php_str_new("__toString", 10), &php_exm_tostring, V_PUBLIC);
+    php_ce_iface(ce, php_str_new("Throwable", 9));
+    php_ce_iface(ce, php_str_new("Stringable", 10));
+}
+
+uptr php_sub(uptr name, i64 n, uptr parent) {
+    uptr ce = php_ce_new(php_str_new(name, n));
+    st64(ce + 8, parent);
+    return ce;
+}
+
+i64 ph_boot_done;
+
+void php_bootstrap() {
+    if (ph_boot_done) return;
+    ph_boot_done = 1;
+    php_ce_flag(php_ce_new(php_str_new("Throwable", 9)), 4);
+    php_ce_flag(php_ce_new(php_str_new("Stringable", 10)), 4);
+    php_ce_flag(php_ce_new(php_str_new("Countable", 9)), 4);
+    php_ce_flag(php_ce_new(php_str_new("Iterator", 8)), 4);
+    php_ce_flag(php_ce_new(php_str_new("IteratorAggregate", 17)), 4);
+    php_ce_flag(php_ce_new(php_str_new("Traversable", 11)), 4);
+    php_ce_flag(php_ce_new(php_str_new("ArrayAccess", 11)), 4);
+    php_ce_flag(php_ce_new(php_str_new("JsonSerializable", 16)), 4);
+    php_ce_flag(php_ce_new(php_str_new("UnitEnum", 8)), 4);
+    php_ce_flag(php_ce_new(php_str_new("BackedEnum", 10)), 4);
+    ph_ce_stdclass = php_ce_new(php_str_new("stdClass", 8));
+
+    uptr e = php_ce_new(php_str_new("Exception", 9));
+    php_ex_members(e);
+    uptr er = php_ce_new(php_str_new("Error", 5));
+    php_ex_members(er);
+
+    uptr te = php_sub("TypeError", 9, er);
+    php_sub("ValueError", 10, er);
+    uptr ae = php_sub("ArithmeticError", 15, er);
+    php_sub("DivisionByZeroError", 19, ae);
+    php_sub("ArgumentCountError", 18, te);
+    php_sub("AssertionError", 14, er);
+    php_sub("UnhandledMatchError", 19, er);
+
+    uptr le = php_sub("LogicException", 14, e);
+    uptr re = php_sub("RuntimeException", 16, e);
+    uptr ia = php_sub("InvalidArgumentException", 24, le);
+    php_sub("DomainException", 15, le);
+    php_sub("LengthException", 15, le);
+    php_sub("OutOfRangeException", 19, le);
+    php_sub("BadFunctionCallException", 24, le);
+    php_sub("BadMethodCallException", 22, le);
+    php_sub("OutOfBoundsException", 20, re);
+    php_sub("OverflowException", 17, re);
+    php_sub("RangeException", 14, re);
+    php_sub("UnderflowException", 18, re);
+    php_sub("UnexpectedValueException", 24, re);
+    php_sub("JsonException", 13, e);
+    php_sub("ErrorException", 14, e);
+}
+
+// an uncaught throwable, in php's own words
+void php_uncaught() {
+    if (!ph_exc) return;
+    uptr o = ld64(ph_exc);
+    uptr s = php_str_concat(php_str_new("Uncaught ", 9), php_obj_cname(o));
+    uptr m = php_zv_str(php_exm_message(o));
+    if (php_strlen(m)) {
+        s = php_str_concat(s, php_str_new(": ", 2));
+        s = php_str_concat(s, m);
+    }
+    uptr f = php_zv_str(php_exm_file(o));
+    i64 ln = php_zv_long(php_exm_line(o));
+    s = php_str_concat(s, php_str_new(" in ", 4));
+    s = php_str_concat(s, f);
+    s = php_str_concat(s, php_str_new(":", 1));
+    s = php_str_concat(s, php_itos(ln));
+    s = php_str_concat(s, php_str_new("\nStack trace:\n#0 {main}\n  thrown in ", 36));
+    s = php_str_concat(s, f);
+    s = php_str_concat(s, php_str_new(" on line ", 9));
+    s = php_str_concat(s, php_itos(ln));
+    ph_exc = 0;
+    php_fatal(s);
+}
+
+// the runtime's own throws, now that the hierarchy exists
+i64 php_throw_cls(uptr cls, uptr msg) {
+    php_bootstrap();
+    uptr ce = php_ce_find(cls);
+    if (!ce) ce = php_ce_find(php_str_new("Error", 5));
+    uptr o = php_obj_new(ce);
+    php_obj_defaults(o, ce);
+    php_zv_cpv(php_arr_sslot(php_obj_props(o), php_str_new("message", 7)), php_zstr(msg));
+    ph_exc = php_zobj(o);
+    return 0;
+}
+
+// does the pending throwable match this catch clause?
+uptr php_unhandled_match(uptr z) {
+    uptr m = php_str_concat(php_str_new("Unhandled match case ", 21), php_zv_str(z));
+    php_throw_cls(php_str_new("UnhandledMatchError", 19), m);
+    return php_znull();
+}
+
+i64 php_catches(uptr name) {
+    if (!ph_exc) return 0;
+    return php_instanceof(ph_exc, name);
+}
+
+uptr php_catch_take() {
+    uptr z = ph_exc;
+    ph_exc = 0;
+    if (!z) return php_znull();
+    return z;
+}
