@@ -87,6 +87,7 @@ uptr ph_cur_cls;               // the class being parsed, 0 outside one
 uptr ph_cur_fn;                // the php function or method being parsed, 0 outside one
 i64  ph_pre_find(uptr n);
 i64  ph_stmt_of(i64 c);
+i64  ph_nmb(i64 c, i64 first);
 i64  ph_mcall_node(i64 recv, uptr name, uptr fl, i64 line);
 i64  ph_scall_node(i64 ce, uptr name, uptr fl, i64 line);
 i64  ph_ce_of(uptr name, uptr fl, i64 line);
@@ -326,6 +327,28 @@ i64  ph_tline;
 uptr ph_tfile;
 i64  ph_tnode;            // PHT_DSTR: the node the scanner already built
 i64  ph_nopeek;           // set right after a p_push_source: cur is in the old frame
+
+// `#[\Override]` just went past: the next class member is the one php checks
+i64  ph_saw_override;
+
+// does [b, e) contain `w` as a whole word? (the attribute scan's only need)
+i64 ph_has_word(uptr b, uptr e, uptr w, i64 n) {
+    uptr q = b;
+    loop {
+        if (q + n > e) break;
+        i64 k = 0;
+        loop { if (k >= n) break; if (ld8(q + k) != ld8(w + k)) break; k = k + 1; }
+        if (k == n) {
+            i64 okl = 1;
+            i64 okr = 1;
+            if (q > b) { i64 p0 = ld8(q - 1); if (ph_nmb(p0, 0)) okl = 0; }
+            if (q + n < e) { i64 p1 = ld8(q + n); if (ph_nmb(p1, 0)) okr = 0; }
+            if (okl && okr) return 1;
+        }
+        q = q + 1;
+    }
+    return 0;
+}
 
 void ph_sync() {
     ph_tid   = p_id();
@@ -719,8 +742,12 @@ void ph_next() {
         }
         if (c == 35) {                                  // # comment, or #[Attr]
             if (q + 1 < e && ld8(q + 1) == 91) {        // D6: attributes are inert
+                // -- except `#[\Override]`, which is not reflection: php
+                // CHECKS it while compiling the class, so the name is read
+                // here and the member that follows is marked.
                 q = q + 2;
                 i64 depth = 1;
+                uptr abeg = q;
                 loop {
                     if (q >= e) break;
                     i64 d2 = ld8(q);
@@ -728,6 +755,7 @@ void ph_next() {
                     if (d2 == 93) { depth = depth - 1; if (depth == 0) { q = q + 1; break; } }
                     q = q + 1;
                 }
+                if (ph_has_word(abeg, q, "Override", 8)) ph_saw_override = 1;
                 continue;
             }
             loop {
@@ -5635,6 +5663,31 @@ i64 ph_scall_node(i64 ce, uptr name, uptr fl, i64 line) {
 }
 
 // ---- the member list -------------------------------------------------------
+// `#[\Override]`: one call per marked member, into the list that runs after
+// every class entry is built, so the parent chain is there to be walked.
+// The check is php's own and it is not reflection (D6): the compiler names
+// the member, and nothing at run time enumerates anything a program can see.
+i64 ph_ovr_head;
+i64 ph_ovr_tail;
+
+void ph_ovr_check(uptr ceg, uptr cname, uptr mname, i64 kind, uptr fl, i64 line) {
+    uptr what = p_cat(cname, "::", 0, 2);
+    if (kind) what = p_cat(what, "$", 0, 1);
+    what = p_cat(what, mname, 0, cstrlen(mname));
+    if (!kind) what = p_cat(what, "()", 0, 2);
+    u8 av[48];
+    st64(av, ph_ceref(ceg));
+    st64(av + 8, ph_strlit(what, cstrlen(what)));
+    st64(av + 16, ph_strlit(mname, cstrlen(mname)));
+    st64(av + 24, ph_int(kind));
+    st64(av + 32, ph_raw(ph_absfile(fl), cstrlen(ph_absfile(fl))));
+    st64(av + 40, ph_int(line));
+    i64 s = ph_stmt_of(ph_calln("php_ce_ovr", av, 6, TY_VOID));
+    if (ph_ovr_tail) set_nd_next(ph_ovr_tail, s);
+    if (!ph_ovr_tail) ph_ovr_head = s;
+    ph_ovr_tail = s;
+}
+
 i64 ph_visword() {
     if (ph_is("public"))    { ph_next(); return V_PUBLIC; }
     if (ph_is("protected")) { ph_next(); return V_PROTECTED; }
@@ -5757,6 +5810,8 @@ void ph_class(uptr fl, i64 line, i64 flags) {
         i64 mflags = 0;
         i64 vis = -1;
         i64 stat = 0;
+        i64 movr = ph_saw_override;
+        ph_saw_override = 0;
 
         if (ph_is("use")) {
             ph_next();
@@ -5873,6 +5928,10 @@ void ph_class(uptr fl, i64 line, i64 flags) {
                 ph_cfill(ph_stmt_of(ph_c4("php_ce_method", ph_ceref(ceg), ph_strlit(mname, cstrlen(mname)),
                                           fp, ph_int(vis), TY_VOID)));
             }
+            if (isabs)
+                ph_cfill(ph_stmt_of(ph_c3("php_ce_absm", ph_ceref(ceg), ph_strlit(mname, cstrlen(mname)),
+                                          ph_int(vis), TY_VOID)));
+            if (movr) ph_ovr_check(ceg, cname, mname, 0, mfl, mline);
             continue;
         }
 
@@ -5889,6 +5948,9 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             uptr fn = "php_ce_prop";
             if (stat) fn = "php_ce_sprop";
             ph_cfill(ph_stmt_of(ph_c4(fn, ph_ceref(ceg), ph_strlit(pname, cstrlen(pname)), def, ph_int(vis), TY_VOID)));
+            // php reports a PROPERTY's #[\Override] at the CLASS's own line
+            // and a method's at the method's (measured, php 8.5.10)
+            if (movr) ph_ovr_check(ceg, cname, pname, 1, fl, line);
             if (!ph_accept(",", 1)) break;
         }
         ph_semi("expected ; after a php property");
@@ -6596,6 +6658,13 @@ void ph_program() {
     if (ph_cfill_head) {
         if (ph_cnew_tail) set_nd_next(ph_cnew_tail, ph_cfill_head);
         if (!ph_cnew_tail) ph_cnew_head = ph_cfill_head;
+        ph_cnew_tail = ph_cfill_tail;
+    }
+    // #[\Override] is checked once every class entry is filled: a class may
+    // extend one declared later in the file, whose methods are not there yet
+    if (ph_ovr_head) {
+        if (ph_cnew_tail) set_nd_next(ph_cnew_tail, ph_ovr_head);
+        if (!ph_cnew_tail) ph_cnew_head = ph_ovr_head;
     }
     i64 boot = ph_stmt_of(ph_call("php_bootstrap", 0, 0, 0, 0, 0, TY_VOID));
     set_nd_next(boot, ph_cnew_head);

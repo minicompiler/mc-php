@@ -3891,6 +3891,12 @@ void php_ce_extend(uptr ce, uptr pname) {
     st64(ce + 8, p);
 }
 
+// an abstract or interface method: no body, but the name is declared, which
+// is what `#[\Override]` and `class_implements`-shaped questions read
+void php_ce_absm(uptr ce, uptr name, i64 vis) {
+    php_zv_cp(php_arr_sslot(ld64(ce + 72), php_case(name, 0)), php_zlong(vis * 8 + 1));
+}
+
 void php_ce_method(uptr ce, uptr name, i64 fn, i64 vis) {
     php_zv_cp(php_arr_sslot(ld64(ce + 24), php_case(name, 0)), php_zlong(fn));
     php_zv_cp(php_arr_sslot(ld64(ce + 72), php_case(name, 0)), php_zlong(vis * 8 + 1));
@@ -4250,6 +4256,100 @@ uptr php_ce_getconst(uptr ce, uptr name) {
     m = php_str_concat(m, name);
     php_throw_str(php_str_new("Error", 5), m);
     return php_znull();
+}
+
+// `#[\Override]` is not reflection: php checks it while COMPILING the class,
+// so nothing enumerates a table at run time -- the compiler emits one call
+// per marked member, with the member's own file and line, into the class
+// setup that runs before any user statement. The check is the parent chain
+// and every interface it names, which is php's own rule.
+i64 php_ce_has(uptr ce, uptr lname, i64 kind) {
+    uptr c = ce;
+    loop {
+        if (!c) break;
+        // the vis table and not the method table: an ABSTRACT or interface
+        // method has no function pointer and still counts as a parent's
+        uptr vb = php_ht_find(ld64(c + 72), php_str_hash(lname), lname);
+        if (vb) {
+            i64 v = ld64(vb);
+            i64 k = v - v / 8 * 8;
+            i64 want = 1;
+            if (kind) want = 0;
+            // a static property records 2, an instance one 0
+            if (kind && k == 2) k = 0;
+            // a PRIVATE member of a parent is not a match: php says the
+            // override has nothing to override (override/010)
+            if (k == want && v / 8 != V_PRIVATE) return 1;
+        }
+        uptr ifs = ld64(c + 48);
+        i64 used = php_ht_used(ifs);
+        i64 i = 0;
+        loop {
+            if (i >= used) break;
+            uptr k = php_ht_bkt(ifs, i);
+            if (ld8(k + 8) != IS_UNDEF) {
+                uptr ic = php_ce_find(ld64(k + 24));
+                if (ic) { if (php_ce_has(ic, lname, kind)) return 1; }
+            }
+            i = i + 1;
+        }
+        c = ld64(c + 8);
+    }
+    return 0;
+}
+
+// php reports a compile-time fatal on stdout with its own file and line, and
+// exits 255 (T7's road, from the runtime rather than from the compiler:
+// what a parent has is only known once every class entry is built).
+void php_rt_fatal_at(uptr msg, uptr file, i64 line) {
+    php_write("\nFatal error: ", 14);
+    php_echo_str(msg);
+    php_write(" in ", 4);
+    php_write(file, php_cstrlen(file));
+    php_write(" on line ", 9);
+    uptr d = php_itos(line);
+    php_write(d + ZS_HDR, php_strlen(d));
+    // php raises this one as an Error while compiling the class, so its
+    // output carries the trace an uncaught Error carries (measured: the
+    // .phpt EXPECTF quotes the first line, the grid compares php's OWN
+    // output, and that is the whole of it).
+    php_write("\nStack trace:\n#0 {main}\n", 24);
+    php_flush();
+    write(2, "PHP Fatal error:  ", 18);
+    write(2, msg + ZS_HDR, php_strlen(msg));
+    write(2, " in ", 4);
+    write(2, file, php_cstrlen(file));
+    write(2, " on line ", 9);
+    write(2, d + ZS_HDR, php_strlen(d));
+    write(2, "\nStack trace:\n#0 {main}\n", 24);
+    exit(255);
+}
+
+// kind 0 a method, 1 a property. `what` is what php names: `C::m()` / `C::$p`.
+void php_ce_ovr(uptr ce, uptr what, uptr name, i64 kind, uptr file, i64 line) {
+    uptr par = ld64(ce + 8);
+    i64 ok = 0;
+    if (par) ok = php_ce_has(par, php_case(name, 0), kind);
+    if (!ok) {
+        // an interface the class itself names counts as a parent here
+        uptr ifs = ld64(ce + 48);
+        i64 used = php_ht_used(ifs);
+        i64 i = 0;
+        loop {
+            if (i >= used) break;
+            uptr k = php_ht_bkt(ifs, i);
+            if (ld8(k + 8) != IS_UNDEF) {
+                uptr ic = php_ce_find(ld64(k + 24));
+                if (ic) { if (php_ce_has(ic, php_case(name, 0), kind)) ok = 1; }
+            }
+            i = i + 1;
+        }
+    }
+    if (ok) return;
+    uptr m = php_str_concat(what, php_str_new(" has #[\\Override] attribute, but no matching parent ", 52));
+    if (kind) m = php_str_concat(m, php_str_new("property exists", 15));
+    if (!kind) m = php_str_concat(m, php_str_new("method exists", 13));
+    php_rt_fatal_at(m, file, line);
 }
 
 uptr php_ce_sslot(uptr ce, uptr name) {
