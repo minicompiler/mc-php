@@ -134,19 +134,22 @@ D6. DECIDED (owner, 2026-09-15): no reflection. A binary carries no run-time typ
     `get_class_methods`, `get_object_vars`, `get_class_vars`, `property_exists`/`method_exists`
     with a non-literal name, `$obj->$prop`, `$obj->$method()`, `new $class`, `$class::$member`,
     a callable spelled as a string (`'Foo::bar'`, `[$o, 'm']` with a dynamic string),
-    `func_get_args` (`...$args` stays), `debug_backtrace`. Attributes `#[Attr]` are accepted by
+    `debug_backtrace` (`func_get_args` was here and is not -- see the correction below;
+    `...$args` stays). Attributes `#[Attr]` are accepted by
     the grammar and inert (only reflection read them). KEPT, because it is dispatch and not
     introspection: `__get`/`__set`/`__call`/`__callStatic`/`__invoke`, `instanceof` with a
     literal, `get_class($o)`, `$o::class`, typed closures/callables, `is_callable(Closure)`.
     ANSWERED AT COMPILE TIME when the argument is a literal: `class_exists('Foo')`,
     `method_exists($o, 'm')`, `function_exists('f')` fold to constants.
-    **Measured by T8** (`probes/t8/RESULTS.md` section 5), and it is a question for the owner:
-    `func_get_args` is on the refused list because "a binary carries no run-time type tables",
-    and that particular one needs none -- the arguments of the currently executing function ARE
-    its own parameters, which the compiler has in front of it. T8 built `func_num_args()` and
-    `func_get_arg(k)`, which D6 does NOT name, out of exactly that (a prologue counter emitted
-    only when the source names one of the two, plus a choice among the parameters); it left
-    `func_get_args` refused, because D6 names it and a decision is the owner's to change. Declared cost: frameworks
+    **Corrected by T8's measurement** (`probes/t8/RESULTS.md` section 5): `func_get_args` is back
+    IN. D6's principle is "a binary carries no run-time type tables, and nothing dispatches on a
+    string" -- and that one needs neither: the arguments of the currently executing function ARE
+    its own parameters, which the compiler has in front of it. T8 already built `func_num_args()`
+    and `func_get_arg(k)` out of exactly that (a prologue counter emitted only when the source
+    names one of them, plus a choice among the parameters); `func_get_args()` is the same
+    mechanism returning an array, so listing it here was a classification mistake, not a choice.
+    `debug_backtrace` stays refused -- it needs the call stack's shape at run time, which is the
+    table D6 is about. Declared cost: frameworks
     built on reflection-driven DI containers (Laravel, Symfony) are out of scope; the target is
     programs and libraries that do not introspect.
 
