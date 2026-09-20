@@ -119,6 +119,9 @@ awk -F'\t' '$2 == "(compiled; output differs)" { print $1 }' "$OUT/why.tsv" > "$
 MCPHP_BIN="$root/probes/t8/mc-php" python3 probes/t8/diffgroup.py "$OUT/dg.tsv" \
     < "$OUT/dg.list" | tee "$OUT/dg.table"
 
+printf '\n== 8b. the two sub-populations T7 named ==\n'
+python3 probes/t8/subpop.py "$OUT/all"
+
 printf '\n== 9. how often the arena (D7) is the answer ==\n'
 # A php array is a VALUE and D7 has no refcount, so T6 copies EAGERLY; this
 # is the number that says whether that, or anything else, exhausts the arena.

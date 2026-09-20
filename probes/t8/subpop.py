@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""The two sub-populations T7 named, re-measured on T8's greens.
+"""The two sub-populations T7 named, re-measured on the greens of a run.
+
+    python3 probes/t8/subpop.py OUT/all
 
   * the tests that assert a php diagnostic line
   * the tests that mention __destruct
 """
 import re, sys, glob, os
 green = set()
-for f in glob.glob('probes/t8/out/final/all/green.txt'):
+out = sys.argv[1] if len(sys.argv) > 1 else 'probes/t8/out/all'
+for f in glob.glob(os.path.join(out, 'green.txt')):
     for l in open(f):
         green.add(l.split('\t')[0])
 DIAG = re.compile(r'^(Warning|Deprecated|Notice|Fatal error):', re.M)

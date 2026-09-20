@@ -203,12 +203,15 @@ and printed the wrong thing**. T7 builds the first and takes the second apart.
 
 ## T8 -- the wall was `(does not compile)`, and it is not any more
 
-**green 1218 -> 1451:**
-`phpt: green 1451 / wrong 13628 / refused 3023 / skip 2947 / php-fail 346 / total 21049`
+**green 1218 -> 1450:**
+`phpt: green 1450 / wrong 13607 / refused 3026 / skip 2947 / php-fail 365 / total 21030`
 over the whole corpus. Per directory: `tests/lang` **93** (was 82), `Zend/tests` **635**
-(was 539), `ext/standard/tests/strings` **221** (was 194). **1442 of the 1451 greens are in
-T0's "touched by none" set.** `refused` rose 2917 -> 3023 and `wrong` fell 13968 -> 13628: a
-test that now COMPILES gets far enough to hit a design refusal it never reached before.
+(was 539), `ext/standard/tests/strings` **223** (was 194). **1441 of the 1450 greens are in
+T0's "touched by none" set.** `refused` rose 2917 -> 3026 and `wrong` fell 13968 -> 13607: a
+test that now COMPILES gets far enough to hit a design refusal it never reached before. The
+`php-fail` column is php's OWN and this run had 365 against the previous run's 346 -- the
+machine was loaded; five of the nineteen were green in that run and are green again when
+re-run with the same binary, so the tree's number is 1455.
 
 T7 left one number pointing at what to do next: **878 of 1460 sampled `wrong` tests DO NOT
 COMPILE**, of which **288 name a php function or constant mc-php does not have**. T8 takes the

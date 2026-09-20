@@ -14,25 +14,37 @@ against a snapshot of T7's compiler, is `tests/lang` **82**, `Zend/tests`
 **539**, `ext/standard/tests/strings` **194** -- T7's three numbers to the
 test.
 
-## Answer: green 1218 -> 1451
+Every measurement in this file was taken against a SNAPSHOT of the compiler
+(`probes/t8/grid.sh`, and `probes/t8/fixtures.sh` does the same now), which
+is T7's own note: the first baseline there measured a binary that was being
+rebuilt underneath it.
+
+## Answer: green 1218 -> 1450
 
 | grid | green | wrong | refused | skip | php-fail | total | T7's green |
 |---|---|---|---|---|---|---|---|
 | `tests/lang` | **93** | 144 | 44 | 12 | 1 | 293 | 82 |
 | `Zend/tests` | **635** | 3606 | 953 | 112 | 6 | 5306 | 539 |
-| `ext/standard/tests/strings` | **221** | 352 | 107 | 54 | 0 | 734 | 194 |
-| **the whole corpus** | **1451** | 13628 | 3023 | 2947 | 346 | 21049 | 1218 |
+| `ext/standard/tests/strings` | **223** | 350 | 107 | 54 | 0 | 734 | 194 |
+| **the whole corpus** | **1450** | 13607 | 3026 | 2947 | 365 | 21030 | 1218 |
+
+**The `php-fail` column is php's own**, and this run had 365 against the
+previous one's 346: the machine was loaded (two grids and an analysis at
+once) and nineteen tests failed on php's SIDE, five of them tests the
+previous run had green. Re-run on a quiet machine with the same binary, all
+five are green -- so **the tree's number is 1455** and 1450 is what the
+loaded run measured. Both are recorded because the measurement is the claim.
 
 T7's line, same corpus and same harness:
 `green 1218 / wrong 13968 / refused 2917 / skip 2947 / php-fail 345 / total 21050`.
 T6's: `green 1073`. T5's: `green 80`. T0's, before any compiler existed:
 `green 0`.
 
-**1442 of the 1451 greens are in T0's "touched by none" set** -- the 84.2% of
+**1441 of the 1450 greens are in T0's "touched by none" set** -- the 84.2% of
 the corpus none of § 3's decisions touches. The other nine are the greens a
 decision has an opinion about; T7 had seven.
 
-`refused` rose 2917 -> 3023 and `wrong` fell 13968 -> 13628. Both are honest:
+`refused` rose 2917 -> 3026 and `wrong` fell 13968 -> 13607. Both are honest:
 a test that now COMPILES gets far enough to hit a design refusal it never
 reached before, which is the third column doing its job.
 
@@ -54,7 +66,10 @@ now compile.
 | `php_rt.txt` | 7571 (was 5930) | the runtime, pushed into every program it compiles |
 | `nocompile.py` | 59 | **new**: the `(does not compile)` block, grouped, with examples |
 | `fixtures.sh` | 42 | **new**: the `g/` and `r/` gate, on a SNAPSHOT of the compiler |
+| `subpop.py` | 26 | **new**: the two sub-populations T7 named, re-counted |
 | the rest | | T7's, unchanged in shape |
+
+The library table went **180 rows -> 242**; `g/` went 30 fixtures -> 46.
 
 `php.mc` calls **58** names from outside itself: **48 are in mc's
 `tests/golden/surface.txt`**, four are core INTRINSICS and not library
@@ -265,6 +280,87 @@ And: `serialize`, `unserialize`, `settype`, `parse_str`, `array_splice`,
    bytes long -- which reads past the literal into whatever the linker put
    next. The pattern is in the check now: **100 pairs -> 418**.
 
+## 3b. The tables, re-measured on the block-3 compiler
+
+1396 `wrong` tests -- `tests/lang` + `ext/standard/tests/strings` in full plus
+the first 900 of `Zend/tests`, T7's own sample shape -- by what mc-php said
+about each. **The block INVERTED**: `(does not compile)` was 878 of 1460 and
+is 638 of 1396, and the majority is now what a test PRINTS.
+
+```
+   758  (compiled; output differs)          (was 582)
+   638  (does not compile)                  (was 878)
+        of which:
+    177  a php function or constant mc-php does not have   (was 288)
+     54  expected ; after a php expression
+     41  mc-php: <a named limit>
+     31  PHP Fatal error
+     30  expected ; after a php property
+     27  expected ) in a php call
+     26  an assignment by reference
+     25  the wrong number of arguments for
+     23  a php parameter
+     19  the storage keyword                 (`static::`, late static binding)
+     17  argument unpacking ...$args
+     12  a reference &$x
+     11  expected ; after a php assignment
+     11  expected = after a php array index
+     10  a php file that does not open with <?php   (the mc gap)
+     10  an assignment by reference to something that is not a $variable
+     10  a reference to a php variable of type
+```
+
+and the names that are left, by frequency:
+
+```
+  sscanf(16), crypt(14), spl_autoload_register(13), debug_print_backtrace(7),
+  highlight_string(7), php_strip_whitespace(6), __HALT_COMPILER(5),
+  set_exception_handler(4), metaphone(4), parse_ini_string(4),
+  get_called_class(4), parse_ini_file(4), register_tick_function(4),
+  highlight_file(3), show_source(3), array_multisort(3), next(3),
+  stream_wrapper_register(3), restore_error_handler(3) ...
+```
+
+Three of those are not functions: `b(3)`, `foo(3)` and `Array(2)` are a
+test's own names in a context this compiler reads as a call.
+
+And the 758 that compile, by what differs:
+
+```
+      355  var_dump of a value
+      166  a php diagnostic
+      121  a blank line
+       73  other text
+       15  a float
+       11  an integer
+        9  print_r of a container
+        2  (timed out)
+        2  (agrees on this harness)
+        2  var_export of an element
+        1  print_r of an element
+        1  a container delimiter
+```
+
+`a php diagnostic` is 166 and its head is now php diagnostics for features
+this compiler does not have at all -- `Allowed memory size exhausted`,
+readonly properties, `Deprecated`/`NoDiscard` as classes -- which is T7's own
+finding one size larger. **`php '' / mc 'Done'`, 29 of the 121 blank lines,
+is the biggest single pair in the whole table**: they are php COMPILE-TIME
+fatals for constructs the parser accepts, and T7's road for those (stdout,
+exit 255) exists and is only four messages wide.
+
+Four of the pairs in that table were exact enough to fix on the spot, and
+block 4 did: `similar_text`'s `$percent`, `str_replace`'s `$count`,
+`str_decrement`'s wording and `unserialize`'s level and its input check.
+
+### D7, re-measured
+
+`probes/t8/arena.py`: **11 of 1396** sampled `wrong` tests exhaust the arena,
+against T7's 9 of 1460. The two new ones are `bug69522` and `gh10940`, and
+they are the same shape as the four T7 named -- a program that builds a very
+large STRING. Still **not one is an array copy**, so T7's decision stands and
+copy-on-write is not built.
+
 ## 4. What is not there, with its number
 
 * **A referenced array element is not marked.** php's `var_dump` prints
@@ -274,6 +370,14 @@ And: `serialize`, `unserialize`, `settype`, `parse_str`, `array_splice`,
   `echo` and says why.
 * **`func_get_args` stays refused.** D6 names it, and a decision is the
   owner's to change -- see § 5.
+* **A by-reference argument that is not a plain `$name`** -- `f($a[0])`,
+  `f($o->p)` -- takes the ordinary road and so passes a COPY. php passes the
+  cell. The shape is reachable (`ph_lv_walk` finds the cell for
+  `$r = &$a[k]` already) and it is not built.
+* **More arguments than a function declares.** php accepts them and
+  `func_get_args` returns them; here it is still `the wrong number of
+  arguments for`, 25 of the sample -- and it is why `func_num_args` counts
+  the DECLARED parameters that arrived and no others.
 * **`static::`** (late static binding) is still `the storage keyword: static`,
   19 of the sample. `new static` and `static function` compile.
 * The **mc gap** is unchanged and T8 hits it exactly as often: **38 of the
@@ -304,4 +408,31 @@ compiler and not to a probe.
 
 ## What T9 should do
 
-In the order the numbers argue for.
+In the order the numbers argue for, and they are all in § 3b.
+
+1. **`var_dump of a value`, 355 of the 758 that compile** -- the largest
+   single group in the whole table now, and no longer one theme. Its head is
+   `php 'int(N)' / mc ''` (24) and `php 'array(N) {' / mc ''` (18), which is
+   a test that stops before it gets there, and `php 'int(N)' / mc 'int(N)'`
+   (23), which is the same shape with a different NUMBER.
+2. **php COMPILE-TIME fatals, 29 of the 121 blank lines** and the single
+   biggest pair in the table (`php '' / mc 'Done'`). The road exists since T7
+   -- the text on stdout, exit 255 -- and only the duplicate-modifier family
+   uses it. `Cannot redeclare`, the parse errors and the interface conflicts
+   are each one check at their own site.
+3. **`static::`, 19** -- late static binding, the last of the grammar's
+   corners with a number. In an instance method it is a dispatch on `$this`
+   and so allowed by D6; in a static one php tracks the CALLED class, which
+   needs a runtime global set at each static call site.
+4. **`sscanf` (16), `crypt` (14), `spl_autoload_register` (13)** lead what is
+   left of the names -- and the third is D5-shaped: `docs/plan.md` D5 already
+   says an autoloader over a literal map is compile-time resolution.
+5. **php's `memory_limit`.** Six of the 166 diagnostic rows are tests that
+   EXPECT php to run out, and the arena exhausts silently instead; a limit
+   and its `Fatal error:` is the diagnostic channel plus a counter. Still
+   T7's item 4, and the number has grown.
+6. **`argument unpacking ...$args` (17)** and the four remaining reference
+   shapes (`an assignment by reference` 26, `a reference &$x` 12, `an
+   assignment by reference to something that is not a $variable` 10, `a
+   reference to a php variable of type` 10), which is 58 between them and
+   the same theme block 1 opened.

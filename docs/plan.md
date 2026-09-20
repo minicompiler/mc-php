@@ -250,7 +250,7 @@ D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connec
 
 | T7 | php's diagnostics, and the tests that compile and print the wrong thing | the diagnostic channel built (position, text, streams, exit codes) and T6's `(compiled; output differs)` block clustered by `probes/t7/diffgroup.py` and worked in descending order | green/total -- **phpt: green 1218 / wrong 13968 / refused 2917 / skip 2947 / php-fail 345 / total 21050** (`probes/t7`); per directory `tests/lang` 82, `Zend/tests` 539, `ext/standard/tests/strings` 194 |
 
-| T8 | the block that does not compile, and the names it asks for | T7's `(does not compile)` block grouped by `probes/t8/nocompile.py` and worked in descending order; the 288 missing names worked in descending frequency | green/total -- **phpt: green 1451 / wrong 13628 / refused 3023 / skip 2947 / php-fail 346 / total 21049** (`probes/t8`); per directory `tests/lang` 93, `Zend/tests` 635, `ext/standard/tests/strings` 221 |
+| T8 | the block that does not compile, and the names it asks for | T7's `(does not compile)` block grouped by `probes/t8/nocompile.py` and worked in descending order; the 288 missing names worked in descending frequency | green/total -- **phpt: green 1450 / wrong 13607 / refused 3026 / skip 2947 / php-fail 365 / total 21030** (`probes/t8`); per directory `tests/lang` 93, `Zend/tests` 635, `ext/standard/tests/strings` 223 |
 
 Gate for the compiler proper: T2 + T3 decide `.so` reuse (D2b); T4 decides that the grammar fits
 Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
@@ -259,13 +259,17 @@ T8 is done (2026-09-20, macos/aarch64; `probes/t8/RESULTS.md`), on **mc 1.1.0**:
 the block T7 named -- `(does not compile)`, 878 of 1460 sampled `wrong`
 tests -- taken apart group by group, and the 288 missing names worked in
 descending frequency:
-`phpt: green 1451 / wrong 13628 / refused 3023 / skip 2947 / php-fail 346 / total 21049`
+`phpt: green 1450 / wrong 13607 / refused 3026 / skip 2947 / php-fail 365 / total 21030`
 over the whole corpus, against T7's `green 1218` on the same harness. Per
 directory `tests/lang` **93** (was 82), `Zend/tests` **635** (was 539),
-`ext/standard/tests/strings` **221** (was 194). **1442 of the 1451 greens are
-in T0's "touched by none" set.** `refused` rose 2917 -> 3023 and `wrong` fell
-13968 -> 13628, which is a test that now COMPILES getting far enough to hit a
-design refusal it never reached before.
+`ext/standard/tests/strings` **223** (was 194). **1441 of the 1450 greens are
+in T0's "touched by none" set.** `refused` rose 2917 -> 3026 and `wrong` fell
+13968 -> 13607, which is a test that now COMPILES getting far enough to hit a
+design refusal it never reached before. The `php-fail` column is php's OWN
+and this run had 365 against the previous run's 346: the machine was loaded,
+and five of the nineteen were green in that run and are green again when
+re-run with the same binary -- so the tree's number is 1455 and 1450 is what
+the loaded run measured.
 
 `probes/t8/nocompile.py` is what made the block workable: `whytable.py`
 prints its head as a flat top-22 with no way back to a file, and this reads
