@@ -2185,15 +2185,21 @@ uptr php_obj_new(uptr ce) {
     st32(o + 8, ph_objid);
     st64(o + 16, ce);
     st64(o + 24, php_arr_new(8));
-    if (ce) {
-        if (php_ce_lookup(ce, 24, php_str_new("__destruct", 10))) {
-            uptr n = php_alloc(16);
-            st64(n, o);
-            st64(n + 8, ph_dt_head);
-            ph_dt_head = n;
-        }
-    }
     return o;
+}
+
+// An object joins the destructor list when it is fully CREATED, which is
+// after its constructor returns normally -- php does not destruct one whose
+// constructor threw, and does not create one at all when an ARGUMENT to
+// `new` threw first (Zend/tests/try/catch_00{2,3,4}, exceptions/bug47771).
+void php_dt_arm(uptr o) {
+    uptr ce = php_obj_ce(o);
+    if (!ce) return;
+    if (!php_ce_lookup(ce, 24, php_str_new("__destruct", 10))) return;
+    uptr n = php_alloc(16);
+    st64(n, o);
+    st64(n + 8, ph_dt_head);
+    ph_dt_head = n;
 }
 
 i64  php_obj_id(uptr o) { return ld32(o + 8); }
@@ -3935,6 +3941,7 @@ uptr php_clone(uptr z) {
     if (php_zv_type(z) != IS_OBJECT) return z;
     uptr o = ld64(z);
     uptr n = php_obj_new(php_obj_ce(o));
+    php_dt_arm(n);
     st64(n + 24, php_arr_copy(php_obj_props(o)));
     uptr b = php_ht_find(ld64(php_obj_ce(o) + 80), php_str_hash(php_str_new("__clone", 7)), php_str_new("__clone", 7));
     if (b) callp(ld64(b), n);
@@ -4409,16 +4416,24 @@ void php_argcount(uptr cls, uptr fn) {
 
 uptr php_ce_name(uptr ce) { return ld64(ce); }
 
+// php does not destruct an object whose CONSTRUCTOR threw: it was never
+// fully created. php_obj_new registers every candidate, so a throwing
+// constructor takes it back off the list -- measured, five Zend/tests said so
+// (Zend/tests/try/catch_002 expects `Caught` and nothing else).
 uptr php_ctor(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
     uptr ce = php_obj_ce(o);
-    if (!php_ce_lookup(ce, 24, php_str_new("__construct", 11))) return php_znull();
-    return php_mcall(o, name, scope, n, a1, a2, a3, a4, a5, a6);
+    if (!php_ce_lookup(ce, 24, php_str_new("__construct", 11))) { php_dt_arm(o); return php_znull(); }
+    uptr r = php_mcall(o, name, scope, n, a1, a2, a3, a4, a5, a6);
+    if (!ph_exc) php_dt_arm(o);
+    return r;
 }
 
 uptr php_ctor0(uptr o) {
     uptr ce = php_obj_ce(o);
-    if (!php_ce_lookup(ce, 24, php_str_new("__construct", 11))) return php_znull();
-    return php_mcall(o, php_str_new("__construct", 11), 0, 0, 0, 0, 0, 0, 0, 0);
+    if (!php_ce_lookup(ce, 24, php_str_new("__construct", 11))) { php_dt_arm(o); return php_znull(); }
+    uptr r = php_mcall(o, php_str_new("__construct", 11), 0, 0, 0, 0, 0, 0, 0, 0);
+    if (!ph_exc) php_dt_arm(o);
+    return r;
 }
 
 uptr php_zv_store(uptr slot, uptr v) { php_zv_cpv(slot, v); return slot; }
