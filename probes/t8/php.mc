@@ -117,6 +117,7 @@ void ph_ls_pop();
 i64  ph_ls_level(i64 n, uptr fl, i64 line);
 i64  ph_check(i64 line, uptr fl);
 i64  ph_lv_walk(uptr d, uptr fl, i64 line, uptr pkey, i64 hoist);
+uptr ph_lv_prop;
 i64  ph_index(i64 base, i64 bt);
 i64  ph_zkey(i64 n, i64 t);
 i64  ph_mcty(i64 t);
@@ -1263,9 +1264,8 @@ i64 ph_pre_find(uptr n) {
 }
 
 void ph_pre_init() {
-    ph_pre("SEEK_SET", 0, 0, 0);
-    ph_pre("SEEK_CUR", 0, 1, 0);
-    ph_pre("SEEK_END", 0, 2, 0);
+    ph_pre("HTML_SPECIALCHARS", 0, 0, 0);
+    ph_pre("HTML_ENTITIES", 0, 1, 0);
     ph_pre("LOCK_SH", 0, 1, 0);
     ph_pre("LOCK_EX", 0, 2, 0);
     ph_pre("LOCK_UN", 0, 8, 0);
@@ -2916,19 +2916,31 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                 i64 v = node_new(N_IDENT, line, fl);
                 set_nd_name(v, ph_mangle(d, "v_"));
                 set_nd_type(v, ph_mcty(t));
+                // T8: the chain is `[k]` and `->p` in any order and to any
+                // depth, read QUIETLY -- php warns for nothing isset() or
+                // empty() touches, and a key or property that is not there
+                // reads as null, which is the answer both of them want.
                 loop {
+                    if (ph_at("->", 2) || ph_at("?->", 3)) {
+                        ph_next();
+                        if (ph_at("$", 1) || ph_at("{", 1))
+                            ph_refuse(fl, line, "a property name that is not a literal", "D6");
+                        if (!ph_wordish()) err_at2(fl, line, "mc-php: a php property needs a name", ph_tname);
+                        uptr pn = ph_tname;
+                        ph_next();
+                        v = ph_c3("php_zv_pget_q", ph_to_mixed(v, t), ph_strlit(pn, cstrlen(pn)), ph_scope(), ty_pzv);
+                        t = PT_MIXED;
+                        continue;
+                    }
                     if (!ph_at("[", 1)) break;
+                    if (t == PT_STRING) { ph_next(); v = ph_c2("php_str_off_q", v, ph_to_int(ph_expr(0), ph_ety), ty_pzv); ph_want("]", 1, "expected ]"); t = PT_MIXED; continue; }
                     if (t == PT_MIXED) { v = ph_c1("php_zv_arr_r", v, ty_parr); t = PT_ARR; }
-                    if (t == PT_STRING) { ph_next(); v = ph_c2("php_str_off", v, ph_to_int(ph_expr(0), ph_ety), ty_pstr); ph_want("]", 1, "expected ]"); t = PT_STRING; continue; }
                     if (t != PT_ARR) ph_refuse2(fl, line, "indexing a value that is not an array", ph_tyname(t), "D4");
                     ph_next();
                     i64 k = ph_zkey(ph_expr(0), ph_ety);
                     ph_want("]", 1, "expected ] in isset/empty");
-                    if (!isempty) v = ph_c2("php_zv_isset_key", v, k, TY_I64);
-                    if (isempty)  v = ph_c2("php_arr_zget", v, k, ty_pzv);
+                    v = ph_c2("php_arr_zget", v, k, ty_pzv);
                     t = PT_MIXED;
-                    if (!isempty) t = PT_INT;
-                    if (!isempty) { if (ph_at("[", 1)) ph_todo(fl, line, "isset of a nested array element"); }
                 }
                 if (!isempty) {
                     if (t == PT_INT)   one = ph_cast(TY_U8, ph_bin(ph_tok("!=", 2), v, ph_int(0), TY_U8));
@@ -3087,6 +3099,18 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         ph_ety = PT_MIXED;
         ph_can_throw = 1;
         return ph_calln("php_arg_at", allf, 12, ty_pzv);
+    }
+    // fprintf($h, $fmt, ...) / vfprintf($h, $fmt, $args): the same formatter
+    // with a stream in front of it
+    if (str_eq(name, "fprintf") || str_eq(name, "vfprintf")) {
+        i64 fvec = str_eq(name, "vfprintf");
+        u8 pnf2[8];
+        uptr avf2 = ph_read_args(16, fl, line, pnf2);
+        i64 naf2 = ld64(pnf2);
+        if (naf2 < 2) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        i64 txt = ph_sprintf(avf2 + 16, naf2 - 1, fl, line, fvec);
+        ph_ety = PT_MIXED;
+        return ph_c2("php_f_fput", ph_to_mixed(ph_a(avf2, 0), ph_aty(avf2, 0)), txt, ty_pzv);
     }
     if (str_eq(name, "sprintf") || str_eq(name, "printf")
         || str_eq(name, "vsprintf") || str_eq(name, "vprintf")) {
@@ -3757,21 +3781,50 @@ i64 ph_tref(i64 n) {
 
 // the container of `$d[k1][k2]...`, with the LAST key written through pkey
 // (0 when the last subscript is the append form `[]`).
+// The lvalue chain `$v[...][...]->p[...]`, walked to its LAST accessor: what
+// comes back is the container plus either a key (an array element) or a
+// property name, and ph_store writes whichever it is. T8: it walked `[` only,
+// so `$a[0]->p = 1`, `$t->x[0][0]` and `$c = &$t->list` -- 71 of the 734 that
+// did not compile -- had nowhere to go.
+//
+// `ph_lv_prop` is the property name of the last accessor, 0 for an element;
+// `cur` is then the RECEIVER (a zval) instead of an array handle.
 i64 ph_lv_walk(uptr d, uptr fl, i64 line, uptr pkey, i64 hoist) {
     i64 vt = ph_var_type(d);
     i64 base = node_new(N_IDENT, line, fl);
     set_nd_name(base, ph_mangle(d, "v_"));
     set_nd_type(base, ph_mcty(vt));
+    ph_lv_prop = 0;
     i64 cur = base;
-    if (vt == PT_MIXED) cur = ph_c1("php_zv_arr_w", base, ty_parr);
-    if (vt != PT_MIXED && vt != PT_ARR)
+    i64 isarr = 1;                       // cur is an array handle, not a zval
+    if (vt == PT_MIXED) { cur = base; isarr = 0; }
+    if (vt == PT_OBJ)   { cur = ph_to_mixed(base, PT_OBJ); isarr = 0; }
+    if (vt != PT_MIXED && vt != PT_ARR && vt != PT_OBJ)
         ph_refuse2(fl, line, "indexing a value that is not an array", ph_tyname(vt), "D4");
     loop {
+        if (ph_at("->", 2) || ph_at("?->", 3)) {
+            ph_next();
+            if (ph_at("$", 1) || ph_at("{", 1))
+                ph_refuse(fl, line, "a property name that is not a literal", "D6");
+            if (!ph_wordish()) err_at2(fl, line, "mc-php: a php property needs a name", ph_tname);
+            uptr pn = ph_tname;
+            ph_next();
+            if (isarr) { cur = ph_c1("php_zarr", cur, ty_pzv); isarr = 0; }
+            if (!ph_at("[", 1) && !ph_at("->", 2) && !ph_at("?->", 3)) {
+                if (hoist) cur = ph_temp(cur, ty_pzv, "phc_");
+                ph_lv_prop = pn;
+                st64(pkey, 0);
+                return cur;
+            }
+            cur = ph_c3("php_zv_pget", cur, ph_strlit(pn, cstrlen(pn)), ph_scope(), ty_pzv);
+            continue;
+        }
         ph_want("[", 1, "expected [ in a php array assignment");
+        if (!isarr) { cur = ph_c1("php_zv_arr_w", cur, ty_parr); isarr = 1; }
         i64 k = 0;
         if (!ph_at("]", 1)) k = ph_zkey(ph_expr(0), ph_ety);
         ph_want("]", 1, "expected ] in a php array assignment");
-        if (!ph_at("[", 1)) {
+        if (!ph_at("[", 1) && !ph_at("->", 2) && !ph_at("?->", 3)) {
             if (hoist) {
                 cur = ph_temp(cur, ty_parr, "phc_");
                 if (k) k = ph_temp(k, ty_pzv, "phk_");
@@ -3779,19 +3832,32 @@ i64 ph_lv_walk(uptr d, uptr fl, i64 line, uptr pkey, i64 hoist) {
             st64(pkey, k);
             return cur;
         }
+        if (ph_at("->", 2) || ph_at("?->", 3)) {
+            // the element itself is the receiver of the property access
+            if (k)  cur = ph_c2("php_arr_zget_w", cur, k, ty_pzv);
+            if (!k) cur = ph_c1("php_zarr", ph_c1("php_arr_dimn", cur, ty_parr), ty_pzv);
+            isarr = 0;
+            continue;
+        }
         if (k)  cur = ph_c2("php_arr_dim", cur, k, ty_parr);
         if (!k) cur = ph_c1("php_arr_dimn", cur, ty_parr);
     }
     return cur;
 }
 
-i64 ph_store(i64 cur, i64 k, i64 zv) {
+// The write ph_lv_walk's answer asks for. `prop` is ph_lv_walk's own
+// ph_lv_prop and is passed rather than read from the global: the OTHER
+// caller (ph_obj_stmt's `$o->p[k] =`) would otherwise see a stale one, which
+// is how `$t->x[0] = "q"` wrote a property named after an earlier statement's.
+i64 ph_store(i64 cur, i64 k, i64 zv, uptr prop) {
+    if (prop) return ph_c4("php_zv_pset", cur, ph_strlit(prop, cstrlen(prop)), zv, ph_scope(), TY_VOID);
     if (k) return ph_c3("php_arr_set", cur, k, zv, TY_VOID);
     return ph_c2("php_arr_push", cur, zv, TY_VOID);
 }
 
 // $v = expr / $v[i] = expr / $v[] = expr, and the compound forms
 i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
+    u8 kbr[8];
     ph_next();                                       // $
     if (ph_at("$", 1)) ph_refuse(fl, line, "a variable variable $$name", "D6");
     if (!ph_wordish()) err_at2(fl, line, "mc-php: a php variable needs a name", ph_tname);
@@ -3808,25 +3874,106 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
             ph_var_bind(d, PT_ARR);
             ph_pending_stmt(ph_set(ph_mangle(d, "v_"), ph_c1("php_arr_new", ph_int(8), ty_parr)));
         }
-        u8 kb[8];
-        i64 op = 0;
-        i64 incdec = 0;
-        i64 save = p_cp();
-        i64 cur = ph_lv_walk(d, fl, line, kb, 0);
-        // a compound form has to read the element too, so redo the walk with
-        // the container and the key hoisted into temporaries
-        if (ph_at(".=", 2) || ph_at("+=", 2) || ph_at("-=", 2) || ph_at("*=", 2)
-            || ph_at("/=", 2) || ph_at("%=", 2) || ph_at("**=", 3) || ph_at("??=", 3)
-            || ph_at("++", 2) || ph_at("--", 2)) {
-            ph_todo(fl, line, "a compound assignment to an array element");
+        // `$s[9] = "x"` on a STRING is php's byte write. A string is
+        // immutable here (D10), so the answer is a new one bound to the
+        // same name -- which is the same value semantics php has.
+        if (ph_var_type(d) == PT_STRING) {
+            ph_next();
+            i64 ix = ph_to_int(ph_expr(0), ph_ety);
+            ph_want("]", 1, "expected ] after a php string offset");
+            ph_want("=", 1, "expected = after a php string offset");
+            i64 cv = ph_expr(0);
+            i64 cvt = ph_ety;
+            if (semi) ph_semi("expected ; after a php assignment");
+            i64 sb = node_new(N_IDENT, line, fl);
+            set_nd_name(sb, ph_mangle(d, "v_"));
+            set_nd_type(sb, ty_pstr);
+            ph_can_throw = 1;
+            return ph_wrap(ph_set(ph_mangle(d, "v_"),
+                ph_c3("php_str_setoff", sb, ix, ph_to_mixed(cv, cvt), ty_pstr)));
         }
+        u8 kb[8];
+        // The container and the key are hoisted into temporaries whatever
+        // follows: a compound form has to READ the element as well as write
+        // it, and there is no way to walk the same tokens twice. T8: that is
+        // what `a compound assignment to an array element` was waiting for.
+        i64 cur = ph_lv_walk(d, fl, line, kb, 1);
+        uptr lprop = ph_lv_prop;
         i64 k = ld64(kb);
+        i64 op = 0;
+        if (ph_at(".=", 2))  op = ph_tok(".", 1);
+        if (ph_at("+=", 2))  op = ph_tok("+", 1);
+        if (ph_at("-=", 2))  op = ph_tok("-", 1);
+        if (ph_at("*=", 2))  op = ph_tok("*", 1);
+        if (ph_at("/=", 2))  op = ph_tok("/", 1);
+        if (ph_at("%=", 2))  op = ph_tok("%", 1);
+        if (ph_at("**=", 3)) op = ph_tok("**", 2);
+        if (ph_at("|=", 2))  op = ph_tok("|", 1);
+        if (ph_at("&=", 2))  op = ph_tok("&", 1);
+        if (ph_at("^=", 2))  op = ph_tok("^", 1);
+        if (ph_at("<<=", 3)) op = ph_tok("<<", 2);
+        if (ph_at(">>=", 3)) op = ph_tok(">>", 2);
+        i64 incdec = 0;
+        if (ph_at("++", 2)) incdec = 1;
+        if (ph_at("--", 2)) incdec = 0 - 1;
+        // The element, read where php reads it. A node may appear in a tree
+        // ONCE -- the arguments of a call are its sibling chain -- so the
+        // read and the write each get their own reference to the hoisted
+        // container and key. Sharing them makes the chain a CYCLE, which is
+        // a stack overflow in the walker and not a diagnostic.
+        if (op || incdec || ph_at("??=", 3)) {
+            i64 cur2 = ph_tref(cur);
+            i64 k2 = 0;
+            if (k) k2 = ph_tref(k);
+            i64 rd = 0;
+            if (lprop) rd = ph_c3("php_zv_pget", cur2, ph_strlit(lprop, cstrlen(lprop)), ph_scope(), ty_pzv);
+            if (!lprop && k) rd = ph_c2("php_arr_zget_w", cur2, k2, ty_pzv);
+            if (!lprop && !k) ph_todo(fl, line, "a compound assignment to $a[]");
+            if (ph_at("??=", 3)) {
+                // the hoisted container and key are initialised BEFORE the
+                // test that reads them; the right-hand side's own pendings
+                // stay inside the branch, because php does not evaluate it
+                // when the element is already set
+                i64 hpre = ph_take_pend();
+                ph_next();
+                i64 rv = ph_expr(0);
+                i64 rvt = ph_ety;
+                if (semi) ph_semi("expected ; after ??=");
+                i64 quiet = 0;
+                if (lprop) quiet = ph_c3("php_zv_pget_q", ph_tref(cur), ph_strlit(lprop, cstrlen(lprop)), ph_scope(), ty_pzv);
+                if (!lprop) quiet = ph_c2("php_arr_zget", ph_tref(cur), ph_tref(k), ty_pzv);
+                i64 nn = node_new(N_UNARY, line, fl);
+                set_nd_op(nn, ph_tok("!", 1));
+                set_nd_a(nn, ph_cast(TY_U8, ph_c1("php_zv_isset", quiet, TY_I64)));
+                set_nd_type(nn, TY_U8);
+                i64 iff = node_new(N_IF, line, fl);
+                set_nd_a(iff, nn);
+                set_nd_b(iff, ph_expr_stmt_of(ph_store(cur, k, ph_to_mixed(ph_own(rv, rvt), rvt), lprop)));
+                return ph_prefix_stmts(hpre, ph_wrap(iff));
+            }
+            i64 nv = 0;
+            if (incdec) {
+                ph_next();
+                if (semi) ph_semi("expected ; after ++/--");
+                if (incdec > 0) nv = ph_c1("php_zv_inc", rd, ty_pzv);
+                if (incdec < 0) nv = ph_c1("php_zv_dec", rd, ty_pzv);
+            }
+            if (!incdec) {
+                ph_next();
+                i64 rv = ph_expr(0);
+                i64 rvt = ph_ety;
+                if (semi) ph_semi("expected ; after a php assignment");
+                if (op == ph_tok(".", 1)) nv = ph_c2("php_zv_concat", rd, ph_to_mixed(rv, rvt), ty_pzv);
+                if (op != ph_tok(".", 1)) { nv = ph_arith(op, rd, PT_MIXED, rv, rvt, fl, line); nv = ph_to_mixed(nv, ph_ety); }
+            }
+            return ph_expr_stmt_of(ph_store(cur, k, nv, lprop));
+        }
         ph_want("=", 1, "expected = after a php array index");
         if (ph_at("&", 1)) ph_todo(fl, line, "an assignment by reference");
         i64 v = ph_expr(0);
         i64 vt = ph_ety;
         if (semi) ph_semi("expected ; after a php assignment");
-        return ph_expr_stmt_of(ph_store(cur, k, ph_to_mixed(ph_own(v, vt), vt)));
+        return ph_expr_stmt_of(ph_store(cur, k, ph_to_mixed(ph_own(v, vt), vt), lprop));
     }
 
     i64 op = 0;
@@ -3962,6 +4109,25 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         ph_next();
         uptr src = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
+        // `$r = &$o->p` / `$r = &$a[k]`: the CELL the chain ends on, which is
+        // exactly what ph_lv_walk finds. The slot is created when it is not
+        // there, as php's reference-taking does.
+        if (ph_at("->", 2) || ph_at("?->", 3) || ph_at("[", 1)) {
+            if (ph_var_find(src) < 0) ph_bind_undef(src, fl, line, 1);
+            i64 sc = ph_lv_walk(src, fl, line, kbr, 0);
+            uptr sprop = ph_lv_prop;
+            i64 sk = ld64(kbr);
+            if (semi) ph_semi("expected ; after a php assignment");
+            i64 cell = 0;
+            if (sprop) cell = ph_c3("php_zv_pref", sc, ph_strlit(sprop, cstrlen(sprop)), ph_scope(), ty_pzv);
+            if (!sprop && sk) cell = ph_c2("php_arr_zslot", sc, sk, ty_pzv);
+            if (!sprop && !sk) cell = ph_c1("php_arr_nextslot", sc, ty_pzv);
+            if (ph_var_find(d) < 0) ph_var_bind(d, PT_MIXED);
+            if (ph_var_type(d) != PT_MIXED)
+                ph_todo2(fl, line, "a reference bound to a php variable of type", ph_tyname(ph_var_type(d)));
+            ph_set_ref(d);
+            return ph_wrap(ph_set(ph_mangle(d, "v_"), cell));
+        }
         if (semi) ph_semi("expected ; after a php assignment");
         // `$a = &$b` where $b does not exist: php creates it as null, silently
         if (ph_var_find(src) < 0) ph_bind_undef(src, fl, line, 1);
@@ -4264,6 +4430,22 @@ i64 ph_stmt_1() {
 
     if (ph_at(";", 1)) { ph_next(); return ph_empty(); }
     if (ph_at("{", 1)) return ph_block();
+    // `@$a[0] = 1;`: the suppression is the statement's, not an expression's
+    // -- an assignment is a STATEMENT here, so the expression form (T7's @)
+    // never saw it.
+    if (ph_at("@", 1)) {
+        ph_next();
+        i64 on = ph_stmt_of(ph_call("php_quiet_on", 0, 0, 0, 0, 0, TY_VOID));
+        i64 inner = ph_stmt_1();
+        i64 off = ph_stmt_of(ph_call("php_quiet_off", 0, 0, 0, 0, 0, TY_VOID));
+        i64 t = on;
+        set_nd_next(t, inner);
+        loop { if (!nd_next(t)) break; t = nd_next(t); }
+        set_nd_next(t, off);
+        i64 b = node_new(N_BLOCK, line, fl);
+        set_nd_a(b, on);
+        return b;
+    }
     if (ph_is("list")) return ph_destructure(fl, line, 0, 1);
     if (ph_at("[", 1)) return ph_destructure(fl, line, 1, 1);
     if (ph_at("<?php", 5) || ph_at("<?=", 3)) { ph_next(); return ph_empty(); }
@@ -5239,9 +5421,17 @@ void ph_cnew(i64 s) {
 }
 
 void ph_cfill(i64 s) {
+    // T8: a class member's DEFAULT may be an array literal, and an array
+    // literal is pending statements plus a local -- `public $x = [1, 2];`
+    // captured the local before those ran, so the property came out
+    // `array(0)` and, with another array literal earlier in the file, the
+    // program segfaulted. The pendings belong in front of the fill.
+    s = ph_prefix_stmts(ph_take_pend(), s);
+    i64 t = s;
+    loop { if (!nd_next(t)) break; t = nd_next(t); }
     if (ph_cfill_tail) set_nd_next(ph_cfill_tail, s);
     if (!ph_cfill_tail) ph_cfill_head = s;
-    ph_cfill_tail = s;
+    ph_cfill_tail = t;
 }
 
 i64 ph_stmt_of(i64 c) {
@@ -5381,7 +5571,10 @@ i64 ph_visword() {
 void ph_skip_type() {
     ph_accept("?", 1);
     loop {
-        if (ph_tid != T_IDENT && ph_tid != T_STR) break;
+        // a php type word may be one of mc's OWN keywords -- `void` is, and
+        // `: void` on a method was 37 of the 734 that did not compile. The
+        // test is what the token LOOKS like, not which id the core gave it.
+        if (!ph_wordish() && ph_tid != T_STR) break;
         if (ph_at("$", 1)) break;
         ph_next();
         if (ph_accept("|", 1)) { ph_accept("?", 1); continue; }
@@ -5393,7 +5586,7 @@ void ph_skip_type() {
 
 i64 ph_is_typeword() {
     if (ph_at("?", 1)) return 1;
-    if (ph_tid != T_IDENT) return 0;
+    if (!ph_wordish()) return 0;
     if (ph_at("$", 1)) return 0;
     return 1;
 }
@@ -5820,7 +6013,7 @@ i64 ph_obj_stmt(uptr d, uptr fl, i64 line, i64 semi) {
                     i64 v = ph_expr(0);
                     i64 vt = ph_ety;
                     if (semi) ph_semi("expected ; after a php assignment");
-                    return ph_expr_stmt_of(ph_store(arr, k, ph_to_mixed(ph_own(v, vt), vt)));
+                    return ph_expr_stmt_of(ph_store(arr, k, ph_to_mixed(ph_own(v, vt), vt), 0));
                 }
                 if (k)  arr = ph_c2("php_arr_dim", arr, k, ty_parr);
                 if (!k) arr = ph_c1("php_arr_dimn", arr, ty_parr);
@@ -6060,6 +6253,7 @@ void ph_lib_init() {
     ph_lib("html_entity_decode", "php_f_htmlspecialchars_decode", 1, 3, PT_STRING);
     ph_lib("str_increment", "php_f_str_increment", 1, 1, PT_STRING);
     ph_lib("unpack", "php_f_unpack", 2, 3, PT_MIXED);
+    ph_lib("get_html_translation_table", "php_f_get_html_translation_table", 0, 3, PT_ARR);
     ph_lib("serialize", "php_f_serialize", 1, 1, PT_STRING);
     ph_lib("unserialize", "php_f_unserialize", 1, 2, PT_MIXED);
     ph_lib("str_getcsv", "php_f_str_getcsv", 1, 4, PT_ARR);
