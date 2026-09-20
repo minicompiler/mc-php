@@ -1,16 +1,20 @@
 #!/bin/sh
-# T7 -- php diagnostics, and the output-differs block (docs/plan.md section 4 row T7)
+# T7 -- php's diagnostics, and the tests that compile and print the wrong
+# thing (docs/plan.md section 4 row T7)
 #
-# T5 asked "does the runtime agree with php" and answered 80 of 21033. T6 works
-# T5's own wrong-reason table in descending value: arrays, objects, functions,
-# exceptions, constants, the library. The number that matters is still `green`,
-# and its denominator.
+# T6 answered 1073 of 21051 and left two numbers pointing at what to do next:
+# 4657 of the 21386 tests with an expect section (21.8%) assert a php
+# DIAGNOSTIC line, of which T6 produced only the uncaught-throwable form of
+# `Fatal error:`; and 536 of 1417 sampled `wrong` tests compiled, ran, and
+# printed the wrong thing. T7 builds the first and takes the second apart.
 #
-# Four grid runs, in the order the task asks for them:
+# Four grid runs, then the tables that choose the next block:
 #   (a) tests/lang   (b) Zend/tests   (c) ext/standard/tests/strings
 #   (d) the whole corpus
-# plus the compiler's own fixtures under g/ (byte for byte php's) and the
-# refusals under r/ (named, exit 3).
+# plus the compiler's own fixtures under g/ (byte for byte php's, on BOTH
+# streams -- the order matters now that diagnostics exist) and the refusals
+# under r/ (named, exit 3); then why.py's wrong-reason table, diffgroup.py's
+# clustering of the tests that compile, and arena.py's answer to D7.
 #
 # Exits 0 only when every run measured; a red grid is still a measurement.
 set -eu
@@ -38,7 +42,7 @@ mkdir -p "$MCPHP_TMP"
 sweeper=$!
 trap 'kill "$sweeper" 2>/dev/null; rm -rf "$MCPHP_TMP"' EXIT INT TERM
 
-[ -d "$SRC" ] || { echo "T6: no php-src -- clone php-8.5.10 at the repository root"; exit 1; }
+[ -d "$SRC" ] || { echo "T7: no php-src -- clone php-8.5.10 at the repository root"; exit 1; }
 "$MC" --version
 "$PHP" --version | head -1
 

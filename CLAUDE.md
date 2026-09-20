@@ -96,3 +96,72 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   a 2000-element array; and 4657 of the 21386 tests with an expect section (21.8%) assert a
   `Warning:`/`Deprecated:`/`Notice:`/`Fatal error:` line, which T6 does not produce and which is
   the largest single item left for T7.
+- T7 done (`probes/t7`), on **mc 1.1.0**: php's DIAGNOSTIC channel, and T6's
+  `(compiled; output differs)` block taken apart by a tool that groups it. **green 1073 ->
+  1218**: `phpt: green 1218 / wrong 13968 / refused 2917 / skip 2947 / php-fail 345 / total 21050`
+  over the whole corpus; per directory `tests/lang` 82 (was 74), `Zend/tests` 539 (was 452),
+  `ext/standard/tests/strings` 194 (was 180). **1211 of the 1218 greens are in T0's "touched by
+  none" set**, the same seven outside it as T6. `refused` fell 3657 -> 2917 and `wrong` rose
+  13374 -> 13968, which is two named refusals being retired and their tests moving into the
+  column that says what they print.
+  The two blocks T6 pointed at, each measured on its own population: the **4657** tests that
+  assert a `Warning:`/`Deprecated:`/`Notice:`/`Fatal error:` line go **5 -> 71 green**, and the
+  **333** that mention `__destruct` go **8 -> 11**.
+  * **The diagnostic channel.** The POSITION is two runtime globals the compiler stores into
+    once per statement (`php_pos`) -- threading a file and a line through 179 library rows is
+    the alternative and it is not one; the file is absolutised the way php resolves it
+    (`host_getcwd`), and the known inexactness is written down: a diagnostic raised after a user
+    function RETURNED, inside the same statement, reports the line that callee last set. The two
+    streams are written in php's own order (`PHP Warning:  ` on stderr first with
+    `log_errors=On`, then `\nWarning: ...` on stdout; the phpt runner sets `log_errors=0` and
+    grades stdout alone). Seventeen messages, each php-src's own text checked against php
+    8.5.10, plus `error_reporting()`, `trigger_error()` and `@`.
+  * **Two named refusals retired.** `Warning: Undefined variable $x` closes the last place T6
+    said D4 had no answer -- php warns and yields null, null is a value of `mixed`, and `mixed`
+    is already a zval, so the READ costs the variable no type and a later `$x = 5` still
+    declares it an int. `@` is a suppression depth in the runtime, so `@EXPR` is a pending
+    statement on each side of a temporary (D1's refusal gone).
+  * **A php COMPILE-TIME `Fatal error:` is output, not a compile failure.** php reports some
+    errors while parsing, prints the text on stdout and exits 255; `ph_phpfatal` does the same
+    from inside the compiler and `probes/t7/mcphp.sh` passes 255 through, so the grid can
+    compare it (the grid compares the exit code too). The first four on that road are the
+    duplicate-modifier family.
+  * **`probes/t7/diffgroup.py`** (new) is what chose every block after the diagnostics: it runs
+    php and the mc-php binary on the same `--FILE--`, finds the FIRST differing line and groups
+    by its shape. Its biggest single pair was a SPURIOUS warning (`??` reading through the
+    warning getter), then the float tail (`1.7E-300` printed `3.720368547758E-299`; two
+    independent bugs, `ph_pow10` dividing into the subnormals and `ph_digits` scaling by an
+    infinite 10^316), the visibility marks `var_dump`/`print_r` owe a class and the object form
+    `var_export` did not have, a zval's unary minus converting to INT first, php's BYTEWISE
+    `& | ^` between two strings, `<< >>` as a TypeError on a non-numeric string, php's shift
+    errors, and `var_dump("65" / "0")` printing NULL before the catch -- T6's own rule (the
+    unwinding check goes between computing a value and using it) was implemented for `echo` and
+    not for a CALL's arguments.
+  * **php's assignment is an EXPRESSION.** `if (!($fp = fopen(...)))` was 22 of the 417 `wrong`
+    tests under `ext/standard/tests/strings` alone. It is the store as a pending statement and
+    the variable as the value; that turned a refusal into a wrong answer for
+    `while (($n = f()) < 4)`, because a loop CONDITION's statements have to run every iteration,
+    which `ph_loop_of` now splices after the step and before the test (a `for`'s condition was
+    running them once, as part of the preamble).
+  * **`__destruct`, and the first draft was a net LOSS.** D7 has no refcount, so the only point
+    php also has is the END OF THE PROGRAM, in php's own reverse creation order (measured).
+    Arming at allocation gave 8 -> 6: php does not destruct an object whose CONSTRUCTOR threw
+    and never creates one when an ARGUMENT to `new` threw first, both said by php-src's own
+    tests. Arming when the object is fully CREATED gives 8 -> 11. An object that dies EARLY --
+    a local at scope end, an `unset`, a temporary -- is a documented difference.
+  * **The array copy does not bite, and copy-on-write is NOT built.** `probes/t7/arena.py`:
+    **9 of 1460** sampled `wrong` tests exhaust the arena and **not one is an array copy** --
+    four build a very large string, four allocate without bound on purpose and expect php's own
+    `Allowed memory size exhausted`, one is wrong for another reason as well. A 4x arena was
+    measured as the cheap alternative and buys one test, so it is not taken either.
+  * Six of T6's most-wanted library names (`class_alias`, `register_shutdown_function`,
+    `strtok`, `strnatcmp`, `strnatcasecmp`, `addcslashes`) and the arities `explode`, `implode`
+    and `substr_count` were short of.
+  **No new mc gap**; the one T5 reported (nothing can own the bytes before the FIRST token) is
+  unchanged, 38 of 21219. `php.mc` calls **53** names from outside itself -- 48 frozen, 3
+  `<float>`'s, and `write`/`exit`, which the module declares `extern` itself for the
+  compile-time fatal. `probes/t6/` is untouched and `probes/t7/out/base/` reproduces its three
+  numbers (74 / 452 / 180) to the test; `probes/t7/grid.sh` exists because the first baseline
+  here measured a binary that was being rebuilt underneath it.
+  Fixtures: **30 of 30** under `g/` byte for byte php's on both streams, **5 of 5** under `r/`
+  refused by name with exit 3; `lencheck` 97 / 0 wrong, `aritycheck` 179 / 0 wrong.

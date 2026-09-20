@@ -19,3 +19,6 @@ probes/t5/mc-php
 probes/t6/mc-php
 probes/t5/out/
 probes/t6/out/
+
+probes/t7/mc-php
+probes/t7/out/

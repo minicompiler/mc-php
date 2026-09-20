@@ -242,7 +242,7 @@ void ph_phpfatal(uptr fl, i64 line, uptr msg) {
 // with "not implemented" would make that column a lie.
 void ph_todo(uptr fl, i64 line, uptr what) {
     uptr m = p_cat("mc-php: ", what, 0, cstrlen(what));
-    m = p_cat(m, " is not implemented yet (probes/t6/RESULTS.md)", 0, 46);
+    m = p_cat(m, " is not implemented yet (probes/t7/RESULTS.md)", 0, 46);
     err_at(fl, line, m);
 }
 

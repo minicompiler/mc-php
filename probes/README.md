@@ -155,3 +155,48 @@ between 500 and 1000 copies of a 2000-element array (php stays at 25 MB); and **
 
 `sh probes/t6/run.sh` (about 45 minutes: 24 fixtures, 5 refusals, four grids, the breakdown
 intersection and the wrong-reason table re-measured). Details: `probes/t6/RESULTS.md`.
+
+## T7 -- php's diagnostics, and the tests that compile and print the wrong thing
+
+**green 1073 -> 1218:**
+`phpt: green 1218 / wrong 13968 / refused 2917 / skip 2947 / php-fail 345 / total 21050`
+over the whole corpus. Per directory: `tests/lang` **82** (was 74), `Zend/tests` **539**
+(was 452), `ext/standard/tests/strings` **194** (was 180). **1211 of the 1218 greens are in
+T0's "touched by none" set.** `refused` fell 3657 -> 2917: two named refusals were retired.
+
+T6 left two numbers pointing at what to do next: **21.8% of the corpus asserts a php DIAGNOSTIC
+line** (4657 of the 21386 tests with an expect section) and T6 produced only the
+uncaught-throwable form of `Fatal error:`; and **536 of 1417 sampled `wrong` tests compiled, ran,
+and printed the wrong thing**. T7 builds the first and takes the second apart.
+
+* **The diagnostic channel.** The POSITION is two runtime globals the compiler stores into once
+  per statement -- a file and a line threaded through 179 library rows is the alternative, and
+  it is not one. The file is absolutised the way php resolves it, the two streams are written in
+  php's own order (the `PHP Warning:  ` form on stderr first, then `\nWarning: ...` on stdout),
+  and the known inexactness is written down: a diagnostic raised after a user function RETURNED,
+  inside the same statement, reports the line that callee last set.
+* **Seventeen messages**, each php-src's own text checked against php 8.5.10 -- undefined
+  variable, undefined array key, array to string, non-numeric value, array offset on a scalar,
+  uninitialized string offset, undefined property, read property on null, `foreach()` argument,
+  two `strtok`/`addcslashes` warnings, four implicit-conversion and increment deprecations, and
+  the duplicate-modifier COMPILE-TIME fatals. `error_reporting()`, `trigger_error()` and `@` are
+  real.
+* **`Warning: Undefined variable $x` retires a D4 refusal** -- the one place T6 said the rule
+  had no answer. php warns and yields null, null is a value of `mixed`, and `mixed` is already a
+  zval, so the READ costs the variable no type at all.
+* **A php COMPILE-TIME `Fatal error:` is output, not a compile failure.** php reports some
+  errors while parsing, prints the text on stdout and exits 255; `probes/t7/mcphp.sh` passes 255
+  through so the grid can compare it.
+* **`probes/t7/diffgroup.py`** (new) runs php and the mc-php binary on the same `--FILE--`,
+  finds the FIRST differing line and groups by its shape. That table chose every block after the
+  diagnostics; what it named and what came of each is in `probes/t7/RESULTS.md` § 2.
+* **`probes/t7/arena.py`** (new) answers D7's open question with a number: **9 of 1460 sampled `wrong` tests exhaust the arena and not one is an
+  array copy** (four build a huge string, four expect php's own memory_limit fatal), so the
+  copy-on-write T6 left open is NOT built and the number is why.
+* **`__destruct`** runs at the end of the program, in php's own reverse creation order -- the
+  only destructor point D7 also has. The 333 tests that mention it go **8 -> 11**; the first
+  draft was a net LOSS (8 -> 6) until php-src's own tests said that an object whose CONSTRUCTOR
+  threw is never destructed. An object that dies EARLY -- a local, an `unset`, a temporary -- is
+  a documented difference.
+
+`sh probes/t7/run.sh`. Details: `probes/t7/RESULTS.md`.
