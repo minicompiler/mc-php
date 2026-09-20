@@ -1887,6 +1887,35 @@ i64 ph_primary() {
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
         if (ph_at("::", 2)) ph_refuse(fl, line, "a class name from a variable", "D6");
+        // `($fp = fopen(...))` -- php's assignment IS an expression, and the
+        // idiom `if (!($x = f()))` is all over the corpus. The store is a
+        // pending statement (mc has no comma operator) and the value is the
+        // variable, which is also what makes `$a = $b = 1` right: the inner
+        // one runs first because the pendings are a queue.
+        if (ph_at("=", 1) && !ph_at("==", 2) && !ph_at("=>", 2) && !ph_at("===", 3)) {
+            ph_next();
+            i64 byref = 0;
+            if (ph_at("&", 1)) byref = 1;
+            if (!byref) {
+                i64 rv = ph_expr(15);
+                i64 rt = ph_ety;
+                i64 known = ph_var_find(d);
+                ph_var_bind(d, rt);
+                i64 bt = ph_var_type(d);
+                i64 sv = ph_own(rv, rt);
+                if (bt != rt) sv = ph_to_mixed(sv, rt);
+                if (known >= 0 && ph_is_ref(d)) {
+                    i64 lvr = node_new(N_IDENT, line, fl);
+                    set_nd_name(lvr, ph_mangle(d, "v_"));
+                    set_nd_type(lvr, ty_pzv);
+                    ph_pending_stmt(ph_expr_stmt_of(ph_c2("php_zv_store", lvr, ph_to_mixed(ph_own(rv, rt), rt), ty_pzv)));
+                } else {
+                    ph_pending_stmt(ph_set(ph_mangle(d, "v_"), sv));
+                }
+                i64 rr = ph_var_ref(d);
+                return ph_postfix(rr, ph_ety);
+            }
+        }
         i64 v = ph_var_ref(d);
         return ph_postfix(v, ph_ety);
     }
@@ -3327,6 +3356,13 @@ i64 ph_block_or_stmt() {
 // `for (...; $i++) { if (c) continue; }`. The step therefore runs at the TOP,
 // guarded by a first-iteration flag, which is the one lowering where every
 // edge into the next iteration passes through it.
+// A loop CONDITION may need statements of its own -- `while (($n = f()) < 4)`
+// and any condition with a call that can throw -- and they have to run on
+// every iteration, after the step and before the test. ph_cpre carries them
+// from the caller, which is the only place that knows the condition is a
+// condition.
+i64 ph_cpre;
+
 i64 ph_loop_of(i64 cond, i64 body, i64 step, i64 line, uptr fl) {
     i64 pre = 0;
     if (step) {
@@ -3357,18 +3393,30 @@ i64 ph_loop_of(i64 cond, i64 body, i64 step, i64 line, uptr fl) {
     i64 iff = node_new(N_IF, line, fl);
     set_nd_a(iff, neg);
     set_nd_b(iff, brk);
+    // the condition's own statements, on every iteration, after the step and
+    // before the test. `test` stays the node the body is linked after; `chk`
+    // is what gets spliced in.
+    i64 chk = iff;
+    if (ph_cpre) {
+        i64 cp = ph_cpre;
+        ph_cpre = 0;
+        i64 ct = cp;
+        loop { if (!nd_next(ct)) break; ct = nd_next(ct); }
+        set_nd_next(ct, iff);
+        chk = cp;
+    }
     // body already begins with the step gate when there is a step
     i64 first = body;
     if (nd_kind(body) == N_IF && ph_loop_pre) {
         // the gate is first; the condition test goes between it and the body
         i64 rest = nd_next(body);
-        set_nd_next(body, iff);
+        set_nd_next(body, chk);
         set_nd_next(iff, rest);
         first = body;
     }
     if (!ph_loop_pre) {
         set_nd_next(iff, body);
-        first = iff;
+        first = chk;
     }
     i64 b = node_new(N_BLOCK, line, fl);
     set_nd_a(b, first);
@@ -3806,12 +3854,13 @@ i64 ph_stmt_1() {
         ph_next();
         ph_want("(", 1, "expected ( after while");
         i64 c = ph_to_bool(ph_expr(0), ph_ety);
-        if (ph_pend_head) ph_todo(fl, line, "a while condition that needs a temporary");
+        i64 cpre = ph_take_pend();
         ph_want(")", 1, "expected ) after while");
         if (ph_at(":", 1)) ph_todo(fl, line, "the alternative while: endwhile; syntax");
         ph_ls_push(0);
         i64 body = ph_block_or_stmt();
         ph_ls_pop();
+        ph_cpre = cpre;
         return ph_loop_of(c, body, 0, line, fl);
     }
     if (ph_is("do")) {
@@ -3851,6 +3900,8 @@ i64 ph_stmt_1() {
         if (ph_at(";", 1)) ph_next();
         i64 c = ph_bool(1);
         if (!ph_at(";", 1)) c = ph_to_bool(ph_expr(0), ph_ety);
+        // the CONDITION's own statements run every iteration, not once
+        i64 cpre2 = ph_take_pend();
         ph_want(";", 1, "expected ; in for");
         i64 step = 0;
         if (!ph_at(")", 1)) {
@@ -3862,6 +3913,7 @@ i64 ph_stmt_1() {
         ph_ls_push(0);
         i64 body = ph_block_or_stmt();
         ph_ls_pop();
+        ph_cpre = cpre2;
         i64 lp = ph_loop_of(c, body, step, line, fl);
         i64 t2 = init;
         loop { if (!nd_next(t2)) break; t2 = nd_next(t2); }
