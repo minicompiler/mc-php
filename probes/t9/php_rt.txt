@@ -7600,6 +7600,386 @@ void php_ser(uptr z, i64 depth) {
     php_write("N;", 2);
 }
 
+// ---- json_encode / json_decode ---------------------------------------------
+// ext/json is D2(a): it IS php and is written here. The text format is the
+// one php writes -- `/` escaped, non-ASCII as \uXXXX by default, a float
+// printed with serialize_precision -1 (the shortest round trip), and an
+// array that is a LIST as [..] and anything else as {..}.
+i64 ph_js_bad;                              // 1 when the input was not UTF-8
+
+void php_js_hex4(i64 v) {
+    php_write("\\u", 2);
+    i64 i = 12;
+    loop {
+        if (i < 0) break;
+        i64 d = (v >> i) & 15;
+        u8 c[1];
+        if (d < 10) st8(c, 48 + d);
+        if (d >= 10) st8(c, 87 + d);
+        php_write(c, 1);
+        i = i - 4;
+    }
+}
+
+void php_js_str(uptr s) {
+    php_write("\"", 1);
+    i64 n = php_strlen(s);
+    uptr b = s + ZS_HDR;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(b + i);
+        if (c == 34) { php_write("\\\"", 2); i = i + 1; continue; }
+        if (c == 92) { php_write("\\\\", 2); i = i + 1; continue; }
+        if (c == 47) { php_write("\\/", 2); i = i + 1; continue; }
+        if (c == 8)  { php_write("\\b", 2); i = i + 1; continue; }
+        if (c == 12) { php_write("\\f", 2); i = i + 1; continue; }
+        if (c == 10) { php_write("\\n", 2); i = i + 1; continue; }
+        if (c == 13) { php_write("\\r", 2); i = i + 1; continue; }
+        if (c == 9)  { php_write("\\t", 2); i = i + 1; continue; }
+        if (c < 32) { php_js_hex4(c); i = i + 1; continue; }
+        if (c < 128) { php_write(b + i, 1); i = i + 1; continue; }
+        // a UTF-8 sequence becomes \uXXXX (and a surrogate pair past the BMP)
+        i64 cp = 0 - 1;
+        i64 len = 0;
+        if (c >= 192 && c < 224) { cp = c - 192; len = 2; }
+        if (c >= 224 && c < 240) { cp = c - 224; len = 3; }
+        if (c >= 240 && c < 248) { cp = c - 240; len = 4; }
+        if (len == 0 || i + len > n) { ph_js_bad = 1; return; }
+        i64 k = 1;
+        loop {
+            if (k >= len) break;
+            i64 cc = ld8(b + i + k);
+            if (cc < 128 || cc >= 192) { ph_js_bad = 1; return; }
+            cp = cp * 64 + (cc - 128);
+            k = k + 1;
+        }
+        if (cp < 128) { ph_js_bad = 1; return; }
+        if (len == 3 && cp < 2048) { ph_js_bad = 1; return; }
+        if (len == 4 && cp < 65536) { ph_js_bad = 1; return; }
+        if (cp >= 55296 && cp < 57344) { ph_js_bad = 1; return; }
+        if (cp < 65536) php_js_hex4(cp);
+        if (cp >= 65536) {
+            i64 v = cp - 65536;
+            php_js_hex4(55296 + (v >> 10));
+            php_js_hex4(56320 + (v - (v >> 10) * 1024));
+        }
+        i = i + len;
+    }
+    php_write("\"", 1);
+}
+
+void php_js(uptr z, i64 depth) {
+    i64 t = php_zv_type(z);
+    if (t == IS_NULL || t == IS_UNDEF) { php_write("null", 4); return; }
+    if (t == IS_TRUE)  { php_write("true", 4); return; }
+    if (t == IS_FALSE) { php_write("false", 5); return; }
+    if (t == IS_LONG)  { php_echo_int(ld64(z)); return; }
+    if (t == IS_DOUBLE) {
+        f64 d = ldf64(z);
+        if (ph_is_nan(d) || ph_is_inf(d)) { ph_js_bad = 2; php_write("0", 1); return; }
+        u8 b[64];
+        i64 n = php_fmt_f64(b, d, 17);
+        php_write(b, n);
+        // php writes an integral double with no fraction: 1.0 -> 1
+        return;
+    }
+    if (t == IS_STRING) { php_js_str(ld64(z)); return; }
+    if (depth > 512) { ph_js_bad = 3; return; }
+    uptr h = 0;
+    i64 list = 0;
+    if (t == IS_ARRAY) { h = ld64(z); list = php_f_array_is_list(z); }
+    if (t == IS_OBJECT) h = php_obj_props(ld64(z));
+    if (!h) { php_write("null", 4); return; }
+    if (list) php_write("[", 1);
+    if (!list) php_write("{", 1);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    i64 first = 1;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            if (!first) php_write(",", 1);
+            first = 0;
+            if (!list) {
+                uptr k = ld64(b + 24);
+                if (k) php_js_str(k);
+                if (!k) php_js_str(php_itos(ld64(b + 16)));
+                php_write(":", 1);
+            }
+            php_js(b, depth + 1);
+        }
+        i = i + 1;
+    }
+    if (list) php_write("]", 1);
+    if (!list) php_write("}", 1);
+}
+
+uptr php_f_json_encode(uptr z, uptr flags, uptr depth) {
+    ph_js_bad = 0;
+    php_ob_start();
+    php_js(z, 0);
+    uptr r = php_ob_get();
+    if (ph_js_bad) return php_zbool(0);
+    return php_zstr(r);
+}
+
+uptr php_f_json_last_error_msg() {
+    if (!ph_js_bad) return php_zstr(php_str_new("No error", 8));
+    if (ph_js_bad == 1) return php_zstr(php_str_new("Malformed UTF-8 characters, possibly incorrectly encoded", 56));
+    if (ph_js_bad == 2) return php_zstr(php_str_new("Inf and NaN cannot be JSON encoded", 34));
+    if (ph_js_bad == 4) return php_zstr(php_str_new("Syntax error", 12));
+    return php_zstr(php_str_new("Maximum stack depth exceeded", 28));
+}
+
+i64 php_f_json_last_error() {
+    if (!ph_js_bad) return 0;
+    if (ph_js_bad == 1) return 5;
+    if (ph_js_bad == 2) return 7;
+    if (ph_js_bad == 4) return 4;
+    return 1;
+}
+
+// the reader: a cursor into the string, json's grammar
+i64 ph_jd_p;
+uptr ph_jd_s;
+i64 ph_jd_n;
+i64 ph_jd_bad;
+i64 ph_jd_assoc;
+
+uptr php_jd_val(i64 depth);
+
+void php_jd_ws() {
+    loop {
+        if (ph_jd_p >= ph_jd_n) break;
+        i64 c = ld8(ph_jd_s + ph_jd_p);
+        if (c == 32 || c == 9 || c == 10 || c == 13) { ph_jd_p = ph_jd_p + 1; continue; }
+        break;
+    }
+}
+
+i64 php_jd_lit(uptr w, i64 n) {
+    if (ph_jd_p + n > ph_jd_n) return 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        if (ld8(ph_jd_s + ph_jd_p + i) != ld8(w + i)) return 0;
+        i = i + 1;
+    }
+    ph_jd_p = ph_jd_p + n;
+    return 1;
+}
+
+void php_jd_utf8(uptr sb, uptr np, i64 cp) {
+    i64 n = ld64(np);
+    if (cp < 128) { st8(sb + n, cp); st64(np, n + 1); return; }
+    if (cp < 2048) {
+        st8(sb + n, 192 + (cp >> 6));
+        st8(sb + n + 1, 128 + (cp - (cp >> 6) * 64));
+        st64(np, n + 2);
+        return;
+    }
+    if (cp < 65536) {
+        st8(sb + n, 224 + (cp >> 12));
+        st8(sb + n + 1, 128 + ((cp >> 6) - (cp >> 12) * 64));
+        st8(sb + n + 2, 128 + (cp - (cp >> 6) * 64));
+        st64(np, n + 3);
+        return;
+    }
+    st8(sb + n, 240 + (cp >> 18));
+    st8(sb + n + 1, 128 + ((cp >> 12) - (cp >> 18) * 64));
+    st8(sb + n + 2, 128 + ((cp >> 6) - (cp >> 12) * 64));
+    st8(sb + n + 3, 128 + (cp - (cp >> 6) * 64));
+    st64(np, n + 4);
+}
+
+i64 php_jd_hex4() {
+    i64 v = 0;
+    i64 i = 0;
+    loop {
+        if (i >= 4) break;
+        if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; return 0; }
+        i64 c = ld8(ph_jd_s + ph_jd_p);
+        i64 d = 0 - 1;
+        if (c >= 48 && c <= 57) d = c - 48;
+        if (c >= 97 && c <= 102) d = c - 87;
+        if (c >= 65 && c <= 70) d = c - 55;
+        if (d < 0) { ph_jd_bad = 1; return 0; }
+        v = v * 16 + d;
+        ph_jd_p = ph_jd_p + 1;
+        i = i + 1;
+    }
+    return v;
+}
+
+uptr php_jd_str() {
+    ph_jd_p = ph_jd_p + 1;                                    // the opening "
+    uptr sb = php_alloc(ph_jd_n * 4 + 8);
+    u8 np[8];
+    st64(np, 0);
+    loop {
+        if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
+        i64 c = ld8(ph_jd_s + ph_jd_p);
+        if (c == 34) { ph_jd_p = ph_jd_p + 1; break; }
+        if (c != 92) {
+            i64 n0 = ld64(np);
+            st8(sb + n0, c);
+            st64(np, n0 + 1);
+            ph_jd_p = ph_jd_p + 1;
+            continue;
+        }
+        ph_jd_p = ph_jd_p + 1;
+        if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
+        i64 e = ld8(ph_jd_s + ph_jd_p);
+        ph_jd_p = ph_jd_p + 1;
+        i64 out = 0 - 1;
+        if (e == 34) out = 34;
+        if (e == 92) out = 92;
+        if (e == 47) out = 47;
+        if (e == 98) out = 8;
+        if (e == 102) out = 12;
+        if (e == 110) out = 10;
+        if (e == 114) out = 13;
+        if (e == 116) out = 9;
+        if (out >= 0) {
+            i64 n1 = ld64(np);
+            st8(sb + n1, out);
+            st64(np, n1 + 1);
+            continue;
+        }
+        if (e != 117) { ph_jd_bad = 1; break; }
+        i64 cp = php_jd_hex4();
+        if (ph_jd_bad) break;
+        if (cp >= 55296 && cp < 56320) {
+            if (ph_jd_p + 1 < ph_jd_n) {
+                if (ld8(ph_jd_s + ph_jd_p) == 92) {
+                    if (ld8(ph_jd_s + ph_jd_p + 1) == 117) {
+                        ph_jd_p = ph_jd_p + 2;
+                        i64 lo = php_jd_hex4();
+                        if (ph_jd_bad) break;
+                        cp = 65536 + (cp - 55296) * 1024 + (lo - 56320);
+                    }
+                }
+            }
+        }
+        php_jd_utf8(sb, np, cp);
+    }
+    return php_str_new(sb, ld64(np));
+}
+
+uptr php_jd_num() {
+    i64 st = ph_jd_p;
+    i64 isf = 0;
+    if (ph_jd_p < ph_jd_n) { if (ld8(ph_jd_s + ph_jd_p) == 45) ph_jd_p = ph_jd_p + 1; }
+    loop {
+        if (ph_jd_p >= ph_jd_n) break;
+        i64 c = ld8(ph_jd_s + ph_jd_p);
+        if (c >= 48 && c <= 57) { ph_jd_p = ph_jd_p + 1; continue; }
+        if (c == 46 || c == 101 || c == 69) { isf = 1; ph_jd_p = ph_jd_p + 1; continue; }
+        if (c == 43 || c == 45) {
+            i64 pv = ld8(ph_jd_s + ph_jd_p - 1);
+            if (pv == 101 || pv == 69) { ph_jd_p = ph_jd_p + 1; continue; }
+        }
+        break;
+    }
+    if (ph_jd_p == st) { ph_jd_bad = 1; return php_znull(); }
+    uptr t = php_str_new(ph_jd_s + st, ph_jd_p - st);
+    if (isf) return php_zdouble(php_stof(t));
+    return php_zlong(php_stoi(t));
+}
+
+uptr php_jd_val(i64 depth) {
+    php_jd_ws();
+    if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; return php_znull(); }
+    if (depth > 512) { ph_jd_bad = 3; return php_znull(); }
+    i64 c = ld8(ph_jd_s + ph_jd_p);
+    if (c == 34) return php_zstr(php_jd_str());
+    if (php_jd_lit("true", 4)) return php_zbool(1);
+    if (php_jd_lit("false", 5)) return php_zbool(0);
+    if (php_jd_lit("null", 4)) return php_znull();
+    if (c == 91) {
+        ph_jd_p = ph_jd_p + 1;
+        uptr a = php_arr_new(8);
+        php_jd_ws();
+        if (ph_jd_p < ph_jd_n) { if (ld8(ph_jd_s + ph_jd_p) == 93) { ph_jd_p = ph_jd_p + 1; return php_zarr(a); } }
+        loop {
+            php_arr_push(a, php_jd_val(depth + 1));
+            if (ph_jd_bad) break;
+            php_jd_ws();
+            if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
+            i64 d = ld8(ph_jd_s + ph_jd_p);
+            ph_jd_p = ph_jd_p + 1;
+            if (d == 93) break;
+            if (d != 44) { ph_jd_bad = 1; break; }
+        }
+        return php_zarr(a);
+    }
+    if (c == 123) {
+        ph_jd_p = ph_jd_p + 1;
+        uptr a = php_arr_new(8);
+        php_jd_ws();
+        i64 empty = 0;
+        if (ph_jd_p < ph_jd_n) { if (ld8(ph_jd_s + ph_jd_p) == 125) { ph_jd_p = ph_jd_p + 1; empty = 1; } }
+        if (!empty) {
+            loop {
+                php_jd_ws();
+                if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
+                if (ld8(ph_jd_s + ph_jd_p) != 34) { ph_jd_bad = 1; break; }
+                uptr k = php_jd_str();
+                if (ph_jd_bad) break;
+                php_jd_ws();
+                if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
+                if (ld8(ph_jd_s + ph_jd_p) != 58) { ph_jd_bad = 1; break; }
+                ph_jd_p = ph_jd_p + 1;
+                uptr v = php_jd_val(depth + 1);
+                if (ph_jd_bad) break;
+                php_zv_cp(php_arr_sslot(a, k), v);
+                php_jd_ws();
+                if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
+                i64 d = ld8(ph_jd_s + ph_jd_p);
+                ph_jd_p = ph_jd_p + 1;
+                if (d == 125) break;
+                if (d != 44) { ph_jd_bad = 1; break; }
+            }
+        }
+        if (ph_jd_assoc) return php_zarr(a);
+        uptr o = php_obj_new(ph_ce_stdclass);
+        i64 used = php_ht_used(a);
+        i64 i = 0;
+        loop {
+            if (i >= used) break;
+            uptr b = php_ht_bkt(a, i);
+            if (ld8(b + 8) != IS_UNDEF) {
+                uptr kk = ld64(b + 24);
+                if (!kk) kk = php_itos(ld64(b + 16));
+                php_zv_cp(php_arr_sslot(php_obj_props(o), kk), b);
+            }
+            i = i + 1;
+        }
+        return php_zobj(o);
+    }
+    if (c == 45 || (c >= 48 && c <= 57)) return php_jd_num();
+    ph_jd_bad = 1;
+    return php_znull();
+}
+
+uptr php_f_json_decode(uptr z, uptr assoc, uptr depth, uptr flags) {
+    ph_js_bad = 0;
+    ph_jd_bad = 0;
+    uptr s = php_zv_str(z);
+    ph_jd_s = s + ZS_HDR;
+    ph_jd_n = php_strlen(s);
+    ph_jd_p = 0;
+    ph_jd_assoc = 0;
+    if (php_zv_type(assoc) != IS_NULL) { if (php_zv_bool(assoc)) ph_jd_assoc = 1; }
+    uptr r = php_jd_val(0);
+    php_jd_ws();
+    if (ph_jd_p != ph_jd_n) ph_jd_bad = 1;
+    if (ph_jd_bad) { ph_js_bad = 4; return php_znull(); }
+    return r;
+}
+
 uptr php_f_serialize(uptr z) {
     php_ob_start();
     php_ser(z, 0);
