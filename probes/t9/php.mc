@@ -173,6 +173,7 @@ i64 ph_in_try;
 i64 ph_toplevel;               // parsing main: an uncaught throwable is fatal
 i64  ph_pushing;
 i64  ph_type_word(i64 must);
+i64  ph_type_tail(i64 t);
 i64  ph_vd(i64 v, i64 t, uptr fl, i64 line);
 i64  ph_echo_of(i64 v, i64 t, uptr fl, i64 line);
 i64  ph_inline_html(uptr fl, i64 line);
@@ -1488,22 +1489,67 @@ i64 ph_fn_find(uptr n) {
 }
 
 // ---- the type words on the surface are PHP's (D9) --------------------------
+// D9: the surface is PHP's whole type system and the LOWERING is mc's. Since
+// T6 a union lowers to a zval and `mixed` IS one (D4 (c)), so every type that
+// is not one of the five native ones answers PT_MIXED rather than a refusal
+// -- T5's table refused them because T5 had no zval, and it was never
+// re-measured after T6 built one. `?T`, `T|U`, `A&B`, a class name,
+// `iterable`, `callable`, `object`, `self`, `static`, `never` and `null` are
+// all a zval, which is exactly what D9 says the lowering is.
+i64 ph_type_tail(i64 t) {
+    // `?T` and `T|U` and `A&B` are all one thing here: a zval. An `&` before
+    // a `$` is a by-reference parameter and NOT an intersection.
+    i64 un = 0;
+    loop {
+        if (ph_accept("|", 1)) { un = 1; ph_accept("?", 1); ph_type_word(0); continue; }
+        if (ph_at("&", 1)) {
+            uptr q = p_cp();
+            uptr e = p_src_end();
+            loop { if (q >= e) break; i64 c = ld8(q); if (c == 32 || c == 9 || c == 10 || c == 13) { q = q + 1; continue; } break; }
+            if (q < e) { if (ld8(q) == 36) break; }          // &$x: by reference
+            ph_next();
+            un = 1;
+            ph_accept("?", 1);
+            ph_type_word(0);
+            continue;
+        }
+        break;
+    }
+    if (un) return PT_MIXED;
+    return t;
+}
+
 i64 ph_type_word(i64 must) {
-    if (ph_at("?", 1)) ph_refuse(ph_tfile, ph_tline, "a nullable type ?T", "D9 (e)");
-    if (ph_is("int"))      { ph_next(); if (ph_at("|", 1)) ph_refuse(ph_tfile, ph_tline, "a union type", "D9"); return PT_INT; }
-    if (ph_is("float"))    { ph_next(); if (ph_at("|", 1)) ph_refuse(ph_tfile, ph_tline, "a union type", "D9"); return PT_FLOAT; }
-    if (ph_is("string"))   { ph_next(); if (ph_at("|", 1)) ph_refuse(ph_tfile, ph_tline, "a union type", "D9"); return PT_STRING; }
-    if (ph_is("bool"))     { ph_next(); if (ph_at("|", 1)) ph_refuse(ph_tfile, ph_tline, "a union type", "D9"); return PT_BOOL; }
+    if (ph_at("(", 1)) {                                    // a DNF type, (A&B)|C
+        ph_next();
+        ph_type_word(1);
+        loop { if (ph_at(")", 1)) break; if (ph_tid == T_EOF) break; ph_next(); }
+        ph_next();
+        ph_type_tail(PT_MIXED);
+        return PT_MIXED;
+    }
+    if (ph_accept("?", 1)) { ph_type_word(1); ph_type_tail(PT_MIXED); return PT_MIXED; }
+    ph_accept("\\", 1);
+    if (ph_is("int"))      { ph_next(); return ph_type_tail(PT_INT); }
+    if (ph_is("float"))    { ph_next(); return ph_type_tail(PT_FLOAT); }
+    if (ph_is("string"))   { ph_next(); return ph_type_tail(PT_STRING); }
+    if (ph_is("bool"))     { ph_next(); return ph_type_tail(PT_BOOL); }
     if (ph_is("void"))     { ph_next(); return PT_VOID; }
-    if (ph_is("array"))    { ph_next(); ph_refuse(ph_tfile, ph_tline, "an untyped array parameter", "D4 (d)"); }
-    if (ph_is("mixed"))    { ph_next(); ph_refuse(ph_tfile, ph_tline, "the type mixed", "D4 (c)"); }
-    if (ph_is("iterable")) { ph_next(); ph_refuse(ph_tfile, ph_tline, "the type iterable", "D9"); }
-    if (ph_is("callable")) { ph_next(); ph_refuse(ph_tfile, ph_tline, "the type callable", "D9"); }
-    if (ph_is("object"))   { ph_next(); ph_refuse(ph_tfile, ph_tline, "the type object", "D9"); }
-    if (ph_is("null"))     { ph_next(); ph_refuse(ph_tfile, ph_tline, "the type null", "D9 (e)"); }
-    if (ph_is("static"))   { ph_next(); ph_refuse(ph_tfile, ph_tline, "the type static", "D6"); }
-    if (ph_is("self"))     { ph_next(); ph_refuse(ph_tfile, ph_tline, "the type self", "D6"); }
-    if (ph_is("never"))    { ph_next(); ph_refuse(ph_tfile, ph_tline, "the type never", "D9"); }
+    if (ph_is("array"))    { ph_next(); return ph_type_tail(PT_ARR); }
+    if (ph_is("mixed") || ph_is("iterable") || ph_is("callable") || ph_is("object")
+        || ph_is("null") || ph_is("static") || ph_is("self") || ph_is("parent")
+        || ph_is("never") || ph_is("true") || ph_is("false")) {
+        ph_next();
+        ph_type_tail(PT_MIXED);
+        return PT_MIXED;
+    }
+    // a class name is an object, and an object is a zval
+    if (ph_tid == T_IDENT) {
+        ph_next();
+        loop { if (!ph_accept("\\", 1)) break; if (ph_tid == T_IDENT) ph_next(); }
+        ph_type_tail(PT_MIXED);
+        return PT_MIXED;
+    }
     if (must) ph_refuse2(ph_tfile, ph_tline, "a php type this compiler does not have", ph_tname, "D9");
     return -1;
 }
@@ -4415,9 +4461,23 @@ i64  ph_nseen;
 void ph_require(i64 once, uptr fl, i64 line) {
     ph_next();
     if (ph_at("(", 1)) ph_next();
-    if (ph_tid != T_STR && ph_tid != PHT_PSTR)
-        ph_refuse(fl, line, "an include of a computed path", "D1");
     uptr rel = ph_tname;
+    // `require "x.php"`: a double-quoted literal is already a NODE by the
+    // time it gets here, so the bytes come out of it -- the shape define()
+    // reads for the same reason. One that interpolates is a computed path.
+    if (ph_tid == PHT_DSTR) {
+        rel = 0;
+        i64 dn = ph_tnode;
+        if (nd_kind(dn) == N_CALL) {
+            if (str_eq(nd_name(dn), "php_str_lit")) {
+                i64 raw = nd_next(nd_a(dn));
+                if (raw) rel = xstrdup(nd_name(raw), nd_val(raw));
+            }
+        }
+        if (!rel) ph_refuse(fl, line, "an include of a computed path", "D1");
+    }
+    if (ph_tid != T_STR && ph_tid != PHT_PSTR && ph_tid != PHT_DSTR)
+        ph_refuse(fl, line, "an include of a computed path", "D1");
     ph_next();
     if (ph_at(")", 1)) ph_next();
     if (!ph_at(";", 1)) err_at(fl, line, "mc-php: expected ; after require");
