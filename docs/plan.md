@@ -44,13 +44,16 @@ D4. DECIDED (owner, 2026-09-15): variables have a STATIC type. A variable's type
     and its lowering is a zval. `int / int` is `int|float` and so a zval; an UNTYPED PARAMETER
     is what php declares `mixed` by omission, so it is one too -- which is the refusal T5
     measured as "53 of the first 200" and named as the cheapest move from refused to green;
-    and `$x = null` gives `$x` the union's type. **What is left with no answer is an UNDEFINED
-    VARIABLE**: php warns and yields null, and a variable's type is its declaration or its first
-    assignment -- a read before either has neither. It is still refused by name.
+    and `$x = null` gives `$x` the union's type. The fourth, an UNDEFINED VARIABLE, is
+    **answered by T7** (`probes/t7/RESULTS.md` section 1): php warns and yields null, and null is
+    a value of `mixed`, which (c) already lowers to a zval -- so the READ is expressible without
+    the variable gaining a type at all, and a later `$x = 5` still declares it an int. The
+    refusal is retired and the warning is php's own text, with php's own file and line.
+    D4 now has an answer everywhere the rule is asked.
 
     **Measured by T5** (`probes/t5/RESULTS.md` § "Where a decision met reality"), three places
     where the rule as written had no answer and T5 therefore refused (i) and (ii) are ANSWERED
-    by T6, above; (iii) stands:
+    by T6, above and (iii) by T7, so all three are closed; kept for the record:
     (i) **`int / int`**. `10/2` is `int(5)` and `7/2` is `float(3.5)`, so the static type of `/`
         over two ints is `int|float` -- (c) sends that to a zval, which T5 does not have, so the
         operator is refused by name and the message names `intdiv()`. It is the commonest
@@ -146,6 +149,16 @@ D7. DECIDED (owner, 2026-09-15): no VM and no GC -- "teko already proves automat
     extension runs on it. The risk is measured, not assumed: a long loop that allocates (string
     concatenation in `while`) grows until its scope ends, so T5 gains a column, peak RSS against
     `php` on the same `.phpt`.
+    **Measured by T7** (`probes/t7/arena.py`, which runs on every `sh probes/t7/run.sh`):
+    **9 of 1460 sampled `wrong` tests** die with `mc-php: arena exhausted`,
+    and **not one of them is an array copy**: four build a very large STRING,
+    four allocate without bound on purpose and expect php's own
+    `Fatal error: Allowed memory size of %d bytes exhausted`, and one is wrong
+    for another reason too. The eager array copy T6 measured (the 48 MiB arena exhausted between 500 and 1000
+    copies of a 2000-element array) is therefore NOT what bites the corpus, and copy-on-write --
+    which D7 would allow without a refcount, since a compile-time escape question can say the
+    writer is the only one that could observe the difference -- is not built. The pressure that
+    does exist is string BUILDING, which is the shape D7 already predicted.
 
 D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixtures, any part of
     the runtime or standard library written in PHP, examples -- carries TESTS that run in BOTH
@@ -219,8 +232,44 @@ D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connec
 
 | T6 | how far does the wrong-reason table move | T5's table worked in descending value -- arrays, objects, functions, exceptions, constants, the library -- and re-measured | green/total -- **phpt: green 1073 / wrong 13374 / refused 3657 / skip 2947 / php-fail 344 / total 21051** (`probes/t6`); per directory `tests/lang` 74, `Zend/tests` 452, `ext/standard/tests/strings` 180** (`probes/t6`) |
 
+| T7 | php's diagnostics, and the tests that compile and print the wrong thing | the diagnostic channel built (position, text, streams, exit codes) and T6's `(compiled; output differs)` block clustered by `probes/t7/diffgroup.py` and worked in descending order | green/total -- **phpt: green 1218 / wrong 13968 / refused 2917 / skip 2947 / php-fail 345 / total 21050** (`probes/t7`); per directory `tests/lang` 82, `Zend/tests` 539, `ext/standard/tests/strings` 194 |
+
 Gate for the compiler proper: T2 + T3 decide `.so` reuse (D2b); T4 decides that the grammar fits
 Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
+
+T7 is done (2026-09-20, macos/aarch64; `probes/t7/RESULTS.md`), on **mc 1.1.0**:
+php's DIAGNOSTIC channel, and T6's `(compiled; output differs)` block taken
+apart by a tool that groups it:
+`phpt: green 1218 / wrong 13968 / refused 2917 / skip 2947 / php-fail 345 / total 21050`
+over the whole corpus, against T6's `green 1073` on the same harness. Per
+directory `tests/lang` **82** (was 74), `Zend/tests` **539** (was 452),
+`ext/standard/tests/strings` **194** (was 180). **1211 of the 1218 greens are
+in T0's "touched by none" set**, the same seven outside it as T6. `refused`
+fell 3657 -> 2917, because two named refusals were retired -- an undefined
+variable (D4) and `@` (D1).
+
+The two blocks T6 pointed at, each on its own population: the 4657 tests that
+assert a php diagnostic go **5 -> 71 green**, and the 333 that mention
+`__destruct` go **8 -> 11**.
+
+The diagnostics are the engine and seventeen messages: the position is two
+runtime globals the compiler stores into once per statement (a file and a
+line threaded through 179 library rows is the alternative, and it is not one),
+the file is absolutised the way php resolves it, the two streams are written
+in php's own order, and a php COMPILE-TIME `Fatal error:` goes to stdout with
+exit 255 from inside the compiler, where php produces it.
+
+`probes/t7/diffgroup.py` is what chose every block after that: it runs php and
+the mc-php binary on the same `--FILE--`, finds the FIRST differing line and
+groups by its shape, so the largest and least structured bucket T6 left is a
+table with counts.
+
+Two of T6's own decisions are re-measured rather than restated:
+**__destruct** now runs at the end of the program, in php's own reverse
+creation order (D7 has no refcount, so that is the only point php also has),
+and **the eager array copy is not what exhausts the arena** -- `probes/t7/arena.py` says 9 of 1460 `wrong` tests exhaust it and not one is an
+array copy (four build a huge string, four expect php's own memory_limit
+fatal), so copy-on-write is not built.
 
 T6 is done (2026-09-20, macos/aarch64; `probes/t6/RESULTS.md`), on **mc 1.1.0**:
 T5's wrong-reason table worked in
@@ -469,6 +518,19 @@ region hangs off a token.
 The smallest additive fix, in `p_skip_to`'s own shape: let `on_source` return a byte offset at
 which lexing should begin (0 meaning the whole buffer), or give `p_push_source` an offset
 argument. Either is one parameter and changes nothing for a module that does not use it.
+
+### Confirmed by T7, and still the only one open
+
+T7 is the fourth probe to grow `probes/t*/php.mc` and it found **no new mc gap**. The one T5
+reported is unchanged and T7 hits it exactly as often: **38 of the 21219 `.phpt` with a
+`--FILE--` section** open with inline HTML and are refused by name.
+
+Two things T7 needed from mc that were already there and are worth naming, because they are
+what a Tier 3 module reaches for once it has to produce a HOST-SHAPED diagnostic:
+`host_getcwd()` (to absolutise a file the way php resolves it) and the ordinary libc `write`
+and `exit`, which a module may declare `extern` itself -- that is how a php COMPILE-TIME
+`Fatal error:` reaches stdout with exit 255 from inside the compiler. `php.mc` now calls **53**
+names from outside itself: 48 frozen, 3 `<float>`'s, and those two.
 
 ### Still unmeasured
 
