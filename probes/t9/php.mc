@@ -5962,6 +5962,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             if (ph_tid != T_IDENT) err_at(fl, line, "mc-php: a php class name was expected after extends");
             uptr pn = ph_tname;
             ph_next();
+            loop { if (!ph_accept("\\", 1)) break; pn = ph_tname; ph_next(); }
             // an interface `extends` several: they are all interfaces here
             if (kind == 1) ph_cfill(ph_stmt_of(ph_c2("php_ce_iface", ph_ceref(ceg), ph_strlit(pn, cstrlen(pn)), TY_VOID)));
             if (kind != 1) ph_cfill(ph_stmt_of(ph_c2("php_ce_extend", ph_ceref(ceg), ph_strlit(pn, cstrlen(pn)), TY_VOID)));
@@ -5975,6 +5976,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             if (ph_tid != T_IDENT) err_at(fl, line, "mc-php: a php interface name was expected");
             uptr inm = ph_tname;
             ph_next();
+            loop { if (!ph_accept("\\", 1)) break; inm = ph_tname; ph_next(); }
             ph_cfill(ph_stmt_of(ph_c2("php_ce_iface", ph_ceref(ceg), ph_strlit(inm, cstrlen(inm)), TY_VOID)));
             if (!ph_accept(",", 1)) break;
         }

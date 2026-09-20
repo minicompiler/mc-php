@@ -77,7 +77,8 @@ function wl_sort(array $rows, int $reps): int {
             }
             return $a["score"] < $b["score"] ? -1 : 1;
         });
-        $n += $copy[0]["score"] + $copy[count($copy) - 1]["score"];
+        // D4: $n is an int, so the zval the array yields is cast here
+        $n += (int) $copy[0]["score"] + (int) $copy[count($copy) - 1]["score"];
     }
     return $n;
 }

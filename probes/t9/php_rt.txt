@@ -3975,6 +3975,25 @@ uptr php_ce_reg() {
     return ph_classes;
 }
 
+// A class is keyed by the part after the LAST backslash, lowercased: this
+// compiler FLATTENS namespaces (D1 resolves every include at compile time,
+// so there is one program and one class table). `\PHPUnit\Framework\TestCase`
+// and `TestCase` are the same class here, and two classes with the same
+// base name in different namespaces would collide -- which is the cost,
+// written down rather than hidden.
+uptr php_clskey(uptr name) {
+    i64 n = php_strlen(name);
+    i64 cut = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        if (ld8(name + ZS_HDR + i) == 92) cut = i + 1;
+        i = i + 1;
+    }
+    if (!cut) return php_case(name, 0);
+    return php_case(php_str_new(name + ZS_HDR + cut, n - cut), 0);
+}
+
 uptr php_ce_new(uptr name) {
     uptr ce = php_alloc(CE_SIZE);
     st64(ce, name);
@@ -3990,14 +4009,14 @@ uptr php_ce_new(uptr name) {
     st64(ce + 80, php_arr_new(8));
     st64(ce + 88, php_arr_new(8));
     st64(ce + 96, php_arr_new(8));
-    uptr lk = php_case(name, 0);
+    uptr lk = php_clskey(name);
     php_zv_cp(php_arr_sslot(php_ce_reg(), lk), php_zlong(ce));
     return ce;
 }
 
 uptr php_ce_find(uptr name) {
     if (!ph_classes) return 0;
-    uptr b = php_ht_find(ph_classes, php_str_hash(php_case(name, 0)), php_case(name, 0));
+    uptr b = php_ht_find(ph_classes, php_str_hash(php_clskey(name)), php_clskey(name));
     if (!b) return 0;
     return ld64(b);
 }
@@ -4071,7 +4090,7 @@ void php_ce_sprop(uptr ce, uptr name, uptr def, i64 vis) {
 }
 
 void php_ce_const(uptr ce, uptr name, uptr v) { php_zv_cpv(php_arr_sslot(ld64(ce + 56), name), v); }
-void php_ce_iface(uptr ce, uptr name) { php_zv_cp(php_arr_sslot(ld64(ce + 48), php_case(name, 0)), php_zbool(1)); }
+void php_ce_iface(uptr ce, uptr name) { php_zv_cp(php_arr_sslot(ld64(ce + 48), php_clskey(name)), php_zbool(1)); }
 void php_ce_flag(uptr ce, i64 f) { st64(ce + 64, ld64(ce + 64) | f); }
 
 // a trait is copied in, member by member, at class-build time
@@ -4110,11 +4129,11 @@ uptr php_ce_owner(uptr ce, i64 tab, uptr name) {
 }
 
 i64 php_ce_is(uptr ce, uptr name) {
-    uptr lk = php_case(name, 0);
+    uptr lk = php_clskey(name);
     uptr c = ce;
     loop {
         if (!c) return 0;
-        if (php_str_eq(php_case(ld64(c), 0), lk)) return 1;
+        if (php_str_eq(php_clskey(ld64(c)), lk)) return 1;
         if (php_ht_find(ld64(c + 48), php_str_hash(lk), lk)) return 1;
         // an interface can extend another: its own ifaces table carries them
         c = ld64(c + 8);
