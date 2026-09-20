@@ -165,6 +165,79 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   here measured a binary that was being rebuilt underneath it.
   Fixtures: **30 of 30** under `g/` byte for byte php's on both streams, **5 of 5** under `r/`
   refused by name with exit 3; `lencheck` 97 / 0 wrong, `aritycheck` 179 / 0 wrong.
+- T9 done (`probes/t9`), on **mc 1.1.0**: D6's correction built, and T8's two blocks
+  worked from a UNIFORM corpus-wide sample (every ninth of `wrong.txt`, split so the
+  three GRADED directories are not drowned by `ext/dom` 734, `ext/spl` 713,
+  `ext/date` 570, `ext/reflection` 467). **green 1450 -> 1637**:
+  `phpt: green 1637 / wrong 14140 / refused 2309 / skip 2947 / php-fail 362 / total 21033`;
+  per directory `tests/lang` 102 (was 93), `Zend/tests` 709 (was 635),
+  `ext/standard/tests/strings` 262 (was 223). **1626 of the 1637 greens are in T0's
+  "touched by none" set**; `refused` fell 3024 -> 2309, which is one block.
+  * **The php type words, the biggest block and it REMOVED a refusal.** T5's table
+    refused `array`, `mixed`, `iterable`, `callable`, `object`, `never`, `self`,
+    `static`, `null`, `?T`, `T|U`, `A&B` and a class name in a parameter or a return
+    because T5 had no zval; **T6 built one and the table was never re-measured**, and
+    D4 (c) and D9 already said every one of them lowers to a zval. `Zend/tests`'s
+    refused column fell by 229. Namespaces are FLATTENED with it (one program, one
+    class table -- D1), with the collision cost on record.
+  * **`#[\Override]` is checked, not ignored** (0 -> 28 of 67). Not reflection: php
+    checks it while COMPILING the class. Three rules measured rather than assumed --
+    a property's fatal carries the CLASS's line and a method's its own, a PRIVATE
+    parent member is not a match, and an abstract or interface method IS one.
+  * **Late static binding** (`static::`, `new static`, `get_called_class`): one
+    runtime global saved and restored around every call that can change it, an
+    instance call binding the object's class and a static call the named one unless
+    it FORWARDS. `static` needed a cursor lookahead (`ph_dcolon_next`), because the
+    module has no token lookahead.
+  * **`readonly`** (94 tests in the graded directories name one), **argument
+    unpacking `f(...$args)`** (one slot per parameter the callee could take, and
+    `php_unpack_at` answers "not passed"), **`max`/`min` over N values with php's own
+    comparison**, **`ext/json` written in mc** (D2 (a)), the three by-reference
+    targets T8 left, **`sscanf`**/`setlocale`, the **trigonometric family from libm**
+    (php prints 14 digits and a hand-rolled series does not survive it), `getcwd`/
+    `chdir`/`chmod`/`putenv`, and **`set_error_handler` made real** -- it was a no-op
+    STUB, which is why a test installing one to OBSERVE a diagnostic printed nothing.
+  * **Five string edges** the strings diffgroup named, each measured against php
+    8.5.10: `strrpos`/`strripos` ignored the offset, `strspn`/`strcspn` ignored
+    `(offset, length)`, `str_split("")` is `[]` since 8.2, `wordwrap` with `cut`
+    cuts at EXACTLY the width, and `trim`'s charlist reads `x..y` as a RANGE.
+  * **D8 met for the first time**: nothing here had ever written a `.php` outside a
+    `.phpt` fixture. `probes/t9/bench/workload.php` (a JSON round trip, a template
+    renderer, a sort-heavy pass) runs under `php` unchanged; its PHPUnit `TestCase`
+    is **6 ok / 0 failed in BOTH worlds** (the mc-php half NAMES its test methods,
+    because D6 forbids discovering them at run time); and the bench reports TWO
+    ratios because they measure different things -- **mc-php wins the whole program
+    (5.85x, 1.45x)** because php pays ~38 ms of start-up, and **LOSES the work**
+    (php's own work is 1.5 ms of `heavy.php`'s 39.5 against mc-php's 27, so the
+    generated code is 8x to 23x slower than php's VM). D7 names the cause: every
+    value is arena-allocated and never freed, an array copies eagerly, a string is
+    immutable. The JSON phase is also the first thing the 48 MiB arena has bounded
+    that this repository WANTED to do rather than a corpus test doing it on purpose
+    (60 records x 3 fits, 80 does not).
+  * **The generator decision, with its number, and generators are NOT built**: 252 of
+    the 13623 `wrong` tests use `yield` (1.8%; 260 of 5312 under `Zend/tests`) and
+    **145 of the 252 use the manual Generator API**. The shape if it is built is a
+    state machine the compiler makes out of the function body -- mc has no goto and
+    D7 forbids a VM and a second stack -- which needs a CFG pass `php.mc` does not
+    have and is the largest single piece of work in the probe (600-1000 lines plus
+    the `Generator` class). The cheap shape (inverting a `foreach`-only generator
+    into a callback) is correct and costs ~150 lines but serves at most 107 of the
+    252 and would make the other 145 a trap, so it was refused as a WRONG answer
+    rather than a missing one. Recorded for T10 to weigh against its own list.
+  * The re-measured tables are FLAT at the head: of 718 sampled `wrong` tests in the
+    graded directories, 391 do not compile and 327 compile and differ, and the
+    largest single first-difference pair left is worth 6 tests. What is bounded and
+    named is property hooks (25) and asymmetric visibility; the rest is one function
+    each.
+  * Sub-populations: the 4647 tests asserting a php diagnostic go 83 -> **93**, the
+    333 mentioning `__destruct` stay at **14**. D7 re-measured: **2 of 1572** sampled
+    `wrong` tests exhaust the arena (T8's was 11 of 1396), both building a very large
+    string on purpose. **No new mc gap**; the one T5 reported is unchanged, 38 of
+    21219. `probes/t8/` untouched and `probes/t9/out/base/` reproduces its three
+    numbers to the test. Fixtures **60 of 60** byte for byte php's on both streams
+    and the exit code, refusals **6 of 6** named with exit 3 (T8's `d9-nullable.php`
+    stopped being a refusal and moved to `g/`), `lencheck` 468 / 0 wrong,
+    `aritycheck` 272 / 0 wrong.
 - T8 done (`probes/t8`), on **mc 1.1.0**: the block T7 named -- `(does not compile)`, 878 of
   1460 sampled `wrong` tests -- taken apart group by group, and the 288 missing names worked in
   descending frequency. **green 1218 -> 1450**:

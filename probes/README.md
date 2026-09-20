@@ -201,6 +201,48 @@ and printed the wrong thing**. T7 builds the first and takes the second apart.
 
 `sh probes/t7/run.sh`. Details: `probes/t7/RESULTS.md`.
 
+## T9 -- func_get_args, the two blocks T8 inverted, and the generator decision
+
+`phpt: green 1637 / wrong 14140 / refused 2309 / skip 2947 / php-fail 362 / total 21033`
+over the whole corpus, against T8's `green 1450` on the same harness. Per directory
+`tests/lang` **102**, `Zend/tests` **709**, `ext/standard/tests/strings` **262**.
+**1626 of the 1637 greens are in T0's "touched by none" set**, and `refused` fell
+3024 -> 2309.
+
+The sample this probe worked from is UNIFORM over the whole corpus (every ninth of
+`wrong.txt`) and not an alphabetical slice, and it was split: the three GRADED
+directories from `ext/dom` (734 wrong), `ext/spl` (713), `ext/date` (570),
+`ext/reflection` (467) and their kind, which need whole extensions.
+
+* **The php type words, and this is the biggest block by far.** T5's table refused
+  `array`, `mixed`, `iterable`, `callable`, `object`, `never`, `self`, `static`,
+  `null`, `?T`, `T|U`, `A&B` and a class name in a parameter or a return -- because
+  T5 had no zval. **T6 built one and the table was never re-measured**, and D4 (c)
+  and D9 already said every one of them lowers to a zval. `Zend/tests`'s refused
+  column fell by 229 on that alone.
+* **`#[\Override]` is checked, not ignored**, 0 -> 28 of the 67 Override tests. It
+  is not reflection (D6): php checks it while COMPILING the class, the compiler
+  names the member, and nothing at run time enumerates anything.
+* **Late static binding** (`static::`, `new static`, `get_called_class`), one
+  runtime global saved and restored around every call that can change it.
+* **`readonly` properties**, **argument unpacking `f(...$args)`**, **`ext/json`
+  written in mc** (D2 (a)), the three **by-reference targets** T8 left
+  (`$a = &f()`, `$a[k] = &$v`, `$o->p = &$v`), **`sscanf`** and five string-function
+  edges that moved `ext/standard/tests/strings` 223 -> 262, the **trigonometric
+  family** from libm, and **`set_error_handler` made real** (it was a no-op stub).
+* **D8 was met for the first time**: the first `.php` here that is not a `.phpt`
+  fixture, its PHPUnit tests **6 ok / 0 failed in BOTH worlds**, and a bench that
+  reports two ratios because they measure different things -- mc-php wins the whole
+  program (5.85x, 1.45x) on php's ~38 ms of start-up and LOSES the work (8x to 23x
+  slower than php's VM).
+* **Generators are measured and NOT built**: 252 of the 13623 `wrong` tests use
+  `yield` and 145 of those use the manual Generator API. The shape is a state machine
+  the compiler makes out of the function body (mc has no goto, D7 forbids a VM and a
+  second stack); the cheap `foreach`-into-callback shape is correct but serves at
+  most 107 and would make the other 145 a trap.
+
+`sh probes/t9/run.sh`. Details: `probes/t9/RESULTS.md`.
+
 ## T8 -- the wall was `(does not compile)`, and it is not any more
 
 **green 1218 -> 1450:**

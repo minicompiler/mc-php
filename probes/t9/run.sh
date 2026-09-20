@@ -1,21 +1,23 @@
 #!/bin/sh
-# T9 -- the wall was `(does not compile)`, and it is not any more
+# T9 -- func_get_args, the block that prints the wrong thing, the block that
+# does not compile, the names, and the generator decision
 # (docs/plan.md section 4 row T9)
 #
-# T7 answered 1218 of 21050 and left one number pointing at what to do next:
-# 878 of 1460 sampled `wrong` tests DO NOT COMPILE, of which 288 name a php
-# function or constant mc-php does not have. T9 takes the first apart, group
-# by group (probes/t9/nocompile.py, new), and works the second in descending
-# frequency.
+# T8 answered 1450 of 21044 and INVERTED its own failure table: 758 of 1396
+# sampled `wrong` tests compiled and printed the wrong thing, 638 did not
+# compile. T9 works both, in that order, re-measuring between blocks, and
+# takes D6's correction (func_get_args) first.
 #
 # Four grid runs, then the tables that choose the next block:
 #   (a) tests/lang   (b) Zend/tests   (c) ext/standard/tests/strings
 #   (d) the whole corpus
 # plus the compiler's own fixtures under g/ (byte for byte php's, on BOTH
-# streams) and the refusals under r/ (named, exit 3); then why.py's
-# wrong-reason table, nocompile.py's groups of the block that does not
-# compile, diffgroup.py's clustering of the block that does, and arena.py's
-# answer to D7.
+# streams and the exit code) and the refusals under r/ (named, exit 3);
+# then why.py's wrong-reason table, nocompile.py's groups of the block that
+# does not compile, diffgroup.py's clustering of the block that does,
+# arena.py's answer to D7, and D8's two obligations for the one .php this
+# probe wrote that is not a fixture -- its tests in both worlds and its
+# bench against php.
 #
 # Exits 0 only when every run measured; a red grid is still a measurement.
 set -eu
@@ -43,7 +45,7 @@ mkdir -p "$MCPHP_TMP"
 sweeper=$!
 trap 'kill "$sweeper" 2>/dev/null; rm -rf "$MCPHP_TMP"' EXIT INT TERM
 
-[ -d "$SRC" ] || { echo "T7: no php-src -- clone php-8.5.10 at the repository root"; exit 1; }
+[ -d "$SRC" ] || { echo "T9: no php-src -- clone php-8.5.10 at the repository root"; exit 1; }
 "$MC" --version
 "$PHP" --version | head -1
 
@@ -119,13 +121,20 @@ awk -F'\t' '$2 == "(compiled; output differs)" { print $1 }' "$OUT/why.tsv" > "$
 MCPHP_BIN="$root/probes/t9/mc-php" python3 probes/t9/diffgroup.py "$OUT/dg.tsv" \
     < "$OUT/dg.list" | tee "$OUT/dg.table"
 
-printf '\n== 8b. the two sub-populations T7 named ==\n'
+printf "\n== 8b. the two sub-populations T7 named ==\n"
 python3 probes/t9/subpop.py "$OUT/all"
 
 printf '\n== 9. how often the arena (D7) is the answer ==\n'
 # A php array is a VALUE and D7 has no refcount, so T6 copies EAGERLY; this
 # is the number that says whether that, or anything else, exhausts the arena.
 MCPHP_BIN="$root/probes/t9/mc-php" python3 probes/t9/arena.py < "$OUT/why.list"
+
+printf '\n== 10. D8: the workload tests, in both worlds ==\n'
+"$PHP" probes/t9/bench/run.php | tail -1
+probes/t9/mcphp.sh probes/t9/bench/run.php | tail -1
+
+printf '\n== 11. D8: the bench, php against the mc-php binary ==\n'
+sh probes/t9/bench/bench9.sh || fail=1
 
 echo ""
 [ "$fail" = 0 ] || { echo "T9: something did not measure"; exit 1; }
