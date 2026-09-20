@@ -3118,21 +3118,42 @@ i64 php_inset(uptr set, i64 c) {
     return 0;
 }
 
-i64 php_f_strspn(uptr a, uptr b, uptr _p3, uptr _p4) {
+// strspn/strcspn take php's substring window (offset, length), both signs
+i64 php_span_win(uptr s, uptr oz, uptr lz, uptr pb) {
+    i64 n = php_strlen(s);
+    i64 o = 0;
+    if (oz) { if (php_zv_type(oz) != IS_NULL) o = php_zv_long(oz); }
+    if (o < 0) { o = n + o; if (o < 0) o = 0; }
+    if (o > n) o = n;
+    i64 l = n - o;
+    if (lz) { if (php_zv_type(lz) != IS_NULL) {
+        l = php_zv_long(lz);
+        if (l < 0) { l = n - o + l; if (l < 0) l = 0; }
+        if (l > n - o) l = n - o;
+    } }
+    st64(pb, o);
+    return l;
+}
+
+i64 php_f_strspn(uptr a, uptr b, uptr oz, uptr lz) {
     uptr s = php_zv_str(a);
     uptr set = php_zv_str(b);
-    i64 n = php_strlen(s);
+    u8 ob[8];
+    i64 l = php_span_win(s, oz, lz, ob);
+    i64 o = ld64(ob);
     i64 i = 0;
-    loop { if (i >= n) break; if (!php_inset(set, ld8(s + ZS_HDR + i))) break; i = i + 1; }
+    loop { if (i >= l) break; if (!php_inset(set, ld8(s + ZS_HDR + o + i))) break; i = i + 1; }
     return i;
 }
 
-i64 php_f_strcspn(uptr a, uptr b, uptr _p3, uptr _p4) {
+i64 php_f_strcspn(uptr a, uptr b, uptr oz, uptr lz) {
     uptr s = php_zv_str(a);
     uptr set = php_zv_str(b);
-    i64 n = php_strlen(s);
+    u8 ob[8];
+    i64 l = php_span_win(s, oz, lz, ob);
+    i64 o = ld64(ob);
     i64 i = 0;
-    loop { if (i >= n) break; if (php_inset(set, ld8(s + ZS_HDR + i))) break; i = i + 1; }
+    loop { if (i >= l) break; if (php_inset(set, ld8(s + ZS_HDR + o + i))) break; i = i + 1; }
     return i;
 }
 
@@ -3184,18 +3205,35 @@ uptr php_f_substr_replace(uptr sz, uptr rz, uptr oz, uptr lz) {
     return out;
 }
 
-i64 php_f_strrpos(uptr hz, uptr nz, uptr oz) {
-    uptr h = php_zv_str(hz);
-    uptr nd = php_zv_str(nz);
-    i64 last = -1;
-    i64 i = 0;
+// php's strrpos offset: a non-negative one is where the search STARTS, a
+// negative one says the match must start at or before strlen + offset
+// (measured: strrpos("hello","o",-2) is false and ("hello world","o",-5) is 4)
+i64 php_rpos(uptr h, uptr nd, i64 off) {
+    i64 hn = php_strlen(h);
+    i64 from = 0;
+    i64 upto = hn;
+    if (off >= 0) from = off;
+    if (off < 0) {
+        upto = hn + off;
+        if (upto < 0) return 0 - 1;
+    }
+    if (from > hn) return 0 - 1;
+    i64 last = 0 - 1;
+    i64 i = from;
     loop {
         i64 p = php_strpos(h, nd, i);
         if (p < 0) break;
+        if (p > upto) break;
         last = p;
         i = p + 1;
     }
     return last;
+}
+
+i64 php_f_strrpos(uptr hz, uptr nz, uptr oz) {
+    i64 off = 0;
+    if (oz) { if (php_zv_type(oz) != IS_NULL) off = php_zv_long(oz); }
+    return php_rpos(php_zv_str(hz), php_zv_str(nz), off);
 }
 
 i64 php_f_stripos(uptr hz, uptr nz, uptr oz) {
@@ -3203,6 +3241,12 @@ i64 php_f_stripos(uptr hz, uptr nz, uptr oz) {
 }
 
 i64 php_f_strripos(uptr hz, uptr nz, uptr oz) {
+    i64 off2 = 0;
+    if (oz) { if (php_zv_type(oz) != IS_NULL) off2 = php_zv_long(oz); }
+    return php_rpos(php_case(php_zv_str(hz), 0), php_case(php_zv_str(nz), 0), off2);
+}
+
+i64 php_f_strripos_old(uptr hz, uptr nz, uptr oz) {
     uptr h = php_case(php_zv_str(hz), 0);
     uptr nd = php_case(php_zv_str(nz), 0);
     i64 last = -1;
@@ -3315,7 +3359,7 @@ uptr php_f_str_split(uptr sz, uptr lz) {
         php_arr_push(r, php_zstr(php_str_new(s + ZS_HDR + i, k)));
         i = i + l;
     }
-    if (n == 0) php_arr_push(r, php_zstr(php_str_new("", 0)));
+    // php 8.2 and later: str_split("") is the EMPTY array, not [""]
     return r;
 }
 
@@ -3489,18 +3533,21 @@ uptr php_f_wordwrap(uptr sz, uptr wz, uptr bz, uptr cz) {
         if (c == 32) lastsp = w;
         w = w + 1;
         line = line + 1;
-        if (line > width) {
-            if (lastsp >= 0) {
-                i64 tail = w - lastsp - 1;
-                i64 k = tail;
-                loop { if (k <= 0) break; st8(o + ZS_HDR + lastsp + bl + k - 1, ld8(o + ZS_HDR + lastsp + k)); k = k - 1; }
-                php_memcpy(o + ZS_HDR + lastsp, brk + ZS_HDR, bl);
-                w = w + bl - 1;
-                line = tail;
-                lastsp = -1;
-            } else {
-                if (cut) { php_memcpy(o + ZS_HDR + w, brk + ZS_HDR, bl); w = w + bl; line = 0; }
-            }
+        if (line > width && lastsp >= 0) {
+            i64 tail = w - lastsp - 1;
+            i64 k = tail;
+            loop { if (k <= 0) break; st8(o + ZS_HDR + lastsp + bl + k - 1, ld8(o + ZS_HDR + lastsp + k)); k = k - 1; }
+            php_memcpy(o + ZS_HDR + lastsp, brk + ZS_HDR, bl);
+            w = w + bl - 1;
+            line = tail;
+            lastsp = -1;
+        }
+        // a word longer than the width is cut at EXACTLY the width, so the
+        // test is >= and not > (measured: wordwrap("...woooooooooooord.", 8))
+        if (line >= width && lastsp < 0 && cut && i + 1 < n) {
+            php_memcpy(o + ZS_HDR + w, brk + ZS_HDR, bl);
+            w = w + bl;
+            line = 0;
         }
         i = i + 1;
     }
@@ -5458,6 +5505,29 @@ uptr php_f_str_word_count(uptr z, uptr _p2, uptr _p3) {
     return r;
 }
 
+// trim's charlist understands `x..y` as a RANGE (measured:
+// trim("a..z", "a..z") is ".." because a..z is every letter)
+i64 php_trimset2(uptr set, i64 c) {
+    i64 n = php_strlen(set);
+    uptr b = set + ZS_HDR;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        if (i + 3 < n) {
+            if (ld8(b + i + 1) == 46) { if (ld8(b + i + 2) == 46) {
+                i64 lo = ld8(b + i);
+                i64 hi = ld8(b + i + 3);
+                if (c >= lo && c <= hi) return 1;
+                i = i + 4;
+                continue;
+            } }
+        }
+        if (ld8(b + i) == c) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
 uptr php_f_ltrim_c(uptr z, uptr cz, i64 mode) {
     uptr s = php_zv_str(z);
     if (php_zv_type(cz) == IS_NULL) return php_trim(s, mode);
@@ -5465,8 +5535,8 @@ uptr php_f_ltrim_c(uptr z, uptr cz, i64 mode) {
     i64 n = php_strlen(s);
     i64 a = 0;
     i64 b = n;
-    if (mode != 2) { loop { if (a >= b) break; if (!php_inset(set, ld8(s + ZS_HDR + a))) break; a = a + 1; } }
-    if (mode != 1) { loop { if (b <= a) break; if (!php_inset(set, ld8(s + ZS_HDR + b - 1))) break; b = b - 1; } }
+    if (mode != 2) { loop { if (a >= b) break; if (!php_trimset2(set, ld8(s + ZS_HDR + a))) break; a = a + 1; } }
+    if (mode != 1) { loop { if (b <= a) break; if (!php_trimset2(set, ld8(s + ZS_HDR + b - 1))) break; b = b - 1; } }
     return php_str_new(s + ZS_HDR + a, b - a);
 }
 
