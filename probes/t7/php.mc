@@ -5407,6 +5407,12 @@ void ph_lib_init() {
     ph_lib("md5", "php_f_md5", 1, 2, PT_STRING);
     ph_lib("sha1", "php_f_sha1", 1, 2, PT_STRING);
     ph_lib("ucfirst", "php_f_ucfirst", 1, 1, PT_STRING);
+    ph_lib("class_alias", "php_f_class_alias", 2, 3, PT_BOOL);
+    ph_lib("register_shutdown_function", "php_f_reg_shutdown", 1, 4, PT_BOOL);
+    ph_lib("strtok", "php_f_strtok", 1, 2, PT_MIXED);
+    ph_lib("strnatcmp", "php_f_strnatcmp", 2, 2, PT_INT);
+    ph_lib("strnatcasecmp", "php_f_strnatcasecmp", 2, 2, PT_INT);
+    ph_lib("addcslashes", "php_f_addcslashes", 2, 2, PT_STRING);
     ph_lib("iterator_to_array", "php_f_iterator", 1, 2, PT_MIXED);
     ph_lib("lcg_value", "php_f_pi", 0, 0, PT_FLOAT);
     ph_lib("microtime", "php_f_noop", 0, 1, PT_INT);
