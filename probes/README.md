@@ -88,6 +88,30 @@ tests, D1 touches 143 (0.7%), D5 1569 (7.3%), D6 1719 (8.0%), D4-suspect 123 (0.
 `sh probes/t0/run.sh` (`T0_CROSSCHECK=1` also re-runs php-src's own runner, ~8 minutes). Details:
 `probes/t0/RESULTS.md`.
 
-## Not run yet
+## T5 -- does the runtime agree with php
 
-T5 (`docs/plan.md` § 4).
+**Green moves off zero:**
+`phpt: green 80 / wrong 15367 / refused 2639 / skip 2947 / php-fail 362 / total 21033`
+over the whole corpus, against T0's
+`green 0 / wrong 18109 / refused 0 / skip 2947 / php-fail 339 / total 21056` on the same harness.
+Per directory: `tests/lang` 12, `Zend/tests` 38, `ext/standard/tests/strings` 12.
+All 80 greens are in T0's "touched by none" set -- the 84.2% of the corpus none of
+`docs/plan.md` § 3's decisions touches.
+
+Two files and nothing else: `probes/t5/php.mc`, a compiler that hangs on ONE
+`syntax("<?php")` plus `syntax_expr("$")`, and `probes/t5/php_rt.txt`, the runtime D10's table
+describes -- `bool` as `u8`, `int` as `i64`, `float` as `<float>`'s `f64`, `string` as a
+`zend_string`-shaped handle that is binary-safe and never encoding-validated, over one arena
+(D7). The third column is real for the first time: a refusal is a NAMED design answer
+(`mc-php: <what> is refused by design (docs/plan.md D<n>)`, exit 3) and is a different message
+from something T5 has not built yet, which is an ordinary compile error.
+
+mc 1.1.0 is what made it possible. `p_skip_to` closed three of T4's four lexer gaps and a fourth
+T4 had not asked for -- `"..."`, which is the only way to get php's own `\xNN`/`\u{...}`
+escapes and an escaped `\$` -- and `syntax_expr("$")` closed the last. **T4's in-place
+`on_source` rewrite is deleted**, and the `don't` -> `don"t` corruption with it. One gap is left
+and it is in `docs/plan.md` § 5: there is no way to own the bytes before the FIRST token, so a
+`.php` that opens with inline HTML is refused by name (38 of 21219).
+
+`sh probes/t5/run.sh` (about 12 minutes: fifteen fixtures, six refusals, four grids and the
+breakdown intersection). Details: `probes/t5/RESULTS.md`.

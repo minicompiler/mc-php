@@ -39,6 +39,21 @@ D4. DECIDED (owner, 2026-09-15): variables have a STATIC type. A variable's type
     such a type is a zval; (d) arrays stay heterogeneous inside (elements are zvals) -- the static
     type is the container's; (e) `null` needs a declared `?T` or a union, never an implicit one.
     The `.phpt` grid gains a third column: green / wrong / refused-by-design.
+    **Measured by T5** (`probes/t5/RESULTS.md` § "Where a decision met reality"), three places
+    where the rule as written has no answer and T5 therefore refuses:
+    (i) **`int / int`**. `10/2` is `int(5)` and `7/2` is `float(3.5)`, so the static type of `/`
+        over two ints is `int|float` -- (c) sends that to a zval, which T5 does not have, so the
+        operator is refused by name and the message names `intdiv()`. It is the commonest
+        refusal in ordinary code.
+    (ii) **An untyped parameter.** `function f($x)` is the commonest shape in the corpus and has
+        no declaration and no first assignment; its type is the CALL SITE's, which D1's
+        whole-program closure makes readable and which T5 does not read. 53 of the first 200
+        refusals under `tests/lang` + `ext/standard/tests/strings` are this one, and it is the
+        cheapest thing that would move refusals back into green.
+    (iii) **An undefined variable.** PHP warns and yields null; the rule has nowhere to put it.
+        34 of the same 200.
+    Also measured, and it is the rule working: reusing one `$v` for two `foreach` element types
+    is valid PHP and D4 refuses the second -- it caught the probe's own fixture.
 
 D2. Extensions. Two classes, two answers. **Decided by T1/T2/T3 (2026-09-15, macos/aarch64;
     `probes/`). D2(b) is taken: the shim is real, it is small, and it works.**
@@ -151,6 +166,11 @@ D9. DECIDED (owner, 2026-09-15): the TYPE SYSTEM is PHP's, in full -- the manual
     The owner allows the mc names to stay ACCEPTED by the compiler as a lowering hint, but a
     `.php` that uses one no longer runs unchanged under `php` (there `i64 $x` is a class type),
     so it cannot pass D8's php side and is out of every gate -- an escape hatch for probes only.
+    **Measured by T5**: the surface is PHP's, and every type word the compiler does not have is
+    refused BY NAME rather than mistyped -- `?T` and unions (D9 (e): assigning `null` to a
+    variable is refused too, since its type would be `?T`), `mixed`, `iterable`, `callable`,
+    `object`, `never`, `self`, `static`. T4's mapping of `bool` to `TY_I64` and its refusal of
+    `float` are both gone: `bool` is `u8` and `float` is `<float>`'s `f64`.
 
 D10. DECIDED (owner, 2026-09-15): the lowering table, PHP -> mc.
 
@@ -161,6 +181,17 @@ D10. DECIDED (owner, 2026-09-15): the lowering table, PHP -> mc.
     | `float` | `f64` (`<float>`) | |
     | `string` | a NEW type: `len` as `i64` + the bytes, immutable | PHP strings are BINARY-SAFE byte sequences: `strlen("\xc3\xa9") == 2`, binary data travels in `string`, and the `.phpt` corpus asserts exactly that -- so the type stores bytes and never validates encoding; UTF-8 is the content convention `mb_*` interprets, not a property of the type. Immutable value: a write is a new string (PHP's copy-on-write, arena-friendly, D7). Laid out like `zend_string` (refcount, hash, len, val) so D2(b)'s shim gets it for free |
     | the rest | developed one by one | `array` (ordered hash), objects, enums, `callable`, `iterable`, `mixed`/unions/`?T` (a zval), resources, each with its own `.phpt` slice and its bench row |
+
+    **Built and measured by T5** (`probes/t5/php_rt.txt`): `bool`, `int`, `float` and `string`
+    exactly as the table says -- the string is a `type_new(8, 8, TK_INT)` handle to T3's
+    `zend_string` layout, and `strlen("\xc3\xa9") == 2` is a fixture (`g/03-binary-safe.php`).
+    Two rows the table left open got a T5 answer that is deliberately smaller than the final one
+    and says so at the refusal: `array` is a PACKED HOMOGENEOUS vector with the keys 0..n-1 (a
+    key or a mixed element is a named error, not a zval), and one union exists -- `int|false`,
+    lowered to `i64` with -1 as the false, because `strpos` has it and nothing else would make
+    `=== false` right. D7's arena is 48 MiB of `__bss`, never freed; a string literal is built
+    once per RUN and cached in a global the compiler emits beside it, because an arena with no
+    free cannot afford one copy per loop iteration.
 
 D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connection shape from
     mc's bench) that fills the superglobals; no CGI/FCGI, no `url/file.php`. Later.
@@ -174,10 +205,23 @@ D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connec
 | T2 | can an mc binary export a symbol to a `.so` and take a variadic call | `[linker]` with `-export_dynamic`, `dlopen`, a callback; a C caller of a variadic mc callee | yes/no per host -- **macos/aarch64: yes, yes** (`probes/t2`) |
 | T3 | does a real extension run on our zval | zval/`zend_string`/HashTable at `zend_types.h` offsets in mc, `ctype_digit` from `ctype.so` | yes/no -- **yes** (`probes/t3`) |
 | T4 | does Tier 3 take PHP's grammar | lexer/parser for `<?php echo 1+2;`, functions, arrays, strings -> `--dump-ast` | gaps list -- **grammar yes, lexer no** (`probes/t4`) |
-| T5 | does the runtime agree with php | zval, ordered array, string, refcount; first ~100 `.phpt` of `Zend/tests` + `ext/standard/tests/strings` | green/total |
+| T5 | does the runtime agree with php | the string/array/float runtime of D10 under a compiler for the php subset D4 allows; the whole `.phpt` corpus through `probes/t5/mcphp.sh` | green/total -- **phpt: green 80 / wrong 15367 / refused 2639 / skip 2947 / php-fail 362 / total 21033** (`probes/t5`); per directory `tests/lang` 12, `Zend/tests` 38, `ext/standard/tests/strings` 12 |
 
 Gate for the compiler proper: T2 + T3 decide `.so` reuse (D2b); T4 decides that the grammar fits
 Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
+
+T5 is done (2026-09-20, macos/aarch64; `probes/t5/RESULTS.md`), on **mc 1.1.0**: the first
+runtime and the first compiler:
+`phpt: green 80 / wrong 15367 / refused 2639 / skip 2947 / php-fail 362 / total 21033` over the
+whole corpus -- green off zero, and the third column real for the first time. All 80 greens are
+in T0's "touched by none" set, the 84.2% of the corpus none of section 3's decisions touches.
+Two files and nothing else: `probes/t5/php.mc`
+(the compiler, one `syntax("<?php")` plus `syntax_expr("$")`) and `probes/t5/php_rt.txt` (the
+runtime: D10's string as a `zend_string`-shaped binary-safe handle, a packed homogeneous array,
+`<float>` for `float`, one arena per D7). mc 1.1.0's `p_skip_to` closed three of T4's four lexer
+gaps and a fourth T4 had not asked for (`"..."`, which is what gives php's own `\xNN`/`\u{...}`
+escapes and an escaped `\$`); **T4's in-place `on_source` rewrite is deleted**, and with it the
+`don't` -> `don"t` corruption. One gap is left and it is reported in section 5.
 
 T1, T2, T3 and T4 are done (2026-09-15, macos/aarch64): see `probes/README.md` for the numbers and
 `probes/tN/RESULTS.md` for each. **D2(b) is taken.** T4 answers its own gate: the grammar fits
@@ -196,7 +240,31 @@ reconciles to the byte once three bugs this cross-check found in the harness its
 
 ## 5. What mc may need (reported, not worked around)
 
-### Open: a module cannot own the LEXING of a source it claims (macos/aarch64)
+### Closed by mc 1.1.0: a module cannot own the LEXING of a source it claims
+
+**Closed (2026-09-20, mc 1.1.0), and measured by T5.** `p_skip_to(uptr q)` -- the one additive
+function this section named -- shipped, and it closes items 1, 2 and 3; `syntax_expr("$", &f)`
+now makes `$name` lex as the `$` token plus an ordinary identifier, which closes item 4.
+`probes/t5/php.mc` owns `'...'`, `#` comments, `#[Attr]`, the inline HTML between `?>` and
+`<?php` -- **and `"..."`, which nobody asked for and which turns out to matter most**: the core
+lexer decodes ITS escape set before any handler runs, so `\$` and `$` were the same byte and
+`\xNN`/`\u{...}`/octal did not exist at all. Owning the double quote gives php's own escapes and
+an interpolation that can tell an escaped `$` from a real one. **T4's in-place `on_source`
+rewrite is deleted** and the `don't` -> `don"t` corruption with it (`probes/t5/g/09-html.php` has
+an apostrophe inside its HTML and comes out byte for byte php's).
+
+Two things worth writing down that `docs/reference/hooks.md` does not say:
+
+* **`p_skip_to` is once per token.** The guard is `cp == tok_start(cur) + tok_len(cur)`, which
+  the first skip breaks, so a handler cannot skip twice before the next `p_next()`. A module
+  owning several adjacent regions has to decide ONE destination in a single scan.
+* **The guard can never hold on a `T_STR`**, because `lex_string` points `tok_start` into the
+  arena. A module that owns `'` but not `"` cannot skip a region that follows a double-quoted
+  string. T5 does not hit it because it owns both.
+
+The text below is T4's, kept for the record.
+
+
 
 Found by T4, reduced to `probes/gap-lexer-ownership/` (`sh probes/gap-lexer-ownership/run.sh`,
 exits 0 only while it still reproduces). Measured on mc 1.0.0.
@@ -262,7 +330,15 @@ buffer, called from `lex_push_mem` before the frame is read -- would make the in
 explicit contract instead of an undocumented side effect, but it is strictly weaker: a whole-buffer
 rewrite still cannot know PHP's lexical states, which is exactly the `don"t` above.
 
-### Open: 29 of the 46 `<mc/core>` names a Tier 3 module of this size needs are not frozen
+### Closed by mc 1.1.0: 29 of the 46 `<mc/core>` names a Tier 3 module needs were not frozen
+
+**Closed (2026-09-20).** `tests/golden/surface.txt` in mc 1.1.0 covers them. T5's `php.mc` is
+three and a half times T4's and calls **48** names from outside itself: **45 are frozen**, and
+the three that are not -- `float_init`, `machine_arm64_float_init`, `machine_x86_64_float_init`
+-- are `<float>`'s, which the freeze covers as a bundle name and not as symbols. Nothing to ask
+for. The text below is T4's, kept for the record.
+
+
 
 Measured by T4 over `probes/t4/php.mc` (`docs/reference/hooks.md` § 8 is the promise,
 `tests/golden/surface.txt` is what `make check-freeze` enforces). 17 of the 46 are in the frozen
@@ -336,6 +412,24 @@ arena is already past the threshold, and is not usable as a `dlopen` host today.
   `ld64(x29 + 16 + 8*n)` by hand. SysV passes the first eight variadic arguments in registers
   instead, so on Linux the natural shape is different again and needs its own probe -- neither is
   an mc gap.
+
+### Open: there is no way to own the bytes BEFORE the first token (macos/aarch64)
+
+Found by T5 on mc 1.1.0. `p_skip_to` moves the lexer cursor relative to a token that has already
+been lexed, so a source whose FIRST bytes are not lexable by the core has nowhere to hang a
+handler. For PHP that is a file opening with inline HTML -- `Hello <?php echo 1; ?>` -- which the
+core lexes as stray identifiers before `syntax("<?php")` can fire. `on_source` is handed the
+buffer and `source_claim` is asked at push time, but neither can move the cursor, and mutating
+the buffer in place is the undocumented workaround T4 used and T5 deleted.
+
+`probes/t5/php.mc` refuses such a file by name (`ph_on_source` reads the first five bytes) rather
+than mis-lexing it. **38 of the 21219 `.phpt` with a `--FILE--` section die on it** -- small, and
+the honest number. Everything that closes with `?>` and trailing text is fine, because that
+region hangs off a token.
+
+The smallest additive fix, in `p_skip_to`'s own shape: let `on_source` return a byte offset at
+which lexing should begin (0 meaning the whole buffer), or give `p_push_source` an offset
+argument. Either is one parameter and changes nothing for a module that does not use it.
 
 ### Still unmeasured
 

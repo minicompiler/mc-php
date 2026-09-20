@@ -1,0 +1,843 @@
+// php_rt.txt -- T5's runtime, pushed into every program the compiler compiles
+// (php.mc's user_init: #embed + p_push_source).
+//
+// docs/plan.md D10 is the lowering table this file implements:
+//   bool   -> u8, the two values 0 and 1
+//   int    -> i64
+//   float  -> f64 (<float>)
+//   string -> a handle to a zend_string-shaped record, BINARY-SAFE and never
+//             encoding-validated: strlen("\xc3\xa9") is 2. Immutable: every
+//             write makes a new string.
+//   array  -> a packed vector of 8-byte slots, HOMOGENEOUS (T5's own limit,
+//             named at the refusal, not silently coerced)
+//
+// D7 is the memory model: one arena, never freed, released by exit.
+#include <sys>
+
+// ---- the arena (D7) --------------------------------------------------------
+#define PH_ARENA 50331648
+
+u8  ph_heap[50331648];
+i64 ph_top;
+
+void php_die(uptr msg, i64 n) { write(2, msg, n); exit(255); }
+
+uptr php_alloc(i64 n) {
+    i64 a = (ph_top + 7) / 8 * 8;
+    if (a + n > PH_ARENA) php_die("mc-php: arena exhausted\n", 24);
+    ph_top = a + n;
+    return ph_heap + a;
+}
+
+// ---- string: the zend_string shape (T3's probes/t3/zend.mc, verbatim) ------
+// 0 refcount u32 | 4 type_info u32 | 8 h u64 | 16 len u64 | 24 val[]
+#define ZS_HDR 24
+
+uptr php_str_alloc(i64 n) {
+    uptr s = php_alloc(ZS_HDR + n + 1);
+    st32(s, 1);
+    st32(s + 4, 22);                          // GC_STRING
+    st64(s + 8, 0);                           // h: not computed
+    st64(s + 16, n);
+    st8(s + ZS_HDR + n, 0);
+    return s;
+}
+
+i64  php_strlen(uptr s) { return ld64(s + 16); }
+uptr php_str_val(uptr s) { return s + ZS_HDR; }
+
+void php_memcpy(uptr d, uptr s, i64 n) {
+    i64 i = 0;
+    loop { if (i >= n) break; st8(d + i, ld8(s + i)); i = i + 1; }
+}
+
+uptr php_str_new(uptr b, i64 n) {
+    uptr s = php_str_alloc(n);
+    php_memcpy(s + ZS_HDR, b, n);
+    return s;
+}
+
+// A literal is built once per program run and cached in a global the compiler
+// emits beside it -- an arena with no free cannot afford one copy per loop
+// iteration (D7's risk, measured in RESULTS.md).
+uptr php_str_lit(uptr cache, uptr b, i64 n) {
+    uptr s = ld64(cache);
+    if (s) return s;
+    s = php_str_new(b, n);
+    st64(cache, s);
+    return s;
+}
+
+uptr php_str_concat(uptr a, uptr b) {
+    i64 la = php_strlen(a);
+    i64 lb = php_strlen(b);
+    uptr s = php_str_alloc(la + lb);
+    php_memcpy(s + ZS_HDR, a + ZS_HDR, la);
+    php_memcpy(s + ZS_HDR + la, b + ZS_HDR, lb);
+    return s;
+}
+
+// memcmp over the bytes, then the length: PHP's own strcmp ordering.
+i64 php_str_cmp(uptr a, uptr b) {
+    i64 la = php_strlen(a);
+    i64 lb = php_strlen(b);
+    i64 n = la;
+    if (lb < n) n = lb;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 x = ld8(a + ZS_HDR + i);
+        i64 y = ld8(b + ZS_HDR + i);
+        if (x != y) { if (x < y) return -1; return 1; }
+        i = i + 1;
+    }
+    if (la < lb) return -1;
+    if (la > lb) return 1;
+    return 0;
+}
+
+i64 php_str_eq(uptr a, uptr b) { if (php_str_cmp(a, b) == 0) return 1; return 0; }
+
+// ---- int and bool to string ------------------------------------------------
+uptr php_itos(i64 v) {
+    u8 t[24];
+    i64 k = 0;
+    i64 neg = 0;
+    u64 u = v;
+    if (v < 0) { neg = 1; u = 0 - u; }
+    loop {
+        st8(t + k, '0' + u % 10);
+        u = u / 10;
+        k = k + 1;
+        if (u == 0) break;
+    }
+    uptr s = php_str_alloc(k + neg);
+    if (neg) st8(s + ZS_HDR, '-');
+    i64 i = 0;
+    loop {
+        if (i >= k) break;
+        st8(s + ZS_HDR + neg + i, ld8(t + k - 1 - i));
+        i = i + 1;
+    }
+    return s;
+}
+
+uptr php_btos(u8 b) {
+    if (b) return php_str_new("1", 1);
+    return php_str_new("", 0);
+}
+
+// ---- float formatting ------------------------------------------------------
+// PHP prints a float two ways and this runtime implements both:
+//   echo / string cast : precision=14, php's %.14G with its own ".0E+" shape
+//   var_dump           : serialize_precision=-1, the SHORTEST decimal that
+//                        reads back as the same double
+// The digits come from scaling by an exact power of ten (the doubles 1e0..1e22
+// are exact) and the last digit is then corrected by trying d-1, d, d+1 and
+// keeping the one whose exact reconstruction is nearest. Outside 1e-22..1e22
+// the reconstruction is not exact and the shortest-repr search gives up at 17
+// digits -- named in RESULTS.md, not hidden.
+f64 ph_p10[23];
+i64 ph_p10_done;
+
+void ph_p10_init() {
+    if (ph_p10_done) return;
+    ph_p10_done = 1;
+    f64 v = 1.0;
+    i64 i = 0;
+    loop {
+        if (i > 22) break;
+        stf64(ph_p10 + i * 8, v);
+        v = v * 10.0;
+        i = i + 1;
+    }
+}
+
+f64 ph_pow10(i64 e) {
+    ph_p10_init();
+    if (e >= 0) {
+        if (e <= 22) return ldf64(ph_p10 + e * 8);
+        f64 r = ldf64(ph_p10 + 22 * 8);
+        i64 k = e - 22;
+        loop { if (k <= 0) break; r = r * 10.0; k = k - 1; }
+        return r;
+    }
+    i64 m = 0 - e;
+    if (m <= 22) return 1.0 / ldf64(ph_p10 + m * 8);
+    f64 r2 = 1.0 / ldf64(ph_p10 + 22 * 8);
+    i64 k2 = m - 22;
+    loop { if (k2 <= 0) break; r2 = r2 / 10.0; k2 = k2 - 1; }
+    return r2;
+}
+
+u64 ph_bits(f64 x) { u8 t[8]; stf64(t, x); return ld64(t); }
+f64 ph_unbits(u64 b) { u8 t[8]; st64(t, b); return ldf64(t); }
+
+i64 ph_is_nan(f64 x) {
+    u64 b = ph_bits(x);
+    if (((b >> 52) & 0x7ff) != 0x7ff) return 0;
+    if ((b << 12) == 0) return 0;
+    return 1;
+}
+i64 ph_is_inf(f64 x) {
+    u64 b = ph_bits(x);
+    if (((b >> 52) & 0x7ff) != 0x7ff) return 0;
+    if ((b << 12) != 0) return 0;
+    return 1;
+}
+
+// digits * 10^e, exactly rounded whenever both halves are exact (|e| <= 22 and
+// digits < 2^53) -- Clinger's fast path.
+f64 ph_scale(i64 digits, i64 e) {
+    // Past 2^53 an i64 is no longer exactly a double, so split it: both halves
+    // are exact and so is each power of ten, and only the final add rounds.
+    if (digits >= 9007199254740992) {
+        i64 hi = digits / 100000000;
+        i64 lo = digits - hi * 100000000;
+        return ph_scale(hi, e + 8) + ph_scale(lo, e);
+    }
+    f64 d = (f64) digits;
+    if (e == 0) return d;
+    if (e > 0) { if (e <= 22) return d * ph_pow10(e); }
+    if (e < 0) { if (0 - e <= 22) return d / ph_pow10(0 - e); }
+    return d * ph_pow10(e);
+}
+
+// decimal exponent of |x| (x > 0): the k with 10^k <= x < 10^(k+1)
+i64 ph_e10(f64 x) {
+    i64 k = 0;
+    loop {
+        if (x < ph_pow10(k + 1)) break;
+        k = k + 1;
+        if (k > 308) break;
+    }
+    loop {
+        if (k <= -324) break;
+        if (x >= ph_pow10(k)) break;
+        k = k - 1;
+    }
+    return k;
+}
+
+// the `prec` significant digits of x > 0, as an integer, with the decimal
+// exponent written through `pe`: x ~= digits * 10^(*pe)
+i64 ph_digits(f64 x, i64 prec, uptr pe) {
+    i64 k = ph_e10(x);
+    i64 e = k - prec + 1;
+    f64 y = x;
+    if (e > 0) y = y / ph_pow10(e);
+    if (e < 0) y = y * ph_pow10(0 - e);
+    // NOT (i64)(y + 0.5): once |y| >= 2^52 the spacing is 1 and y + 0.5 ties
+    // to even, which rounds an odd exact integer UP.
+    i64 d = (i64) y;
+    f64 fr = y - (f64) d;
+    if (fr > 0.5) d = d + 1;
+    if (fr == 0.5) { if (d & 1) d = d + 1; }   // an exact tie rounds to even
+    // the scaling above can be a ulp out: keep whichever of d-1, d, d+1
+    // reconstructs nearest to x.
+    i64 best = d;
+    f64 bd = -1.0;
+    i64 k = 0;
+    loop {
+        if (k > 2) break;
+        i64 c = d;                       // d first, so it keeps a tie
+        if (k == 1) c = d - 1;
+        if (k == 2) c = d + 1;
+        if (c > 0) {
+            f64 r = ph_scale(c, e);
+            f64 df = r - x;
+            if (df < 0.0) df = 0.0 - df;
+            if (bd < 0.0 || df < bd) { bd = df; best = c; }
+        }
+        k = k + 1;
+    }
+    d = best;
+    i64 lim = 1;
+    i64 i = 0;
+    loop { if (i >= prec) break; lim = lim * 10; i = i + 1; }
+    if (d >= lim) { d = d / 10; e = e + 1; }
+    st64(pe, e);
+    return d;
+}
+
+// write `d` (prec digits) with decimal exponent `e` in php's %G shape
+i64 ph_fmt_dig(uptr b, i64 neg, i64 d, i64 prec, i64 e, i64 trim, i64 ndig) {
+    u8 t[24];
+    i64 k = 0;
+    i64 u = d;
+    loop { st8(t + k, '0' + u % 10); u = u / 10; k = k + 1; if (u == 0) break; }
+    loop { if (k >= prec) break; st8(t + k, '0'); k = k + 1; }
+    // t holds the digits least-significant first, k == prec
+    i64 last = prec;
+    if (trim) { loop { if (last <= 1) break; if (ld8(t + prec - last) != '0') break; last = last - 1; } }
+    i64 exp = e + prec - 1;                  // the value is 0.d1d2... * 10^(exp+1)
+    i64 n = 0;
+    if (neg) { st8(b, '-'); n = 1; }
+    // zend_gcvt's own switch: with decpt = exp + 1 and ndigit the precision it
+    // was called with (14 for echo, 17 for serialize_precision=-1), scientific
+    // iff decpt < -3 or decpt > ndigit.
+    i64 decpt = exp + 1;
+    if (decpt < -3 || decpt > ndig) {
+        st8(b + n, '0' + ld8(t + prec - 1) - '0'); n = n + 1;
+        st8(b + n, '.'); n = n + 1;
+        if (last == 1) { st8(b + n, '0'); n = n + 1; }
+        i64 i = 1;
+        loop { if (i >= last) break; st8(b + n, ld8(t + prec - 1 - i)); n = n + 1; i = i + 1; }
+        st8(b + n, 'E'); n = n + 1;
+        i64 ae = exp;
+        if (ae < 0) { st8(b + n, '-'); ae = 0 - ae; } else { st8(b + n, '+'); }
+        n = n + 1;
+        u8 eb[8];
+        i64 ek = 0;
+        loop { st8(eb + ek, '0' + ae % 10); ae = ae / 10; ek = ek + 1; if (ae == 0) break; }
+        loop { if (ek == 0) break; ek = ek - 1; st8(b + n, ld8(eb + ek)); n = n + 1; }
+        return n;
+    }
+    if (exp >= 0) {
+        i64 i = 0;
+        loop {
+            if (i > exp) break;
+            if (i < last) st8(b + n, ld8(t + prec - 1 - i));
+            if (i >= last) st8(b + n, '0');
+            n = n + 1;
+            i = i + 1;
+        }
+        if (last > exp + 1) {
+            st8(b + n, '.'); n = n + 1;
+            i = exp + 1;
+            loop { if (i >= last) break; st8(b + n, ld8(t + prec - 1 - i)); n = n + 1; i = i + 1; }
+        }
+        return n;
+    }
+    st8(b + n, '0'); n = n + 1;
+    st8(b + n, '.'); n = n + 1;
+    i64 z = 0 - exp - 1;
+    loop { if (z <= 0) break; st8(b + n, '0'); n = n + 1; z = z - 1; }
+    i64 i2 = 0;
+    loop { if (i2 >= last) break; st8(b + n, ld8(t + prec - 1 - i2)); n = n + 1; i2 = i2 + 1; }
+    return n;
+}
+
+// prec > 0: that many significant digits. prec == 0: the shortest decimal that
+// reads back as the same double (serialize_precision=-1).
+i64 php_fmt_f64(uptr b, f64 x, i64 prec) {
+    if (ph_is_nan(x)) { php_memcpy(b, "NAN", 3); return 3; }
+    if (ph_is_inf(x)) {
+        if (x < 0.0) { php_memcpy(b, "-INF", 4); return 4; }
+        php_memcpy(b, "INF", 3);
+        return 3;
+    }
+    i64 neg = 0;
+    f64 a = x;
+    if ((ph_bits(x) >> 63) != 0) { neg = 1; a = 0.0 - x; }
+    if (a == 0.0) { if (neg) { php_memcpy(b, "-0", 2); return 2; } st8(b, '0'); return 1; }
+    u8 pe[8];
+    if (prec > 0) {
+        i64 d = ph_digits(a, prec, pe);
+        return ph_fmt_dig(b, neg, d, prec, ld64(pe), 1, prec);
+    }
+    i64 p = 1;
+    loop {
+        if (p > 17) break;
+        i64 d = ph_digits(a, p, pe);
+        if (ph_scale(d, ld64(pe)) == a) return ph_fmt_dig(b, neg, d, p, ld64(pe), 0, 17);
+        p = p + 1;
+    }
+    i64 d17 = ph_digits(a, 17, pe);
+    return ph_fmt_dig(b, neg, d17, 17, ld64(pe), 1, 17);
+}
+
+uptr php_ftos(f64 x) {
+    u8 t[64];
+    i64 n = php_fmt_f64(t, x, 14);
+    return php_str_new(t, n);
+}
+
+// ---- string to number (php's leading-numeric rule) -------------------------
+i64 php_stoi(uptr s) {
+    i64 n = php_strlen(s);
+    uptr v = s + ZS_HDR;
+    i64 i = 0;
+    loop { if (i >= n) break; i64 c = ld8(v + i); if (c != 32 && c != 9 && c != 10 && c != 13) break; i = i + 1; }
+    i64 neg = 0;
+    if (i < n) { if (ld8(v + i) == '-') { neg = 1; i = i + 1; } else { if (ld8(v + i) == '+') i = i + 1; } }
+    i64 acc = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(v + i);
+        if (c < '0' || c > '9') break;
+        acc = acc * 10 + (c - '0');
+        i = i + 1;
+    }
+    if (neg) return 0 - acc;
+    return acc;
+}
+
+f64 php_stof(uptr s) {
+    i64 n = php_strlen(s);
+    uptr v = s + ZS_HDR;
+    i64 i = 0;
+    loop { if (i >= n) break; i64 c = ld8(v + i); if (c != 32 && c != 9 && c != 10 && c != 13) break; i = i + 1; }
+    i64 neg = 0;
+    if (i < n) { if (ld8(v + i) == '-') { neg = 1; i = i + 1; } else { if (ld8(v + i) == '+') i = i + 1; } }
+    i64 mant = 0;
+    i64 nd = 0;
+    i64 e = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(v + i);
+        if (c < '0' || c > '9') break;
+        if (nd < 18) { mant = mant * 10 + (c - '0'); nd = nd + 1; } else { e = e + 1; }
+        i = i + 1;
+    }
+    if (i < n) {
+        if (ld8(v + i) == '.') {
+            i = i + 1;
+            loop {
+                if (i >= n) break;
+                i64 c2 = ld8(v + i);
+                if (c2 < '0' || c2 > '9') break;
+                if (nd < 18) { mant = mant * 10 + (c2 - '0'); nd = nd + 1; e = e - 1; }
+                i = i + 1;
+            }
+        }
+    }
+    if (i < n) {
+        i64 c3 = ld8(v + i);
+        if (c3 == 'e' || c3 == 'E') {
+            i64 j = i + 1;
+            i64 es = 0;
+            i64 ev = 0;
+            i64 any = 0;
+            if (j < n) { if (ld8(v + j) == '-') { es = 1; j = j + 1; } else { if (ld8(v + j) == '+') j = j + 1; } }
+            loop {
+                if (j >= n) break;
+                i64 c4 = ld8(v + j);
+                if (c4 < '0' || c4 > '9') break;
+                ev = ev * 10 + (c4 - '0');
+                any = 1;
+                j = j + 1;
+            }
+            if (any) { if (es) e = e - ev; else e = e + ev; }
+        }
+    }
+    f64 r = ph_scale(mant, e);
+    if (neg) return 0.0 - r;
+    return r;
+}
+
+// ---- echo ------------------------------------------------------------------
+u8 ph_out[4096];
+i64 ph_outn;
+
+void php_flush() { if (ph_outn) write(1, ph_out, ph_outn); ph_outn = 0; }
+
+void php_write(uptr b, i64 n) {
+    if (n > 2048) { php_flush(); write(1, b, n); return; }
+    if (ph_outn + n > 4096) php_flush();
+    php_memcpy(ph_out + ph_outn, b, n);
+    ph_outn = ph_outn + n;
+}
+
+i64 php_echo_str(uptr s) { php_write(s + ZS_HDR, php_strlen(s)); return 0; }
+i64 php_echo_int(i64 v) { php_echo_str(php_itos(v)); return 0; }
+i64 php_echo_bool(u8 b) { if (b) php_write("1", 1); return 0; }
+i64 php_echo_float(f64 x) { u8 t[64]; i64 n = php_fmt_f64(t, x, 14); php_write(t, n); return 0; }
+i64 php_echo_null() { return 0; }
+
+// ---- arrays: packed, homogeneous, 8 bytes a slot ---------------------------
+// 0 count i64 | 8 cap i64 | 16 data uptr
+#define PA_HDR 24
+
+uptr php_arr_new(i64 cap) {
+    if (cap < 4) cap = 4;
+    uptr a = php_alloc(PA_HDR);
+    st64(a, 0);
+    st64(a + 8, cap);
+    st64(a + 16, php_alloc(cap * 8));
+    return a;
+}
+
+i64 php_count(uptr a) { return ld64(a); }
+
+void php_arr_push(uptr a, i64 v) {
+    i64 n = ld64(a);
+    i64 cap = ld64(a + 8);
+    if (n >= cap) {
+        i64 nc = cap * 2;
+        uptr nd = php_alloc(nc * 8);
+        php_memcpy(nd, ld64(a + 16), n * 8);
+        st64(a + 8, nc);
+        st64(a + 16, nd);
+    }
+    st64(ld64(a + 16) + n * 8, v);
+    st64(a, n + 1);
+}
+
+i64 php_arr_get(uptr a, i64 i) {
+    if (i < 0 || i >= ld64(a)) php_die("mc-php: undefined array offset\n", 31);
+    return ld64(ld64(a + 16) + i * 8);
+}
+
+void php_arr_set(uptr a, i64 i, i64 v) {
+    i64 n = ld64(a);
+    if (i == n) { php_arr_push(a, v); return; }
+    if (i < 0 || i > n) php_die("mc-php: array keys are 0..n in this runtime\n", 44);
+    st64(ld64(a + 16) + i * 8, v);
+}
+
+void php_arr_pushf(uptr a, f64 x) { u8 t[8]; stf64(t, x); php_arr_push(a, ld64(t)); }
+f64  php_arr_getf(uptr a, i64 i) { u8 t[8]; st64(t, php_arr_get(a, i)); return ldf64(t); }
+void php_arr_setf(uptr a, i64 i, f64 x) { u8 t[8]; stf64(t, x); php_arr_set(a, i, ld64(t)); }
+
+// ---- var_dump --------------------------------------------------------------
+// The element type codes are the compiler's (php.mc PT_*), passed as a literal.
+#define PT_INT     0
+#define PT_FLOAT   1
+#define PT_STRING  2
+#define PT_BOOL    3
+#define PT_VOID    4
+#define PT_IFALSE  5
+#define PT_NULL    6
+
+void php_ind(i64 d) { i64 i = 0; loop { if (i >= d) break; php_write("  ", 2); i = i + 1; } }
+
+void php_vd_int(i64 v) { php_write("int(", 4); php_echo_int(v); php_write(")\n", 2); }
+void php_vd_bool(u8 b) {
+    php_write("bool(", 5);
+    if (b) php_write("true", 4);
+    if (!b) php_write("false", 5);
+    php_write(")\n", 2);
+}
+void php_vd_null() { php_write("NULL\n", 5); }
+void php_vd_float(f64 x) {
+    php_write("float(", 6);
+    u8 t[64];
+    i64 n = php_fmt_f64(t, x, 0);
+    php_write(t, n);
+    php_write(")\n", 2);
+}
+void php_vd_str(uptr s) {
+    php_write("string(", 7);
+    php_echo_int(php_strlen(s));
+    php_write(") \"", 3);
+    php_echo_str(s);
+    php_write("\"\n", 2);
+}
+// int|false: the one union T5 has, and the only reason it exists is that
+// strpos has it. -1 is the false.
+void php_vd_ifalse(i64 v) { if (v < 0) { php_vd_bool(0); return; } php_vd_int(v); }
+
+void php_vd_arr(uptr a, i64 et, i64 depth) {
+    php_write("array(", 6);
+    php_echo_int(php_count(a));
+    php_write(") {\n", 4);
+    i64 i = 0;
+    loop {
+        if (i >= php_count(a)) break;
+        php_ind(depth + 1);
+        php_write("[", 1);
+        php_echo_int(i);
+        php_write("]=>\n", 4);
+        php_ind(depth + 1);
+        if (et == PT_INT)    php_vd_int(php_arr_get(a, i));
+        if (et == PT_IFALSE) php_vd_ifalse(php_arr_get(a, i));
+        if (et == PT_BOOL)   php_vd_bool(php_arr_get(a, i));
+        if (et == PT_FLOAT)  php_vd_float(php_arr_getf(a, i));
+        if (et == PT_STRING) php_vd_str(php_arr_get(a, i));
+        i = i + 1;
+    }
+    php_ind(depth);
+    php_write("}\n", 2);
+}
+
+// ---- the string functions T5 implements ------------------------------------
+uptr php_substr(uptr s, i64 start, i64 len, i64 haslen) {
+    i64 n = php_strlen(s);
+    if (start < 0) { start = n + start; if (start < 0) start = 0; }
+    if (start > n) return php_str_new("", 0);
+    i64 want = n - start;
+    if (haslen) {
+        if (len < 0) { want = n - start + len; } else { want = len; }
+    }
+    if (want < 0) want = 0;
+    if (start + want > n) want = n - start;
+    return php_str_new(s + ZS_HDR + start, want);
+}
+
+i64 php_strpos(uptr h, uptr nd, i64 off) {
+    i64 hn = php_strlen(h);
+    i64 nn = php_strlen(nd);
+    if (off < 0) { off = hn + off; if (off < 0) off = 0; }
+    if (off > hn) return -1;
+    i64 i = off;
+    loop {
+        if (i + nn > hn) break;
+        i64 j = 0;
+        i64 ok = 1;
+        loop {
+            if (j >= nn) break;
+            if (ld8(h + ZS_HDR + i + j) != ld8(nd + ZS_HDR + j)) { ok = 0; break; }
+            j = j + 1;
+        }
+        if (ok) return i;
+        i = i + 1;
+    }
+    return -1;
+}
+
+uptr php_str_repeat(uptr s, i64 times) {
+    if (times <= 0) return php_str_new("", 0);
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n * times);
+    i64 i = 0;
+    loop { if (i >= times) break; php_memcpy(o + ZS_HDR + i * n, s + ZS_HDR, n); i = i + 1; }
+    return o;
+}
+
+uptr php_str_replace(uptr search, uptr repl, uptr subj) {
+    i64 sn = php_strlen(search);
+    if (sn == 0) return subj;
+    i64 hn = php_strlen(subj);
+    i64 rn = php_strlen(repl);
+    i64 cnt = 0;
+    i64 i = 0;
+    loop {
+        i64 p = php_strpos(subj, search, i);
+        if (p < 0) break;
+        cnt = cnt + 1;
+        i = p + sn;
+    }
+    if (cnt == 0) return subj;
+    uptr o = php_str_alloc(hn + cnt * (rn - sn));
+    i64 w = 0;
+    i = 0;
+    loop {
+        i64 p = php_strpos(subj, search, i);
+        if (p < 0) break;
+        php_memcpy(o + ZS_HDR + w, subj + ZS_HDR + i, p - i);
+        w = w + (p - i);
+        php_memcpy(o + ZS_HDR + w, repl + ZS_HDR, rn);
+        w = w + rn;
+        i = p + sn;
+    }
+    php_memcpy(o + ZS_HDR + w, subj + ZS_HDR + i, hn - i);
+    return o;
+}
+
+uptr php_implode(uptr sep, uptr a) {
+    i64 n = php_count(a);
+    if (n == 0) return php_str_new("", 0);
+    i64 sl = php_strlen(sep);
+    i64 total = sl * (n - 1);
+    i64 i = 0;
+    loop { if (i >= n) break; total = total + php_strlen(php_arr_get(a, i)); i = i + 1; }
+    uptr o = php_str_alloc(total);
+    i64 w = 0;
+    i = 0;
+    loop {
+        if (i >= n) break;
+        if (i) { php_memcpy(o + ZS_HDR + w, sep + ZS_HDR, sl); w = w + sl; }
+        uptr e = php_arr_get(a, i);
+        i64 el = php_strlen(e);
+        php_memcpy(o + ZS_HDR + w, e + ZS_HDR, el);
+        w = w + el;
+        i = i + 1;
+    }
+    return o;
+}
+
+uptr php_explode(uptr sep, uptr s) {
+    uptr a = php_arr_new(8);
+    i64 sl = php_strlen(sep);
+    if (sl == 0) { php_die("mc-php: explode(): Argument #1 ($separator) cannot be empty\n", 60); }
+    i64 i = 0;
+    loop {
+        i64 p = php_strpos(s, sep, i);
+        if (p < 0) break;
+        php_arr_push(a, php_str_new(s + ZS_HDR + i, p - i));
+        i = p + sl;
+    }
+    php_arr_push(a, php_str_new(s + ZS_HDR + i, php_strlen(s) - i));
+    return a;
+}
+
+// ---- the numeric ones ------------------------------------------------------
+i64 php_intdiv(i64 a, i64 b) {
+    if (b == 0) php_die("mc-php: DivisionByZeroError: Division by zero\n", 46);
+    return a / b;
+}
+i64 php_abs_i(i64 v) { if (v < 0) return 0 - v; return v; }
+f64 php_abs_f(f64 v) { if (v < 0.0) return 0.0 - v; return v; }
+i64 php_max_i(i64 a, i64 b) { if (a >= b) return a; return b; }
+i64 php_min_i(i64 a, i64 b) { if (a <= b) return a; return b; }
+f64 php_max_f(f64 a, f64 b) { if (a >= b) return a; return b; }
+f64 php_min_f(f64 a, f64 b) { if (a <= b) return a; return b; }
+i64 php_mod(i64 a, i64 b) {
+    if (b == 0) php_die("mc-php: Modulo by zero\n", 23);
+    return a - (a / b) * b;
+}
+i64 php_div_i(i64 a, i64 b) {
+    if (b == 0) php_die("mc-php: DivisionByZeroError: Division by zero\n", 46);
+    return a / b;
+}
+f64 php_pow_f(f64 a, i64 e) {
+    f64 r = 1.0;
+    i64 n = e;
+    i64 inv = 0;
+    if (n < 0) { inv = 1; n = 0 - n; }
+    loop { if (n <= 0) break; r = r * a; n = n - 1; }
+    if (inv) return 1.0 / r;
+    return r;
+}
+i64 php_pow_i(i64 a, i64 e) {
+    i64 r = 1;
+    i64 n = e;
+    loop { if (n <= 0) break; r = r * a; n = n - 1; }
+    return r;
+}
+
+// the program's exit path: the buffer must reach fd 1 before _exit
+i64 php_end() { php_flush(); return 0; }
+
+// ---- what the compiler needs beside the named php functions ---------------
+i64 php_truthy_s(uptr s) {
+    i64 n = php_strlen(s);
+    if (n == 0) return 0;
+    if (n == 1 && ld8(s + ZS_HDR) == '0') return 0;
+    return 1;
+}
+i64 php_truthy_f(f64 x) { if (x == 0.0) return 0; return 1; }
+f64 php_fzero(i64 ignored) { return 0.0; }
+i64 php_cmp_i(i64 a, i64 b) { if (a < b) return -1; if (a > b) return 1; return 0; }
+i64 php_cmp_f(f64 a, f64 b) { if (a < b) return -1; if (a > b) return 1; return 0; }
+i64 php_seq_i(i64 ignored, i64 v) { return v; }
+void php_exit(i64 code) { php_flush(); exit(code); }
+// printf's %f is php's: six digits after the point, always
+uptr php_ftos6(f64 x) {
+    u8 t[64];
+    i64 n = 0;
+    f64 a = x;
+    if ((ph_bits(x) >> 63) != 0) { st8(t, '-'); n = 1; a = 0.0 - x; }
+    i64 ip = (i64) a;
+    f64 fr = a - (f64) ip;
+    i64 frac = (i64) (fr * 1000000.0 + 0.5);
+    if (frac >= 1000000) { frac = frac - 1000000; ip = ip + 1; }
+    uptr is = php_itos(ip);
+    php_memcpy(t + n, is + ZS_HDR, php_strlen(is));
+    n = n + php_strlen(is);
+    st8(t + n, '.');
+    n = n + 1;
+    i64 d = 100000;
+    loop {
+        if (d == 0) break;
+        st8(t + n, '0' + (frac / d) % 10);
+        n = n + 1;
+        d = d / 10;
+    }
+    return php_str_new(t, n);
+}
+
+// ---- the rest of the string set T5 implements -----------------------------
+uptr php_chr(i64 c) {
+    i64 b = c % 256;
+    if (b < 0) b = b + 256;
+    u8 t[1];
+    st8(t, b);
+    return php_str_new(t, 1);
+}
+i64 php_ord(uptr s) { if (php_strlen(s) == 0) return 0; return ld8(s + ZS_HDR); }
+
+uptr php_case(uptr s, i64 up) {
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        if (up && c >= 'a' && c <= 'z') c = c - 32;
+        if (!up && c >= 'A' && c <= 'Z') c = c + 32;
+        st8(o + ZS_HDR + i, c);
+        i = i + 1;
+    }
+    return o;
+}
+uptr php_strtoupper(uptr s) { return php_case(s, 1); }
+uptr php_strtolower(uptr s) { return php_case(s, 0); }
+
+uptr php_ucfirst(uptr s) {
+    i64 n = php_strlen(s);
+    if (n == 0) return s;
+    uptr o = php_str_new(s + ZS_HDR, n);
+    i64 c = ld8(o + ZS_HDR);
+    if (c >= 'a' && c <= 'z') st8(o + ZS_HDR, c - 32);
+    return o;
+}
+uptr php_lcfirst(uptr s) {
+    i64 n = php_strlen(s);
+    if (n == 0) return s;
+    uptr o = php_str_new(s + ZS_HDR, n);
+    i64 c = ld8(o + ZS_HDR);
+    if (c >= 'A' && c <= 'Z') st8(o + ZS_HDR, c + 32);
+    return o;
+}
+
+// php's default charlist for trim: " \t\n\r\0\x0B"
+i64 php_trimset(i64 c) {
+    if (c == 32 || c == 9 || c == 10 || c == 13 || c == 0 || c == 11) return 1;
+    return 0;
+}
+uptr php_trim(uptr s, i64 mode) {         // 0 both, 1 left, 2 right
+    i64 n = php_strlen(s);
+    i64 a = 0;
+    i64 b = n;
+    if (mode != 2) { loop { if (a >= b) break; if (!php_trimset(ld8(s + ZS_HDR + a))) break; a = a + 1; } }
+    if (mode != 1) { loop { if (b <= a) break; if (!php_trimset(ld8(s + ZS_HDR + b - 1))) break; b = b - 1; } }
+    return php_str_new(s + ZS_HDR + a, b - a);
+}
+
+uptr php_strrev(uptr s) {
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n);
+    i64 i = 0;
+    loop { if (i >= n) break; st8(o + ZS_HDR + i, ld8(s + ZS_HDR + n - 1 - i)); i = i + 1; }
+    return o;
+}
+
+uptr php_str_pad(uptr s, i64 len, uptr pad, i64 type) {    // 0 right, 1 left, 2 both
+    i64 n = php_strlen(s);
+    i64 pl = php_strlen(pad);
+    if (len <= n || pl == 0) return s;
+    i64 need = len - n;
+    i64 left = 0;
+    if (type == 1) left = need;
+    if (type == 2) left = need / 2;
+    i64 right = need - left;
+    uptr o = php_str_alloc(len);
+    i64 w = 0;
+    i64 i = 0;
+    loop { if (i >= left) break; st8(o + ZS_HDR + w, ld8(pad + ZS_HDR + i % pl)); w = w + 1; i = i + 1; }
+    php_memcpy(o + ZS_HDR + w, s + ZS_HDR, n);
+    w = w + n;
+    i = 0;
+    loop { if (i >= right) break; st8(o + ZS_HDR + w, ld8(pad + ZS_HDR + i % pl)); w = w + 1; i = i + 1; }
+    return o;
+}
+
+u8 php_str_contains(uptr h, uptr n) { if (php_strlen(n) == 0) return 1; if (php_strpos(h, n, 0) >= 0) return 1; return 0; }
+u8 php_str_starts(uptr h, uptr n) {
+    i64 ln = php_strlen(n);
+    if (ln > php_strlen(h)) return 0;
+    i64 i = 0;
+    loop { if (i >= ln) break; if (ld8(h + ZS_HDR + i) != ld8(n + ZS_HDR + i)) return 0; i = i + 1; }
+    return 1;
+}
+u8 php_str_ends(uptr h, uptr n) {
+    i64 ln = php_strlen(n);
+    i64 lh = php_strlen(h);
+    if (ln > lh) return 0;
+    i64 i = 0;
+    loop { if (i >= ln) break; if (ld8(h + ZS_HDR + lh - ln + i) != ld8(n + ZS_HDR + i)) return 0; i = i + 1; }
+    return 1;
+}
+i64 php_strcasecmp(uptr a, uptr b) { return php_str_cmp(php_case(a, 0), php_case(b, 0)); }
