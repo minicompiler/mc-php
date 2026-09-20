@@ -2107,7 +2107,7 @@ uptr php_f_array_flip(uptr a) {
     return r;
 }
 
-uptr php_f_array_unique(uptr a) {
+uptr php_f_array_unique(uptr a, uptr _p2) {
     uptr r = php_arr_new(8);
     if (php_zv_type(a) != IS_ARRAY) return r;
     uptr h = ld64(a);
@@ -2288,12 +2288,12 @@ u8 php_f_sort(uptr a, i64 mode, i64 keepkeys) {
     return 1;
 }
 
-u8 php_f_sort_a(uptr a) { return php_f_sort(a, 0, 0); }
-u8 php_f_rsort(uptr a) { return php_f_sort(a, 1, 0); }
-u8 php_f_asort(uptr a) { return php_f_sort(a, 0, 1); }
-u8 php_f_arsort(uptr a) { return php_f_sort(a, 1, 1); }
-u8 php_f_ksort(uptr a) { return php_f_sort(a, 2, 1); }
-u8 php_f_krsort(uptr a) { return php_f_sort(a, 3, 1); }
+u8 php_f_sort_a(uptr a, uptr _p2) { return php_f_sort(a, 0, 0); }
+u8 php_f_rsort(uptr a, uptr _p2) { return php_f_sort(a, 1, 0); }
+u8 php_f_asort(uptr a, uptr _p2) { return php_f_sort(a, 0, 1); }
+u8 php_f_arsort(uptr a, uptr _p2) { return php_f_sort(a, 1, 1); }
+u8 php_f_ksort(uptr a, uptr _p2) { return php_f_sort(a, 2, 1); }
+u8 php_f_krsort(uptr a, uptr _p2) { return php_f_sort(a, 3, 1); }
 
 // ---- strings ---------------------------------------------------------------
 i64 php_hexval(i64 c) {
@@ -2368,7 +2368,7 @@ i64 php_b64val(i64 c) {
     return -1;
 }
 
-uptr php_f_base64_decode(uptr z) {
+uptr php_f_base64_decode(uptr z, uptr _p2) {
     uptr s = php_zv_str(z);
     i64 n = php_strlen(s);
     uptr o = php_str_alloc(n);
@@ -2397,7 +2397,7 @@ i64 php_inset(uptr set, i64 c) {
     return 0;
 }
 
-i64 php_f_strspn(uptr a, uptr b) {
+i64 php_f_strspn(uptr a, uptr b, uptr _p3, uptr _p4) {
     uptr s = php_zv_str(a);
     uptr set = php_zv_str(b);
     i64 n = php_strlen(s);
@@ -2406,7 +2406,7 @@ i64 php_f_strspn(uptr a, uptr b) {
     return i;
 }
 
-i64 php_f_strcspn(uptr a, uptr b) {
+i64 php_f_strcspn(uptr a, uptr b, uptr _p3, uptr _p4) {
     uptr s = php_zv_str(a);
     uptr set = php_zv_str(b);
     i64 n = php_strlen(s);
@@ -2670,7 +2670,7 @@ uptr php_f_nl2br(uptr sz, uptr xz) {
     return o;
 }
 
-uptr php_f_strip_tags(uptr sz) {
+uptr php_f_strip_tags(uptr sz, uptr _p2) {
     uptr s = php_zv_str(sz);
     i64 n = php_strlen(s);
     uptr o = php_str_alloc(n);
@@ -2737,7 +2737,7 @@ uptr php_f_stripslashes(uptr sz) {
     return o;
 }
 
-uptr php_f_htmlspecialchars(uptr sz) {
+uptr php_f_htmlspecialchars(uptr sz, uptr _p2, uptr _p3, uptr _p4) {
     uptr s = php_zv_str(sz);
     i64 n = php_strlen(s);
     uptr o = php_str_alloc(n * 6);
@@ -2982,7 +2982,7 @@ f64 php_f_ceil(uptr z) {
     return r;
 }
 
-f64 php_f_round(uptr z, uptr pz) {
+f64 php_f_round(uptr z, uptr pz, uptr _p3) {
     f64 x = php_zv_double(z);
     i64 p = 0;
     if (php_zv_type(pz) != IS_NULL) p = php_zv_long(pz);
@@ -3096,7 +3096,7 @@ i64 php_f_mt_rand(uptr a, uptr b) {
     if (hi <= lo) return lo;
     return lo + (r % (hi - lo + 1));
 }
-void php_f_srand(uptr z) { ph_seed = php_zv_long(z); }
+void php_f_srand(uptr z, uptr _p2) { ph_seed = php_zv_long(z); }
 i64 php_f_mt_getrandmax() { return 2147483647; }
 
 // ---- type and misc ---------------------------------------------------------
@@ -3137,7 +3137,7 @@ uptr php_f_var_export(uptr z, uptr ret) {
 }
 
 i64 php_f_noop(uptr a) { return 0; }
-uptr php_f_nullf(uptr a) { return php_znull(); }
+uptr php_f_nullf(uptr a, uptr _p2, uptr _p3) { return php_znull(); }
 u8 php_f_false1(uptr a) { return 0; }
 uptr php_f_strrev_z(uptr z) { return php_strrev(php_zv_str(z)); }
 
@@ -3617,7 +3617,7 @@ uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     return callp(ld64(b), ld64(u), tp, a1, a2, a3, a4, a5);
 }
 
-u8 php_f_is_callable(uptr z) {
+u8 php_f_is_callable(uptr z, uptr _p2, uptr _p3) {
     if (php_zv_type(z) != IS_OBJECT) return 0;
     uptr o = ld64(z);
     if (php_ht_find(php_obj_props(o), php_str_hash(php_str_new("fn", 2)), php_str_new("fn", 2))) return 1;
@@ -3637,7 +3637,7 @@ uptr php_f_get_parent_class(uptr z) {
     return php_zstr(ld64(p));
 }
 
-u8 php_f_class_exists(uptr z) { if (php_ce_find(php_zv_str(z))) return 1; return 0; }
+u8 php_f_class_exists(uptr z, uptr _p2) { if (php_ce_find(php_zv_str(z))) return 1; return 0; }
 
 u8 php_f_method_exists(uptr z, uptr m) {
     uptr ce = 0;
@@ -4211,3 +4211,749 @@ uptr php_spf(uptr z, i64 flags, i64 width, i64 prec, i64 conv, i64 pad) {
     if (conv == 'd' || conv == 'f' || conv == 'F' || conv == 'e' || conv == 'E') s = php_spf_sign(s, flags, neg);
     return php_spf_pad(s, flags, width, pad);
 }
+
+// ---- more of the library ---------------------------------------------------
+uptr php_f_md5(uptr z, uptr _p2);
+uptr php_f_sha1(uptr z, uptr _p2);
+
+i64 php_f_strcmp_z(uptr a, uptr b) { return php_str_cmp(php_zv_str(a), php_zv_str(b)); }
+
+uptr php_f_str_rot13(uptr z) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    uptr o = php_str_new(s + ZS_HDR, n);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(o + ZS_HDR + i);
+        if (c >= 'a' && c <= 'z') st8(o + ZS_HDR + i, 'a' + (c - 'a' + 13) % 26);
+        if (c >= 'A' && c <= 'Z') st8(o + ZS_HDR + i, 'A' + (c - 'A' + 13) % 26);
+        i = i + 1;
+    }
+    return o;
+}
+
+uptr php_f_quotemeta(uptr z) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n * 2);
+    i64 w = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        if (php_inset(php_str_new(".\\+*?[^]$()", 11), c)) { st8(o + ZS_HDR + w, 92); w = w + 1; }
+        st8(o + ZS_HDR + w, c);
+        w = w + 1;
+        i = i + 1;
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+uptr php_f_strpbrk(uptr sz, uptr cz) {
+    uptr s = php_zv_str(sz);
+    uptr set = php_zv_str(cz);
+    i64 n = php_strlen(s);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        if (php_inset(set, ld8(s + ZS_HDR + i))) return php_zstr(php_str_new(s + ZS_HDR + i, n - i));
+        i = i + 1;
+    }
+    return php_zbool(0);
+}
+
+i64 php_f_substr_compare(uptr mz, uptr nz, uptr oz, uptr lz, uptr _p5) {
+    uptr m = php_zv_str(mz);
+    uptr nd = php_zv_str(nz);
+    i64 o = php_zv_long(oz);
+    if (o < 0) o = php_strlen(m) + o;
+    uptr a = php_substr(m, o, 0, 0);
+    uptr b = nd;
+    if (php_zv_type(lz) != IS_NULL) {
+        i64 l = php_zv_long(lz);
+        a = php_substr(a, 0, l, 1);
+        b = php_substr(b, 0, l, 1);
+    }
+    return php_str_cmp(a, b);
+}
+
+i64 php_f_levenshtein(uptr az, uptr bz) {
+    uptr a = php_zv_str(az);
+    uptr b = php_zv_str(bz);
+    i64 n = php_strlen(a);
+    i64 m = php_strlen(b);
+    if (n == 0) return m;
+    if (m == 0) return n;
+    uptr prev = php_alloc((m + 1) * 8);
+    uptr cur = php_alloc((m + 1) * 8);
+    i64 j = 0;
+    loop { if (j > m) break; st64(prev + j * 8, j); j = j + 1; }
+    i64 i = 1;
+    loop {
+        if (i > n) break;
+        st64(cur, i);
+        j = 1;
+        loop {
+            if (j > m) break;
+            i64 cost = 1;
+            if (ld8(a + ZS_HDR + i - 1) == ld8(b + ZS_HDR + j - 1)) cost = 0;
+            i64 d = ld64(prev + j * 8) + 1;
+            i64 ins = ld64(cur + (j - 1) * 8) + 1;
+            i64 sub = ld64(prev + (j - 1) * 8) + cost;
+            if (ins < d) d = ins;
+            if (sub < d) d = sub;
+            st64(cur + j * 8, d);
+            j = j + 1;
+        }
+        uptr t = prev;
+        prev = cur;
+        cur = t;
+        i = i + 1;
+    }
+    return ld64(prev + m * 8);
+}
+
+i64 php_f_similar_text(uptr az, uptr bz, uptr _p3) {
+    uptr a = php_zv_str(az);
+    uptr b = php_zv_str(bz);
+    i64 n = php_strlen(a);
+    i64 m = php_strlen(b);
+    if (n == 0 || m == 0) return 0;
+    i64 bi = 0;
+    i64 bj = 0;
+    i64 bl = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 j = 0;
+        loop {
+            if (j >= m) break;
+            i64 k = 0;
+            loop {
+                if (i + k >= n || j + k >= m) break;
+                if (ld8(a + ZS_HDR + i + k) != ld8(b + ZS_HDR + j + k)) break;
+                k = k + 1;
+            }
+            if (k > bl) { bl = k; bi = i; bj = j; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    if (bl == 0) return 0;
+    i64 sum = bl;
+    if (bi && bj) sum = sum + php_f_similar_text(php_zstr(php_str_new(a + ZS_HDR, bi)), php_zstr(php_str_new(b + ZS_HDR, bj)), 0);
+    if (bi + bl < n && bj + bl < m)
+        sum = sum + php_f_similar_text(php_zstr(php_str_new(a + ZS_HDR + bi + bl, n - bi - bl)),
+                                       php_zstr(php_str_new(b + ZS_HDR + bj + bl, m - bj - bl)), 0);
+    return sum;
+}
+
+uptr php_f_soundex(uptr z) {
+    uptr s = php_case(php_zv_str(z), 1);
+    uptr code = "01230120022455012623010202";
+    i64 n = php_strlen(s);
+    u8 t[8];
+    i64 w = 0;
+    i64 last = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n || w >= 4) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        i = i + 1;
+        if (c < 'A' || c > 'Z') continue;
+        i64 d = ld8(code + (c - 'A'));
+        if (!w) { st8(t, c); w = 1; last = d; continue; }
+        if (d != '0' && d != last) { st8(t + w, d); w = w + 1; }
+        last = d;
+    }
+    if (!w) return php_str_new("", 0);
+    loop { if (w >= 4) break; st8(t + w, '0'); w = w + 1; }
+    return php_str_new(t, 4);
+}
+
+uptr php_f_count_chars(uptr z, uptr mz) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    u8 tab[2048];
+    i64 i = 0;
+    loop { if (i >= 256) break; st64(tab + i * 8, 0); i = i + 1; }
+    i = 0;
+    loop { if (i >= n) break; i64 c = ld8(s + ZS_HDR + i); st64(tab + c * 8, ld64(tab + c * 8) + 1); i = i + 1; }
+    i64 mode = php_zv_long(mz);
+    uptr r = php_arr_new(16);
+    i = 0;
+    loop {
+        if (i >= 256) break;
+        i64 v = ld64(tab + i * 8);
+        if (mode == 0) php_zv_cp(php_arr_islot(r, i), php_zlong(v));
+        if (mode == 1 && v) php_zv_cp(php_arr_islot(r, i), php_zlong(v));
+        if (mode == 3 && v) { u8 cb[1]; st8(cb, i); php_arr_push(r, php_zstr(php_str_new(cb, 1))); }
+        i = i + 1;
+    }
+    if (mode == 3) {
+        uptr o = php_str_alloc(php_count(r));
+        i64 w = 0;
+        i64 u = php_ht_used(r);
+        i = 0;
+        loop {
+            if (i >= u) break;
+            uptr b = php_ht_bkt(r, i);
+            if (ld8(b + 8) != IS_UNDEF) { st8(o + ZS_HDR + w, ld8(php_zv_str(b) + ZS_HDR)); w = w + 1; }
+            i = i + 1;
+        }
+        return php_zstr(o);
+    }
+    return php_zarr(r);
+}
+
+uptr php_f_str_word_count(uptr z, uptr _p2, uptr _p3) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    uptr r = php_arr_new(8);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        i64 ok = 0;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == 39 || c == 45) ok = 1;
+        if (!ok) { i = i + 1; continue; }
+        i64 st = i;
+        loop {
+            if (i >= n) break;
+            i64 d = ld8(s + ZS_HDR + i);
+            i64 k = 0;
+            if ((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z') || d == 39 || d == 45) k = 1;
+            if (!k) break;
+            i = i + 1;
+        }
+        php_arr_push(r, php_zstr(php_str_new(s + ZS_HDR + st, i - st)));
+    }
+    return r;
+}
+
+uptr php_f_ltrim_c(uptr z, uptr cz, i64 mode) {
+    uptr s = php_zv_str(z);
+    if (php_zv_type(cz) == IS_NULL) return php_trim(s, mode);
+    uptr set = php_zv_str(cz);
+    i64 n = php_strlen(s);
+    i64 a = 0;
+    i64 b = n;
+    if (mode != 2) { loop { if (a >= b) break; if (!php_inset(set, ld8(s + ZS_HDR + a))) break; a = a + 1; } }
+    if (mode != 1) { loop { if (b <= a) break; if (!php_inset(set, ld8(s + ZS_HDR + b - 1))) break; b = b - 1; } }
+    return php_str_new(s + ZS_HDR + a, b - a);
+}
+
+uptr php_f_trim(uptr z, uptr c) { return php_f_ltrim_c(z, c, 0); }
+uptr php_f_ltrim(uptr z, uptr c) { return php_f_ltrim_c(z, c, 1); }
+uptr php_f_rtrim(uptr z, uptr c) { return php_f_ltrim_c(z, c, 2); }
+
+uptr php_f_ucfirst(uptr z) { return php_ucfirst(php_zv_str(z)); }
+uptr php_f_basename(uptr z, uptr sz) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    loop { if (n <= 0) break; if (ld8(s + ZS_HDR + n - 1) != '/') break; n = n - 1; }
+    i64 i = n;
+    loop { if (i <= 0) break; if (ld8(s + ZS_HDR + i - 1) == '/') break; i = i - 1; }
+    uptr r = php_str_new(s + ZS_HDR + i, n - i);
+    if (php_zv_type(sz) != IS_NULL) {
+        uptr suf = php_zv_str(sz);
+        i64 sl = php_strlen(suf);
+        if (sl && php_strlen(r) > sl && php_str_eq(php_str_new(r + ZS_HDR + php_strlen(r) - sl, sl), suf))
+            r = php_str_new(r + ZS_HDR, php_strlen(r) - sl);
+    }
+    return r;
+}
+
+uptr php_f_dirname(uptr z, uptr _p2) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    loop { if (n <= 1) break; if (ld8(s + ZS_HDR + n - 1) != '/') break; n = n - 1; }
+    i64 i = n;
+    loop { if (i <= 0) break; if (ld8(s + ZS_HDR + i - 1) == '/') break; i = i - 1; }
+    if (i <= 1) { if (i == 1) return php_str_new("/", 1); return php_str_new(".", 1); }
+    return php_str_new(s + ZS_HDR, i - 1);
+}
+
+i64 php_f_crc32(uptr z) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    u64 c = 4294967295;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        c = c ^ ld8(s + ZS_HDR + i);
+        i64 k = 0;
+        loop {
+            if (k >= 8) break;
+            u64 m = 0 - (c & 1);
+            c = (c >> 1) ^ (3988292384 & m);
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return (c ^ 4294967295) & 4294967295;
+}
+
+uptr php_f_urlencode(uptr z, i64 raw) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n * 3);
+    i64 w = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        i64 safe = 0;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) safe = 1;
+        if (c == 45 || c == 46 || c == 95) safe = 1;
+        if (raw && c == 126) safe = 1;
+        if (safe) { st8(o + ZS_HDR + w, c); w = w + 1; i = i + 1; continue; }
+        if (!raw && c == 32) { st8(o + ZS_HDR + w, 43); w = w + 1; i = i + 1; continue; }
+        st8(o + ZS_HDR + w, 37);
+        st8(o + ZS_HDR + w + 1, ld8("0123456789ABCDEF" + ((c >> 4) & 15)));
+        st8(o + ZS_HDR + w + 2, ld8("0123456789ABCDEF" + (c & 15)));
+        w = w + 3;
+        i = i + 1;
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+uptr php_f_urlencode0(uptr z) { return php_f_urlencode(z, 0); }
+uptr php_f_rawurlencode(uptr z) { return php_f_urlencode(z, 1); }
+
+uptr php_f_urldecode(uptr z) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    uptr o = php_str_alloc(n);
+    i64 w = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        if (c == 43) { st8(o + ZS_HDR + w, 32); w = w + 1; i = i + 1; continue; }
+        if (c == 37 && i + 2 < n) {
+            i64 h1 = php_hexval(ld8(s + ZS_HDR + i + 1));
+            i64 h2 = php_hexval(ld8(s + ZS_HDR + i + 2));
+            if (h1 >= 0 && h2 >= 0) { st8(o + ZS_HDR + w, h1 * 16 + h2); w = w + 1; i = i + 3; continue; }
+        }
+        st8(o + ZS_HDR + w, c);
+        w = w + 1;
+        i = i + 1;
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+uptr php_f_htmlspecialchars_decode(uptr z, uptr _p2, uptr _p3) {
+    uptr s = php_zv_str(z);
+    uptr r = php_str_replace(php_str_new("&amp;", 5), php_str_new("&", 1), s);
+    r = php_str_replace(php_str_new("&lt;", 4), php_str_new("<", 1), r);
+    r = php_str_replace(php_str_new("&gt;", 4), php_str_new(">", 1), r);
+    r = php_str_replace(php_str_new("&quot;", 6), php_str_new("\"", 1), r);
+    r = php_str_replace(php_str_new("&#039;", 6), php_str_new("'", 1), r);
+    r = php_str_replace(php_str_new("&#39;", 5), php_str_new("'", 1), r);
+    return r;
+}
+
+uptr php_f_str_increment(uptr z) { return php_zstr(php_str_inc(php_zv_str(z))); }
+
+u8 php_f_array_is_list(uptr z) {
+    if (php_zv_type(z) != IS_ARRAY) return 0;
+    uptr h = ld64(z);
+    i64 used = php_ht_used(h);
+    i64 k = 0;
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            if (ld64(b + 24)) return 0;
+            if (ld64(b + 16) != k) return 0;
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+i64 php_f_array_push(uptr a, uptr v1, uptr v2, uptr v3) {
+    if (php_zv_type(a) != IS_ARRAY) return 0;
+    uptr h = ld64(a);
+    php_arr_push(h, v1);
+    if (php_zv_type(v2) != IS_NULL) php_arr_push(h, v2);
+    if (php_zv_type(v3) != IS_NULL) php_arr_push(h, v3);
+    return php_count(h);
+}
+
+uptr php_f_array_column(uptr a, uptr col, uptr idx) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF && php_zv_type(b) == IS_ARRAY) {
+            uptr row = ld64(b);
+            uptr v = b;
+            if (php_zv_type(col) != IS_NULL) {
+                if (!php_arr_has(row, col)) { i = i + 1; continue; }
+                v = php_arr_zget(row, col);
+            }
+            if (php_zv_type(idx) != IS_NULL && php_arr_has(row, idx))
+                php_zv_cpv(php_arr_zslot(r, php_arr_zget(row, idx)), v);
+            if (php_zv_type(idx) == IS_NULL) php_zv_cpv(php_arr_nextslot(r), v);
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+uptr php_f_array_diff(uptr a, uptr b) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr bk = php_ht_bkt(h, i);
+        if (ld8(bk + 8) != IS_UNDEF) {
+            i64 found = 0;
+            if (php_zv_type(b) == IS_ARRAY) {
+                uptr g = ld64(b);
+                i64 u2 = php_ht_used(g);
+                i64 j = 0;
+                loop {
+                    if (j >= u2) break;
+                    uptr b2 = php_ht_bkt(g, j);
+                    if (ld8(b2 + 8) != IS_UNDEF && php_str_eq(php_zv_str(bk), php_zv_str(b2))) { found = 1; break; }
+                    j = j + 1;
+                }
+            }
+            if (!found) {
+                uptr k = ld64(bk + 24);
+                if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), bk);
+                if (!k) php_zv_cpv(php_arr_islot(r, ld64(bk + 16)), bk);
+            }
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+uptr php_f_array_intersect(uptr a, uptr b) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY || php_zv_type(b) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    uptr g = ld64(b);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr bk = php_ht_bkt(h, i);
+        if (ld8(bk + 8) != IS_UNDEF) {
+            i64 found = 0;
+            i64 u2 = php_ht_used(g);
+            i64 j = 0;
+            loop {
+                if (j >= u2) break;
+                uptr b2 = php_ht_bkt(g, j);
+                if (ld8(b2 + 8) != IS_UNDEF && php_str_eq(php_zv_str(bk), php_zv_str(b2))) { found = 1; break; }
+                j = j + 1;
+            }
+            if (found) {
+                uptr k = ld64(bk + 24);
+                if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), bk);
+                if (!k) php_zv_cpv(php_arr_islot(r, ld64(bk + 16)), bk);
+            }
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+uptr php_f_array_pad(uptr a, uptr sz, uptr v) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    i64 want = php_zv_long(sz);
+    i64 n = php_count(ld64(a));
+    i64 need = want;
+    if (need < 0) need = 0 - need;
+    if (need <= n) { php_ht_append_all(r, a); return r; }
+    i64 k = need - n;
+    if (want < 0) { i64 i = 0; loop { if (i >= k) break; php_arr_push(r, v); i = i + 1; } }
+    php_ht_append_all(r, a);
+    if (want > 0) { i64 i2 = 0; loop { if (i2 >= k) break; php_arr_push(r, v); i2 = i2 + 1; } }
+    return r;
+}
+
+uptr php_f_array_chunk(uptr a, uptr sz, uptr pres) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    i64 k = php_zv_long(sz);
+    if (k < 1) k = 1;
+    i64 keep = php_zv_bool(pres);
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    uptr cur = 0;
+    i64 c = 0;
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            if (!cur) { cur = php_arr_new(8); c = 0; }
+            uptr key = ld64(b + 24);
+            if (keep && key) php_zv_cpv(php_ht_slotfor(cur, php_str_hash(key), key), b);
+            if (keep && !key) php_zv_cpv(php_arr_islot(cur, ld64(b + 16)), b);
+            if (!keep) php_zv_cpv(php_arr_nextslot(cur), b);
+            c = c + 1;
+            if (c >= k) { php_arr_push(r, php_zarr(cur)); cur = 0; }
+        }
+        i = i + 1;
+    }
+    if (cur) php_arr_push(r, php_zarr(cur));
+    return r;
+}
+
+uptr php_f_compact_no(uptr a) { return php_znull(); }
+uptr php_f_iterator(uptr a, uptr _p2) { return a; }
+uptr php_f_current(uptr a) {
+    if (php_zv_type(a) != IS_ARRAY) return php_zbool(0);
+    i64 i = php_it_next(ld64(a), 0);
+    if (i < 0) return php_zbool(0);
+    return php_it_val(ld64(a), i);
+}
+uptr php_f_end(uptr a) {
+    if (php_zv_type(a) != IS_ARRAY) return php_zbool(0);
+    i64 i = php_ht_last(ld64(a));
+    if (i < 0) return php_zbool(0);
+    return php_it_val(ld64(a), i);
+}
+uptr php_f_key(uptr a) {
+    if (php_zv_type(a) != IS_ARRAY) return php_znull();
+    i64 i = php_it_next(ld64(a), 0);
+    if (i < 0) return php_znull();
+    return php_it_key(ld64(a), i);
+}
+
+// md5 and sha1, so a corpus test that hashes a string has an answer
+u32 ph_rol(u32 x, i64 c) { return ((x << c) | (x >> (32 - c))) & 4294967295; }
+
+uptr php_f_md5(uptr z, uptr _p2) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    i64 total = ((n + 8) / 64 + 1) * 64;
+    uptr m = php_alloc(total);
+    i64 i = 0;
+    loop { if (i >= total) break; st8(m + i, 0); i = i + 1; }
+    php_memcpy(m, s + ZS_HDR, n);
+    st8(m + n, 128);
+    u64 bits = n * 8;
+    i = 0;
+    loop { if (i >= 8) break; st8(m + total - 8 + i, (bits >> (i * 8)) & 255); i = i + 1; }
+    // K[i] = floor(2^32 * |sin(i+1)|), as decimal text so the source carries
+    // no escape mc does not have
+    u8 kk[512];
+    uptr kdec = "3614090360 3905402710 606105819 3250441966 4118548399 1200080426 2821735955 4249261313 1770035416 2336552879 4294925233 2304563134 1804603682 4254626195 2792965006 1236535329 4129170786 3225465664 643717713 3921069994 3593408605 38016083 3634488961 3889429448 568446438 3275163606 4107603335 1163531501 2850285829 4243563512 1735328473 2368359562 4294588738 2272392833 1839030562 4259657740 2763975236 1272893353 4139469664 3200236656 681279174 3936430074 3572445317 76029189 3654602809 3873151461 530742520 3299628645 4096336452 1126891415 2878612391 4237533241 1700485571 2399980690 4293915773 2240044497 1873313359 4264355552 2734768916 1309151649 4149444226 3174756917 718787259 3951481745";
+    i64 kp = 0;
+    i = 0;
+    loop {
+        if (i >= 64) break;
+        i64 v = 0;
+        loop { if (ld8(kdec + kp) < 48 || ld8(kdec + kp) > 57) break; v = v * 10 + (ld8(kdec + kp) - 48); kp = kp + 1; }
+        kp = kp + 1;
+        st64(kk + i * 8, v);
+        i = i + 1;
+    }
+    u8 rr[64];
+    uptr rdec = "7 12 17 22 7 12 17 22 7 12 17 22 7 12 17 22 5 9 14 20 5 9 14 20 5 9 14 20 5 9 14 20 4 11 16 23 4 11 16 23 4 11 16 23 4 11 16 23 6 10 15 21 6 10 15 21 6 10 15 21 6 10 15 21";
+    i64 rp = 0;
+    i = 0;
+    loop {
+        if (i >= 64) break;
+        i64 v = 0;
+        loop { if (ld8(rdec + rp) < 48 || ld8(rdec + rp) > 57) break; v = v * 10 + (ld8(rdec + rp) - 48); rp = rp + 1; }
+        rp = rp + 1;
+        st8(rr + i, v);
+        i = i + 1;
+    }
+    u64 h0 = 1732584193;
+    u64 h1 = 4023233417;
+    u64 h2 = 2562383102;
+    u64 h3 = 271733878;
+    i64 off = 0;
+    loop {
+        if (off >= total) break;
+        u8 w[128];
+        i = 0;
+        loop {
+            if (i >= 16) break;
+            u64 v = ld8(m + off + i * 4) | (ld8(m + off + i * 4 + 1) << 8) | (ld8(m + off + i * 4 + 2) << 16) | (ld8(m + off + i * 4 + 3) << 24);
+            st64(w + i * 8, v);
+            i = i + 1;
+        }
+        u64 a = h0;
+        u64 b = h1;
+        u64 c = h2;
+        u64 d = h3;
+        i = 0;
+        loop {
+            if (i >= 64) break;
+            u64 f = 0;
+            i64 g = 0;
+            if (i < 16) { f = (b & c) | ((4294967295 - b) & d); g = i; }
+            if (i >= 16 && i < 32) { f = (d & b) | ((4294967295 - d) & c); g = (5 * i + 1) % 16; }
+            if (i >= 32 && i < 48) { f = b ^ c ^ d; g = (3 * i + 5) % 16; }
+            if (i >= 48) { f = c ^ (b | (4294967295 - d)); g = (7 * i) % 16; }
+            u64 tmp = d;
+            d = c;
+            c = b;
+            u64 x = (a + (f & 4294967295) + ld64(kk + i * 8) + ld64(w + g * 8)) & 4294967295;
+            b = (b + ph_rol(x, ld8(rr + i))) & 4294967295;
+            a = tmp;
+            i = i + 1;
+        }
+        h0 = (h0 + a) & 4294967295;
+        h1 = (h1 + b) & 4294967295;
+        h2 = (h2 + c) & 4294967295;
+        h3 = (h3 + d) & 4294967295;
+        off = off + 64;
+    }
+    u8 dig[16];
+    i = 0;
+    loop {
+        if (i >= 4) break;
+        st8(dig + i, (h0 >> (i * 8)) & 255);
+        st8(dig + 4 + i, (h1 >> (i * 8)) & 255);
+        st8(dig + 8 + i, (h2 >> (i * 8)) & 255);
+        st8(dig + 12 + i, (h3 >> (i * 8)) & 255);
+        i = i + 1;
+    }
+    return php_f_bin2hex(php_zstr(php_str_new(dig, 16)));
+}
+
+uptr php_f_sha1(uptr z, uptr _p2) {
+    uptr s = php_zv_str(z);
+    i64 n = php_strlen(s);
+    i64 total = ((n + 8) / 64 + 1) * 64;
+    uptr m = php_alloc(total);
+    i64 i = 0;
+    loop { if (i >= total) break; st8(m + i, 0); i = i + 1; }
+    php_memcpy(m, s + ZS_HDR, n);
+    st8(m + n, 128);
+    u64 bits = n * 8;
+    i = 0;
+    loop { if (i >= 8) break; st8(m + total - 1 - i, (bits >> (i * 8)) & 255); i = i + 1; }
+    u64 h0 = 1732584193;
+    u64 h1 = 4023233417;
+    u64 h2 = 2562383102;
+    u64 h3 = 271733878;
+    u64 h4 = 3285377520;
+    i64 off = 0;
+    loop {
+        if (off >= total) break;
+        u8 w[640];
+        i = 0;
+        loop {
+            if (i >= 16) break;
+            u64 v = (ld8(m + off + i * 4) << 24) | (ld8(m + off + i * 4 + 1) << 16) | (ld8(m + off + i * 4 + 2) << 8) | ld8(m + off + i * 4 + 3);
+            st64(w + i * 8, v);
+            i = i + 1;
+        }
+        i = 16;
+        loop {
+            if (i >= 80) break;
+            u64 v = ld64(w + (i - 3) * 8) ^ ld64(w + (i - 8) * 8) ^ ld64(w + (i - 14) * 8) ^ ld64(w + (i - 16) * 8);
+            st64(w + i * 8, ph_rol(v & 4294967295, 1));
+            i = i + 1;
+        }
+        u64 a = h0;
+        u64 b = h1;
+        u64 c = h2;
+        u64 d = h3;
+        u64 e = h4;
+        i = 0;
+        loop {
+            if (i >= 80) break;
+            u64 f = 0;
+            u64 k = 0;
+            if (i < 20) { f = (b & c) | ((4294967295 - b) & d); k = 1518500249; }
+            if (i >= 20 && i < 40) { f = b ^ c ^ d; k = 1859775393; }
+            if (i >= 40 && i < 60) { f = (b & c) | (b & d) | (c & d); k = 2400959708; }
+            if (i >= 60) { f = b ^ c ^ d; k = 3395469782; }
+            u64 t = (ph_rol(a, 5) + (f & 4294967295) + e + k + ld64(w + i * 8)) & 4294967295;
+            e = d;
+            d = c;
+            c = ph_rol(b, 30);
+            b = a;
+            a = t;
+            i = i + 1;
+        }
+        h0 = (h0 + a) & 4294967295;
+        h1 = (h1 + b) & 4294967295;
+        h2 = (h2 + c) & 4294967295;
+        h3 = (h3 + d) & 4294967295;
+        h4 = (h4 + e) & 4294967295;
+        off = off + 64;
+    }
+    u8 dig[20];
+    i = 0;
+    loop {
+        if (i >= 4) break;
+        st8(dig + 3 - i, (h0 >> (i * 8)) & 255);
+        st8(dig + 7 - i, (h1 >> (i * 8)) & 255);
+        st8(dig + 11 - i, (h2 >> (i * 8)) & 255);
+        st8(dig + 15 - i, (h3 >> (i * 8)) & 255);
+        st8(dig + 19 - i, (h4 >> (i * 8)) & 255);
+        i = i + 1;
+    }
+    return php_f_bin2hex(php_zstr(php_str_new(dig, 20)));
+}
+
+uptr php_f_sapi() { return php_str_new("cli", 3); }
+uptr php_f_phpversion(uptr z) { return php_str_new("8.5.10", 6); }
+u8 php_f_trigger(uptr m, uptr l) { return 1; }
+u8 php_f_contains(uptr h, uptr n) { return php_str_contains(php_zv_str(h), php_zv_str(n)); }
+i64 ph_ct_all(uptr z, i64 kind) {
+    if (php_zv_type(z) != IS_STRING) return 0;
+    uptr s = ld64(z);
+    i64 n = php_strlen(s);
+    if (n == 0) return 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        i64 ok = 0;
+        if (kind == 0 && c >= '0' && c <= '9') ok = 1;
+        if (kind == 1 && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) ok = 1;
+        if (kind == 2 && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) ok = 1;
+        if (kind == 3 && (c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12)) ok = 1;
+        if (kind == 4 && c >= 'A' && c <= 'Z') ok = 1;
+        if (kind == 5 && c >= 'a' && c <= 'z') ok = 1;
+        if (kind == 6 && c > 32 && c < 127 && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) ok = 1;
+        if (kind == 7 && php_hexval(c) >= 0) ok = 1;
+        if (!ok) return 0;
+        i = i + 1;
+    }
+    return 1;
+}
+u8 php_f_ctype(uptr z) { return ph_ct_all(z, 0); }
+u8 php_f_ctype_a(uptr z) { return ph_ct_all(z, 1); }
+u8 php_f_ctype_an(uptr z) { return ph_ct_all(z, 2); }
+u8 php_f_ctype_sp(uptr z) { return ph_ct_all(z, 3); }
+u8 php_f_ctype_up(uptr z) { return ph_ct_all(z, 4); }
+u8 php_f_ctype_lo(uptr z) { return ph_ct_all(z, 5); }
+u8 php_f_ctype_pu(uptr z) { return ph_ct_all(z, 6); }
+u8 php_f_ctype_xd(uptr z) { return ph_ct_all(z, 7); }
+
+i64 php_f_zero() { return 0; }
+uptr php_f_ver0() { return php_str_new("8.5.10", 6); }

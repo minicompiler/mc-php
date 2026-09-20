@@ -64,6 +64,8 @@ i64  ph_assign_stmt(uptr fl, i64 line, i64 semi);
 i64  ph_strlit(uptr bytes, i64 len);
 i64  ph_digit(i64 c, i64 base);
 i64  ph_dq_read(uptr q, uptr e, uptr pend);
+i64  ph_dq_read2(uptr q, uptr e, uptr pend, i64 term, i64 raw);
+i64  ph_heredoc(uptr q, uptr e, uptr pend);
 i64  ph_to_str(i64 n, i64 t);
 i64  ph_to_int(i64 n, i64 t);
 i64  ph_to_float(i64 n, i64 t);
@@ -129,6 +131,8 @@ i64  ph_call(uptr name, i64 nargs, i64 a0, i64 a1, i64 a2, i64 a3, i64 ty);
 i64  ph_prec(i64 t);
 i64  ph_is(uptr w);
 i64  ph_at(uptr s, i64 n);
+i64  ph_wordish();
+i64  ph_name_byte(i64 c, i64 first);
 void ph_next();
 i64  ph_accept(uptr s, i64 n);
 void ph_want(uptr s, i64 n, uptr msg);
@@ -378,15 +382,15 @@ i64 ph_name_byte(i64 c, i64 first) {
 }
 
 // returns the node; writes the byte just past the closing quote through pend
-i64 ph_dq_read(uptr q, uptr e, uptr pend) {
-    uptr p = q + 1;
+i64 ph_dq_read2(uptr q, uptr e, uptr pend, i64 term, i64 raw) {
+    uptr p = q;
     i64 acc = 0;
     ph_dqn = 0;
     loop {
-        if (p >= e) err_at(ph_tfile, ph_tline, "mc-php: unterminated php string");
+        if (p >= e) { if (term) err_at(ph_tfile, ph_tline, "mc-php: unterminated php string"); break; }
         i64 c = ld8(p);
-        if (c == 34) { p = p + 1; break; }
-        if (c == 92) {
+        if (term && c == term) { p = p + 1; break; }
+        if (c == 92 && !raw) {
             p = p + 1;
             if (p >= e) break;
             i64 d = ld8(p);
@@ -453,6 +457,7 @@ i64 ph_dq_read(uptr q, uptr e, uptr pend) {
         }
         i64 nstart = 0;
         i64 brace = 0;
+        if (raw) { ph_dq_put(c); p = p + 1; continue; }   // a nowdoc interpolates nothing
         if (c == 36 && p + 1 < e && ph_name_byte(ld8(p + 1), 1)) nstart = p + 1;
         if (c == 123 && p + 2 < e && ld8(p + 1) == 36 && ph_name_byte(ld8(p + 2), 1)) { nstart = p + 2; brace = 1; }
         if (!nstart) { ph_dq_put(c); p = p + 1; continue; }
@@ -486,6 +491,91 @@ i64 ph_dq_read(uptr q, uptr e, uptr pend) {
     acc = ph_dq_flush(acc);
     if (!acc) acc = ph_strlit("", 0);
     return acc;
+}
+
+i64 ph_dq_read(uptr q, uptr e, uptr pend) { return ph_dq_read2(q + 1, e, pend, 34, 0); }
+
+// <<<LABEL / <<<"LABEL" / <<<'LABEL' -- php 7.3's indented closing label is
+// stripped from every body line, and a nowdoc has no escapes and no
+// interpolation.
+i64 ph_heredoc(uptr q, uptr e, uptr pend) {
+    uptr p = q + 3;
+    loop { if (p >= e) break; i64 c = ld8(p); if (c != 32 && c != 9) break; p = p + 1; }
+    i64 raw = 0;
+    i64 quoted = 0;
+    if (p < e && ld8(p) == 39) { raw = 1; quoted = 1; p = p + 1; }
+    if (p < e && ld8(p) == 34) { quoted = 1; p = p + 1; }
+    uptr ls = p;
+    loop { if (p >= e) break; if (!ph_name_byte(ld8(p), p == ls)) break; p = p + 1; }
+    i64 ln = p - ls;
+    if (!ln) err_at(ph_tfile, ph_tline, "mc-php: a heredoc needs a label");
+    uptr lab = xstrdup(ls, ln);
+    if (quoted) { if (p < e && (ld8(p) == 39 || ld8(p) == 34)) p = p + 1; }
+    loop { if (p >= e) break; if (ld8(p) == 10) { p = p + 1; break; } p = p + 1; }
+    uptr bs = p;
+    // find the closing label: the first line whose first non-blank run is it
+    uptr be = e;
+    uptr after = e;
+    i64 indent = 0;
+    uptr ln0 = p;
+    loop {
+        if (ln0 >= e) break;
+        uptr k = ln0;
+        loop { if (k >= e) break; i64 c = ld8(k); if (c != 32 && c != 9) break; k = k + 1; }
+        i64 m = 1;
+        i64 z = 0;
+        loop {
+            if (z >= ln) break;
+            if (k + z >= e || ld8(k + z) != ld8(lab + z)) { m = 0; break; }
+            z = z + 1;
+        }
+        if (m) {
+            if (k + ln >= e || !ph_name_byte(ld8(k + ln), 0)) {
+                be = ln0;
+                indent = k - ln0;
+                after = k + ln;
+                break;
+            }
+        }
+        loop { if (ln0 >= e) break; if (ld8(ln0) == 10) { ln0 = ln0 + 1; break; } ln0 = ln0 + 1; }
+    }
+    if (be > bs) { be = be - 1; if (be > bs && ld8(be - 1) == 13) be = be - 1; }   // the \n before the label
+    // strip the closing indentation from every line
+    uptr body = bs;
+    i64 blen = be - bs;
+    if (blen < 0) blen = 0;
+    if (indent) {
+        uptr o = xalloc(blen + 1);
+        i64 w = 0;
+        uptr r = bs;
+        loop {
+            if (r >= be) break;
+            i64 sk = 0;
+            loop {
+                if (sk >= indent || r >= be) break;
+                i64 c = ld8(r);
+                if (c != 32 && c != 9) break;
+                r = r + 1;
+                sk = sk + 1;
+            }
+            loop {
+                if (r >= be) break;
+                i64 c = ld8(r);
+                st8(o + w, c);
+                w = w + 1;
+                r = r + 1;
+                if (c == 10) break;
+            }
+        }
+        body = o;
+        blen = w;
+    }
+    st64(pend, after);
+    u8 dummy[8];
+    i64 saveline = ph_tline;
+    i64 n = ph_dq_read2(body, body + blen, dummy, 0, raw);
+    ph_tline = saveline;
+    return n;
 }
 
 void ph_next() {
@@ -540,6 +630,7 @@ void ph_next() {
         }
         if (c == 39) { quote = 1; break; }              // '
         if (c == 34) { quote = 2; break; }              // "
+        if (c == 60 && q + 2 < e && ld8(q + 1) == 60 && ld8(q + 2) == 60) { quote = 3; break; }
         break;
     }
     if (quote == 1) {
@@ -562,6 +653,16 @@ void ph_next() {
         ph_tnode = n2;
         return;
     }
+    if (quote == 3) {
+        u8 eb3[8];
+        ph_tline = p_line();
+        ph_tfile = p_file();
+        i64 n3 = ph_heredoc(q, e, eb3);
+        p_skip_to(ld64(eb3));
+        ph_tid = PHT_DSTR;
+        ph_tnode = n3;
+        return;
+    }
     if (q != q0) p_skip_to(q);
     p_next();
     ph_sync();
@@ -582,6 +683,15 @@ i64 ph_is(uptr w) {
 }
 
 i64 ph_at(uptr s, i64 n) { if (ph_tid == ph_tok(s, n)) return 1; return 0; }
+
+// php's variable names include words mc lexes as core KEYWORDS ($break, $for,
+// $return...): the test is on the lexeme's shape, not on the token id.
+i64 ph_wordish() {
+    if (ph_tid == T_STR || ph_tid == T_CHAR || ph_tid == T_INT) return 0;
+    if (ph_tid == PHT_PSTR || ph_tid == PHT_HTML || ph_tid == PHT_DSTR) return 0;
+    if (!ph_tname) return 0;
+    return ph_name_byte(ld8(ph_tname), 1);
+}
 
 void ph_want(uptr s, i64 n, uptr msg) {
     if (!ph_at(s, n)) err_at2(ph_tfile, ph_tline, msg, ph_tname);
@@ -901,16 +1011,24 @@ void ph_const_add(uptr cn, i64 v, i64 t, uptr fl, i64 line) {
     if (ph_nconst >= PH_MAXCONST) err_at(fl, line, "mc-php: too many php constants");
     i64 val = 0;
     uptr bytes = 0;
-    if (t == PT_INT || t == PT_BOOL) {
-        if (nd_kind(v) != N_INT) ph_todo2(fl, line, "a php constant whose value is not a literal", cn);
-        val = nd_val(v);
-    } else {
-        if (t != PT_STRING) ph_todo2(fl, line, "a php constant of type", ph_tyname(t));
-        if (nd_kind(v) != N_CALL || !str_eq(nd_name(v), "php_str_lit"))
-            ph_todo2(fl, line, "a php constant whose value is not a literal", cn);
+    i64 lit = 0;
+    if ((t == PT_INT || t == PT_BOOL) && nd_kind(v) == N_INT) { val = nd_val(v); lit = 1; }
+    if (t == PT_STRING && nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_lit")) {
         i64 raw = nd_next(nd_a(v));
         bytes = nd_name(raw);
         val = nd_val(raw);
+        lit = 1;
+    }
+    if (!lit) {
+        // not a literal: the value is computed at run time and looked up by
+        // name, which is what php's own constant table is
+        ph_pending_stmt(ph_stmt_of(ph_c2("php_const_set", ph_strlit(cn, cstrlen(cn)), ph_to_mixed(v, t), TY_VOID)));
+        st64(ph_cname + ph_nconst * 8, cn);
+        st64(ph_cty + ph_nconst * 8, -1);
+        st64(ph_cval + ph_nconst * 8, 0);
+        st64(ph_cstr + ph_nconst * 8, 0);
+        ph_nconst = ph_nconst + 1;
+        return;
     }
     st64(ph_cname + ph_nconst * 8, cn);
     st64(ph_cty + ph_nconst * 8, t);
@@ -1562,6 +1680,24 @@ i64 ph_primary() {
         return ph_strlit(s, n);
     }
     if (ph_tid == T_INT) return ph_number();
+    if (ph_at(".", 1)) {
+        uptr q0 = p_cp();
+        uptr e0 = p_src_end();
+        if (q0 < e0 && ph_digit(ld8(q0), 10) >= 0) {
+            uptr q = q0;
+            loop { if (q >= e0) break; i64 c = ld8(q); if (ph_digit(c, 10) >= 0 || c == 95) { q = q + 1; continue; } if (c == 101 || c == 69) { q = q + 1; if (q < e0 && (ld8(q) == 43 || ld8(q) == 45)) q = q + 1; continue; } break; }
+            uptr txt = xalloc(q - q0 + 4);
+            st8(txt, 48);
+            st8(txt + 1, 46);
+            i64 z = 0;
+            loop { if (z >= q - q0) break; st8(txt + 2 + z, ld8(q0 + z)); z = z + 1; }
+            st8(txt + 2 + (q - q0), 0);
+            p_skip_to(q);
+            ph_next();
+            ph_ety = PT_FLOAT;
+            return ph_c1("php_stof", ph_strlit(txt, cstrlen(txt)), ty_f64);
+        }
+    }
     if (ph_tid == T_STR) {
         uptr s = ph_tname;
         i64 n = cstrlen(s);
@@ -1573,7 +1709,7 @@ i64 ph_primary() {
         ph_next();
         if (ph_at("$", 1)) ph_refuse(fl, line, "a variable variable $$name", "D6");
         if (ph_at("{", 1)) ph_refuse(fl, line, "a variable variable ${expr}", "D6");
-        if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php variable needs a name", ph_tname);
+        if (!ph_wordish()) err_at2(fl, line, "mc-php: a php variable needs a name", ph_tname);
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
         i64 v = ph_var_ref(d);
@@ -1630,6 +1766,53 @@ i64 ph_primary() {
         set_nd_a(n, v);
         set_nd_type(n, TY_U8);
         return n;
+    }
+    if (ph_at("~", 1)) {
+        ph_next();
+        i64 v = ph_expr(70);
+        i64 t = ph_ety;
+        if (t == PT_MIXED || t == PT_STRING) { ph_ety = PT_MIXED; return ph_c1("php_zv_bnot", ph_to_mixed(v, t), ty_pzv); }
+        ph_ety = PT_INT;
+        return ph_bin(ph_tok("-", 1), ph_bin(ph_tok("-", 1), ph_int(0), ph_to_int(v, t), TY_I64), ph_int(1), TY_I64);
+    }
+    if (ph_at("++", 2) || ph_at("--", 2)) {
+        // ++$x in expression position: the increment is a pending statement
+        i64 up = 1;
+        if (ph_at("--", 2)) up = 0;
+        ph_next();
+        if (!ph_at("$", 1)) ph_todo(fl, line, "++ on something that is not a $variable");
+        ph_next();
+        uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
+        ph_next();
+        if (ph_var_find(d) < 0) ph_refuse2(fl, line, "an undefined php variable", d, "D4");
+        i64 t = ph_var_type(d);
+        i64 lv = node_new(N_IDENT, line, fl);
+        set_nd_name(lv, ph_mangle(d, "v_"));
+        set_nd_type(lv, ph_mcty(t));
+        i64 val = 0;
+        if (t == PT_MIXED) {
+            uptr f = "php_zv_inc";
+            if (!up) f = "php_zv_dec";
+            val = ph_c1(f, lv, ty_pzv);
+        }
+        if (t != PT_MIXED) {
+            i64 one = ph_int(1);
+            if (t == PT_FLOAT) one = ph_cast(ty_f64, ph_int(1));
+            val = ph_bin(ph_tok("+", 1), lv, one, ph_mcty(t));
+            if (!up) set_nd_op(val, ph_tok("-", 1));
+        }
+        if (ph_is_ref(d)) {
+            i64 lvi = node_new(N_IDENT, line, fl);
+            set_nd_name(lvi, ph_mangle(d, "v_"));
+            set_nd_type(lvi, ty_pzv);
+            ph_pending_stmt(ph_expr_stmt_of(ph_c2("php_zv_store", lvi, val, ty_pzv)));
+        }
+        if (!ph_is_ref(d)) ph_pending_stmt(ph_set(ph_mangle(d, "v_"), val));
+        i64 r = node_new(N_IDENT, line, fl);
+        set_nd_name(r, ph_mangle(d, "v_"));
+        set_nd_type(r, ph_mcty(t));
+        ph_ety = t;
+        return r;
     }
     if (ph_at("@", 1)) ph_refuse(fl, line, "the @ error-suppression operator", "D1");
     if (ph_is("new")) {
@@ -2284,6 +2467,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (ci >= 0) {
         ph_next();
         i64 ct = ld64(ph_cty + ci * 8);
+        if (ct < 0) { ph_ety = PT_MIXED; return ph_c1("php_const_get", ph_strlit(name, cstrlen(name)), ty_pzv); }
         ph_ety = ct;
         if (ct == PT_STRING) return ph_strlit(ld64(ph_cstr + ci * 8), ld64(ph_cval + ci * 8));
         if (ct == PT_BOOL)   return ph_bool(ld64(ph_cval + ci * 8));
@@ -2307,7 +2491,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             if (ph_at(")", 1)) break;
             if (!ph_at("$", 1)) ph_todo2(fl, line, "isset/empty of", "something that is not a $variable");
             ph_next();
-            if (ph_tid != T_IDENT) err_at(fl, line, "mc-php: a php variable needs a name");
+            if (!ph_wordish()) err_at(fl, line, "mc-php: a php variable needs a name");
             uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
             ph_next();
             i64 one = 0;
@@ -2421,7 +2605,10 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_c2("php_ce_getconst", ce, ph_strlit(mn, cstrlen(mn)), ty_pzv);
     }
     if (!ph_at("(", 1)) {
-        ph_todo2(fl, line, "a php constant mc-php does not have", name);
+        // php looks an unknown bare name up in the constant table at RUN time
+        // and raises Error if it is not there
+        ph_ety = PT_MIXED;
+        return ph_c1("php_const_get", ph_strlit(name, cstrlen(name)), ty_pzv);
     }
 
     if (str_eq(name, "sprintf") || str_eq(name, "printf")
@@ -2546,21 +2733,25 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     }
     if (str_eq(name, "define")) {
         ph_need(na, 2, name, fl, line);
-        if (t0 != PT_STRING || nd_kind(a0) != N_CALL || !str_eq(nd_name(a0), "php_str_lit"))
-            ph_refuse(fl, line, "define() with a computed name", "D1");
-        i64 rawn = nd_next(nd_a(a0));
-        ph_const_add(xstrdup(nd_name(rawn), nd_val(rawn)), ph_a(av, 1), ph_aty(av, 1), fl, line);
+        // a literal name is ALSO a compile-time constant, which keeps the
+        // typed road; the run-time table is what constant()/defined() read
+        if (t0 == PT_STRING && nd_kind(a0) == N_CALL && str_eq(nd_name(a0), "php_str_lit")) {
+            i64 rawn = nd_next(nd_a(a0));
+            uptr cn2 = xstrdup(nd_name(rawn), nd_val(rawn));
+            if (ph_const_find(cn2) < 0) ph_const_add(cn2, ph_a(av, 1), ph_aty(av, 1), fl, line);
+        }
         ph_ety = PT_BOOL;
-        return ph_bool(1);
+        return ph_c2("php_f_define", ph_to_mixed(a0, t0), ph_to_mixed(ph_a(av, 1), ph_aty(av, 1)), TY_U8);
     }
     if (str_eq(name, "defined")) {
         ph_need(na, 1, name, fl, line);
-        if (t0 != PT_STRING || nd_kind(a0) != N_CALL || !str_eq(nd_name(a0), "php_str_lit"))
-            ph_refuse(fl, line, "defined() with a computed name", "D1");
-        i64 rawd = nd_next(nd_a(a0));
         ph_ety = PT_BOOL;
-        if (ph_const_find(xstrdup(nd_name(rawd), nd_val(rawd))) >= 0) return ph_bool(1);
-        return ph_bool(0);
+        if (t0 == PT_STRING && nd_kind(a0) == N_CALL && str_eq(nd_name(a0), "php_str_lit")) {
+            i64 rawd = nd_next(nd_a(a0));
+            if (ph_const_find(xstrdup(nd_name(rawd), nd_val(rawd))) >= 0) return ph_bool(1);
+            if (ph_pre_find(xstrdup(nd_name(rawd), nd_val(rawd))) >= 0) return ph_bool(1);
+        }
+        return ph_cast(TY_U8, ph_c1("php_f_defined", ph_to_mixed(a0, t0), TY_I64));
     }
     if (str_eq(name, "chr")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_chr", ph_to_int(a0, t0), ty_pstr); }
     if (str_eq(name, "ord")) { ph_need(na, 1, name, fl, line); ph_ety = PT_INT; return ph_c1("php_ord", ph_to_str(a0, t0), TY_I64); }
@@ -2569,13 +2760,15 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "ucfirst")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_ucfirst", ph_to_str(a0, t0), ty_pstr); }
     if (str_eq(name, "lcfirst")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_lcfirst", ph_to_str(a0, t0), ty_pstr); }
     if (str_eq(name, "strrev")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_strrev", ph_to_str(a0, t0), ty_pstr); }
-    if (str_eq(name, "trim") || str_eq(name, "ltrim") || str_eq(name, "rtrim")) {
-        if (na != 1) ph_todo2(fl, line, "a trim with a charlist", name);
-        i64 mode = 0;
-        if (str_eq(name, "ltrim")) mode = 1;
-        if (str_eq(name, "rtrim")) mode = 2;
+    if (str_eq(name, "trim") || str_eq(name, "ltrim") || str_eq(name, "rtrim") || str_eq(name, "chop")) {
+        if (na < 1 || na > 2) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        uptr f = "php_f_trim";
+        if (str_eq(name, "ltrim")) f = "php_f_ltrim";
+        if (str_eq(name, "rtrim") || str_eq(name, "chop")) f = "php_f_rtrim";
+        i64 cl = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
+        if (na == 2) cl = ph_to_mixed(ph_a(av, 1), ph_aty(av, 1));
         ph_ety = PT_STRING;
-        return ph_c2("php_trim", ph_to_str(a0, t0), ph_int(mode), ty_pstr);
+        return ph_c2(f, ph_to_mixed(a0, t0), cl, ty_pstr);
     }
     if (str_eq(name, "str_pad")) {
         if (na < 2 || na > 4) ph_need(na, 2, name, fl, line);
@@ -2966,7 +3159,7 @@ i64 ph_store(i64 cur, i64 k, i64 zv) {
 i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
     ph_next();                                       // $
     if (ph_at("$", 1)) ph_refuse(fl, line, "a variable variable $$name", "D6");
-    if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php variable needs a name", ph_tname);
+    if (!ph_wordish()) err_at2(fl, line, "mc-php: a php variable needs a name", ph_tname);
     uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
     ph_next();
 
@@ -3236,6 +3429,7 @@ i64 ph_stmt() {
         loop {
             i64 sct = ph_can_throw;
             ph_can_throw = 0;
+            i64 argpre = ph_take_pend();
             i64 e = ph_expr(0);
             i64 t = ph_ety;
             i64 thr = ph_can_throw;
@@ -3263,6 +3457,10 @@ i64 ph_stmt() {
                 set_nd_next(ck, s);
                 s = pre;
             }
+            // an argument's own pending statements run just before it, not
+            // before the whole echo: `echo ++$x, $x` must print 2 then 2
+            s = ph_prefix_stmts(ph_take_pend(), s);
+            s = ph_prefix_stmts(argpre, s);
             if (tail) set_nd_next(tail, s);
             if (!tail) head = s;
             tail = s;
@@ -3417,7 +3615,7 @@ i64 ph_stmt() {
             if (ph_at(")", 1)) break;
             if (!ph_at("$", 1)) ph_todo(fl, line, "unset of something that is not a $variable");
             ph_next();
-            if (ph_tid != T_IDENT) err_at(fl, line, "mc-php: a php variable needs a name");
+            if (!ph_wordish()) err_at(fl, line, "mc-php: a php variable needs a name");
             uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
             ph_next();
             if (ph_var_find(d) < 0) ph_refuse2(fl, line, "an undefined php variable", d, "D4");
@@ -4795,6 +4993,63 @@ i64 ph_function() {
 }
 
 void ph_lib_init() {
+    ph_lib("str_rot13", "php_f_str_rot13", 1, 1, PT_STRING);
+    ph_lib("quotemeta", "php_f_quotemeta", 1, 1, PT_STRING);
+    ph_lib("strpbrk", "php_f_strpbrk", 2, 2, PT_MIXED);
+    ph_lib("substr_compare", "php_f_substr_compare", 3, 5, PT_INT);
+    ph_lib("levenshtein", "php_f_levenshtein", 2, 2, PT_INT);
+    ph_lib("similar_text", "php_f_similar_text", 2, 3, PT_INT);
+    ph_lib("soundex", "php_f_soundex", 1, 1, PT_STRING);
+    ph_lib("count_chars", "php_f_count_chars", 1, 2, PT_MIXED);
+    ph_lib("str_word_count", "php_f_str_word_count", 1, 3, PT_ARR);
+    ph_lib("basename", "php_f_basename", 1, 2, PT_STRING);
+    ph_lib("dirname", "php_f_dirname", 1, 2, PT_STRING);
+    ph_lib("crc32", "php_f_crc32", 1, 1, PT_INT);
+    ph_lib("urlencode", "php_f_urlencode0", 1, 1, PT_STRING);
+    ph_lib("rawurlencode", "php_f_rawurlencode", 1, 1, PT_STRING);
+    ph_lib("urldecode", "php_f_urldecode", 1, 1, PT_STRING);
+    ph_lib("rawurldecode", "php_f_urldecode", 1, 1, PT_STRING);
+    ph_lib("htmlspecialchars_decode", "php_f_htmlspecialchars_decode", 1, 2, PT_STRING);
+    ph_lib("html_entity_decode", "php_f_htmlspecialchars_decode", 1, 3, PT_STRING);
+    ph_lib("str_increment", "php_f_str_increment", 1, 1, PT_STRING);
+    ph_lib("array_is_list", "php_f_array_is_list", 1, 1, PT_BOOL);
+    ph_lib("array_push", "php_f_array_push", 2, 4, PT_INT);
+    ph_lib("array_column", "php_f_array_column", 2, 3, PT_ARR);
+    ph_lib("array_diff", "php_f_array_diff", 2, 2, PT_ARR);
+    ph_lib("array_diff_key", "php_f_array_diff", 2, 2, PT_ARR);
+    ph_lib("array_intersect", "php_f_array_intersect", 2, 2, PT_ARR);
+    ph_lib("array_pad", "php_f_array_pad", 3, 3, PT_ARR);
+    ph_lib("array_chunk", "php_f_array_chunk", 2, 3, PT_ARR);
+    ph_lib("current", "php_f_current", 1, 1, PT_MIXED);
+    ph_lib("reset", "php_f_current", 1, 1, PT_MIXED);
+    ph_lib("end", "php_f_end", 1, 1, PT_MIXED);
+    ph_lib("key", "php_f_key", 1, 1, PT_MIXED);
+    ph_lib("md5", "php_f_md5", 1, 2, PT_STRING);
+    ph_lib("sha1", "php_f_sha1", 1, 2, PT_STRING);
+    ph_lib("ucfirst", "php_f_ucfirst", 1, 1, PT_STRING);
+    ph_lib("iterator_to_array", "php_f_iterator", 1, 2, PT_MIXED);
+    ph_lib("lcg_value", "php_f_pi", 0, 0, PT_FLOAT);
+    ph_lib("microtime", "php_f_noop", 0, 1, PT_INT);
+    ph_lib("time", "php_f_zero", 0, 0, PT_INT);
+    ph_lib("php_sapi_name", "php_f_sapi", 0, 0, PT_STRING);
+    ph_lib("phpversion", "php_f_phpversion", 0, 1, PT_STRING);
+    ph_lib("zend_version", "php_f_ver0", 0, 0, PT_STRING);
+    ph_lib("func_num_args", "php_f_zero", 0, 0, PT_INT);
+    ph_lib("trigger_error", "php_f_trigger", 1, 2, PT_BOOL);
+    ph_lib("set_time_limit", "php_f_noop", 0, 1, PT_BOOL);
+    ph_lib("date_default_timezone_set", "php_f_noop", 0, 1, PT_BOOL);
+    ph_lib("assert_options", "php_f_nullf", 0, 2, PT_MIXED);
+    ph_lib("flush", "php_f_zero", 0, 0, PT_VOID);
+    ph_lib("constant", "php_f_constant", 1, 1, PT_MIXED);
+    ph_lib("str_contains", "php_f_contains", 2, 2, PT_BOOL);
+    ph_lib("ctype_digit", "php_f_ctype", 1, 1, PT_BOOL);
+    ph_lib("ctype_alpha", "php_f_ctype_a", 1, 1, PT_BOOL);
+    ph_lib("ctype_alnum", "php_f_ctype_an", 1, 1, PT_BOOL);
+    ph_lib("ctype_space", "php_f_ctype_sp", 1, 1, PT_BOOL);
+    ph_lib("ctype_upper", "php_f_ctype_up", 1, 1, PT_BOOL);
+    ph_lib("ctype_lower", "php_f_ctype_lo", 1, 1, PT_BOOL);
+    ph_lib("ctype_punct", "php_f_ctype_pu", 1, 1, PT_BOOL);
+    ph_lib("ctype_xdigit", "php_f_ctype_xd", 1, 1, PT_BOOL);
     ph_lib("get_class", "php_f_get_class", 0, 1, PT_MIXED);
     ph_lib("get_parent_class", "php_f_get_parent_class", 0, 1, PT_MIXED);
     ph_lib("class_exists", "php_f_class_exists", 1, 2, PT_BOOL);
