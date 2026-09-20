@@ -50,6 +50,11 @@ D4. DECIDED (owner, 2026-09-15): variables have a STATIC type. A variable's type
     the variable gaining a type at all, and a later `$x = 5` still declares it an int. The
     refusal is retired and the warning is php's own text, with php's own file and line.
     D4 now has an answer everywhere the rule is asked.
+    **T8 finished the job on the WRITE side**: every operation that writes a variable does the
+    read first (`$u .= "x"`, `$u++`, `$u += 2`, `$u->p = 1`, `unset($u)`), and six sites still
+    refused an unbound name by D4. They bind it `mixed` now, holding what php's read of it
+    answers -- the warning and the null -- so the six refusals are gone too. `$a = &$b` where
+    `$b` does not exist creates it SILENTLY, which is php's rule for that one.
 
     **Measured by T5** (`probes/t5/RESULTS.md` § "Where a decision met reality"), three places
     where the rule as written had no answer and T5 therefore refused (i) and (ii) are ANSWERED
@@ -134,7 +139,14 @@ D6. DECIDED (owner, 2026-09-15): no reflection. A binary carries no run-time typ
     introspection: `__get`/`__set`/`__call`/`__callStatic`/`__invoke`, `instanceof` with a
     literal, `get_class($o)`, `$o::class`, typed closures/callables, `is_callable(Closure)`.
     ANSWERED AT COMPILE TIME when the argument is a literal: `class_exists('Foo')`,
-    `method_exists($o, 'm')`, `function_exists('f')` fold to constants. Declared cost: frameworks
+    `method_exists($o, 'm')`, `function_exists('f')` fold to constants.
+    **Measured by T8** (`probes/t8/RESULTS.md` section 5), and it is a question for the owner:
+    `func_get_args` is on the refused list because "a binary carries no run-time type tables",
+    and that particular one needs none -- the arguments of the currently executing function ARE
+    its own parameters, which the compiler has in front of it. T8 built `func_num_args()` and
+    `func_get_arg(k)`, which D6 does NOT name, out of exactly that (a prologue counter emitted
+    only when the source names one of the two, plus a choice among the parameters); it left
+    `func_get_args` refused, because D6 names it and a decision is the owner's to change. Declared cost: frameworks
     built on reflection-driven DI containers (Laravel, Symfony) are out of scope; the target is
     programs and libraries that do not introspect.
 
@@ -159,6 +171,10 @@ D7. DECIDED (owner, 2026-09-15): no VM and no GC -- "teko already proves automat
     which D7 would allow without a refcount, since a compile-time escape question can say the
     writer is the only one that could observe the difference -- is not built. The pressure that
     does exist is string BUILDING, which is the shape D7 already predicted.
+    **T8 adds one consequence with a number**: a php `var_dump` marks an array element another
+    name holds a reference to (`&int(99)`), and D7 has no refcount, so nothing at run time tells
+    the mark from the value. The values agree; the mark is a documented difference
+    (`probes/t8/g/42-string-offset-ref.php` compares the values with `echo` and says why).
 
 D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixtures, any part of
     the runtime or standard library written in PHP, examples -- carries TESTS that run in BOTH
@@ -234,8 +250,55 @@ D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connec
 
 | T7 | php's diagnostics, and the tests that compile and print the wrong thing | the diagnostic channel built (position, text, streams, exit codes) and T6's `(compiled; output differs)` block clustered by `probes/t7/diffgroup.py` and worked in descending order | green/total -- **phpt: green 1218 / wrong 13968 / refused 2917 / skip 2947 / php-fail 345 / total 21050** (`probes/t7`); per directory `tests/lang` 82, `Zend/tests` 539, `ext/standard/tests/strings` 194 |
 
+| T8 | the block that does not compile, and the names it asks for | T7's `(does not compile)` block grouped by `probes/t8/nocompile.py` and worked in descending order; the 288 missing names worked in descending frequency | green/total -- **phpt: green 1451 / wrong 13628 / refused 3023 / skip 2947 / php-fail 346 / total 21049** (`probes/t8`); per directory `tests/lang` 93, `Zend/tests` 635, `ext/standard/tests/strings` 221 |
+
 Gate for the compiler proper: T2 + T3 decide `.so` reuse (D2b); T4 decides that the grammar fits
 Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
+
+T8 is done (2026-09-20, macos/aarch64; `probes/t8/RESULTS.md`), on **mc 1.1.0**:
+the block T7 named -- `(does not compile)`, 878 of 1460 sampled `wrong`
+tests -- taken apart group by group, and the 288 missing names worked in
+descending frequency:
+`phpt: green 1451 / wrong 13628 / refused 3023 / skip 2947 / php-fail 346 / total 21049`
+over the whole corpus, against T7's `green 1218` on the same harness. Per
+directory `tests/lang` **93** (was 82), `Zend/tests` **635** (was 539),
+`ext/standard/tests/strings` **221** (was 194). **1442 of the 1451 greens are
+in T0's "touched by none" set.** `refused` rose 2917 -> 3023 and `wrong` fell
+13968 -> 13628, which is a test that now COMPILES getting far enough to hit a
+design refusal it never reached before.
+
+`probes/t8/nocompile.py` is what made the block workable: `whytable.py`
+prints its head as a flat top-22 with no way back to a file, and this reads
+the SAME `why.tsv` -- so no compiler run is repeated -- masks the variable
+part of each message, groups, and prints the count with three example files
+per group. The groups, in the order they were worked: references (83 across
+four messages, and the biggest single theme), a method's `: void` (37, and
+the cause is that `void` is one of mc's OWN keywords), the lvalue chain (71:
+`$a[0]->p`, `$t->x[0][0]`, `$c = &$t->list`), `isset`/`empty` over the same
+chain (34), `$f();` as a statement (27), anonymous classes (25), `list()` and
+`[$a, $b] =` (21), a compound assignment to an array element (13), the
+alternative syntax (all five), `@` on a statement, `$s[9] = "x"`.
+
+The names, in descending frequency: files and streams (the biggest, 40
+library rows over a php `resource`, which is a zval of type `IS_RESOURCE`
+indexing one table), `pack`/`unpack` (30), output buffering that NESTS,
+`get_html_translation_table` with php's own 253 entries, `fprintf`/`vfprintf`
+(22), `serialize`/`unserialize`, `func_num_args`/`func_get_arg`, and eleven
+more. The library table went 180 rows -> 242.
+
+Four defects the blocks found, none of them in the block being built: the
+source scans read BYTES and a comment is not code (one line of the RUNTIME's
+own commentary put `$a` in the ref set and silenced a D4 refusal, which
+`probes/t8/r/d4-retype.php` caught); the unwinding check was missing on
+`return`, so `return f();` inside a `try` left the exception pending; a class
+member's default that is an ARRAY literal captured its local before the
+literal was built, which came out `array(0)` and, with another array literal
+earlier in the file, SEGFAULTED; and `lencheck` did not cover
+`php_str_new("...", N)`, where three lengths were wrong -- 97 pairs -> 418.
+
+Two sub-populations moved without being targets: the 4647 tests that assert a
+php diagnostic go 71 -> 83 and the 333 that mention `__destruct` go 11 -> 14,
+because the tests around them now compile.
 
 T7 is done (2026-09-20, macos/aarch64; `probes/t7/RESULTS.md`), on **mc 1.1.0**:
 php's DIAGNOSTIC channel, and T6's `(compiled; output differs)` block taken
@@ -518,6 +581,26 @@ region hangs off a token.
 The smallest additive fix, in `p_skip_to`'s own shape: let `on_source` return a byte offset at
 which lexing should begin (0 meaning the whole buffer), or give `p_push_source` an offset
 argument. Either is one parameter and changes nothing for a module that does not use it.
+
+### Confirmed by T8, and still the only one open
+
+T8 is the fifth probe to grow `probes/t*/php.mc` and it found **no new mc gap**. The one T5
+reported is unchanged and T8 hits it exactly as often: **38 of the 21219 `.phpt` with a
+`--FILE--` section** open with inline HTML and are refused by name.
+
+Three things T8 needed from mc that were already there, worth naming because they are what a
+Tier 3 module reaches for once it grows a standard library:
+
+* **`realpath`**, which `<mc/host>` declares for its own use (`src/host_macos.mc`): php reports
+  the path it RESOLVED, symlinks included, so on macOS every diagnostic raised by a script under
+  `/tmp` printed the wrong one of `/tmp` and `/private/tmp`. One call, at compile time, and
+  `__FILE__`/`__DIR__` went with it.
+* **`MAXPARAMS` is 12**, which is a documented mc limit and not a gap -- it is what sizes
+  `func_get_arg`'s choice among the callee's parameters (a count, an index and ten of them).
+* **A node may appear in an mc AST ONCE.** The arguments of a call are its SIBLING chain, so
+  reusing one node in two places makes a cycle, and a cycle is a stack overflow in the walker
+  rather than a diagnostic. `docs/reference/hooks.md` does not say so; a module that hoists a
+  value and then reads it twice has to make a second reference node.
 
 ### Confirmed by T7, and still the only one open
 

@@ -1,20 +1,21 @@
 #!/bin/sh
-# T7 -- php's diagnostics, and the tests that compile and print the wrong
-# thing (docs/plan.md section 4 row T7)
+# T8 -- the wall was `(does not compile)`, and it is not any more
+# (docs/plan.md section 4 row T8)
 #
-# T6 answered 1073 of 21051 and left two numbers pointing at what to do next:
-# 4657 of the 21386 tests with an expect section (21.8%) assert a php
-# DIAGNOSTIC line, of which T6 produced only the uncaught-throwable form of
-# `Fatal error:`; and 536 of 1417 sampled `wrong` tests compiled, ran, and
-# printed the wrong thing. T7 builds the first and takes the second apart.
+# T7 answered 1218 of 21050 and left one number pointing at what to do next:
+# 878 of 1460 sampled `wrong` tests DO NOT COMPILE, of which 288 name a php
+# function or constant mc-php does not have. T8 takes the first apart, group
+# by group (probes/t8/nocompile.py, new), and works the second in descending
+# frequency.
 #
 # Four grid runs, then the tables that choose the next block:
 #   (a) tests/lang   (b) Zend/tests   (c) ext/standard/tests/strings
 #   (d) the whole corpus
 # plus the compiler's own fixtures under g/ (byte for byte php's, on BOTH
-# streams -- the order matters now that diagnostics exist) and the refusals
-# under r/ (named, exit 3); then why.py's wrong-reason table, diffgroup.py's
-# clustering of the tests that compile, and arena.py's answer to D7.
+# streams) and the refusals under r/ (named, exit 3); then why.py's
+# wrong-reason table, nocompile.py's groups of the block that does not
+# compile, diffgroup.py's clustering of the block that does, and arena.py's
+# answer to D7.
 #
 # Exits 0 only when every run measured; a red grid is still a measurement.
 set -eu
@@ -57,39 +58,8 @@ rm -f probes/t8/mc-php
 ls -l probes/t8/mc-php | awk '{ printf "  probes/t8/mc-php  %s bytes\n", $5 }'
 
 echo ""
-echo "== 1. the fixtures: every g/*.php under php and under mc-php =="
-ng=0
-nok=0
-for f in probes/t8/g/*.php; do
-    ng=$((ng + 1))
-    exp=$("$PHP" "$f" 2>&1) && pe=0 || pe=$?
-    got=$(probes/t8/mcphp.sh "$f" 2>&1) && me=0 || me=$?
-    if [ "$exp" = "$got" ] && [ "$pe" = "$me" ]; then
-        nok=$((nok + 1))
-        printf '  ok    %s\n' "$(basename "$f")"
-    else
-        printf '  FAIL  %s\n    php:    %s (exit %s)\n    mc-php: %s (exit %s)\n' \
-            "$(basename "$f")" "$exp" "$pe" "$got" "$me"
-        fail=1
-    fi
-done
-echo "  fixtures: $nok / $ng agree with php"
-
-echo ""
-echo "== 1b. the refusals: a .php php runs and mc-php names (exit 3) =="
-nr=0
-nrok=0
-for f in probes/t8/r/*.php; do
-    nr=$((nr + 1))
-    msg=$(probes/t8/mcphp.sh "$f" 2>&1 >/dev/null | sed 's/^[^:]*:[0-9]*: //' | head -1)
-    probes/t8/mcphp.sh "$f" >/dev/null 2>&1 && rc=0 || rc=$?
-    case "$rc:$msg" in
-        3:*"is refused by design"*)
-            nrok=$((nrok + 1)); printf '  ok    %-26s %s\n' "$(basename "$f")" "$msg" ;;
-        *)  printf '  FAIL  %-26s exit %s: %s\n' "$(basename "$f")" "$rc" "$msg"; fail=1 ;;
-    esac
-done
-echo "  refusals: $nrok / $nr named, exit 3"
+echo "== 1. the fixtures and the refusals, against a SNAPSHOT of the compiler =="
+sh probes/t8/fixtures.sh || fail=1
 
 run_grid() {
     name=$1
@@ -141,6 +111,9 @@ head -900 "$OUT/zend/wrong.txt" | cut -f1 >> "$OUT/why.list"
 MCPHP_BIN="$root/probes/t8/mc-php" python3 probes/t8/why.py "$OUT/why.tsv" < "$OUT/why.list"
 python3 probes/t8/whytable.py "$OUT/why.tsv" | tee "$OUT/why.table"
 
+printf '\n== 7b. the tests that DO NOT COMPILE, by the compiler own message ==\n'
+python3 probes/t8/nocompile.py "$OUT/why.tsv" | tee "$OUT/nocompile.table"
+
 printf '\n== 8. the tests that COMPILE and disagree, by what differs ==\n'
 awk -F'\t' '$2 == "(compiled; output differs)" { print $1 }' "$OUT/why.tsv" > "$OUT/dg.list"
 MCPHP_BIN="$root/probes/t8/mc-php" python3 probes/t8/diffgroup.py "$OUT/dg.tsv" \
@@ -152,5 +125,5 @@ printf '\n== 9. how often the arena (D7) is the answer ==\n'
 MCPHP_BIN="$root/probes/t8/mc-php" python3 probes/t8/arena.py < "$OUT/why.list"
 
 echo ""
-[ "$fail" = 0 ] || { echo "T7: something did not measure"; exit 1; }
-echo "T7: measured -- see probes/t8/RESULTS.md"
+[ "$fail" = 0 ] || { echo "T8: something did not measure"; exit 1; }
+echo "T8: measured -- see probes/t8/RESULTS.md"

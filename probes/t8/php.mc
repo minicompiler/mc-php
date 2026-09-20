@@ -2565,8 +2565,13 @@ i64 ph_argref;
 // (ph_scan_brf_calls) put every variable in such a call into the ref set.
 i64 ph_ref_arg(uptr fl, i64 line) {
     if (!ph_at("$", 1)) return 0;
+    if (ph_at("$$", 2)) ph_refuse(fl, line, "a variable variable $$name", "D6");
     ph_next();
-    if (ph_tid != T_IDENT) { ph_ety = PT_MIXED; return 0; }
+    // the `$` is consumed: anything that is not a name has to be refused
+    // here and not handed back to the ordinary expression road, which would
+    // start one token late
+    if (ph_at("$", 1)) ph_refuse(fl, line, "a variable variable $$name", "D6");
+    if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php variable needs a name", ph_tname);
     uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
     ph_next();
     // only a bare $name: `$a[0]` and `$o->p` keep the ordinary road
@@ -3193,10 +3198,13 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_c3("php_strpos", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), off, TY_I64);
     }
     if (str_eq(name, "str_replace")) {
-        ph_need(na, 3, name, fl, line);
+        if (na < 3 || na > 4) ph_todo2(fl, line, "the wrong number of arguments for", name);
         ph_ety = PT_STRING;
-        return ph_c3("php_str_replace", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)),
-                     ph_to_str(ph_a(av, 2), ph_aty(av, 2)), ty_pstr);
+        // the fourth argument is php's by-reference $count
+        i64 cnt = ph_int(0);
+        if (na == 4) cnt = ph_a(av, 3);
+        return ph_c4("php_str_replace_c", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)),
+                     ph_to_str(ph_a(av, 2), ph_aty(av, 2)), cnt, ty_pstr);
     }
     if (str_eq(name, "implode") || str_eq(name, "join")) {
         // php 8: implode($array) with no separator

@@ -5052,7 +5052,25 @@ i64 php_f_levenshtein(uptr az, uptr bz) {
     return ld64(prev + m * 8);
 }
 
-i64 php_f_similar_text(uptr az, uptr bz, uptr _p3) {
+// php's third argument is by REFERENCE and carries the percentage; T8's
+// by-reference call sites make it the caller's own zval, so this can write
+// it. The recursion passes 0 and only the OUTER call fills it in.
+i64 php_f_similar_text(uptr az, uptr bz, uptr pz) {
+    i64 sim = php_similar_n(az, bz);
+    if (pz) {
+        if (php_zv_type(pz) != IS_NULL || 1) {
+            i64 la = php_strlen(php_zv_str(az));
+            i64 lb = php_strlen(php_zv_str(bz));
+            f64 pc = 0.0;
+            if (la + lb) pc = ((f64) sim) * 2.0 * 100.0 / ((f64) (la + lb));
+            stf64(pz, pc);
+            php_zv_settype(pz, IS_DOUBLE);
+        }
+    }
+    return sim;
+}
+
+i64 php_similar_n(uptr az, uptr bz) {
     uptr a = php_zv_str(az);
     uptr b = php_zv_str(bz);
     i64 n = php_strlen(a);
@@ -5080,10 +5098,10 @@ i64 php_f_similar_text(uptr az, uptr bz, uptr _p3) {
     }
     if (bl == 0) return 0;
     i64 sum = bl;
-    if (bi && bj) sum = sum + php_f_similar_text(php_zstr(php_str_new(a + ZS_HDR, bi)), php_zstr(php_str_new(b + ZS_HDR, bj)), 0);
+    if (bi && bj) sum = sum + php_similar_n(php_zstr(php_str_new(a + ZS_HDR, bi)), php_zstr(php_str_new(b + ZS_HDR, bj)));
     if (bi + bl < n && bj + bl < m)
-        sum = sum + php_f_similar_text(php_zstr(php_str_new(a + ZS_HDR + bi + bl, n - bi - bl)),
-                                       php_zstr(php_str_new(b + ZS_HDR + bj + bl, m - bj - bl)), 0);
+        sum = sum + php_similar_n(php_zstr(php_str_new(a + ZS_HDR + bi + bl, n - bi - bl)),
+                                  php_zstr(php_str_new(b + ZS_HDR + bj + bl, m - bj - bl)));
     return sum;
 }
 
@@ -6618,7 +6636,7 @@ uptr php_f_str_decrement(uptr sz) {
     i64 n = php_strlen(s);
     if (!n) {
         php_throw_str(php_str_new("ValueError", 10),
-            php_str_new("str_decrement(): Argument #1 ($string) cannot be empty", 54));
+            php_str_new("str_decrement(): Argument #1 ($string) must not be empty", 56));
         return php_zstr(s);
     }
     uptr o = php_str_new(s + ZS_HDR, n);
@@ -7394,7 +7412,15 @@ uptr php_us_str() {
 uptr php_us_val() {
     if (ph_us_p >= ph_us_n) { ph_us_bad = 1; return php_znull(); }
     i64 t = ld8(ph_us_s + ph_us_p);
-    if (t == 'N') { ph_us_p = ph_us_p + 2; return php_znull(); }
+    // the type letter is followed by `:` (or `;` for N), and nothing else is
+    // a serialization -- php answers false and warns for the rest
+    if (t == 'N') {
+        if (ph_us_p + 1 >= ph_us_n || ld8(ph_us_s + ph_us_p + 1) != ';') { ph_us_bad = 1; return php_znull(); }
+        ph_us_p = ph_us_p + 2;
+        return php_znull();
+    }
+    if (t != 'b' && t != 'i' && t != 'd' && t != 's' && t != 'a') { ph_us_bad = 1; return php_znull(); }
+    if (ph_us_p + 1 >= ph_us_n || ld8(ph_us_s + ph_us_p + 1) != ':') { ph_us_bad = 1; return php_znull(); }
     if (t == 'b') { ph_us_p = ph_us_p + 2; i64 v = php_us_int(); ph_us_p = ph_us_p + 1; return php_zbool(v); }
     if (t == 'i') { ph_us_p = ph_us_p + 2; i64 v = php_us_int(); ph_us_p = ph_us_p + 1; return php_zlong(v); }
     if (t == 'd') {
@@ -7440,7 +7466,7 @@ uptr php_f_unserialize(uptr sz, uptr oz) {
         php_mc("unserialize(): Error at offset 0 of ");
         php_mi(ph_us_n);
         php_mc(" bytes");
-        php_raise_m(PHE_NOTICE);
+        php_raise_m(PHE_WARNING);
         return php_zbool(0);
     }
     return v;
@@ -7568,4 +7594,26 @@ uptr php_f_get_html_translation_table(uptr tz, uptr fz, uptr ez) {
         if (ld8(ents + i) == ' ') i = i + 1;
     }
     return a;
+}
+
+// str_replace($search, $replace, $subject, &$count): php's fourth argument
+// is by reference and carries how many replacements were made.
+uptr php_str_replace_c(uptr search, uptr repl, uptr subj, uptr cz) {
+    uptr o = php_str_replace(search, repl, subj);
+    if (cz) {
+        i64 sn = php_strlen(search);
+        i64 n = 0;
+        if (sn) {
+            i64 i = 0;
+            loop {
+                i64 p = php_strpos(subj, search, i);
+                if (p < 0) break;
+                n = n + 1;
+                i = p + sn;
+            }
+        }
+        st64(cz, n);
+        php_zv_settype(cz, IS_LONG);
+    }
+    return o;
 }
