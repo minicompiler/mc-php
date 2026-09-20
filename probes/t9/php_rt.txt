@@ -4045,6 +4045,8 @@ uptr php_new_ce(uptr ce) {
     return o;
 }
 
+uptr php_new_ce_at(uptr ce, uptr file, i64 line);
+
 uptr php_new_at(uptr name, uptr file, i64 line) {
     uptr ce = php_ce_find(name);
     if (!ce) {
@@ -4055,6 +4057,21 @@ uptr php_new_at(uptr name, uptr file, i64 line) {
     }
     uptr o = php_new_ce(ce);
     // php records where a throwable was CREATED, not where it was thrown
+    if (php_ce_is(ce, php_str_new("Throwable", 9))) {
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)), php_zstr(file));
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(line));
+    }
+    return o;
+}
+
+// `new static()` / `new self()`: the class ENTRY is what the compiler has,
+// not a literal name
+uptr php_new_ce_at(uptr ce, uptr file, i64 line) {
+    if (!ce) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("Cannot instantiate an unknown class", 35));
+        return php_obj_new(ph_ce_stdclass);
+    }
+    uptr o = php_new_ce(ce);
     if (php_ce_is(ce, php_str_new("Throwable", 9))) {
         php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)), php_zstr(file));
         php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(line));
@@ -4194,6 +4211,24 @@ uptr php_zv_parr(uptr z, uptr name, uptr scope) {
 uptr php_obj_parr(uptr o, uptr name, uptr scope) { return php_zv_arr_w(php_obj_slot(o, name)); }
 
 // ---- methods ---------------------------------------------------------------
+// Late static binding: `static::` is the class the call was made ON, not the
+// class the method was declared in. One global, saved and restored around
+// every call that can change it -- an instance call binds the object's class
+// and a static call binds the named one unless it FORWARDS (a `parent::` or
+// `self::` from inside an instance method carries $this, and php keeps the
+// caller's binding for exactly those).
+uptr ph_lsb;
+
+uptr php_lsb_or(uptr decl) { if (ph_lsb) return ph_lsb; return decl; }
+
+// get_called_class(): the same binding, as a name. Not reflection (D6): it
+// answers one question about the call in progress and enumerates nothing.
+uptr php_f_called_class(uptr decl) {
+    uptr ce = php_lsb_or(decl);
+    if (!ce) return php_zbool(0);
+    return php_zstr(ld64(ce));
+}
+
 uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
     uptr ce = php_obj_ce(o);
     uptr lk = php_case(name, 0);
@@ -4206,7 +4241,11 @@ uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, 
             m = php_str_concat(m, php_str_new("() from an inaccessible scope", 29));
             php_throw_str(php_str_new("Error", 5), m);
         }
-        return callp(ld64(b), o, a1, a2, a3, a4, a5, a6);
+        uptr sv = ph_lsb;
+        ph_lsb = ce;
+        uptr r = callp(ld64(b), o, a1, a2, a3, a4, a5, a6);
+        ph_lsb = sv;
+        return r;
     }
     uptr c = php_ht_find(ld64(ce + 80), php_str_hash(php_str_new("__call", 6)), php_str_new("__call", 6));
     if (c) {
@@ -4265,7 +4304,13 @@ uptr php_scall(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr 
         php_throw_str(php_str_new("Error", 5), m);
         return php_znull();
     }
-    return callp(ld64(b), thisp, a1, a2, a3, a4, a5, a6);
+    uptr sv = ph_lsb;
+    // a forwarding call (`parent::m()` from an instance method) carries
+    // $this and keeps the caller's binding; a named one rebinds
+    if (!thisp) ph_lsb = ce;
+    uptr r = callp(ld64(b), thisp, a1, a2, a3, a4, a5, a6);
+    ph_lsb = sv;
+    return r;
 }
 
 uptr php_ce_byname(uptr name) {

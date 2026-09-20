@@ -333,6 +333,24 @@ i64  ph_nopeek;           // set right after a p_push_source: cur is in the old 
 // `#[\Override]` just went past: the next class member is the one php checks
 i64  ph_saw_override;
 
+// is the very next thing in the source `::`? The module has no token
+// lookahead, so this reads the cursor, which sits just past the current
+// token -- the same road ph_number takes for a literal's tail.
+i64 ph_dcolon_next() {
+    uptr q = p_cp();
+    uptr e = p_src_end();
+    loop {
+        if (q >= e) return 0;
+        i64 c = ld8(q);
+        if (c == 32 || c == 9 || c == 10 || c == 13) { q = q + 1; continue; }
+        break;
+    }
+    if (q + 1 >= e) return 0;
+    if (ld8(q) != 58) return 0;
+    if (ld8(q + 1) != 58) return 0;
+    return 1;
+}
+
 // does [b, e) contain `w` as a whole word? (the attribute scan's only need)
 i64 ph_has_word(uptr b, uptr e, uptr w, i64 n) {
     uptr q = b;
@@ -2178,6 +2196,30 @@ i64 ph_primary() {
         cn = ph_tname;
         ph_next();
         loop { if (!ph_accept("\\", 1)) break; cn = ph_tname; ph_next(); }
+        // `new static()` / `new self()` / `new parent()`: the class ENTRY
+        if (str_eq(cn, "static") || str_eq(cn, "self") || str_eq(cn, "parent")) {
+            i64 ceo = ph_ce_of(cn, fl, line);
+            i64 obs = ph_c3("php_new_ce_at", ceo, ph_strlit(fl, cstrlen(fl)), ph_int(line), TY_UPTR);
+            i64 tmps = ph_temp(obs, TY_UPTR, "phw_");
+            i64 hasa = 0;
+            if (ph_at("(", 1)) {
+                u8 nbs[8];
+                uptr mas = ph_margs(nbs, fl, line);
+                i64 ncs = ld64(nbs);
+                u8 alls[80];
+                st64(alls, ph_tref(tmps));
+                st64(alls + 8, ph_strlit("__construct", 11));
+                st64(alls + 16, ph_scope());
+                st64(alls + 24, ph_int(ncs));
+                i64 qi = 0;
+                loop { if (qi >= 6) break; st64(alls + 32 + qi * 8, ld64(mas + qi * 8)); qi = qi + 1; }
+                ph_pending_stmt(ph_stmt_of(ph_calln("php_ctor", alls, 10, ty_pzv)));
+                hasa = 1;
+            }
+            if (!hasa) ph_pending_stmt(ph_stmt_of(ph_c1("php_ctor0", ph_tref(tmps), ty_pzv)));
+            ph_ety = PT_OBJ;
+            return ph_tref(tmps);
+        }
         i64 ob = ph_c3("php_new_at", ph_strlit(cn, cstrlen(cn)), ph_strlit(fl, cstrlen(fl)), ph_int(line), TY_UPTR);
         i64 tmp = ph_temp(ob, TY_UPTR, "phw_");
         i64 hasargs = 0;
@@ -2201,11 +2243,16 @@ i64 ph_primary() {
     if (ph_is("fn")) { ph_next(); return ph_closure(fl, line, 1); }
     if (ph_is("function")) { ph_next(); ph_accept("&", 1); return ph_closure(fl, line, 0); }
     if (ph_is("static")) {
-        // `static function () {}` / `static fn() =>`: a closure with no $this
-        ph_next();
-        if (ph_is("fn")) { ph_next(); return ph_closure(fl, line, 1); }
-        if (ph_is("function")) { ph_next(); ph_accept("&", 1); return ph_closure(fl, line, 0); }
-        ph_todo2(fl, line, "the storage keyword", "static");
+        // `static function () {}` / `static fn() =>`: a closure with no
+        // $this. `static::` is a CLASS name and goes the ordinary way, so
+        // the cursor decides which of the two this is -- ph_builtin wants
+        // the name token still current and there is no token lookahead.
+        if (!ph_dcolon_next()) {
+            ph_next();
+            if (ph_is("fn")) { ph_next(); return ph_closure(fl, line, 1); }
+            if (ph_is("function")) { ph_next(); ph_accept("&", 1); return ph_closure(fl, line, 0); }
+            ph_todo2(fl, line, "the storage keyword", "static");
+        }
     }
     if (ph_is("match")) {
         ph_next();
@@ -3452,6 +3499,15 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_bool(0);
     }
     if (str_eq(name, "function_exists")) { ph_ety = PT_BOOL; return ph_bool(0); }
+    // get_called_class(): late static binding as a name, so it goes where
+    // the compiler knows the declaring class
+    if (str_eq(name, "get_called_class")) {
+        if (na) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        i64 decl = ph_int(0);
+        if (ph_cur_ceg) decl = ph_ceref(ph_cur_ceg);
+        ph_ety = PT_MIXED;
+        return ph_c1("php_f_called_class", decl, ty_pzv);
+    }
 
     // a php function this program declared
     i64 fi = ph_fn_find(name);
@@ -5625,7 +5681,13 @@ i64 ph_scope() {
 
 // a class entry looked up by its literal name
 i64 ph_ce_of(uptr name, uptr fl, i64 line) {
-    if (str_eq(name, "self") || str_eq(name, "static")) {
+    if (str_eq(name, "static")) {
+        // late static binding: the class the call was made ON, which the
+        // runtime carries, falling back to the declaring class
+        if (!ph_cur_ceg) err_at(fl, line, "mc-php: static:: outside a class");
+        return ph_c1("php_lsb_or", ph_ceref(ph_cur_ceg), TY_UPTR);
+    }
+    if (str_eq(name, "self")) {
         if (!ph_cur_ceg) err_at(fl, line, "mc-php: self:: outside a class");
         return ph_ceref(ph_cur_ceg);
     }
