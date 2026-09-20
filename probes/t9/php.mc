@@ -6576,6 +6576,10 @@ void ph_lib_init() {
     ph_lib("realpath", "php_f_realpath", 1, 1, PT_MIXED);
     ph_lib("stream_get_contents", "php_f_stream_get_contents", 1, 1, PT_MIXED);
     ph_lib("array_is_list", "php_f_array_is_list", 1, 1, PT_BOOL);
+    ph_lib("getcwd", "php_f_getcwd", 0, 0, PT_MIXED);
+    ph_lib("chdir", "php_f_chdir", 1, 1, PT_BOOL);
+    ph_lib("chmod", "php_f_chmod", 2, 2, PT_BOOL);
+    ph_lib("putenv", "php_f_putenv", 1, 1, PT_BOOL);
     // ext/json is D2(a): it IS php and is written in mc
     ph_lib("json_encode", "php_f_json_encode", 1, 3, PT_MIXED);
     ph_lib("json_decode", "php_f_json_decode", 1, 4, PT_MIXED);
