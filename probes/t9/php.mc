@@ -1426,6 +1426,7 @@ i64  ph_fpt[PH_MAXFN * PH_MAXP];
 i64  ph_fpd[PH_MAXFN * PH_MAXP];        // the default value node, 0 = none
 i64  ph_fvar[PH_MAXFN];                 // 1 when the last parameter is ...$rest
 i64  ph_fpr[PH_MAXFN];                  // bit i: parameter i is `&$x`
+i64  ph_frr[PH_MAXFN];                  // 1 when declared `function &f()`
 i64  ph_nfn;
 
 i64 ph_fn_find(uptr n) {
@@ -2554,6 +2555,11 @@ i64 ph_uses_nargs;
 // inside a `function &f()`: a returned value is the callee's own cell
 i64 ph_fn_retref;
 
+// 1 when the expression just parsed is a call to a `function &f()`. The
+// caller of `$a = &EXPR` reads it to decide whether php would give the
+// alias silently or keep the value and say so.
+i64 ph_ref_call;
+
 // Which argument positions of the call about to be read are by-reference
 // (`function f(&$x)`). Set by the caller just before ph_read_args, consumed
 // once: a nested call inside an argument must not inherit it.
@@ -3455,6 +3461,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     i64 rt = ld64(ph_fret + fi * 8);
     set_nd_type(c, ph_mcty(rt));
     ph_ety = rt;
+    ph_ref_call = ld64(ph_frr + fi * 8);
     return c;
 }
 
@@ -3878,6 +3885,34 @@ i64 ph_store(i64 cur, i64 k, i64 zv, uptr prop) {
     return ph_c2("php_arr_push", cur, zv, TY_VOID);
 }
 
+// the CELL the same path ends on, which is what a reference needs
+i64 ph_slot(i64 cur, i64 k, uptr prop) {
+    if (prop) return ph_c3("php_zv_pref", cur, ph_strlit(prop, cstrlen(prop)), ph_scope(), ty_pzv);
+    if (k) return ph_c2("php_arr_zslot", cur, k, ty_pzv);
+    return ph_c1("php_arr_nextslot", cur, ty_pzv);
+}
+
+// `<container> = &$v`: bind the variable to the container's own cell, after
+// the cell receives the variable's current value. Reads the `&` and the
+// `$name` after it; returns the statement.
+i64 ph_ref_into(i64 cell, uptr fl, i64 line, i64 semi) {
+    ph_next();                                                   // &
+    if (!ph_at("$", 1)) ph_todo(fl, line, "a reference to something that is not a $variable");
+    ph_next();
+    if (!ph_wordish()) err_at2(fl, line, "mc-php: a php variable needs a name", ph_tname);
+    uptr sv = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
+    ph_next();
+    if (semi) ph_semi("expected ; after a php assignment");
+    if (ph_var_find(sv) < 0) ph_bind_undef(sv, fl, line, 1);
+    if (ph_var_type(sv) != PT_MIXED)
+        ph_todo2(fl, line, "a reference to a php variable of type", ph_tyname(ph_var_type(sv)));
+    if (!ph_is_ref(sv)) ph_set_ref(sv);
+    i64 cv = node_new(N_IDENT, line, fl);
+    set_nd_name(cv, ph_mangle(sv, "v_"));
+    set_nd_type(cv, ty_pzv);
+    return ph_wrap(ph_set(ph_mangle(sv, "v_"), ph_c2("php_ref_bind", cell, cv, ty_pzv)));
+}
+
 // $v = expr / $v[i] = expr / $v[] = expr, and the compound forms
 i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
     u8 kbr[8];
@@ -3992,7 +4027,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
             return ph_expr_stmt_of(ph_store(cur, k, nv, lprop));
         }
         ph_want("=", 1, "expected = after a php array index");
-        if (ph_at("&", 1)) ph_todo(fl, line, "an assignment by reference");
+        if (ph_at("&", 1)) return ph_ref_into(ph_slot(cur, k, lprop), fl, line, semi);
         i64 v = ph_expr(0);
         i64 vt = ph_ety;
         if (semi) ph_semi("expected ; after a php assignment");
@@ -4128,7 +4163,25 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
     if (ph_at("&", 1)) {
         // $a = &$b: the two names share one zval from here on
         ph_next();
-        if (!ph_at("$", 1)) ph_todo(fl, line, "an assignment by reference to something that is not a $variable");
+        if (!ph_at("$", 1)) {
+            // `$a = &f()`, `$a = &C::m()`, `$a = &new C`. A mixed value IS a
+            // zval cell here, so binding the name to it is the alias php
+            // gives when the callee returns by reference; when it does not,
+            // php keeps the value and says so, which is what the notice is.
+            ph_ref_call = 0;
+            i64 rex = ph_expr(0);
+            i64 rxt = ph_ety;
+            if (semi) ph_semi("expected ; after a php assignment");
+            if (ph_var_find(d) < 0) ph_var_bind(d, PT_MIXED);
+            if (ph_var_type(d) != PT_MIXED)
+                ph_todo2(fl, line, "a reference bound to a php variable of type", ph_tyname(ph_var_type(d)));
+            ph_set_ref(d);
+            i64 pre = 0;
+            if (!ph_ref_call) pre = ph_stmt_of(ph_call("php_ref_notice", 0, 0, 0, 0, 0, TY_VOID));
+            i64 bnd = ph_set(ph_mangle(d, "v_"), ph_to_mixed(rex, rxt));
+            if (pre) { set_nd_next(pre, bnd); return ph_wrap(pre); }
+            return ph_wrap(bnd);
+        }
         ph_next();
         uptr src = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
@@ -6075,7 +6128,8 @@ i64 ph_obj_stmt(uptr d, uptr fl, i64 line, i64 semi) {
             }
             if (!incdec && !op) {
                 ph_next();
-                if (ph_at("&", 1)) ph_todo(fl, line, "an assignment by reference");
+                if (ph_at("&", 1))
+                    return ph_ref_into(ph_c3("php_zv_pref", ph_tref(rt), ph_strlit(pname, cstrlen(pname)), ph_scope(), ty_pzv), fl, line, semi);
                 i64 r2 = ph_expr(0);
                 v = ph_to_mixed(ph_own(r2, ph_ety), ph_ety);
             }
@@ -6117,6 +6171,7 @@ i64 ph_function() {
     st64(ph_fnp + fi * 8, 0);
     st64(ph_fvar + fi * 8, 0);
     st64(ph_fpr + fi * 8, 0);
+    st64(ph_frr + fi * 8, retref);
 
     ph_want("(", 1, "expected ( in a php function");
     uptr save = ph_scope_save();

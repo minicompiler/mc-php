@@ -7508,6 +7508,21 @@ uptr php_arg_at(i64 k, i64 n, uptr a0, uptr a1, uptr a2, uptr a3, uptr a4,
 // D6 refuses no run-time table and this needs none -- the arguments of the
 // executing function ARE its own parameters, which the compiler has in front
 // of it (docs/plan.md D6, corrected by T8's measurement).
+// `$a[k] = &$v` / `$o->p = &$v`: the two names share ONE cell from here on,
+// and the cell php picks is the container's -- the variable is rebound to it
+// after it receives the variable's current value. D7 has no refcount, so an
+// array that is later COPIED (a php array is a value) separates them, which
+// is the same approximation `$r = &$a[k]` has made since T8.
+uptr php_ref_bind(uptr cell, uptr cur) {
+    if (cur) php_zv_cp(cell, cur);
+    return cell;
+}
+
+// `$a = &f()` where f does not return by reference: php keeps the value and
+// says so. The value is already a cell here, so the alias is harmless; the
+// notice is what the corpus grades.
+void php_ref_notice() { php_mreset(); php_mc("Only variables should be assigned by reference"); php_raise_m(PHE_NOTICE); }
+
 uptr php_args_all(i64 n, uptr a0, uptr a1, uptr a2, uptr a3, uptr a4,
                   uptr a5, uptr a6, uptr a7, uptr a8, uptr a9) {
     uptr a = php_arr_new(n);
