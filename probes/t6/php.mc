@@ -78,6 +78,8 @@ i64  ph_ret_null(i64 line, uptr fl);
 void ph_var_bind_raw(uptr d, i64 ty);
 void ph_class(uptr fl, i64 line, i64 flags);
 i64  ph_scope();
+uptr ph_cur_cls;               // the class being parsed, 0 outside one
+i64  ph_pre_find(uptr n);
 i64  ph_stmt_of(i64 c);
 i64  ph_mcall_node(i64 recv, uptr name, uptr fl, i64 line);
 i64  ph_scall_node(i64 ce, uptr name, uptr fl, i64 line);
@@ -88,6 +90,12 @@ void ph_skip_type();
 i64  ph_obj_stmt(uptr d, uptr fl, i64 line, i64 semi);
 i64  ph_calln(uptr fn, uptr args, i64 n, i64 ty);
 i64  ph_take_pend();
+i64  ph_is_ref(uptr d);
+i64  ph_refset_has(uptr n);
+i64  ph_gset_has(uptr n);
+void ph_gset_add(uptr n);
+void ph_refset_add(uptr n);
+void ph_set_ref(uptr d);
 uptr ph_scope_save();
 void ph_scope_restore(uptr b);
 i64  ph_closure(uptr fl, i64 line, i64 arrow);
@@ -715,6 +723,11 @@ i64 ph_set(uptr name, i64 val) {
 
 uptr ph_vname[PH_MAXVAR];
 i64  ph_vtype[PH_MAXVAR];
+// 1 when the variable holds a zval POINTER that must be written through:
+// a by-reference parameter, `global $x`, a function `static`, and the value
+// of `foreach as &$v`. Reading one is reading the zval; writing one is a
+// store into it, which is what makes the alias visible to the other name.
+i64  ph_vref[PH_MAXVAR];
 i64  ph_nvar;
 
 i64 ph_var_find(uptr d) {
@@ -729,17 +742,84 @@ i64 ph_var_find(uptr d) {
 
 i64 ph_var_type(uptr d) { return ld64(ph_vtype + ph_var_find(d) * 8); }
 
+i64 ph_is_ref(uptr d) {
+    i64 i = ph_var_find(d);
+    if (i < 0) return 0;
+    return ld64(ph_vref + i * 8);
+}
+
+// A variable that is ever aliased (`&$x`, a `global`, a by-reference use or
+// parameter) has to be a zval from its FIRST assignment: the typed local it
+// would otherwise be has no address a second name can share. The names come
+// from a byte scan of every source, in ph_on_source, before anything is
+// parsed -- a false positive costs a zval and nothing else.
+#define PH_MAXREF 256
+uptr ph_refn[PH_MAXREF];
+i64  ph_nref;
+uptr ph_gsetn[PH_MAXREF];
+i64  ph_ngset;
+
+void ph_gset_add(uptr n) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_ngset) break;
+        if (str_eq(ld64(ph_gsetn + i * 8), n)) return;
+        i = i + 1;
+    }
+    if (ph_ngset >= PH_MAXREF) return;
+    st64(ph_gsetn + ph_ngset * 8, n);
+    ph_ngset = ph_ngset + 1;
+}
+
+i64 ph_gset_has(uptr n) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_ngset) break;
+        if (str_eq(ld64(ph_gsetn + i * 8), n)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+void ph_refset_add(uptr n) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_nref) break;
+        if (str_eq(ld64(ph_refn + i * 8), n)) return;
+        i = i + 1;
+    }
+    if (ph_nref >= PH_MAXREF) return;
+    st64(ph_refn + ph_nref * 8, n);
+    ph_nref = ph_nref + 1;
+}
+
+i64 ph_refset_has(uptr n) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_nref) break;
+        if (str_eq(ld64(ph_refn + i * 8), n)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+void ph_set_ref(uptr d) {
+    i64 i = ph_var_find(d);
+    if (i >= 0) st64(ph_vref + i * 8, 1);
+}
+
 // a php function body has its OWN scope: it sees no enclosing variable (a
 // closure's captures are copied in explicitly). The table is flat, so the
 // outer entries are saved and put back rather than just counted.
 uptr ph_scope_save() {
-    uptr b = xalloc(ph_nvar * 16 + 16);
+    uptr b = xalloc(ph_nvar * 24 + 24);
     st64(b, ph_nvar);
     i64 i = 0;
     loop {
         if (i >= ph_nvar) break;
-        st64(b + 8 + i * 16, ld64(ph_vname + i * 8));
-        st64(b + 16 + i * 16, ld64(ph_vtype + i * 8));
+        st64(b + 8 + i * 24, ld64(ph_vname + i * 8));
+        st64(b + 16 + i * 24, ld64(ph_vtype + i * 8));
+        st64(b + 24 + i * 24, ld64(ph_vref + i * 8));
         i = i + 1;
     }
     ph_nvar = 0;
@@ -751,8 +831,9 @@ void ph_scope_restore(uptr b) {
     i64 i = 0;
     loop {
         if (i >= n) break;
-        st64(ph_vname + i * 8, ld64(b + 8 + i * 16));
-        st64(ph_vtype + i * 8, ld64(b + 16 + i * 16));
+        st64(ph_vname + i * 8, ld64(b + 8 + i * 24));
+        st64(ph_vtype + i * 8, ld64(b + 16 + i * 24));
+        st64(ph_vref + i * 8, ld64(b + 24 + i * 24));
         i = i + 1;
     }
     ph_nvar = n;
@@ -766,6 +847,7 @@ void ph_var_bind_raw(uptr d, i64 ty) {
     if (ph_nvar >= PH_MAXVAR) err_at(ph_tfile, ph_tline, "mc-php: too many php variables");
     st64(ph_vname + ph_nvar * 8, d);
     st64(ph_vtype + ph_nvar * 8, ty);
+    st64(ph_vref + ph_nvar * 8, 0);
     ph_nvar = ph_nvar + 1;
 }
 
@@ -775,6 +857,7 @@ i64 ph_var_bind(uptr d, i64 ty) {
         if (ph_nvar >= PH_MAXVAR) err_at(ph_tfile, ph_tline, "mc-php: too many php variables");
         st64(ph_vname + ph_nvar * 8, d);
         st64(ph_vtype + ph_nvar * 8, ty);
+        st64(ph_vref + ph_nvar * 8, 0);
         ph_nvar = ph_nvar + 1;
         ph_local(ph_mangle(d, "v_"), ph_mcty(ty));
         return 1;
@@ -836,6 +919,142 @@ void ph_const_add(uptr cn, i64 v, i64 t, uptr fl, i64 line) {
     ph_nconst = ph_nconst + 1;
 }
 
+// ---- the predefined constants ----------------------------------------------
+// value kinds: 0 int, 1 string, 2 float (built by the runtime from its text)
+#define PH_MAXPRE 160
+uptr ph_pren[PH_MAXPRE];
+i64  ph_prek[PH_MAXPRE];
+i64  ph_prev[PH_MAXPRE];
+uptr ph_pres[PH_MAXPRE];
+i64  ph_npre;
+
+void ph_pre(uptr n, i64 k, i64 v, uptr s) {
+    if (ph_npre >= PH_MAXPRE) err_at("php.mc", 1, "mc-php: too many predefined constants");
+    st64(ph_pren + ph_npre * 8, n);
+    st64(ph_prek + ph_npre * 8, k);
+    st64(ph_prev + ph_npre * 8, v);
+    st64(ph_pres + ph_npre * 8, s);
+    ph_npre = ph_npre + 1;
+}
+
+i64 ph_pre_find(uptr n) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_npre) break;
+        if (str_eq(ld64(ph_pren + i * 8), n)) return i;
+        i = i + 1;
+    }
+    return -1;
+}
+
+void ph_pre_init() {
+    ph_pre("E_ERROR", 0, 1, 0);
+    ph_pre("E_WARNING", 0, 2, 0);
+    ph_pre("E_PARSE", 0, 4, 0);
+    ph_pre("E_NOTICE", 0, 8, 0);
+    ph_pre("E_CORE_ERROR", 0, 16, 0);
+    ph_pre("E_CORE_WARNING", 0, 32, 0);
+    ph_pre("E_COMPILE_ERROR", 0, 64, 0);
+    ph_pre("E_COMPILE_WARNING", 0, 128, 0);
+    ph_pre("E_USER_ERROR", 0, 256, 0);
+    ph_pre("E_USER_WARNING", 0, 512, 0);
+    ph_pre("E_USER_NOTICE", 0, 1024, 0);
+    ph_pre("E_STRICT", 0, 2048, 0);
+    ph_pre("E_RECOVERABLE_ERROR", 0, 4096, 0);
+    ph_pre("E_DEPRECATED", 0, 8192, 0);
+    ph_pre("E_USER_DEPRECATED", 0, 16384, 0);
+    ph_pre("E_ALL", 0, 30719, 0);
+    ph_pre("SORT_REGULAR", 0, 0, 0);
+    ph_pre("SORT_NUMERIC", 0, 1, 0);
+    ph_pre("SORT_STRING", 0, 2, 0);
+    ph_pre("SORT_DESC", 0, 3, 0);
+    ph_pre("SORT_ASC", 0, 4, 0);
+    ph_pre("SORT_LOCALE_STRING", 0, 5, 0);
+    ph_pre("SORT_NATURAL", 0, 6, 0);
+    ph_pre("SORT_FLAG_CASE", 0, 8, 0);
+    ph_pre("COUNT_NORMAL", 0, 0, 0);
+    ph_pre("COUNT_RECURSIVE", 0, 1, 0);
+    ph_pre("ENT_QUOTES", 0, 3, 0);
+    ph_pre("ENT_COMPAT", 0, 2, 0);
+    ph_pre("ENT_NOQUOTES", 0, 0, 0);
+    ph_pre("ENT_HTML5", 0, 48, 0);
+    ph_pre("ENT_HTML401", 0, 0, 0);
+    ph_pre("ENT_SUBSTITUTE", 0, 8, 0);
+    ph_pre("ENT_IGNORE", 0, 4, 0);
+    ph_pre("LC_ALL", 0, 0, 0);
+    ph_pre("LC_COLLATE", 0, 1, 0);
+    ph_pre("LC_CTYPE", 0, 2, 0);
+    ph_pre("LC_MONETARY", 0, 3, 0);
+    ph_pre("LC_NUMERIC", 0, 4, 0);
+    ph_pre("LC_TIME", 0, 5, 0);
+    ph_pre("LC_MESSAGES", 0, 6, 0);
+    ph_pre("PHP_MAJOR_VERSION", 0, 8, 0);
+    ph_pre("PHP_MINOR_VERSION", 0, 5, 0);
+    ph_pre("PHP_RELEASE_VERSION", 0, 10, 0);
+    ph_pre("PHP_INT_SIZE", 0, 8, 0);
+    ph_pre("PHP_FLOAT_DIG", 0, 15, 0);
+    ph_pre("JSON_PRETTY_PRINT", 0, 128, 0);
+    ph_pre("JSON_UNESCAPED_SLASHES", 0, 64, 0);
+    ph_pre("JSON_UNESCAPED_UNICODE", 0, 256, 0);
+    ph_pre("JSON_THROW_ON_ERROR", 0, 4194304, 0);
+    ph_pre("JSON_HEX_TAG", 0, 1, 0);
+    ph_pre("JSON_HEX_QUOT", 0, 8, 0);
+    ph_pre("JSON_HEX_AMP", 0, 2, 0);
+    ph_pre("JSON_HEX_APOS", 0, 4, 0);
+    ph_pre("JSON_NUMERIC_CHECK", 0, 32, 0);
+    ph_pre("JSON_PRESERVE_ZERO_FRACTION", 0, 1024, 0);
+    ph_pre("JSON_ERROR_NONE", 0, 0, 0);
+    ph_pre("ARRAY_FILTER_USE_KEY", 0, 2, 0);
+    ph_pre("ARRAY_FILTER_USE_BOTH", 0, 1, 0);
+    ph_pre("PHP_ROUND_HALF_UP", 0, 1, 0);
+    ph_pre("PHP_ROUND_HALF_DOWN", 0, 2, 0);
+    ph_pre("PHP_ROUND_HALF_EVEN", 0, 3, 0);
+    ph_pre("PHP_ROUND_HALF_ODD", 0, 4, 0);
+    ph_pre("SEEK_SET", 0, 0, 0);
+    ph_pre("SEEK_CUR", 0, 1, 0);
+    ph_pre("SEEK_END", 0, 2, 0);
+    ph_pre("PREG_PATTERN_ORDER", 0, 1, 0);
+    ph_pre("PREG_SET_ORDER", 0, 2, 0);
+    ph_pre("PREG_SPLIT_NO_EMPTY", 0, 1, 0);
+    ph_pre("CASE_LOWER", 0, 0, 0);
+    ph_pre("CASE_UPPER", 0, 1, 0);
+    ph_pre("STR_PAD_RIGHT", 0, 1, 0);
+    ph_pre("STR_PAD_LEFT", 0, 0, 0);
+    ph_pre("STR_PAD_BOTH", 0, 2, 0);
+    ph_pre("PHP_VERSION_ID", 0, 80510, 0);
+    ph_pre("MB_CASE_UPPER", 0, 0, 0);
+    ph_pre("MB_CASE_LOWER", 0, 1, 0);
+    ph_pre("MB_CASE_TITLE", 0, 2, 0);
+    ph_pre("DEBUG_BACKTRACE_IGNORE_ARGS", 0, 2, 0);
+    ph_pre("PHP_MAXPATHLEN", 0, 1024, 0);
+    ph_pre("PHP_EOL", 1, 1, "\n");
+    ph_pre("PHP_OS", 1, 6, "Darwin");
+    ph_pre("PHP_OS_FAMILY", 1, 6, "Darwin");
+    ph_pre("DIRECTORY_SEPARATOR", 1, 1, "/");
+    ph_pre("PATH_SEPARATOR", 1, 1, ":");
+    ph_pre("PHP_VERSION", 1, 6, "8.5.10");
+    ph_pre("PHP_EXTRA_VERSION", 1, 0, "");
+    ph_pre("PHP_SAPI", 1, 3, "cli");
+    ph_pre("PHP_BINARY", 1, 3, "php");
+    ph_pre("M_PI", 2, 0, "3.141592653589793");
+    ph_pre("M_E", 2, 0, "2.718281828459045");
+    ph_pre("M_SQRT2", 2, 0, "1.4142135623730951");
+    ph_pre("M_LN2", 2, 0, "0.6931471805599453");
+    ph_pre("M_LN10", 2, 0, "2.302585092994046");
+    ph_pre("M_LOG2E", 2, 0, "1.4426950408889634");
+    ph_pre("M_LOG10E", 2, 0, "0.4342944819032518");
+    ph_pre("M_PI_2", 2, 0, "1.5707963267948966");
+    ph_pre("M_PI_4", 2, 0, "0.7853981633974483");
+    ph_pre("M_1_PI", 2, 0, "0.3183098861837907");
+    ph_pre("M_2_PI", 2, 0, "0.6366197723675814");
+    ph_pre("M_SQRT1_2", 2, 0, "0.7071067811865476");
+    ph_pre("M_2_SQRTPI", 2, 0, "1.1283791670955126");
+    ph_pre("M_EULER", 2, 0, "0.5772156649015329");
+    ph_pre("M_SQRT3", 2, 0, "1.7320508075688772");
+    ph_pre("PHP_FLOAT_EPSILON", 2, 0, "2.220446049250313e-16");
+    ph_pre("PHP_FLOAT_MAX", 2, 0, "1.7976931348623157e+308");
+    ph_pre("PHP_FLOAT_MIN", 2, 0, "2.2250738585072014e-308");
+}
 // ---- the library table -----------------------------------------------------
 // Every row is one php function whose arguments are zvals and whose result is
 // a native value of `ret`. Missing optional arguments are php_znull(), so the
@@ -1861,9 +2080,10 @@ i64 ph_echo_of(i64 v, i64 t, uptr fl, i64 line) {
     return 0;
 }
 
-// sprintf/printf: the FORMAT must be a literal, so the conversion is compiled
-// into a chain of concatenations and there is no run-time format walker.
-i64 ph_sprintf(uptr av, i64 na, uptr fl, i64 line) {
+// sprintf/printf/vsprintf/vprintf: the FORMAT must be a literal (D1), so the
+// compiler walks it and emits ONE php_spf call per conversion. There is no
+// run-time format walker in the binary.
+i64 ph_sprintf(uptr av, i64 na, uptr fl, i64 line, i64 vec) {
     i64 f = ph_a(av, 0);
     if (ph_aty(av, 0) != PT_STRING) ph_todo(fl, line, "a printf format that is not a string");
     if (nd_kind(f) != N_CALL || !str_eq(nd_name(f), "php_str_lit"))
@@ -1871,10 +2091,21 @@ i64 ph_sprintf(uptr av, i64 na, uptr fl, i64 line) {
     i64 raw = nd_next(nd_a(f));                     // the N_STR argument
     uptr b = nd_name(raw);
     i64 n = nd_val(raw);
+    // vsprintf: every argument comes out of ONE array, by position
+    i64 arr = 0;
+    if (vec) {
+        if (na < 2) ph_todo2(fl, line, "the wrong number of arguments for", "vsprintf");
+        i64 at = ph_aty(av, 1);
+        arr = ph_a(av, 1);
+        if (at == PT_MIXED) arr = ph_c1("php_zv_arr_r", arr, ty_parr);
+        if (at != PT_MIXED && at != PT_ARR) ph_todo(fl, line, "vsprintf without an array");
+        arr = ph_temp(arr, ty_parr, "phv_");
+    }
     i64 acc = 0;
     i64 seg = 0;
     i64 i = 0;
     i64 ai = 1;
+    i64 vi = 0;
     loop {
         if (i >= n) break;
         if (ld8(b + i) != 37) { i = i + 1; continue; }
@@ -1883,27 +2114,92 @@ i64 ph_sprintf(uptr av, i64 na, uptr fl, i64 line) {
             if (acc) acc = ph_c2("php_str_concat", acc, lit, ty_pstr);
             if (!acc) acc = lit;
         }
-        i64 c = 0;
-        if (i + 1 < n) c = ld8(b + i + 1);
-        i64 piece = 0;
-        if (c == 37) piece = ph_strlit("%", 1);
-        if (c == 100 || c == 115 || c == 102) {
-            if (ai >= na) ph_todo(fl, line, "a printf format with more conversions than arguments");
-            i64 v = ph_a(av, ai);
-            i64 vt = ph_aty(av, ai);
-            ai = ai + 1;
-            if (c == 100) piece = ph_to_str(ph_to_int(v, vt), PT_INT);
-            if (c == 115) piece = ph_to_str(v, vt);
-            if (c == 102) piece = ph_c1("php_ftos6", ph_to_float(v, vt), ty_pstr);
+        i64 p = i + 1;
+        if (p < n && ld8(b + p) == 37) {
+            i64 pc = ph_strlit("%", 1);
+            if (acc) acc = ph_c2("php_str_concat", acc, pc, ty_pstr);
+            if (!acc) acc = pc;
+            i = p + 1;
+            seg = i;
+            continue;
         }
-        if (!piece) {
-            uptr w = xalloc(4);
-            st8(w, 37); st8(w + 1, c); st8(w + 2, 0);
-            ph_todo2(fl, line, "a printf conversion T5 does not have", w);
+        // [argnum$][flags][width][.precision]conv
+        i64 argnum = 0;
+        i64 q = p;
+        i64 num = 0;
+        i64 any = 0;
+        loop {
+            if (q >= n) break;
+            i64 c = ld8(b + q);
+            if (c < 48 || c > 57) break;
+            num = num * 10 + (c - 48);
+            any = 1;
+            q = q + 1;
         }
+        if (any && q < n && ld8(b + q) == 36) { argnum = num; p = q + 1; }
+        i64 flags = 0;
+        i64 pad = 32;
+        loop {
+            if (p >= n) break;
+            i64 c = ld8(b + p);
+            if (c == 45) { flags = flags | 1; p = p + 1; continue; }
+            if (c == 43) { flags = flags | 2; p = p + 1; continue; }
+            if (c == 32) { flags = flags | 4; p = p + 1; continue; }
+            if (c == 48) { flags = flags | 8; pad = 48; p = p + 1; continue; }
+            if (c == 39 && p + 1 < n) { pad = ld8(b + p + 1); p = p + 2; continue; }
+            break;
+        }
+        i64 width = 0;
+        loop {
+            if (p >= n) break;
+            i64 c = ld8(b + p);
+            if (c < 48 || c > 57) break;
+            width = width * 10 + (c - 48);
+            p = p + 1;
+        }
+        i64 prec = -1;
+        if (p < n && ld8(b + p) == 46) {
+            p = p + 1;
+            prec = 0;
+            loop {
+                if (p >= n) break;
+                i64 c = ld8(b + p);
+                if (c < 48 || c > 57) break;
+                prec = prec * 10 + (c - 48);
+                p = p + 1;
+            }
+        }
+        if (p >= n) err_at(fl, line, "mc-php: a printf format that ends in %");
+        i64 conv = ld8(b + p);
+        p = p + 1;
+        i64 val = 0;
+        if (vec) {
+            i64 idx = vi;
+            if (argnum) idx = argnum - 1;
+            if (!argnum) vi = vi + 1;
+            val = ph_c2("php_arr_iget", ph_tref(arr), ph_int(idx), ty_pzv);
+        }
+        if (!vec) {
+            i64 k = ai;
+            if (argnum) k = argnum;
+            if (!argnum) ai = ai + 1;
+            if (k >= na) ph_todo(fl, line, "a printf format with more conversions than arguments");
+            val = ph_to_mixed(ph_a(av, k), ph_aty(av, k));
+        }
+        u8 six[8];
+        st64(six, val);
+        i64 piece = ph_call("php_spf", 4, val, ph_int(flags), ph_int(width), ph_int(prec), ty_pstr);
+        // php_spf takes six arguments; the last two go on with set_nd_next
+        i64 t5 = ph_int(conv);
+        i64 t6 = ph_int(pad);
+        set_nd_next(ph_int(0), 0);
+        i64 lastarg = nd_a(piece);
+        loop { if (!nd_next(lastarg)) break; lastarg = nd_next(lastarg); }
+        set_nd_next(lastarg, t5);
+        set_nd_next(t5, t6);
         if (acc) acc = ph_c2("php_str_concat", acc, piece, ty_pstr);
         if (!acc) acc = piece;
-        i = i + 2;
+        i = p;
         seg = i;
     }
     if (n > seg) {
@@ -1939,14 +2235,8 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         ph_ety = PT_NULL;
         return ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
     }
-    if (str_eq(name, "PHP_EOL"))      { ph_next(); ph_ety = PT_STRING; return ph_strlit("\n", 1); }
     if (str_eq(name, "PHP_INT_MAX"))  { ph_next(); ph_ety = PT_INT; return ph_int(9223372036854775807); }
     if (str_eq(name, "PHP_INT_MIN"))  { ph_next(); ph_ety = PT_INT; return ph_bin(ph_tok("-", 1), ph_int(-9223372036854775807), ph_int(1), TY_I64); }
-    if (str_eq(name, "PHP_INT_SIZE")) { ph_next(); ph_ety = PT_INT; return ph_int(8); }
-    if (str_eq(name, "PHP_FLOAT_DIG")) { ph_next(); ph_ety = PT_INT; return ph_int(15); }
-    if (str_eq(name, "STR_PAD_RIGHT")) { ph_next(); ph_ety = PT_INT; return ph_int(0); }
-    if (str_eq(name, "STR_PAD_LEFT"))  { ph_next(); ph_ety = PT_INT; return ph_int(1); }
-    if (str_eq(name, "STR_PAD_BOTH"))  { ph_next(); ph_ety = PT_INT; return ph_int(2); }
     if (str_eq(name, "__LINE__")) { i64 l = ph_tline; ph_next(); ph_ety = PT_INT; return ph_int(l); }
     if (str_eq(name, "__FILE__")) {
         uptr f = ph_tfile;
@@ -1966,6 +2256,28 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         ph_ety = PT_STRING;
         if (!f2) return ph_strlit("", 0);
         return ph_strlit(f2 + 2, cstrlen(f2 + 2));
+    }
+    i64 pi = ph_pre_find(name);
+    if (pi >= 0) {
+        ph_next();
+        i64 pk = ld64(ph_prek + pi * 8);
+        if (pk == 0) { ph_ety = PT_INT; return ph_int(ld64(ph_prev + pi * 8)); }
+        if (pk == 1) {
+            uptr sv = ld64(ph_pres + pi * 8);
+            ph_ety = PT_STRING;
+            return ph_strlit(sv, ld64(ph_prev + pi * 8));
+        }
+        uptr fv = ld64(ph_pres + pi * 8);
+        ph_ety = PT_FLOAT;
+        return ph_c1("php_stof", ph_strlit(fv, cstrlen(fv)), ty_f64);
+    }
+    if (str_eq(name, "NAN")) { ph_next(); ph_ety = PT_FLOAT; return ph_c1("php_nan", ph_int(0), ty_f64); }
+    if (str_eq(name, "INF")) { ph_next(); ph_ety = PT_FLOAT; return ph_c1("php_inf", ph_int(0), ty_f64); }
+    if (str_eq(name, "__CLASS__")) {
+        ph_next();
+        ph_ety = PT_STRING;
+        if (!ph_cur_cls) return ph_strlit("", 0);
+        return ph_strlit(ph_cur_cls, cstrlen(ph_cur_cls));
     }
     // a constant this program declared with `const` or define()
     i64 ci = ph_const_find(name);
@@ -2112,11 +2424,14 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         ph_todo2(fl, line, "a php constant mc-php does not have", name);
     }
 
-    if (str_eq(name, "sprintf") || str_eq(name, "printf")) {
+    if (str_eq(name, "sprintf") || str_eq(name, "printf")
+        || str_eq(name, "vsprintf") || str_eq(name, "vprintf")) {
+        i64 vec = 0;
+        if (str_eq(name, "vsprintf") || str_eq(name, "vprintf")) vec = 1;
         u8 pn0[8];
         uptr av0 = ph_read_args(16, fl, line, pn0);
-        i64 s = ph_sprintf(av0, ld64(pn0), fl, line);
-        if (str_eq(name, "sprintf")) { ph_ety = PT_STRING; return s; }
+        i64 s = ph_sprintf(av0, ld64(pn0), fl, line, vec);
+        if (str_eq(name, "sprintf") || str_eq(name, "vsprintf")) { ph_ety = PT_STRING; return s; }
         i64 e = ph_c1("php_echo_str", s, TY_I64);
         ph_ety = PT_INT;
         return ph_c2("php_seq_i", e, ph_int(0), TY_I64);
@@ -2265,7 +2580,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "str_pad")) {
         if (na < 2 || na > 4) ph_need(na, 2, name, fl, line);
         i64 pad = ph_strlit(" ", 1);
-        i64 type = ph_int(0);
+        i64 type = ph_int(1);                       // STR_PAD_RIGHT
         if (na >= 3) pad = ph_to_str(ph_a(av, 2), ph_aty(av, 2));
         if (na >= 4) type = ph_to_int(ph_a(av, 3), ph_aty(av, 3));
         ph_ety = PT_STRING;
@@ -2723,6 +3038,12 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
             val = ph_bin(ph_tok("+", 1), lv, one, ph_mcty(t));
             if (incdec < 0) set_nd_op(val, ph_tok("-", 1));
         }
+        if (ph_is_ref(d)) {
+            i64 lvi = node_new(N_IDENT, line, fl);
+            set_nd_name(lvi, ph_mangle(d, "v_"));
+            set_nd_type(lvi, ty_pzv);
+            return ph_wrap(ph_expr_stmt_of(ph_c2("php_zv_store", lvi, val, ty_pzv)));
+        }
         i64 a = node_new(N_ASSIGN, line, fl);
         set_nd_name(a, ph_mangle(d, "v_"));
         set_nd_a(a, val);
@@ -2756,20 +3077,68 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
             m = p_cat(m, ph_tyname(ph_ety), 0, cstrlen(ph_tyname(ph_ety)));
             ph_refuse2(fl, line, "a php variable has one type", m, "D4");
         }
+        if (ph_is_ref(d)) {
+            i64 lv2 = node_new(N_IDENT, line, fl);
+            set_nd_name(lv2, ph_mangle(d, "v_"));
+            set_nd_type(lv2, ty_pzv);
+            return ph_wrap(ph_expr_stmt_of(ph_c2("php_zv_store", lv2, ph_to_mixed(v, ph_ety), ty_pzv)));
+        }
         i64 a = node_new(N_ASSIGN, line, fl);
         set_nd_name(a, ph_mangle(d, "v_"));
         set_nd_a(a, v);
         return ph_wrap(a);
     }
 
-    if (ph_at("??=", 3)) ph_todo(fl, line, "the ??= operator");
+    if (ph_at("??=", 3)) {
+        ph_next();
+        if (ph_var_find(d) < 0) { ph_var_bind(d, PT_MIXED); ph_pending_stmt(ph_set(ph_mangle(d, "v_"), ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv))); }
+        i64 lt2 = ph_var_type(d);
+        i64 lv3 = node_new(N_IDENT, line, fl);
+        set_nd_name(lv3, ph_mangle(d, "v_"));
+        set_nd_type(lv3, ph_mcty(lt2));
+        i64 r3 = ph_expr(0);
+        i64 rt3 = ph_ety;
+        if (semi) ph_want(";", 1, "expected ; after ??=");
+        if (lt2 != PT_MIXED) ph_todo2(fl, line, "??= on a variable of type", ph_tyname(lt2));
+        i64 nn3 = node_new(N_UNARY, line, fl);
+        set_nd_op(nn3, ph_tok("!", 1));
+        set_nd_a(nn3, ph_cast(TY_U8, ph_c1("php_zv_isset", lv3, TY_I64)));
+        set_nd_type(nn3, TY_U8);
+        i64 iff3 = node_new(N_IF, line, fl);
+        set_nd_a(iff3, nn3);
+        i64 lv4 = node_new(N_IDENT, line, fl);
+        set_nd_name(lv4, ph_mangle(d, "v_"));
+        set_nd_type(lv4, ty_pzv);
+        if (ph_is_ref(d)) set_nd_b(iff3, ph_expr_stmt_of(ph_c2("php_zv_store", lv4, ph_to_mixed(r3, rt3), ty_pzv)));
+        if (!ph_is_ref(d)) set_nd_b(iff3, ph_set(ph_mangle(d, "v_"), ph_to_mixed(r3, rt3)));
+        return ph_wrap(iff3);
+    }
 
     if (!ph_at("=", 1)) {
         if (ph_at("=>", 2)) err_at(fl, line, "mc-php: unexpected => outside foreach");
         ph_todo2(fl, line, "a php variable used as a statement", d);
     }
     ph_next();
-    if (ph_at("&", 1)) ph_todo(fl, line, "an assignment by reference");
+    if (ph_at("&", 1)) {
+        // $a = &$b: the two names share one zval from here on
+        ph_next();
+        if (!ph_at("$", 1)) ph_todo(fl, line, "an assignment by reference to something that is not a $variable");
+        ph_next();
+        uptr src = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
+        ph_next();
+        if (semi) ph_want(";", 1, "expected ; after a php assignment");
+        if (ph_var_find(src) < 0) ph_refuse2(fl, line, "an undefined php variable", src, "D4");
+        if (ph_var_type(src) != PT_MIXED)
+            ph_todo2(fl, line, "a reference to a php variable of type", ph_tyname(ph_var_type(src)));
+        if (!ph_is_ref(src)) ph_set_ref(src);
+        if (!ph_is_ref(src)) ph_set_ref(src);
+        if (ph_var_find(d) < 0) ph_var_bind(d, PT_MIXED);
+        ph_set_ref(d);
+        i64 sr = node_new(N_IDENT, line, fl);
+        set_nd_name(sr, ph_mangle(src, "v_"));
+        set_nd_type(sr, ty_pzv);
+        return ph_wrap(ph_set(ph_mangle(d, "v_"), sr));
+    }
     i64 v = ph_expr(0);
     i64 vt = ph_ety;
     if (semi) ph_want(";", 1, "expected ; after a php assignment");
@@ -2782,6 +3151,28 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         i64 was = ph_var_type(d);
         // a mixed variable accepts any value: its declared type IS the union
         if (was == PT_MIXED && vt != PT_MIXED) { v = ph_to_mixed(v, vt); vt = PT_MIXED; }
+    }
+    if (ph_var_find(d) < 0 && ph_refset_has(d)) {
+        // first assignment to a name something else aliases: it is a zval.
+        // A name some function declares `global` is THE global of that name.
+        ph_var_bind(d, PT_MIXED);
+        ph_set_ref(d);
+        i64 box = ph_c1("php_zv_val", ph_to_mixed(v, vt), ty_pzv);
+        if (ph_toplevel && ph_gset_has(d)) {
+            i64 bind = ph_set(ph_mangle(d, "v_"), ph_c1("php_gvar", ph_strlit(d + 1, cstrlen(d + 1)), ty_pzv));
+            i64 lvg = node_new(N_IDENT, line, fl);
+            set_nd_name(lvg, ph_mangle(d, "v_"));
+            set_nd_type(lvg, ty_pzv);
+            set_nd_next(bind, ph_expr_stmt_of(ph_c2("php_zv_store", lvg, ph_to_mixed(v, vt), ty_pzv)));
+            return ph_wrap(bind);
+        }
+        return ph_wrap(ph_set(ph_mangle(d, "v_"), box));
+    }
+    if (ph_is_ref(d)) {
+        i64 lvr = node_new(N_IDENT, line, fl);
+        set_nd_name(lvr, ph_mangle(d, "v_"));
+        set_nd_type(lvr, ty_pzv);
+        return ph_wrap(ph_expr_stmt_of(ph_c2("php_zv_store", lvr, ph_to_mixed(ph_own(v, vt), vt), ty_pzv)));
     }
     ph_var_bind(d, vt);
     return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_own(v, vt)));
@@ -3057,7 +3448,65 @@ i64 ph_stmt() {
         set_nd_a(b, head);
         return ph_wrap(b);
     }
-    if (ph_is("global") || ph_is("static")) ph_todo2(fl, line, "the storage keyword", ph_tname);
+    if (ph_is("global")) {
+        ph_next();
+        i64 head = 0;
+        i64 tail = 0;
+        loop {
+            if (!ph_at("$", 1)) err_at(fl, line, "mc-php: a php variable was expected after global");
+            ph_next();
+            uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
+            ph_next();
+            if (ph_var_find(d) < 0) ph_var_bind(d, PT_MIXED);
+            ph_set_ref(d);
+            i64 g = ph_set(ph_mangle(d, "v_"), ph_c1("php_gvar", ph_strlit(d + 1, cstrlen(d + 1)), ty_pzv));
+            if (tail) set_nd_next(tail, g);
+            if (!tail) head = g;
+            tail = g;
+            if (!ph_accept(",", 1)) break;
+        }
+        ph_want(";", 1, "expected ; after global");
+        i64 b = node_new(N_BLOCK, line, fl);
+        set_nd_a(b, head);
+        return b;
+    }
+    if (ph_is("static")) {
+        // `static $x = e;` -- one zval per declaration, made on the first call
+        ph_next();
+        if (!ph_at("$", 1)) ph_todo2(fl, line, "the storage keyword", "static");
+        i64 head2 = 0;
+        i64 tail2 = 0;
+        loop {
+            if (!ph_at("$", 1)) break;
+            ph_next();
+            uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
+            ph_next();
+            i64 init = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
+            if (ph_accept("=", 1)) { i64 iv = ph_expr(0); init = ph_to_mixed(iv, ph_ety); }
+            ph_nonce = ph_nonce + 1;
+            uptr sg = p_cat("phst_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+            i64 gn = node_new(N_GLOBAL, line, fl);
+            set_nd_name(gn, sg);
+            set_nd_type(gn, TY_UPTR);
+            set_nd_val(gn, 1);
+            set_nd_a(gn, 0);
+            top_add(gn);
+            if (ph_var_find(d) < 0) ph_var_bind(d, PT_MIXED);
+            ph_set_ref(d);
+            i64 gref = node_new(N_IDENT, line, fl);
+            set_nd_name(gref, sg);
+            set_nd_type(gref, TY_UPTR);
+            i64 st2 = ph_set(ph_mangle(d, "v_"), ph_c2("php_static", gref, init, ty_pzv));
+            if (tail2) set_nd_next(tail2, st2);
+            if (!tail2) head2 = st2;
+            tail2 = st2;
+            if (!ph_accept(",", 1)) break;
+        }
+        ph_want(";", 1, "expected ; after static");
+        i64 b2 = node_new(N_BLOCK, line, fl);
+        set_nd_a(b2, head2);
+        return ph_wrap(b2);
+    }
     if (ph_is("switch")) {
         // php numbers the arms; `m` is the first arm to run, so fall-through
         // is `if (m <= k)` and `default` is just another number.
@@ -3381,6 +3830,7 @@ i64 ph_foreach(uptr fl, i64 line) {
 
     if (key) ph_var_bind(key, PT_MIXED);
     ph_var_bind(val, PT_MIXED);
+    if (byref) ph_set_ref(val);
 
     i64 aref2 = node_new(N_IDENT, line, fl);
     set_nd_name(aref2, an);
@@ -3660,7 +4110,6 @@ i64 ph_cnew_head;
 i64 ph_cnew_tail;
 i64 ph_cfill_head;
 i64 ph_cfill_tail;
-uptr ph_cur_cls;               // the class being parsed, 0 outside one
 uptr ph_cur_ceg;               // the mc global holding its class entry
 i64  ph_in_method;             // 1 while a method body is being parsed
 i64  ph_in_static;
@@ -4068,6 +4517,7 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
         i64 byref = 0;
         if (!ph_at("$", 1)) ph_skip_type();
         if (ph_at("&", 1)) { ph_next(); byref = 1; }
+        if (byref) ph_todo(fl, line, "a by-reference parameter in a method");
         if (!ph_at("$", 1)) ph_todo2(fl, line, "a php parameter", ph_tname);
         ph_next();
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
@@ -4288,7 +4738,7 @@ i64 ph_function() {
     loop {
         if (ph_at(")", 1)) break;
         if (ph_at("...", 3)) ph_todo(fl, line, "a variadic parameter ...$args");
-        if (ph_at("&", 1)) ph_todo(fl, line, "a by-reference parameter");
+        if (ph_at("&", 1)) ph_todo(fl, line, "a by-reference parameter in a typed function");
         i64 pt = -1;
         if (!ph_at("$", 1)) pt = ph_type_word(1);
         if (pt < 0) ph_refuse(fl, line, "an untyped php parameter (D4 needs the type)", "D4");
@@ -4531,7 +4981,68 @@ i64 ph_ends(uptr s, uptr sfx) {
     return str_eq(s + n - m, sfx);
 }
 
+// the byte scan that finds every aliased name, before a token is lexed
+i64 ph_nmb(i64 c, i64 first) {
+    if (c >= 97 && c <= 122) return 1;
+    if (c >= 65 && c <= 90) return 1;
+    if (c == 95) return 1;
+    if (!first && c >= 48 && c <= 57) return 1;
+    return 0;
+}
+
+uptr ph_scan_name(uptr src, i64 len, uptr pi) {
+    i64 i = ld64(pi);
+    i64 st = i;
+    loop { if (i >= len) break; if (!ph_nmb(ld8(src + i), i == st)) break; i = i + 1; }
+    if (i == st) return 0;
+    uptr o = xalloc(i - st + 2);
+    st8(o, 36);
+    i64 k = 0;
+    loop { if (k >= i - st) break; st8(o + 1 + k, ld8(src + st + k)); k = k + 1; }
+    st8(o + 1 + (i - st), 0);
+    st64(pi, i);
+    return o;
+}
+
+void ph_scan_refs(uptr src, i64 len) {
+    i64 i = 0;
+    loop {
+        if (i >= len) break;
+        i64 c = ld8(src + i);
+        if (c == 38 && i + 1 < len && ld8(src + i + 1) == 36) {     // &$name
+            u8 pb[8];
+            st64(pb, i + 2);
+            uptr n = ph_scan_name(src, len, pb);
+            if (n) { ph_refset_add(n); i = ld64(pb); continue; }
+        }
+        if (c == 103 && i + 6 < len) {                              // global
+            if (ld8(src + i + 1) == 108 && ld8(src + i + 2) == 111 && ld8(src + i + 3) == 98
+                && ld8(src + i + 4) == 97 && ld8(src + i + 5) == 108 && !ph_nmb(ld8(src + i + 6), 0)) {
+                i64 j = i + 6;
+                loop {
+                    loop { if (j >= len) break; if (!ph_space(ld8(src + j))) break; j = j + 1; }
+                    if (j >= len || ld8(src + j) != 36) break;
+                    u8 pb2[8];
+                    st64(pb2, j + 1);
+                    uptr n2 = ph_scan_name(src, len, pb2);
+                    if (!n2) break;
+                    ph_refset_add(n2);
+                    ph_gset_add(n2);
+                    j = ld64(pb2);
+                    loop { if (j >= len) break; if (!ph_space(ld8(src + j))) break; j = j + 1; }
+                    if (j < len && ld8(src + j) == 44) { j = j + 1; continue; }
+                    break;
+                }
+                i = j;
+                continue;
+            }
+        }
+        i = i + 1;
+    }
+}
+
 void ph_on_source(uptr name, uptr src, i64 len) {
+    ph_scan_refs(src, len);
     if (ph_pushing) return;                  // the body of a require: <?php already eaten
     if (!ph_ends(name, ".php")) return;
     if (len >= 5 && str_eq(xstrdup(src, 5), "<?php")) return;
@@ -4555,6 +5066,7 @@ void user_init() {
     ty_pzv  = type_new("php_zval", 8, 8, TK_INT);
     ph_tokens();
     ph_lib_init();
+    ph_pre_init();
     syntax_expr("$", &ph_dollar_expr);            // makes `$name` lex as `$` + name
     on_source(&ph_on_source);
     syntax("<?php", &ph_program);

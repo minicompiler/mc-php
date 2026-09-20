@@ -1570,13 +1570,13 @@ uptr php_strrev(uptr s) {
     return o;
 }
 
-uptr php_str_pad(uptr s, i64 len, uptr pad, i64 type) {    // 0 right, 1 left, 2 both
+uptr php_str_pad(uptr s, i64 len, uptr pad, i64 type) {    // php: 0 left, 1 right, 2 both
     i64 n = php_strlen(s);
     i64 pl = php_strlen(pad);
     if (len <= n || pl == 0) return s;
     i64 need = len - n;
     i64 left = 0;
-    if (type == 1) left = need;
+    if (type == 0) left = need;
     if (type == 2) left = need / 2;
     i64 right = need - left;
     uptr o = php_str_alloc(len);
@@ -3986,4 +3986,228 @@ uptr php_catch_take() {
     ph_exc = 0;
     if (!z) return php_znull();
     return z;
+}
+
+f64 php_nan(i64 ignored) { return ph_unbits(0x7ff8000000000000); }
+f64 php_inf(i64 ignored) { return ph_unbits(0x7ff0000000000000); }
+
+// ---- the global variable table --------------------------------------------
+// `global $x` and a top-level variable a function reaches through it share
+// ONE zval, allocated once and never moved -- the hash stores the pointer, so
+// a rehash cannot invalidate an alias.
+uptr ph_globals;
+
+uptr php_gvar(uptr name) {
+    if (!ph_globals) ph_globals = php_arr_new(16);
+    uptr b = php_ht_find(ph_globals, php_str_hash(name), name);
+    if (b) return ld64(b);
+    uptr z = php_znull();
+    php_zv_cp(php_arr_sslot(ph_globals, name), php_zlong(z));
+    return z;
+}
+
+// a function `static`: one zval per declaration, initialised on the first call
+uptr php_static(uptr slot, uptr init) {
+    uptr z = ld64(slot);
+    if (z) return z;
+    z = php_zv_val(init);
+    st64(slot, z);
+    return z;
+}
+
+// ---- named runtime constants ----------------------------------------------
+uptr ph_consts;
+
+void php_const_set(uptr name, uptr v) {
+    if (!ph_consts) ph_consts = php_arr_new(16);
+    php_zv_cpv(php_arr_sslot(ph_consts, name), v);
+}
+
+uptr php_const_get(uptr name) {
+    if (!ph_consts) ph_consts = php_arr_new(16);
+    uptr b = php_ht_find(ph_consts, php_str_hash(name), name);
+    if (b) return b;
+    uptr m = php_str_concat(php_str_new("Undefined constant \"", 20), name);
+    m = php_str_concat(m, php_str_new("\"", 1));
+    php_throw_cls(php_str_new("Error", 5), m);
+    return php_znull();
+}
+
+u8 php_f_defined(uptr z) {
+    if (!ph_consts) return 0;
+    uptr n = php_zv_str(z);
+    if (php_ht_find(ph_consts, php_str_hash(n), n)) return 1;
+    return 0;
+}
+
+uptr php_f_constant(uptr z) { return php_const_get(php_zv_str(z)); }
+u8 php_f_define(uptr n, uptr v) { php_const_set(php_zv_str(n), v); return 1; }
+
+// ---- sprintf's conversions -------------------------------------------------
+// The FORMAT is a literal (D1), so the compiler walks it and emits one call
+// per conversion; this is the conversion itself. flags: 1 left, 2 plus,
+// 4 space, 8 zero-pad.
+#define SPF_LEFT  1
+#define SPF_PLUS  2
+#define SPF_SPACE 4
+#define SPF_ZERO  8
+
+uptr php_spf_pad(uptr s, i64 flags, i64 width, i64 pad) {
+    i64 n = php_strlen(s);
+    if (width <= n) return s;
+    uptr o = php_str_alloc(width);
+    i64 k = width - n;
+    if (flags & SPF_LEFT) {
+        php_memcpy(o + ZS_HDR, s + ZS_HDR, n);
+        i64 i = 0;
+        loop { if (i >= k) break; st8(o + ZS_HDR + n + i, 32); i = i + 1; }
+        return o;
+    }
+    // a zero pad goes AFTER the sign
+    i64 skip = 0;
+    if (pad == 48 && n > 0) {
+        i64 c0 = ld8(s + ZS_HDR);
+        if (c0 == 45 || c0 == 43) skip = 1;
+    }
+    if (skip) st8(o + ZS_HDR, ld8(s + ZS_HDR));
+    i64 i2 = 0;
+    loop { if (i2 >= k) break; st8(o + ZS_HDR + skip + i2, pad); i2 = i2 + 1; }
+    php_memcpy(o + ZS_HDR + skip + k, s + ZS_HDR + skip, n - skip);
+    return o;
+}
+
+uptr php_spf_sign(uptr s, i64 flags, i64 neg) {
+    if (neg) return s;
+    if (flags & SPF_PLUS) return php_str_concat(php_str_new("+", 1), s);
+    if (flags & SPF_SPACE) return php_str_concat(php_str_new(" ", 1), s);
+    return s;
+}
+
+// %e / %E, php's own: one digit, the point, `prec` digits, e+NN
+uptr php_spf_e(f64 x, i64 prec, i64 up) {
+    i64 neg = 0;
+    if ((ph_bits(x) >> 63) != 0) { neg = 1; x = 0.0 - x; }
+    if (ph_is_nan(x)) return php_str_new("NAN", 3);
+    if (ph_is_inf(x)) { if (neg) return php_str_new("-INF", 4); return php_str_new("INF", 3); }
+    u8 pe[8];
+    i64 d = 0;
+    i64 e = 0;
+    if (x != 0.0) { d = ph_digits(x, prec + 1, pe); e = ld64(pe) + prec; }
+    u8 t[64];
+    i64 k = 0;
+    u8 dg[32];
+    i64 nd = 0;
+    i64 u = d;
+    loop { st8(dg + nd, 48 + u % 10); u = u / 10; nd = nd + 1; if (u == 0) break; }
+    loop { if (nd >= prec + 1) break; st8(dg + nd, 48); nd = nd + 1; }
+    if (neg) { st8(t + k, 45); k = k + 1; }
+    st8(t + k, ld8(dg + nd - 1));
+    k = k + 1;
+    if (prec > 0) {
+        st8(t + k, 46);
+        k = k + 1;
+        i64 i = 1;
+        loop { if (i > prec) break; st8(t + k, ld8(dg + nd - 1 - i)); k = k + 1; i = i + 1; }
+    }
+    st8(t + k, 101);
+    if (up) st8(t + k, 69);
+    k = k + 1;
+    if (e < 0) { st8(t + k, 45); e = 0 - e; } else { st8(t + k, 43); }
+    k = k + 1;
+    uptr es = php_itos(e);
+    if (php_strlen(es) < 1) es = php_str_new("0", 1);
+    php_memcpy(t + k, es + ZS_HDR, php_strlen(es));
+    k = k + php_strlen(es);
+    return php_str_new(t, k);
+}
+
+// %f, with an explicit precision
+uptr php_spf_f(f64 x, i64 prec) {
+    if (ph_is_nan(x)) return php_str_new("NAN", 3);
+    if (ph_is_inf(x)) { if (x < 0.0) return php_str_new("-INF", 4); return php_str_new("INF", 3); }
+    i64 neg = 0;
+    if ((ph_bits(x) >> 63) != 0) { neg = 1; x = 0.0 - x; }
+    f64 sc = ph_pow10(prec);
+    f64 r = x * sc;
+    // the integer part can exceed i64; fall back to the shortest form there
+    if (r >= 9.2233720368547758e18) return php_ftos(x);
+    // printf rounds half to EVEN, like the C library php calls: 2.25 with one
+    // decimal is 2.2 and not 2.3
+    u64 iv = (u64) r;
+    f64 fr = r - (f64) iv;
+    if (fr > 0.5) iv = iv + 1;
+    if (fr == 0.5) { if (iv & 1) iv = iv + 1; }
+    uptr ds = php_itos(iv);
+    i64 dn = php_strlen(ds);
+    uptr dv = ds + ZS_HDR;
+    i64 ip = dn - prec;
+    uptr o = php_str_alloc(neg + prec + 2 + dn);
+    i64 w = 0;
+    if (neg) { st8(o + ZS_HDR, 45); w = 1; }
+    if (ip <= 0) {
+        st8(o + ZS_HDR + w, 48);
+        w = w + 1;
+    }
+    i64 i = 0;
+    loop { if (i >= ip) break; st8(o + ZS_HDR + w, ld8(dv + i)); w = w + 1; i = i + 1; }
+    if (prec > 0) {
+        st8(o + ZS_HDR + w, 46);
+        w = w + 1;
+        i64 z = 0;
+        loop { if (z >= 0 - ip) break; st8(o + ZS_HDR + w, 48); w = w + 1; z = z + 1; }
+        i64 j = ip;
+        if (j < 0) j = 0;
+        loop { if (j >= dn) break; st8(o + ZS_HDR + w, ld8(dv + j)); w = w + 1; j = j + 1; }
+    }
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
+    return o;
+}
+
+uptr php_spf(uptr z, i64 flags, i64 width, i64 prec, i64 conv, i64 pad) {
+    uptr s = 0;
+    i64 neg = 0;
+    if (conv == 's') {
+        s = php_zv_str(z);
+        if (prec >= 0 && php_strlen(s) > prec) s = php_str_new(s + ZS_HDR, prec);
+    }
+    if (conv == 'd' || conv == 'i') {
+        i64 v = php_zv_long(z);
+        if (v < 0) neg = 1;
+        s = php_itos(v);
+    }
+    if (conv == 'u') {
+        u64 v2 = php_zv_long(z);
+        s = php_tobase(v2, 10);
+    }
+    if (conv == 'x') s = php_tobase(php_zv_long(z), 16);
+    if (conv == 'X') s = php_case(php_tobase(php_zv_long(z), 16), 1);
+    if (conv == 'o') s = php_tobase(php_zv_long(z), 8);
+    if (conv == 'b') s = php_tobase(php_zv_long(z), 2);
+    if (conv == 'c') { i64 cv = php_zv_long(z); s = php_chr(cv); }
+    if (conv == 'f' || conv == 'F') {
+        i64 p = 6;
+        if (prec >= 0) p = prec;
+        f64 x = php_zv_double(z);
+        if (x < 0.0) neg = 1;
+        s = php_spf_f(x, p);
+    }
+    if (conv == 'e' || conv == 'E') {
+        i64 p2 = 6;
+        if (prec >= 0) p2 = prec;
+        f64 x2 = php_zv_double(z);
+        if (x2 < 0.0) neg = 1;
+        s = php_spf_e(x2, p2, conv == 'E');
+    }
+    if (conv == 'g' || conv == 'G') {
+        i64 p3 = 6;
+        if (prec > 0) p3 = prec;
+        u8 b[64];
+        i64 n = php_fmt_f64(b, php_zv_double(z), p3);
+        s = php_str_new(b, n);
+        if (conv == 'g') s = php_case(s, 0);
+    }
+    if (!s) s = php_zv_str(z);
+    if (conv == 'd' || conv == 'f' || conv == 'F' || conv == 'e' || conv == 'E') s = php_spf_sign(s, flags, neg);
+    return php_spf_pad(s, flags, width, pad);
 }
