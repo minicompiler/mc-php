@@ -5971,7 +5971,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
                 if (nabs > 1) ph_phpfatal(mfl2, mln2, "Multiple abstract modifiers are not allowed"); continue; }
             if (ph_is("final"))    { ph_next(); mflags = mflags | 2; nfin = nfin + 1;
                 if (nfin > 1) ph_phpfatal(mfl2, mln2, "Multiple final modifiers are not allowed"); continue; }
-            if (ph_is("readonly")) { ph_next(); continue; }
+            if (ph_is("readonly")) { ph_next(); mflags = mflags | 4; continue; }
             if (ph_is("static"))   { ph_next(); stat = 1; nstat = nstat + 1;
                 if (nstat > 1) ph_phpfatal(mfl2, mln2, "Multiple static modifiers are not allowed"); continue; }
             i64 v = ph_visword();
@@ -6074,6 +6074,8 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             ph_cfill(ph_stmt_of(ph_c4(fn, ph_ceref(ceg), ph_strlit(pname, cstrlen(pname)), def, ph_int(vis), TY_VOID)));
             // php reports a PROPERTY's #[\Override] at the CLASS's own line
             // and a method's at the method's (measured, php 8.5.10)
+            if (mflags & 4)
+                ph_cfill(ph_stmt_of(ph_c2("php_ce_ro", ph_ceref(ceg), ph_strlit(pname, cstrlen(pname)), TY_VOID)));
             if (movr) ph_ovr_check(ceg, cname, pname, 1, fl, line);
             if (!ph_accept(",", 1)) break;
         }
@@ -6121,10 +6123,11 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     loop {
         if (ph_at(")", 1)) break;
         i64 pvis = -1;
+        i64 pro = 0;
         loop {
             i64 v = ph_visword();
             if (v >= 0) { pvis = v; continue; }
-            if (ph_is("readonly")) { ph_next(); if (pvis < 0) pvis = V_PUBLIC; continue; }
+            if (ph_is("readonly")) { ph_next(); pro = 1; if (pvis < 0) pvis = V_PUBLIC; continue; }
             break;
         }
         if (ph_at("...", 3)) ph_todo(fl, line, "a variadic parameter ...$args");
@@ -6170,6 +6173,7 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
             uptr bare = d + 1;
             ph_cfill(ph_stmt_of(ph_c4("php_ce_prop", ph_ceref(ceg), ph_strlit(bare, cstrlen(bare)),
                                       ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv), ph_int(pvis), TY_VOID)));
+            if (pro) ph_cfill(ph_stmt_of(ph_c2("php_ce_ro", ph_ceref(ceg), ph_strlit(bare, cstrlen(bare)), TY_VOID)));
             i64 pr2 = node_new(N_IDENT, line, fl);
             set_nd_name(pr2, ph_mangle(d, "v_"));
             set_nd_type(pr2, ty_pzv);

@@ -3883,8 +3883,9 @@ uptr php_f_strrev_z(uptr z) { return php_strrev(php_zv_str(z)); }
 //   72 vis      HashTable  member name -> long(vis*8 + kind), vis 0/1/2
 //   80 magic    HashTable  lowercased name -> long(fn) for __get and friends
 //   88 cases    HashTable  an enum's cases, name -> the case object
+//   96 ro       HashTable  a readonly property's name -> its DECLARING ce
 // ============================================================================
-#define CE_SIZE 96
+#define CE_SIZE 104
 
 uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6);
 uptr php_obj_get(uptr o, uptr name, uptr scope);
@@ -3912,6 +3913,7 @@ uptr php_ce_new(uptr name) {
     st64(ce + 72, php_arr_new(8));
     st64(ce + 80, php_arr_new(8));
     st64(ce + 88, php_arr_new(8));
+    st64(ce + 96, php_arr_new(8));
     uptr lk = php_case(name, 0);
     php_zv_cp(php_arr_sslot(php_ce_reg(), lk), php_zlong(ce));
     return ce;
@@ -3947,6 +3949,39 @@ void php_ce_method(uptr ce, uptr name, i64 fn, i64 vis) {
     if (php_str_eq(l, php_str_new("__tostring", 10))) st64(ce + 16, fn);
     if (php_strlen(l) > 2 && ld8(l + ZS_HDR) == 95 && ld8(l + ZS_HDR + 1) == 95)
         php_zv_cp(php_arr_sslot(ld64(ce + 80), l), php_zlong(fn));
+}
+
+// `public readonly int $x`: the name, against the class that DECLARED it --
+// php names the declarer in the message even when the object is a subclass.
+void php_ce_ro(uptr ce, uptr name) {
+    php_zv_cp(php_arr_sslot(ld64(ce + 96), name), php_zlong(ce));
+}
+
+// the declaring ce of a readonly property, 0 when it is not one
+uptr php_ro_of(uptr ce, uptr name) {
+    uptr c = ce;
+    loop {
+        if (!c) break;
+        uptr b = php_ht_find(ld64(c + 96), php_str_hash(name), name);
+        if (b) return ld64(b);
+        c = ld64(c + 8);
+    }
+    return 0;
+}
+
+// php allows exactly one write, from inside the declaring scope. D7 has no
+// per-object "initialised" bitmap, so the test is the VALUE: a readonly
+// property still null has not been written. A readonly property deliberately
+// initialised to null and written again is the one case this lets through.
+i64 php_ro_check(uptr ce, uptr name, uptr scope, i64 written) {
+    uptr d = php_ro_of(ce, name);
+    if (!d) return 0;
+    if (d == scope && !written) return 0;
+    uptr m = php_str_concat(php_str_new("Cannot modify readonly property ", 32), ld64(d));
+    m = php_str_concat(m, php_str_new("::$", 3));
+    m = php_str_concat(m, name);
+    php_throw_str(php_str_new("Error", 5), m);
+    return 1;
 }
 
 void php_ce_prop(uptr ce, uptr name, uptr def, i64 vis) {
@@ -4162,6 +4197,13 @@ void php_obj_set(uptr o, uptr name, uptr v, uptr scope) {
         if (sfn) { callp(ld64(sfn), o, php_zstr(name), v); return; }
     }
     if (b && !php_vis_ok(ce, name, scope)) php_vis_die(ce, name, php_str_new("property", 8));
+    // readonly: refused from outside the declaring scope, and inside it only
+    // while the property has not been written (see php_ro_check)
+    if (b) {
+        i64 was = 1;
+        if (php_zv_type(b) == IS_NULL) was = 0;
+        if (php_ro_check(ce, name, scope, was)) return;
+    }
     php_zv_cpv(php_arr_sslot(php_obj_props(o), name), v);
 }
 
