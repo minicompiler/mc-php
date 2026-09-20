@@ -165,3 +165,86 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   here measured a binary that was being rebuilt underneath it.
   Fixtures: **30 of 30** under `g/` byte for byte php's on both streams, **5 of 5** under `r/`
   refused by name with exit 3; `lencheck` 97 / 0 wrong, `aritycheck` 179 / 0 wrong.
+- T8 done (`probes/t8`), on **mc 1.1.0**: the block T7 named -- `(does not compile)`, 878 of
+  1460 sampled `wrong` tests -- taken apart group by group, and the 288 missing names worked in
+  descending frequency. **green 1218 -> 1450**:
+  `phpt: green 1450 / wrong 13607 / refused 3026 / skip 2947 / php-fail 365 / total 21030` over the whole
+  corpus; per directory `tests/lang` 93 (was 82), `Zend/tests` 635 (was 539),
+  `ext/standard/tests/strings` 223 (was 194). **1441 of the 1450 greens are in T0's "touched
+  by none" set**; `refused` rose 2917 -> 3026 and `wrong` fell 13968 -> 13607, which is a test
+  that now COMPILES getting far enough to hit a design refusal it never reached before. The
+  `php-fail` column is php's OWN and this run had 365 against the previous run's 346 -- the
+  machine was loaded, and five of the nineteen were green in that run and are green again when
+  re-run with the same binary, so the tree's number is 1455 and 1450 is what the loaded run
+  measured. Two sub-populations moved without being targets: the 4647 tests that assert a php
+  diagnostic go 71 -> 83 and the 333 that mention `__destruct` go 11 -> 14.
+  **`probes/t8/nocompile.py`** (new) is what made the block workable: `whytable.py` prints its
+  head as a flat top-22 with no way back to a file, and this reads the SAME `why.tsv` -- so no
+  compiler run is repeated -- masks the variable part of each message, groups, and prints the
+  count with three example files per group.
+  * **References, 83 of the sample across four messages, the biggest single theme.** A
+    by-reference parameter is FREE once the caller's variable is a zval -- a `mixed` local
+    already holds a zval pointer and a ref writes THROUGH it (`php_zv_store`), the mechanism
+    `$a = &$b` and `global $x` have used since T6 -- and what was missing is that nothing made
+    the CALLER's variable one. The source scan grew two passes: `ph_scan_brf` finds every
+    `function name(... &$x ...)` (its own pass, because a call may come before the declaration)
+    and `ph_scan_brf_calls` puts every `$variable` inside the parentheses of a call to one of
+    them into the ref set. It does not track argument POSITIONS: over-marking costs a zval and
+    nothing else, which is what the rule above it already costs. An UNBOUND name passed by
+    reference is CREATED rather than read (php does not warn for one), which is what makes an
+    output parameter work. With that in place: `use (&$x)` (the capture is the enclosing zval's
+    ADDRESS, carried through the use array as an integer -- the array slot `php_arr_set` writes
+    is a different cell and could not alias), a by-reference METHOD parameter (free: every
+    method parameter is already a zval pointer) and `function &f()` (D7 has no refcount, so what
+    `&` can mean is that the value is not copied on the way out).
+  * **The lvalue chain, 71.** `ph_lv_walk` walked `[k]` only, so `$a[0]->p = 1`, `$t->x[0][0]`
+    and `$c = &$t->list` had nowhere to go; it walks `[k]` and `->p` in any order and to any
+    depth now and answers a container plus either a key or a property name. `isset`/`empty` read
+    the same chain QUIETLY -- php warns for nothing either touches, and what is not there reads
+    as null, which is the answer both want.
+  * **A method's `: void`, 37.** `ph_skip_type` tested `ph_tid == T_IDENT` and `void` is one of
+    mc's OWN keywords, so the skip consumed nothing and the body's `{` was never reached.
+  * The **alternative syntax** (all five, one helper), **`list()`/`[$a,$b] =`** (the pattern
+    collected first, as a flat list of paths), **anonymous classes** (an ordinary declaration
+    under a generated name; the constructor arguments sit between the keyword and `extends`),
+    **a compound assignment to an array element** (`??=`, `++` and `--` too), **`@` on a
+    STATEMENT**, **`$s[9] = "x"`**, **`$f();` as a statement** (`ph_expr` split into its primary
+    half and `ph_expr_tail`), **`int ...$n`**.
+  * **The names.** Files and streams -- the biggest block, 39 library rows over a php
+    `resource`, which is a zval of type `IS_RESOURCE` indexing one table; mc's `open` is not
+    variadic, so a create is `creat()` + reopen. `pack`/`unpack` (every code with its repeater;
+    the byte orders spelled out rather than probed, because a compiled program must give the
+    same answer on all five targets). Output buffering, which NESTS -- it was one level, a
+    capture for `print_r($x, true)`, so `ob_start(); print_r($x, true);` lost the outer buffer.
+    `get_html_translation_table` with php's own 253 entries. `fprintf`/`vfprintf`,
+    `serialize`/`unserialize`, `settype`, `parse_str`, `array_splice`, `str_getcsv`,
+    `str_decrement`, `uniqid`, `quoted_printable_*`, `convert_uu*`, `mb_internal_encoding`, and
+    **`func_num_args`/`func_get_arg`** -- answered inside the callee from its own parameters,
+    which needs no run-time type table (`func_get_args` IS named by D6 and stays refused; the
+    measurement is in `docs/plan.md` D6 and the decision is the owner's).
+  * **Four defects the blocks found, none of them in the block being built.** (1) The source
+    scans read BYTES and a comment is not code: one line of the RUNTIME's own commentary --
+    `// array_splice(&$a, offset, ...)` -- put `$a` in the ref set, so every `$a` in every
+    program became a zval and the D4 refusal `$a = "one"; $a = 1;` stopped firing;
+    `probes/t8/r/d4-retype.php` caught it. `ph_scan_hop` skips `//`, `#` (but not `#[`),
+    `/* */` and both quote forms. (2) The unwinding check was missing on `return` -- T6's rule
+    is that it goes BETWEEN computing a value and using it, and the return statement put it
+    after, where nothing runs, so `return f();` inside a `try` left the exception pending.
+    (3) A class member's DEFAULT may be an array literal, and an array literal is pending
+    statements plus a local: `public $x = [1, 2];` captured the local before those ran, so the
+    property came out `array(0)` and, with another array literal earlier in the file, the
+    program SEGFAULTED. (4) `lencheck` did not cover `php_str_new("...", N)`, which is how most
+    of the runtime spells a literal: three lengths were wrong, one of them ten bytes long.
+    100 pairs -> 418.
+  * **A node may appear in an mc AST ONCE**, which is not written down anywhere: the arguments
+    of a call are its SIBLING chain, so sharing a hoisted container between the read and the
+    write of a compound assignment made the chain a CYCLE -- a stack overflow in the walker and
+    not a diagnostic.
+  **No new mc gap**; the one T5 reported is unchanged, 38 of 21219. `php.mc` calls 58 names
+  from outside itself: 48 frozen, four core intrinsics (`ld8`/`ld64`/`st8`/`st64`), three
+  `<float>`'s, and three libc -- `write` and `exit` (T7's) plus `realpath`, which `<mc/host>`
+  declares and which php needs because it reports the path it RESOLVED (on macOS every
+  diagnostic under `/tmp` printed the wrong one of `/tmp` and `/private/tmp`).
+  Fixtures: **46 of 46** under `g/` byte for byte php's on both streams and the exit code,
+  **5 of 5** under `r/` refused by name with exit 3; `lencheck` 418 / 0 wrong, `aritycheck`
+  241 / 0 wrong.

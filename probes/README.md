@@ -200,3 +200,50 @@ and printed the wrong thing**. T7 builds the first and takes the second apart.
   a documented difference.
 
 `sh probes/t7/run.sh`. Details: `probes/t7/RESULTS.md`.
+
+## T8 -- the wall was `(does not compile)`, and it is not any more
+
+**green 1218 -> 1450:**
+`phpt: green 1450 / wrong 13607 / refused 3026 / skip 2947 / php-fail 365 / total 21030`
+over the whole corpus. Per directory: `tests/lang` **93** (was 82), `Zend/tests` **635**
+(was 539), `ext/standard/tests/strings` **223** (was 194). **1441 of the 1450 greens are in
+T0's "touched by none" set.** `refused` rose 2917 -> 3026 and `wrong` fell 13968 -> 13607: a
+test that now COMPILES gets far enough to hit a design refusal it never reached before. The
+`php-fail` column is php's OWN and this run had 365 against the previous run's 346 -- the
+machine was loaded; five of the nineteen were green in that run and are green again when
+re-run with the same binary, so the tree's number is 1455.
+
+T7 left one number pointing at what to do next: **878 of 1460 sampled `wrong` tests DO NOT
+COMPILE**, of which **288 name a php function or constant mc-php does not have**. T8 takes the
+first apart, group by group, and works the second in descending frequency.
+
+* **`probes/t8/nocompile.py`** (new) is what made the block workable: `whytable.py` prints its
+  head as a flat top-22 with no way back to a file, and this reads the SAME `why.tsv`, masks the
+  variable part of each message, groups, and prints the count with **three example files per
+  group**.
+* **References**, 83 of the sample across four messages, and the biggest single theme. A
+  by-reference parameter is FREE once the caller's variable is a zval, and what was missing is
+  that nothing made it one: the source scan grew two passes, one that finds every
+  `function name(... &$x ...)` and one that puts every `$variable` inside a call to one of them
+  into the ref set. With that, `use (&$x)`, a by-reference METHOD parameter and `function &f()`
+  were small.
+* **The lvalue chain**, 71. `ph_lv_walk` walked `[k]` only, so `$a[0]->p = 1`, `$t->x[0][0]` and
+  `$c = &$t->list` had nowhere to go; it walks `[k]` and `->p` in any order and to any depth now,
+  and `isset`/`empty` read the same chain QUIETLY.
+* **A method's `: void`**, 37 -- `ph_skip_type` tested `T_IDENT` and `void` is one of mc's OWN
+  keywords, so the skip consumed nothing.
+* **The alternative syntax** (all five), **`list()`/`[$a,$b] =`**, **anonymous classes**,
+  **a compound assignment to an array element**, **`@` on a statement**, **`$s[9] = "x"`**,
+  **`$f();` as a statement**.
+* **The names**: files and streams (39 library rows over a php `resource`, which is a zval of
+  type `IS_RESOURCE` indexing one table), `pack`/`unpack` (every code, with its repeater),
+  output buffering that NESTS, `get_html_translation_table` with php's own 253 entries,
+  `fprintf`/`vfprintf`, `serialize`/`unserialize`, `func_num_args`/`func_get_arg`, and nine more.
+* **Four defects the blocks found**, none of them in the block being built: the source scans
+  read BYTES and a comment is not code (one line of the runtime's own commentary put `$a` in the
+  ref set and silenced a D4 refusal); the unwinding check was missing on `return`, so
+  `return f();` inside a `try` left the exception pending; a class member's default that is an
+  ARRAY literal captured its local before the literal was built, which segfaulted; and
+  `lencheck` did not cover `php_str_new("...", N)`, where three lengths were wrong.
+
+`sh probes/t8/run.sh`. Details: `probes/t8/RESULTS.md`.
