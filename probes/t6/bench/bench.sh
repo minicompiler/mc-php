@@ -48,6 +48,13 @@ echo "  without    $wo"
 [ "$w" = "$pp" ] || { echo "bench: mc-php disagrees with php"; exit 1; }
 [ "$wo" = "$pp" ] || { echo "bench: the no-check build disagrees with php"; exit 1; }
 
+echo "== the static cost: instructions in the hot function =="
+for b in "probes/t6/mc-php" "$tmp/mc-php-nocheck"; do
+    printf '  %-16s f_mix: %s instructions\n' "$(basename "$b")" \
+        "$("$b" --dump-asm probes/t6/bench/unwind.php 2>/dev/null \
+           | awk '/^_f_mix:/{f=1;next} /^_[a-z]/{f=0} f' | wc -l | tr -d ' ')"
+done
+
 echo "== $REPS interleaved repetitions, seconds =="
 python3 - "$tmp/with" "$tmp/without" "$PHP" probes/t6/bench/unwind.php "$REPS" <<'PY'
 import statistics, subprocess, sys, time

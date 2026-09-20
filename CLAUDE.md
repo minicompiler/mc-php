@@ -75,3 +75,24 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   `tests/golden/surface.txt` and the three that are not are `<float>`'s. One new gap is reported
   in `docs/plan.md` § 5: nothing can own the bytes before the FIRST token, so a `.php` opening
   with inline HTML is refused by name (38 of 21219 `.phpt`).
+- T6 done (`probes/t6`), on **mc 1.1.0**: T5's wrong-reason table worked in descending value, and
+  re-measured. **green 80 -> 1073**:
+  `phpt: green 1073 / wrong 13374 / refused 3657 / skip 2947 / php-fail 344 / total 21051` over the
+  whole corpus; per directory `tests/lang` 74 (was 12), `Zend/tests` 452 (was 38),
+  `ext/standard/tests/strings` 180 (was 12). 1066 of the 1073 greens are in T0's "touched by none"
+  set. Six blocks, one commit each: a zval and php's ordered hash (`mixed` is a php type whose
+  lowering is a zval, which answers three of the four places T5 said D4 had no answer);
+  classes/interfaces/traits/enums/objects reached BY NAME through a registry (dispatch, not
+  reflection -- D6); functions `mixed` by default with defaults, variadics and closures;
+  exceptions over a pending-exception flag (there is no VM and no setjmp: mc targets a board with
+  no libc, and the flag is measured against the alternative in `probes/t6/bench/`); constants,
+  references, `static`/`global`, heredoc, `switch`, `match`, the full `printf`; and a library
+  table of 173 rows whose arity invariant the probe checks. `probes/t5/` is untouched and still
+  reproduces its own number; `probes/t6/` is its two files grown, 2541 + 843 -> 5477 + 5022, and
+  it calls 51 names from outside itself, 48 frozen and 3 `<float>`'s. **No new mc gap**; the one
+  T5 reported (nothing can own the bytes before the FIRST token) is unchanged, 38 of 21219.
+  Two decisions measured rather than assumed: a php array is a VALUE and D7 removed the mechanism
+  php uses for it, so T6 copies EAGERLY and the arena is exhausted between 500 and 1000 copies of
+  a 2000-element array; and 4657 of the 21386 tests with an expect section (21.8%) assert a
+  `Warning:`/`Deprecated:`/`Notice:`/`Fatal error:` line, which T6 does not produce and which is
+  the largest single item left for T7.

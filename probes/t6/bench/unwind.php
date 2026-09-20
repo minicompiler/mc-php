@@ -21,8 +21,8 @@ function mix(int $n): int {
 
 $total = 0;
 $r = 0;
-while ($r < 40) {
-    $total = ($total + mix(20000)) & 0xffffff;
+while ($r < 20) {
+    $total = ($total + mix(1000000)) & 0xffffff;
     $r = $r + 1;
 }
 echo $total, "\n";

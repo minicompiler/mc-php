@@ -33,7 +33,10 @@ fail=0
 MCPHP_TMP=${TMPDIR:-/tmp}/mcphp-t6.$$
 export MCPHP_TMP
 mkdir -p "$MCPHP_TMP"
-trap 'rm -rf "$MCPHP_TMP"' EXIT INT TERM
+# and swept WHILE it runs: 21395 binaries is about 6 GB otherwise
+( while [ -d "$MCPHP_TMP" ]; do find "$MCPHP_TMP" -type f -mmin +1 -delete 2>/dev/null; sleep 20; done ) &
+sweeper=$!
+trap 'kill "$sweeper" 2>/dev/null; rm -rf "$MCPHP_TMP"' EXIT INT TERM
 
 [ -d "$SRC" ] || { echo "T6: no php-src -- clone php-8.5.10 at the repository root"; exit 1; }
 "$MC" --version

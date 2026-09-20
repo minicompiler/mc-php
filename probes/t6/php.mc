@@ -2973,6 +2973,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         tail = v;
         i = i + 1;
     }
+    ph_can_throw = 1;
     i64 c = node_new(N_CALL, line, fl);
     set_nd_name(c, ph_mangle(name, "f_"));
     set_nd_a(c, head);
