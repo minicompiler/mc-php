@@ -28,6 +28,13 @@ OUT=probes/t6/out
 JOBS=${T6_JOBS:-12}
 fail=0
 
+# mcphp.sh EXECs the program it compiled, so it cannot clean up after itself:
+# the binaries land here and this is what sweeps them.
+MCPHP_TMP=${TMPDIR:-/tmp}/mcphp-t6.$$
+export MCPHP_TMP
+mkdir -p "$MCPHP_TMP"
+trap 'rm -rf "$MCPHP_TMP"' EXIT INT TERM
+
 [ -d "$SRC" ] || { echo "T6: no php-src -- clone php-8.5.10 at the repository root"; exit 1; }
 "$MC" --version
 "$PHP" --version | head -1

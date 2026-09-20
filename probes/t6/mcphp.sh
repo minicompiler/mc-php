@@ -24,9 +24,11 @@ MCPHP=${MCPHP_BIN:-$here/mc-php}
 src=$1
 shift
 
-tmp=${TMPDIR:-/tmp}/mcphp.$$.$(basename "$src" .php)
+# The binaries go in one directory the caller sweeps (MCPHP_TMP), because the
+# shell EXECs the program below and so cannot clean up after it.
+dir=${MCPHP_TMP:-${TMPDIR:-/tmp}}
+tmp=$dir/mcphp.$$.$(basename "$src" .php)
 err=$tmp.err
-trap 'rm -f "$tmp" "$err"' EXIT INT TERM
 
 if ! "$MCPHP" --exe "$src" -o "$tmp" 2> "$err"; then
     cat "$err" >&2
@@ -34,16 +36,10 @@ if ! "$MCPHP" --exe "$src" -o "$tmp" 2> "$err"; then
     exit 2
 fi
 
-# A compiled program is bounded HERE and not only by the harness: python's
-# subprocess timeout kills the shell it spawned, not the binary the shell
-# spawned, so a program that loops for ever survives its own test and eats a
-# core until the machine is rebooted. Measured the hard way.
-"$tmp" "$@" &
-prog=$!
-( sleep "${MCPHP_TIMEOUT:-10}"; kill -9 "$prog" 2>/dev/null ) &
-dog=$!
-wait "$prog"
-rc=$?
-kill "$dog" 2>/dev/null
-wait "$dog" 2>/dev/null
-exit $rc
+rm -f "$err"
+# EXEC, so this shell BECOMES the program: python's subprocess timeout kills
+# the process it spawned, and a program that loops for ever must be that same
+# process. Without the exec the timeout killed the shell and left the binary
+# spinning -- eleven of them had accumulated across three grid runs before
+# this was measured. The binary is left behind for the caller to sweep.
+exec "$tmp" "$@"
