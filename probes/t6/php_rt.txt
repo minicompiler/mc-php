@@ -1628,8 +1628,11 @@ i64  php_obj_id(uptr o) { return ld32(o + 8); }
 //                 40 property defaults | 48 interfaces | 56 constants
 uptr php_obj_tostr(uptr o) {
     uptr ce = ld64(o + 16);
-    uptr f = ld64(ce + 16);
-    if (f) return callp(f, o);
+    uptr f = 0;
+    uptr c = ce;
+    loop { if (!c) break; if (ld64(c + 16)) { f = ld64(c + 16); break; } c = ld64(c + 8); }
+    // __toString answers a zval; every caller here wants the zend_string
+    if (f) return php_zv_str(callp(f, o));
     uptr m = php_str_concat(php_str_new("Object of class ", 16), ld64(ce));
     m = php_str_concat(m, php_str_new(" could not be converted to string", 33));
     php_throw_str(php_str_new("Error", 5), m);
@@ -3132,3 +3135,646 @@ i64 php_f_noop(uptr a) { return 0; }
 uptr php_f_nullf(uptr a) { return php_znull(); }
 u8 php_f_false1(uptr a) { return 0; }
 uptr php_f_strrev_z(uptr z) { return php_strrev(php_zv_str(z)); }
+
+// ============================================================================
+// Objects: classes, interfaces, traits and enums.
+//
+// The class entry is built at program start by code the compiler emits, and
+// every lookup is BY NAME through a registry. That is not reflection (D6): the
+// name is a literal in the source, and there is no run-time type table a
+// program can enumerate -- `get_class_methods` and friends stay refused.
+//
+// ce layout:
+//    0 name     zend_string*
+//    8 parent   ce*        (0 at the root)
+//   16 tostr    fn         (__toString, or 0)
+//   24 methods  HashTable  lowercased name -> long(fn)
+//   32 statics  HashTable  name -> zval
+//   40 props    HashTable  name -> the default zval, in declaration order
+//   48 ifaces   HashTable  lowercased name -> true
+//   56 consts   HashTable  name -> zval
+//   64 flags    long       1 abstract, 2 final, 4 interface, 8 enum, 16 backed
+//   72 vis      HashTable  member name -> long(vis*8 + kind), vis 0/1/2
+//   80 magic    HashTable  lowercased name -> long(fn) for __get and friends
+//   88 cases    HashTable  an enum's cases, name -> the case object
+// ============================================================================
+#define CE_SIZE 96
+#define V_PUBLIC    0
+#define V_PROTECTED 1
+#define V_PRIVATE   2
+
+uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6);
+uptr php_obj_get(uptr o, uptr name, uptr scope);
+
+uptr ph_classes;
+
+uptr php_ce_reg() {
+    if (!ph_classes) ph_classes = php_arr_new(16);
+    return ph_classes;
+}
+
+uptr php_ce_new(uptr name) {
+    uptr ce = php_alloc(CE_SIZE);
+    st64(ce, name);
+    st64(ce + 8, 0);
+    st64(ce + 16, 0);
+    st64(ce + 24, php_arr_new(8));
+    st64(ce + 32, php_arr_new(8));
+    st64(ce + 40, php_arr_new(8));
+    st64(ce + 48, php_arr_new(8));
+    st64(ce + 56, php_arr_new(8));
+    st64(ce + 64, 0);
+    st64(ce + 72, php_arr_new(8));
+    st64(ce + 80, php_arr_new(8));
+    st64(ce + 88, php_arr_new(8));
+    uptr lk = php_case(name, 0);
+    php_zv_cp(php_arr_sslot(php_ce_reg(), lk), php_zlong(ce));
+    return ce;
+}
+
+uptr php_ce_find(uptr name) {
+    if (!ph_classes) return 0;
+    uptr b = php_ht_find(ph_classes, php_str_hash(php_case(name, 0)), php_case(name, 0));
+    if (!b) return 0;
+    return ld64(b);
+}
+
+void php_ce_extend(uptr ce, uptr pname) {
+    uptr p = php_ce_find(pname);
+    if (!p) {
+        uptr m = php_str_concat(php_str_new("Class \"", 7), pname);
+        m = php_str_concat(m, php_str_new("\" not found", 11));
+        php_fatal(m);
+    }
+    st64(ce + 8, p);
+}
+
+void php_ce_method(uptr ce, uptr name, i64 fn, i64 vis) {
+    php_zv_cp(php_arr_sslot(ld64(ce + 24), php_case(name, 0)), php_zlong(fn));
+    php_zv_cp(php_arr_sslot(ld64(ce + 72), php_case(name, 0)), php_zlong(vis * 8 + 1));
+    uptr l = php_case(name, 0);
+    if (php_str_eq(l, php_str_new("__tostring", 10))) st64(ce + 16, fn);
+    if (php_strlen(l) > 2 && ld8(l + ZS_HDR) == 95 && ld8(l + ZS_HDR + 1) == 95)
+        php_zv_cp(php_arr_sslot(ld64(ce + 80), l), php_zlong(fn));
+}
+
+void php_ce_prop(uptr ce, uptr name, uptr def, i64 vis) {
+    php_zv_cpv(php_arr_sslot(ld64(ce + 40), name), def);
+    php_zv_cp(php_arr_sslot(ld64(ce + 72), name), php_zlong(vis * 8));
+}
+
+void php_ce_sprop(uptr ce, uptr name, uptr def, i64 vis) {
+    php_zv_cpv(php_arr_sslot(ld64(ce + 32), name), def);
+    php_zv_cp(php_arr_sslot(ld64(ce + 72), name), php_zlong(vis * 8 + 2));
+}
+
+void php_ce_const(uptr ce, uptr name, uptr v) { php_zv_cpv(php_arr_sslot(ld64(ce + 56), name), v); }
+void php_ce_iface(uptr ce, uptr name) { php_zv_cp(php_arr_sslot(ld64(ce + 48), php_case(name, 0)), php_zbool(1)); }
+void php_ce_flag(uptr ce, i64 f) { st64(ce + 64, ld64(ce + 64) | f); }
+
+// a trait is copied in, member by member, at class-build time
+void php_ce_use(uptr ce, uptr tname) {
+    uptr t = php_ce_find(tname);
+    if (!t) return;
+    php_ht_append_all(ld64(ce + 24), php_zarr(ld64(t + 24)));
+    php_ht_append_all(ld64(ce + 40), php_zarr(ld64(t + 40)));
+    php_ht_append_all(ld64(ce + 32), php_zarr(ld64(t + 32)));
+    php_ht_append_all(ld64(ce + 72), php_zarr(ld64(t + 72)));
+    php_ht_append_all(ld64(ce + 80), php_zarr(ld64(t + 80)));
+    if (ld64(t + 16)) st64(ce + 16, ld64(t + 16));
+}
+
+// ---- lookup, walking the parent chain -------------------------------------
+uptr php_ce_lookup(uptr ce, i64 tab, uptr name) {
+    uptr c = ce;
+    uptr k = name;
+    loop {
+        if (!c) return 0;
+        uptr b = php_ht_find(ld64(c + tab), php_str_hash(k), k);
+        if (b) return b;
+        c = ld64(c + 8);
+    }
+    return 0;
+}
+
+uptr php_ce_owner(uptr ce, i64 tab, uptr name) {
+    uptr c = ce;
+    loop {
+        if (!c) return 0;
+        if (php_ht_find(ld64(c + tab), php_str_hash(name), name)) return c;
+        c = ld64(c + 8);
+    }
+    return 0;
+}
+
+i64 php_ce_is(uptr ce, uptr name) {
+    uptr lk = php_case(name, 0);
+    uptr c = ce;
+    loop {
+        if (!c) return 0;
+        if (php_str_eq(php_case(ld64(c), 0), lk)) return 1;
+        if (php_ht_find(ld64(c + 48), php_str_hash(lk), lk)) return 1;
+        // an interface can extend another: its own ifaces table carries them
+        c = ld64(c + 8);
+    }
+    return 0;
+}
+
+i64 php_instanceof(uptr z, uptr name) {
+    if (php_zv_type(z) != IS_OBJECT) return 0;
+    return php_ce_is(php_obj_ce(ld64(z)), name);
+}
+
+// ---- construction ----------------------------------------------------------
+void php_obj_defaults(uptr o, uptr ce) {
+    if (ld64(ce + 8)) php_obj_defaults(o, ld64(ce + 8));
+    uptr p = ld64(ce + 40);
+    uptr t = php_obj_props(o);
+    i64 used = php_ht_used(p);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(p, i);
+        if (ld8(b + 8) != IS_UNDEF) php_zv_cpv(php_arr_sslot(t, ld64(b + 24)), b);
+        i = i + 1;
+    }
+}
+
+uptr php_new_ce(uptr ce) {
+    if (ld64(ce + 64) & 1) {
+        uptr m = php_str_concat(php_str_new("Cannot instantiate abstract class ", 34), ld64(ce));
+        php_throw_str(php_str_new("Error", 5), m);
+    }
+    if (ld64(ce + 64) & 4) {
+        uptr m = php_str_concat(php_str_new("Cannot instantiate interface ", 29), ld64(ce));
+        php_throw_str(php_str_new("Error", 5), m);
+    }
+    uptr o = php_obj_new(ce);
+    php_obj_defaults(o, ce);
+    return o;
+}
+
+uptr php_new(uptr name) {
+    uptr ce = php_ce_find(name);
+    if (!ce) {
+        uptr m = php_str_concat(php_str_new("Class \"", 7), name);
+        m = php_str_concat(m, php_str_new("\" not found", 11));
+        php_throw_str(php_str_new("Error", 5), m);
+        return 0;
+    }
+    return php_new_ce(ce);
+}
+
+uptr php_clone(uptr z) {
+    if (php_zv_type(z) != IS_OBJECT) return z;
+    uptr o = ld64(z);
+    uptr n = php_obj_new(php_obj_ce(o));
+    st64(n + 24, php_arr_copy(php_obj_props(o)));
+    uptr b = php_ht_find(ld64(php_obj_ce(o) + 80), php_str_hash(php_str_new("__clone", 7)), php_str_new("__clone", 7));
+    if (b) callp(ld64(b), n);
+    return php_zobj(n);
+}
+
+// ---- visibility ------------------------------------------------------------
+// The scope is the class entry of the code doing the access, or 0 outside a
+// class. Enforced at run time and not at compile time, because a method is
+// reached through the vtable: the compiler does not know the receiver's class.
+i64 php_vis_ok(uptr ce, uptr name, uptr scope) {
+    uptr b = php_ce_lookup(ce, 72, name);
+    if (!b) return 1;
+    i64 vis = ld64(b) / 8;
+    if (vis == V_PUBLIC) return 1;
+    if (!scope) return 0;
+    if (vis == V_PRIVATE) {
+        uptr owner = php_ce_owner(ce, 72, name);
+        if (owner == scope) return 1;
+        return 0;
+    }
+    if (php_ce_is(scope, ld64(ce)) || php_ce_is(ce, ld64(scope))) return 1;
+    return 0;
+}
+
+void php_vis_die(uptr ce, uptr name, uptr what) {
+    uptr m = php_str_concat(php_str_new("Cannot access ", 14), what);
+    m = php_str_concat(m, php_str_new(" ", 1));
+    m = php_str_concat(m, ld64(ce));
+    m = php_str_concat(m, php_str_new("::$", 3));
+    m = php_str_concat(m, name);
+    php_throw_str(php_str_new("Error", 5), m);
+}
+
+// ---- properties ------------------------------------------------------------
+uptr php_obj_slot(uptr o, uptr name) { return php_arr_sslot(php_obj_props(o), name); }
+
+uptr php_obj_get(uptr o, uptr name, uptr scope) {
+    uptr ce = php_obj_ce(o);
+    uptr b = php_ht_find(php_obj_props(o), php_str_hash(name), name);
+    if (b) {
+        if (!php_vis_ok(ce, name, scope)) php_vis_die(ce, name, php_str_new("property", 8));
+        return b;
+    }
+    uptr g = php_ht_find(ld64(ce + 80), php_str_hash(php_str_new("__get", 5)), php_str_new("__get", 5));
+    if (g) return callp(ld64(g), o, php_zstr(name));
+    return php_znull();
+}
+
+void php_obj_set(uptr o, uptr name, uptr v, uptr scope) {
+    uptr ce = php_obj_ce(o);
+    uptr b = php_ht_find(php_obj_props(o), php_str_hash(name), name);
+    if (!b) {
+        uptr sfn = php_ht_find(ld64(ce + 80), php_str_hash(php_str_new("__set", 5)), php_str_new("__set", 5));
+        if (sfn) { callp(ld64(sfn), o, php_zstr(name), v); return; }
+    }
+    if (b && !php_vis_ok(ce, name, scope)) php_vis_die(ce, name, php_str_new("property", 8));
+    php_zv_cpv(php_arr_sslot(php_obj_props(o), name), v);
+}
+
+// $o->p on a zval receiver
+uptr php_zv_pget(uptr z, uptr name, uptr scope) {
+    if (php_zv_type(z) != IS_OBJECT) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("Attempt to read property on a non-object", 40));
+        return php_znull();
+    }
+    return php_obj_get(ld64(z), name, scope);
+}
+
+void php_zv_pset(uptr z, uptr name, uptr v, uptr scope) {
+    if (php_zv_type(z) != IS_OBJECT) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("Attempt to assign property on a non-object", 42));
+        return;
+    }
+    php_obj_set(ld64(z), name, v, scope);
+}
+
+// the array slot behind $o->p[k] = v
+uptr php_zv_parr(uptr z, uptr name, uptr scope) {
+    if (php_zv_type(z) != IS_OBJECT) return php_arr_new(8);
+    uptr b = php_obj_slot(ld64(z), name);
+    return php_zv_arr_w(b);
+}
+
+uptr php_obj_parr(uptr o, uptr name, uptr scope) { return php_zv_arr_w(php_obj_slot(o, name)); }
+
+// ---- methods ---------------------------------------------------------------
+uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    uptr ce = php_obj_ce(o);
+    uptr lk = php_case(name, 0);
+    uptr b = php_ce_lookup(ce, 24, lk);
+    if (b) {
+        if (!php_vis_ok(ce, lk, scope)) {
+            uptr m = php_str_concat(php_str_new("Call to ", 8), ld64(ce));
+            m = php_str_concat(m, php_str_new("::", 2));
+            m = php_str_concat(m, name);
+            m = php_str_concat(m, php_str_new("() from an inaccessible scope", 29));
+            php_throw_str(php_str_new("Error", 5), m);
+        }
+        return callp(ld64(b), o, a1, a2, a3, a4, a5, a6);
+    }
+    uptr c = php_ht_find(ld64(ce + 80), php_str_hash(php_str_new("__call", 6)), php_str_new("__call", 6));
+    if (c) {
+        uptr args = php_arr_new(8);
+        if (n > 0) php_arr_push(args, a1);
+        if (n > 1) php_arr_push(args, a2);
+        if (n > 2) php_arr_push(args, a3);
+        if (n > 3) php_arr_push(args, a4);
+        if (n > 4) php_arr_push(args, a5);
+        if (n > 5) php_arr_push(args, a6);
+        return callp(ld64(c), o, php_zstr(name), php_zarr(args));
+    }
+    uptr m2 = php_str_concat(php_str_new("Call to undefined method ", 25), ld64(ce));
+    m2 = php_str_concat(m2, php_str_new("::", 2));
+    m2 = php_str_concat(m2, name);
+    m2 = php_str_concat(m2, php_str_new("()", 2));
+    php_throw_str(php_str_new("Error", 5), m2);
+    return php_znull();
+}
+
+uptr php_zv_mcall(uptr z, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    if (php_zv_type(z) != IS_OBJECT) {
+        uptr m = php_str_concat(php_str_new("Call to a member function ", 26), name);
+        m = php_str_concat(m, php_str_new("() on ", 6));
+        m = php_str_concat(m, php_f_get_debug_type(z));
+        php_throw_str(php_str_new("Error", 5), m);
+        return php_znull();
+    }
+    return php_mcall(ld64(z), name, scope, n, a1, a2, a3, a4, a5, a6);
+}
+
+// Foo::bar(): a static call, and the one that carries `parent::`
+uptr php_scall(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    uptr lk = php_case(name, 0);
+    uptr b = php_ce_lookup(ce, 24, lk);
+    if (!b) {
+        uptr c = php_ht_find(ld64(ce + 80), php_str_hash(php_str_new("__callstatic", 12)), php_str_new("__callstatic", 12));
+        if (c) {
+            uptr args = php_arr_new(8);
+            if (n > 0) php_arr_push(args, a1);
+            if (n > 1) php_arr_push(args, a2);
+            if (n > 2) php_arr_push(args, a3);
+            if (n > 3) php_arr_push(args, a4);
+            return callp(ld64(c), 0, php_zstr(name), php_zarr(args));
+        }
+        uptr m = php_str_concat(php_str_new("Call to undefined method ", 25), ld64(ce));
+        m = php_str_concat(m, php_str_new("::", 2));
+        m = php_str_concat(m, name);
+        m = php_str_concat(m, php_str_new("()", 2));
+        php_throw_str(php_str_new("Error", 5), m);
+        return php_znull();
+    }
+    return callp(ld64(b), thisp, a1, a2, a3, a4, a5, a6);
+}
+
+uptr php_ce_byname(uptr name) {
+    uptr ce = php_ce_find(name);
+    if (!ce) {
+        uptr m = php_str_concat(php_str_new("Class \"", 7), name);
+        m = php_str_concat(m, php_str_new("\" not found", 11));
+        php_throw_str(php_str_new("Error", 5), m);
+    }
+    return ce;
+}
+
+// a class constant, walking the parents and then the interfaces
+uptr php_ce_getconst(uptr ce, uptr name) {
+    uptr b = php_ce_lookup(ce, 56, name);
+    if (b) return b;
+    uptr ifs = ld64(ce + 48);
+    i64 used = php_ht_used(ifs);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr k = php_ht_bkt(ifs, i);
+        if (ld8(k + 8) != IS_UNDEF) {
+            uptr ic = php_ce_find(ld64(k + 24));
+            if (ic) { uptr r = php_ce_getconst(ic, name); if (php_zv_type(r) != IS_UNDEF) return r; }
+        }
+        i = i + 1;
+    }
+    uptr m = php_str_concat(php_str_new("Undefined constant ", 19), ld64(ce));
+    m = php_str_concat(m, php_str_new("::", 2));
+    m = php_str_concat(m, name);
+    php_throw_str(php_str_new("Error", 5), m);
+    return php_znull();
+}
+
+uptr php_ce_sslot(uptr ce, uptr name) {
+    uptr c = ce;
+    loop {
+        if (!c) break;
+        uptr b = php_ht_find(ld64(c + 32), php_str_hash(name), name);
+        if (b) return b;
+        c = ld64(c + 8);
+    }
+    return php_arr_sslot(ld64(ce + 32), name);
+}
+
+// ---- enums -----------------------------------------------------------------
+uptr php_enum_case(uptr ce, uptr name, uptr val) {
+    uptr o = php_obj_new(ce);
+    php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("name", 4)), php_zstr(name));
+    if (php_zv_type(val) != IS_NULL) php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("value", 5)), val);
+    uptr z = php_zobj(o);
+    php_zv_cp(php_arr_sslot(ld64(ce + 88), name), z);
+    php_zv_cp(php_arr_sslot(ld64(ce + 56), name), z);
+    return z;
+}
+
+uptr php_enum_cases(uptr ce) {
+    uptr r = php_arr_new(8);
+    php_ht_append_all(r, php_zarr(ld64(ce + 88)));
+    return php_f_array_values(php_zarr(r));
+}
+
+uptr php_enum_from(uptr ce, uptr v, i64 try) {
+    uptr cs = ld64(ce + 88);
+    i64 used = php_ht_used(cs);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(cs, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            uptr cv = php_ht_find(php_obj_props(ld64(b)), php_str_hash(php_str_new("value", 5)), php_str_new("value", 5));
+            if (cv && php_zv_cmp(cv, v) == 0) return b;
+        }
+        i = i + 1;
+    }
+    if (try) return php_znull();
+    uptr m = php_str_concat(php_str_new("\"", 1), php_zv_str(v));
+    m = php_str_concat(m, php_str_new("\" is not a valid backing value for enum ", 40));
+    m = php_str_concat(m, ld64(ce));
+    php_throw_str(php_str_new("ValueError", 10), m);
+    return php_znull();
+}
+
+// ---- callables -------------------------------------------------------------
+// A Closure is an object of the built-in class Closure whose `fn` property is
+// the function pointer and whose `use` property is the bound array. D6 refuses
+// the STRING form of a callable; this is the value form.
+uptr ph_ce_closure;
+
+uptr php_closure_new(i64 fn, uptr bound, uptr thisp) {
+    if (!ph_ce_closure) ph_ce_closure = php_ce_new(php_str_new("Closure", 7));
+    uptr o = php_obj_new(ph_ce_closure);
+    php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("fn", 2)), php_zlong(fn));
+    php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("use", 3)), php_zarr(bound));
+    php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("this", 4)), php_zlong(thisp));
+    return php_zobj(o);
+}
+
+uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
+    if (php_zv_type(z) != IS_OBJECT) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("Value not callable", 18));
+        return php_znull();
+    }
+    uptr o = ld64(z);
+    uptr b = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("fn", 2)), php_str_new("fn", 2));
+    if (!b) return php_mcall(o, php_str_new("__invoke", 8), 0, n, a1, a2, a3, a4, a5, 0);
+    uptr u = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("use", 3)), php_str_new("use", 3));
+    uptr t = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("this", 4)), php_str_new("this", 4));
+    uptr tp = 0;
+    if (t) tp = ld64(t);
+    return callp(ld64(b), ld64(u), tp, a1, a2, a3, a4, a5);
+}
+
+u8 php_f_is_callable(uptr z) {
+    if (php_zv_type(z) != IS_OBJECT) return 0;
+    uptr o = ld64(z);
+    if (php_ht_find(php_obj_props(o), php_str_hash(php_str_new("fn", 2)), php_str_new("fn", 2))) return 1;
+    if (php_ce_lookup(php_obj_ce(o), 24, php_str_new("__invoke", 8))) return 1;
+    return 0;
+}
+
+uptr php_f_get_class(uptr z) {
+    if (php_zv_type(z) != IS_OBJECT) return php_zbool(0);
+    return php_zstr(php_obj_cname(ld64(z)));
+}
+
+uptr php_f_get_parent_class(uptr z) {
+    if (php_zv_type(z) != IS_OBJECT) return php_zbool(0);
+    uptr p = ld64(php_obj_ce(ld64(z)) + 8);
+    if (!p) return php_zbool(0);
+    return php_zstr(ld64(p));
+}
+
+u8 php_f_class_exists(uptr z) { if (php_ce_find(php_zv_str(z))) return 1; return 0; }
+
+u8 php_f_method_exists(uptr z, uptr m) {
+    uptr ce = 0;
+    if (php_zv_type(z) == IS_OBJECT) ce = php_obj_ce(ld64(z));
+    if (php_zv_type(z) == IS_STRING) ce = php_ce_find(ld64(z));
+    if (!ce) return 0;
+    if (php_ce_lookup(ce, 24, php_case(php_zv_str(m), 0))) return 1;
+    return 0;
+}
+
+u8 php_f_property_exists(uptr z, uptr m) {
+    uptr ce = 0;
+    if (php_zv_type(z) == IS_OBJECT) {
+        if (php_ht_find(php_obj_props(ld64(z)), php_str_hash(php_zv_str(m)), php_zv_str(m))) return 1;
+        ce = php_obj_ce(ld64(z));
+    }
+    if (php_zv_type(z) == IS_STRING) ce = php_ce_find(ld64(z));
+    if (!ce) return 0;
+    if (php_ce_lookup(ce, 40, php_zv_str(m))) return 1;
+    return 0;
+}
+
+// the callback library, now that a callable is a value
+uptr php_f_array_map(uptr f, uptr a) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            uptr v = b;
+            if (php_zv_type(f) != IS_NULL) v = php_call_zv(f, 1, b, 0, 0, 0, 0);
+            uptr k = ld64(b + 24);
+            if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), v);
+            if (!k) php_zv_cpv(php_arr_islot(r, ld64(b + 16)), v);
+        }
+        i = i + 1;
+    }
+    if (php_zv_type(f) == IS_NULL) return r;
+    // php renumbers when every key is an integer and there is one array
+    return r;
+}
+
+uptr php_f_array_filter(uptr a, uptr f, uptr mode) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            i64 keep = 0;
+            if (php_zv_type(f) == IS_NULL) keep = php_zv_bool(b);
+            if (php_zv_type(f) != IS_NULL) {
+                i64 m = php_zv_long(mode);
+                if (m == 1) keep = php_zv_bool(php_call_zv(f, 1, php_it_key(h, i), 0, 0, 0, 0));
+                if (m == 2) keep = php_zv_bool(php_call_zv(f, 2, b, php_it_key(h, i), 0, 0, 0));
+                if (m != 1 && m != 2) keep = php_zv_bool(php_call_zv(f, 1, b, 0, 0, 0, 0));
+            }
+            if (keep) {
+                uptr k = ld64(b + 24);
+                if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), b);
+                if (!k) php_zv_cpv(php_arr_islot(r, ld64(b + 16)), b);
+            }
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+uptr php_f_array_reduce(uptr a, uptr f, uptr init) {
+    uptr acc = init;
+    if (php_zv_type(a) != IS_ARRAY) return acc;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(h, i);
+        if (ld8(b + 8) != IS_UNDEF) acc = php_call_zv(f, 2, acc, b, 0, 0, 0);
+        i = i + 1;
+    }
+    return acc;
+}
+
+// usort and friends: the same insertion sort, with the comparison delegated
+u8 php_f_usort(uptr a, uptr f, i64 bykey, i64 keepkeys) {
+    if (php_zv_type(a) != IS_ARRAY) return 0;
+    uptr h = ld64(a);
+    i64 n = php_count(h);
+    uptr order = php_alloc(n * 8 + 8);
+    i64 used = php_ht_used(h);
+    i64 w = 0;
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        if (ld8(php_ht_bkt(h, i) + 8) != IS_UNDEF) { st64(order + w * 8, i); w = w + 1; }
+        i = i + 1;
+    }
+    i = 1;
+    loop {
+        if (i >= w) break;
+        i64 cur = ld64(order + i * 8);
+        i64 j = i - 1;
+        loop {
+            if (j < 0) break;
+            i64 prev = ld64(order + j * 8);
+            uptr x = php_ht_bkt(h, prev);
+            uptr y = php_ht_bkt(h, cur);
+            if (bykey) { x = php_it_key(h, prev); y = php_it_key(h, cur); }
+            if (php_zv_long(php_call_zv(f, 2, x, y, 0, 0, 0)) <= 0) break;
+            st64(order + (j + 1) * 8, prev);
+            j = j - 1;
+        }
+        st64(order + (j + 1) * 8, cur);
+        i = i + 1;
+    }
+    php_ht_reindex(h, order, w, keepkeys);
+    return 1;
+}
+
+u8 php_f_usort_a(uptr a, uptr f) { return php_f_usort(a, f, 0, 0); }
+u8 php_f_uasort(uptr a, uptr f) { return php_f_usort(a, f, 0, 1); }
+u8 php_f_uksort(uptr a, uptr f) { return php_f_usort(a, f, 1, 1); }
+
+uptr php_ce_parent(uptr ce) {
+    uptr p = ld64(ce + 8);
+    if (!p) { php_throw_str(php_str_new("Error", 5), php_str_new("Cannot use \"parent\" when current class scope has no parent", 58)); return ce; }
+    return p;
+}
+
+void php_argcount(uptr cls, uptr fn) {
+    uptr m = php_str_concat(php_str_new("Too few arguments to function ", 30), cls);
+    m = php_str_concat(m, php_str_new("::", 2));
+    m = php_str_concat(m, fn);
+    m = php_str_concat(m, php_str_new("()", 2));
+    php_throw_str(php_str_new("ArgumentCountError", 18), m);
+}
+
+uptr php_ce_name(uptr ce) { return ld64(ce); }
+
+uptr php_ctor(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    uptr ce = php_obj_ce(o);
+    if (!php_ce_lookup(ce, 24, php_str_new("__construct", 11))) return php_znull();
+    return php_mcall(o, name, scope, n, a1, a2, a3, a4, a5, a6);
+}
+
+uptr php_ctor0(uptr o) {
+    uptr ce = php_obj_ce(o);
+    if (!php_ce_lookup(ce, 24, php_str_new("__construct", 11))) return php_znull();
+    return php_mcall(o, php_str_new("__construct", 11), 0, 0, 0, 0, 0, 0, 0, 0);
+}
+
+uptr php_zv_store(uptr slot, uptr v) { php_zv_cpv(slot, v); return slot; }
+
+i64 php_f_obj_id(uptr z) { if (php_zv_type(z) != IS_OBJECT) return 0; return php_obj_id(ld64(z)); }
