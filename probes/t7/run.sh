@@ -137,6 +137,16 @@ head -900 "$OUT/zend/wrong.txt" | cut -f1 >> "$OUT/why.list"
 MCPHP_BIN="$root/probes/t7/mc-php" python3 probes/t7/why.py "$OUT/why.tsv" < "$OUT/why.list"
 python3 probes/t7/whytable.py "$OUT/why.tsv" | tee "$OUT/why.table"
 
+printf '\n== 8. the tests that COMPILE and disagree, by what differs ==\n'
+awk -F'\t' '$2 == "(compiled; output differs)" { print $1 }' "$OUT/why.tsv" > "$OUT/dg.list"
+MCPHP_BIN="$root/probes/t7/mc-php" python3 probes/t7/diffgroup.py "$OUT/dg.tsv" \
+    < "$OUT/dg.list" | tee "$OUT/dg.table"
+
+printf '\n== 9. how often the arena (D7) is the answer ==\n'
+# A php array is a VALUE and D7 has no refcount, so T6 copies EAGERLY; this
+# is the number that says whether that, or anything else, exhausts the arena.
+MCPHP_BIN="$root/probes/t7/mc-php" python3 probes/t7/arena.py < "$OUT/why.list"
+
 echo ""
-[ "$fail" = 0 ] || { echo "T6: something did not measure"; exit 1; }
-echo "T6: measured -- see probes/t7/RESULTS.md"
+[ "$fail" = 0 ] || { echo "T7: something did not measure"; exit 1; }
+echo "T7: measured -- see probes/t7/RESULTS.md"
