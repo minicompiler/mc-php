@@ -5012,3 +5012,11 @@ uptr php_f_ver0() { return php_str_new("8.5.10", 6); }
 uptr php_f_null1(uptr a) { return php_znull(); }
 uptr php_f_null2(uptr a, uptr b) { return php_znull(); }
 uptr php_f_hsd2(uptr a, uptr b) { return php_f_htmlspecialchars_decode(a, 0, 0); }
+
+// foreach over an object walks its properties, in declaration order
+uptr php_zv_iter(uptr z) {
+    i64 t = php_zv_type(z);
+    if (t == IS_ARRAY) return ld64(z);
+    if (t == IS_OBJECT) return php_obj_props(ld64(z));
+    return php_arr_new(8);
+}

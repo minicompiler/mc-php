@@ -4085,7 +4085,7 @@ i64 ph_foreach(uptr fl, i64 line) {
     ph_want("(", 1, "expected ( after foreach");
     i64 src = ph_expr(0);
     i64 st = ph_ety;
-    if (st == PT_MIXED) { src = ph_c1("php_zv_arr_r", src, ty_parr); st = PT_ARR; }
+    if (st == PT_MIXED || st == PT_OBJ) { src = ph_c1("php_zv_iter", ph_recv(src, st), ty_parr); st = PT_ARR; ph_efresh = 1; }
     if (!ph_is_arr(st)) ph_todo2(fl, line, "foreach over", ph_tyname(st));
     i64 fpre = ph_take_pend();
     if (!ph_is("as")) err_at(fl, line, "mc-php: expected as in foreach");
