@@ -6853,6 +6853,247 @@ u8 php_f_restore_exception_handler() {
     return 1;
 }
 
+// setlocale(category, ...locales): this runtime is byte-oriented (D10) and
+// the only locale it has is "C", which is what php answers for a query and
+// for a request it can satisfy; anything else is false, as php gives for a
+// locale the system does not have.
+// sscanf($str, $format): php's own C-like scanner. With no extra arguments
+// it answers an array of the conversions; a directive that finds nothing
+// yields null, and a literal that does not match stops the scan.
+i64 ph_sc_p;
+uptr ph_sc_s;
+i64 ph_sc_n;
+
+// a scanset is `a-z` (a dash range), not trim's `a..z`
+i64 php_scanset(uptr set, i64 c) {
+    i64 n = php_strlen(set);
+    uptr b = set + ZS_HDR;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        if (i + 2 < n) {
+            if (ld8(b + i + 1) == 45) {
+                if (c >= ld8(b + i) && c <= ld8(b + i + 2)) return 1;
+                i = i + 3;
+                continue;
+            }
+        }
+        if (ld8(b + i) == c) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+i64 php_sc_ws(i64 c) { if (c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12) return 1; return 0; }
+
+void php_sc_skipws() {
+    loop {
+        if (ph_sc_p >= ph_sc_n) break;
+        if (!php_sc_ws(ld8(ph_sc_s + ph_sc_p))) break;
+        ph_sc_p = ph_sc_p + 1;
+    }
+}
+
+uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    uptr str = php_zv_str(sz);
+    uptr fmt = php_zv_str(fz);
+    ph_sc_s = str + ZS_HDR;
+    ph_sc_n = php_strlen(str);
+    ph_sc_p = 0;
+    uptr out = php_arr_new(8);
+    uptr f = fmt + ZS_HDR;
+    i64 fn = php_strlen(fmt);
+    i64 i = 0;
+    loop {
+        if (i >= fn) break;
+        i64 fc = ld8(f + i);
+        if (php_sc_ws(fc)) { php_sc_skipws(); i = i + 1; continue; }
+        if (fc != 37) {
+            if (ph_sc_p >= ph_sc_n) break;
+            if (ld8(ph_sc_s + ph_sc_p) != fc) break;
+            ph_sc_p = ph_sc_p + 1;
+            i = i + 1;
+            continue;
+        }
+        i = i + 1;
+        if (i >= fn) break;
+        if (ld8(f + i) == 37) {
+            if (ph_sc_p >= ph_sc_n) break;
+            if (ld8(ph_sc_s + ph_sc_p) != 37) break;
+            ph_sc_p = ph_sc_p + 1;
+            i = i + 1;
+            continue;
+        }
+        i64 width = 0 - 1;
+        loop {
+            if (i >= fn) break;
+            i64 d = ld8(f + i);
+            if (d < 48 || d > 57) break;
+            if (width < 0) width = 0;
+            width = width * 10 + (d - 48);
+            i = i + 1;
+        }
+        if (i >= fn) break;
+        i64 conv = ld8(f + i);
+        i = i + 1;
+        if (conv != 99) php_sc_skipws();                  // %c does not skip
+        i64 st = ph_sc_p;
+        if (conv == 100 || conv == 105 || conv == 117) {  // d i u
+            if (ph_sc_p < ph_sc_n) { i64 sg = ld8(ph_sc_s + ph_sc_p); if (sg == 45 || sg == 43) ph_sc_p = ph_sc_p + 1; }
+            loop {
+                if (ph_sc_p >= ph_sc_n) break;
+                if (width >= 0 && ph_sc_p - st >= width) break;
+                i64 d = ld8(ph_sc_s + ph_sc_p);
+                if (d < 48 || d > 57) break;
+                ph_sc_p = ph_sc_p + 1;
+            }
+            if (ph_sc_p == st) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zlong(php_stoi(php_str_new(ph_sc_s + st, ph_sc_p - st))));
+            continue;
+        }
+        if (conv == 120 || conv == 88 || conv == 111 || conv == 98) {   // x X o b
+            i64 base = 16;
+            if (conv == 111) base = 8;
+            if (conv == 98) base = 2;
+            i64 v = 0;
+            loop {
+                if (ph_sc_p >= ph_sc_n) break;
+                if (width >= 0 && ph_sc_p - st >= width) break;
+                i64 d = ld8(ph_sc_s + ph_sc_p);
+                i64 dv = 0 - 1;
+                if (d >= 48 && d <= 57) dv = d - 48;
+                if (d >= 97 && d <= 102) dv = d - 87;
+                if (d >= 65 && d <= 70) dv = d - 55;
+                if (dv < 0 || dv >= base) break;
+                v = v * base + dv;
+                ph_sc_p = ph_sc_p + 1;
+            }
+            if (ph_sc_p == st) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zlong(v));
+            continue;
+        }
+        if (conv == 101 || conv == 102 || conv == 103 || conv == 69 || conv == 71) {   // e f g
+            if (ph_sc_p < ph_sc_n) { i64 sg = ld8(ph_sc_s + ph_sc_p); if (sg == 45 || sg == 43) ph_sc_p = ph_sc_p + 1; }
+            loop {
+                if (ph_sc_p >= ph_sc_n) break;
+                if (width >= 0 && ph_sc_p - st >= width) break;
+                i64 d = ld8(ph_sc_s + ph_sc_p);
+                if (d >= 48 && d <= 57) { ph_sc_p = ph_sc_p + 1; continue; }
+                if (d == 46) { ph_sc_p = ph_sc_p + 1; continue; }
+                if (d == 101 || d == 69) {
+                    i64 j = ph_sc_p + 1;
+                    if (j < ph_sc_n) { i64 g = ld8(ph_sc_s + j); if (g == 43 || g == 45) j = j + 1; }
+                    if (j < ph_sc_n) { i64 g2 = ld8(ph_sc_s + j); if (g2 >= 48 && g2 <= 57) { ph_sc_p = j; continue; } }
+                }
+                break;
+            }
+            if (ph_sc_p == st) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zdouble(php_stof(php_str_new(ph_sc_s + st, ph_sc_p - st))));
+            continue;
+        }
+        if (conv == 99) {                                  // c
+            i64 w = 1;
+            if (width > 0) w = width;
+            if (ph_sc_p + w > ph_sc_n) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zstr(php_str_new(ph_sc_s + ph_sc_p, w)));
+            ph_sc_p = ph_sc_p + w;
+            continue;
+        }
+        if (conv == 115) {                                 // s
+            loop {
+                if (ph_sc_p >= ph_sc_n) break;
+                if (width >= 0 && ph_sc_p - st >= width) break;
+                if (php_sc_ws(ld8(ph_sc_s + ph_sc_p))) break;
+                ph_sc_p = ph_sc_p + 1;
+            }
+            if (ph_sc_p == st) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zstr(php_str_new(ph_sc_s + st, ph_sc_p - st)));
+            continue;
+        }
+        if (conv == 91) {                                  // [set]
+            i64 neg = 0;
+            if (i < fn) { if (ld8(f + i) == 94) { neg = 1; i = i + 1; } }
+            i64 sb = i;
+            loop { if (i >= fn) break; if (ld8(f + i) == 93 && i > sb) break; i = i + 1; }
+            uptr set = php_str_new(f + sb, i - sb);
+            if (i < fn) i = i + 1;                         // the ]
+            loop {
+                if (ph_sc_p >= ph_sc_n) break;
+                if (width >= 0 && ph_sc_p - st >= width) break;
+                i64 inx = php_scanset(set, ld8(ph_sc_s + ph_sc_p));
+                if (neg) { if (inx) break; }
+                if (!neg) { if (!inx) break; }
+                ph_sc_p = ph_sc_p + 1;
+            }
+            if (ph_sc_p == st) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zstr(php_str_new(ph_sc_s + st, ph_sc_p - st)));
+            continue;
+        }
+        break;
+    }
+    // with extra arguments php writes THROUGH them and answers the count
+    i64 extra = 0;
+    if (a1) { if (php_zv_type(a1) != IS_NULL) extra = 1; }
+    if (!extra) return php_zarr(out);
+    uptr h = ld64(php_zarr(out));
+    i64 k = 0;
+    i64 idx = php_it_next(h, 0);
+    loop {
+        if (k >= 6) break;
+        uptr tgt = a1;
+        if (k == 1) tgt = a2;
+        if (k == 2) tgt = a3;
+        if (k == 3) tgt = a4;
+        if (k == 4) tgt = a5;
+        if (k == 5) tgt = a6;
+        if (!tgt) break;
+        if (php_zv_type(tgt) == IS_NULL && k) break;
+        if (idx < 0) break;
+        php_zv_cp(tgt, php_it_val(h, idx));
+        idx = php_it_next(h, idx + 1);
+        k = k + 1;
+    }
+    return php_zlong(k);
+}
+
+uptr php_f_setlocale(uptr cz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
+    uptr c = php_str_new("C", 1);
+    if (!a1) return php_zstr(c);
+    if (php_zv_type(a1) == IS_NULL) return php_zstr(c);
+    if (php_zv_type(a1) == IS_LONG) { if (ld64(a1) == 0) return php_zstr(c); }
+    i64 k = 0;
+    loop {
+        if (k >= 5) break;
+        uptr v = a1;
+        if (k == 1) v = a2;
+        if (k == 2) v = a3;
+        if (k == 3) v = a4;
+        if (k == 4) v = a5;
+        if (!v) break;
+        // a missing optional argument arrives as php_znull() on the library
+        // road, not as 0
+        if (php_zv_type(v) == IS_NULL) break;
+        if (php_zv_type(v) == IS_ARRAY) {
+            uptr h = ld64(v);
+            i64 i = php_it_next(h, 0);
+            loop {
+                if (i < 0) break;
+                uptr e = php_zv_str(php_it_val(h, i));
+                if (php_str_eq(e, c)) return php_zstr(c);
+                if (php_strlen(e) == 0) return php_zstr(c);
+                i = php_it_next(h, i + 1);
+            }
+            k = k + 1;
+            continue;
+        }
+        uptr e = php_zv_str(v);
+        if (php_str_eq(e, c)) return php_zstr(c);
+        if (php_strlen(e) == 0) return php_zstr(c);
+        k = k + 1;
+    }
+    return php_zbool(0);
+}
+
 uptr php_f_getcwd() {
     uptr b = php_alloc(4096);
     if (!getcwd(b, 4096)) return php_zbool(0);

@@ -6770,7 +6770,8 @@ void ph_lib_init() {
     ph_lib("restore_error_handler", "php_f_restore_error_handler", 0, 0, PT_BOOL);
     ph_lib("set_exception_handler", "php_f_set_exception_handler", 1, 1, PT_MIXED);
     ph_lib("restore_exception_handler", "php_f_restore_exception_handler", 0, 0, PT_BOOL);
-    ph_lib("setlocale", "php_f_null2", 0, 2, PT_MIXED);
+    ph_lib("setlocale", "php_f_setlocale", 1, 6, PT_MIXED);
+    ph_lib("sscanf", "php_f_sscanf", 2, 8, PT_MIXED);
     ph_lib("gc_collect_cycles", "php_f_noop", 0, 1, PT_INT);
     ph_lib("error_log", "php_f_false1", 0, 1, PT_BOOL);
     ph_lib("usleep", "php_f_noop", 0, 1, PT_INT);
