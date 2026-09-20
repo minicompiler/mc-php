@@ -136,6 +136,7 @@ i64  ph_name_byte(i64 c, i64 first);
 void ph_next();
 i64  ph_accept(uptr s, i64 n);
 void ph_want(uptr s, i64 n, uptr msg);
+void ph_semi(uptr msg);
 uptr ph_mangle(uptr d, uptr pfx);
 i64  ph_raw(uptr bytes, i64 len);
 i64  ph_wrap(i64 s);
@@ -468,7 +469,10 @@ i64 ph_dq_read2(uptr q, uptr e, uptr pend, i64 term, i64 raw) {
             k4 = k4 + 1;
         }
         if (brace) {
-            if (k4 >= e || ld8(k4) != 125) { ph_dq_put(c); p = p + 1; continue; }
+            // {$a[...]} and {$o->p} carry one accessor before the }
+            i64 nx = 0;
+            if (k4 < e) nx = ld8(k4);
+            if (nx != 125 && nx != 91 && nx != 45) { ph_dq_put(c); p = p + 1; continue; }
         }
         acc = ph_dq_flush(acc);
         uptr d2 = xalloc(k4 - nstart + 2);
@@ -481,11 +485,70 @@ i64 ph_dq_read2(uptr q, uptr e, uptr pend, i64 term, i64 raw) {
         i64 v4 = node_new(N_IDENT, ph_tline, ph_tfile);
         set_nd_name(v4, ph_mangle(d2, "v_"));
         set_nd_type(v4, ph_mcty(vt));
+        p = k4;
+        // php's SIMPLE interpolation carries one accessor: $a[k] with a bare
+        // key, and $o->p
+        loop {
+            if (p < e && ld8(p) == 91) {
+                uptr ks = p + 1;
+                uptr ke = ks;
+                loop { if (ke >= e) break; if (ld8(ke) == 93) break; ke = ke + 1; }
+                if (ke >= e) break;
+                i64 key = 0;
+                i64 kc = ld8(ks);
+                if (kc == 36 && ks + 1 < e && ph_name_byte(ld8(ks + 1), 1)) {
+                    uptr kd = xalloc(ke - ks + 2);
+                    i64 y = 0;
+                    loop { if (y >= ke - ks) break; st8(kd + y, ld8(ks + y)); y = y + 1; }
+                    st8(kd + (ke - ks), 0);
+                    if (ph_var_find(kd) < 0) break;
+                    i64 kt = ph_var_type(kd);
+                    i64 kn = node_new(N_IDENT, ph_tline, ph_tfile);
+                    set_nd_name(kn, ph_mangle(kd, "v_"));
+                    set_nd_type(kn, ph_mcty(kt));
+                    key = ph_to_mixed(kn, kt);
+                } else {
+                    i64 alldig = 1;
+                    i64 y2 = 0;
+                    loop { if (y2 >= ke - ks) break; if (ph_digit(ld8(ks + y2), 10) < 0) { alldig = 0; break; } y2 = y2 + 1; }
+                    if (ke == ks) break;
+                    if (alldig) {
+                        i64 iv = 0;
+                        y2 = 0;
+                        loop { if (y2 >= ke - ks) break; iv = iv * 10 + ph_digit(ld8(ks + y2), 10); y2 = y2 + 1; }
+                        key = ph_to_mixed(ph_int(iv), PT_INT);
+                    }
+                    if (!alldig) {
+                        uptr kb = ks;
+                        i64 kl = ke - ks;
+                        // php accepts a bare word here, and also a quoted one
+                        if (kl >= 2 && (ld8(kb) == 39 || ld8(kb) == 34)) { kb = kb + 1; kl = kl - 2; }
+                        key = ph_to_mixed(ph_strlit(xstrdup(kb, kl), kl), PT_STRING);
+                    }
+                }
+                if (!key) break;
+                if (vt == PT_MIXED) v4 = ph_c1("php_zv_arr_r", v4, ty_parr);
+                if (vt != PT_MIXED && vt != PT_ARR) break;
+                v4 = ph_c2("php_arr_zget", v4, key, ty_pzv);
+                vt = PT_MIXED;
+                p = ke + 1;
+                break;
+            }
+            if (p + 2 < e && ld8(p) == 45 && ld8(p + 1) == 62 && ph_name_byte(ld8(p + 2), 1)) {
+                uptr ps = p + 2;
+                uptr pe2 = ps;
+                loop { if (pe2 >= e) break; if (!ph_name_byte(ld8(pe2), 0)) break; pe2 = pe2 + 1; }
+                v4 = ph_c3("php_zv_pget", ph_recv(v4, vt), ph_strlit(xstrdup(ps, pe2 - ps), pe2 - ps), ph_scope(), ty_pzv);
+                vt = PT_MIXED;
+                p = pe2;
+                break;
+            }
+            break;
+        }
         i64 sv = ph_to_str(v4, vt);
         if (acc) acc = ph_c2("php_str_concat", acc, sv, ty_pstr);
         if (!acc) acc = sv;
-        p = k4;
-        if (brace) p = k4 + 1;
+        if (brace) { if (p < e && ld8(p) == 125) p = p + 1; }
     }
     st64(pend, p);
     acc = ph_dq_flush(acc);
@@ -699,6 +762,14 @@ void ph_want(uptr s, i64 n, uptr msg) {
 }
 
 i64 ph_accept(uptr s, i64 n) { if (ph_at(s, n)) { ph_next(); return 1; } return 0; }
+
+// php lets the CLOSING TAG end a statement: `<?php echo 1 ?>` is legal, and
+// the ?> is left for the inline-html handler to pick up.
+void ph_semi(uptr msg) {
+    if (ph_at("?>", 2)) return;
+    if (ph_tid == T_EOF) return;
+    ph_want(";", 1, msg);
+}
 
 // ---- node helpers ----------------------------------------------------------
 i64 ph_nonce;
@@ -1214,6 +1285,8 @@ uptr ph_fname[PH_MAXFN];
 i64  ph_fret[PH_MAXFN];
 i64  ph_fnp[PH_MAXFN];
 i64  ph_fpt[PH_MAXFN * PH_MAXP];
+i64  ph_fpd[PH_MAXFN * PH_MAXP];        // the default value node, 0 = none
+i64  ph_fvar[PH_MAXFN];                 // 1 when the last parameter is ...$rest
 i64  ph_nfn;
 
 i64 ph_fn_find(uptr n) {
@@ -1712,6 +1785,7 @@ i64 ph_primary() {
         if (!ph_wordish()) err_at2(fl, line, "mc-php: a php variable needs a name", ph_tname);
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
+        if (ph_at("::", 2)) ph_refuse(fl, line, "a class name from a variable", "D6");
         i64 v = ph_var_ref(d);
         return ph_postfix(v, ph_ety);
     }
@@ -2268,7 +2342,6 @@ i64 ph_echo_of(i64 v, i64 t, uptr fl, i64 line) {
 // run-time format walker in the binary.
 i64 ph_sprintf(uptr av, i64 na, uptr fl, i64 line, i64 vec) {
     i64 f = ph_a(av, 0);
-    if (ph_aty(av, 0) != PT_STRING) ph_todo(fl, line, "a printf format that is not a string");
     if (nd_kind(f) != N_CALL || !str_eq(nd_name(f), "php_str_lit"))
         ph_refuse(fl, line, "a printf format that is not a literal", "D1");
     i64 raw = nd_next(nd_a(f));                     // the N_STR argument
@@ -2848,19 +2921,53 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         ph_todo2(fl, line, "a php function mc-php does not have", name);
     }
     i64 np = ld64(ph_fnp + fi * 8);
-    if (na != np) ph_todo2(fl, line, "the wrong number of arguments for", name);
+    i64 vararg = ld64(ph_fvar + fi * 8);
+    if (na > np && !vararg) ph_todo2(fl, line, "the wrong number of arguments for", name);
     i64 head = 0;
     i64 tail = 0;
     i64 i = 0;
     loop {
         if (i >= np) break;
         i64 want = ld64(ph_fpt + (fi * PH_MAXP + i) * 8);
-        i64 v = ph_a(av, i);
-        i64 have = ph_aty(av, i);
-        if (want == PT_INT)    v = ph_to_int(v, have);
-        if (want == PT_FLOAT)  v = ph_to_float(v, have);
-        if (want == PT_STRING) v = ph_to_str(v, have);
-        if (want == PT_BOOL)   v = ph_to_bool(v, have);
+        i64 v = 0;
+        if (vararg && i == np - 1) {
+            // ...$rest: the caller packs what is left into an array
+            ph_nonce = ph_nonce + 1;
+            uptr rn = p_cat("phva_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+            ph_local(rn, ty_parr);
+            i64 mk = ph_set(rn, ph_c1("php_arr_new", ph_int(8), ty_parr));
+            i64 mt = mk;
+            i64 j = i;
+            loop {
+                if (j >= na) break;
+                i64 ar = node_new(N_IDENT, line, fl);
+                set_nd_name(ar, rn);
+                set_nd_type(ar, ty_parr);
+                i64 ps = ph_stmt_of(ph_c2("php_arr_push", ar, ph_to_mixed(ph_a(av, j), ph_aty(av, j)), TY_VOID));
+                set_nd_next(mt, ps);
+                mt = ps;
+                j = j + 1;
+            }
+            ph_pending_stmt(mk);
+            v = node_new(N_IDENT, line, fl);
+            set_nd_name(v, rn);
+            set_nd_type(v, ty_parr);
+        }
+        if (!v && i >= na) {
+            // not passed: a zval parameter takes 0, which its prologue reads
+            if (want != PT_MIXED) ph_todo2(fl, line, "the wrong number of arguments for", name);
+            v = ph_int(0);
+        }
+        if (!v) {
+            i64 have = ph_aty(av, i);
+            v = ph_a(av, i);
+            if (want == PT_INT)    v = ph_to_int(v, have);
+            if (want == PT_FLOAT)  v = ph_to_float(v, have);
+            if (want == PT_STRING) v = ph_to_str(v, have);
+            if (want == PT_BOOL)   v = ph_to_bool(v, have);
+            if (want == PT_MIXED)  v = ph_to_mixed(v, have);
+            if (want == PT_ARR && have == PT_MIXED) v = ph_c1("php_zv_arr_r", v, ty_parr);
+        }
         if (tail) set_nd_next(tail, v);
         if (!tail) head = v;
         tail = v;
@@ -3190,7 +3297,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         if (ph_at("&", 1)) ph_todo(fl, line, "an assignment by reference");
         i64 v = ph_expr(0);
         i64 vt = ph_ety;
-        if (semi) ph_want(";", 1, "expected ; after a php assignment");
+        if (semi) ph_semi("expected ; after a php assignment");
         return ph_expr_stmt_of(ph_store(cur, k, ph_to_mixed(ph_own(v, vt), vt)));
     }
 
@@ -3213,7 +3320,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
 
     if (incdec) {
         ph_next();
-        if (semi) ph_want(";", 1, "expected ; after ++/--");
+        if (semi) ph_semi("expected ; after ++/--");
         if (ph_var_find(d) < 0) ph_refuse2(fl, line, "an undefined php variable", d, "D4");
         i64 t = ph_var_type(d);
         i64 lv = node_new(N_IDENT, line, fl);
@@ -3252,7 +3359,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         set_nd_type(lv, ph_mcty(lt));
         i64 r = ph_expr(0);
         i64 rt = ph_ety;
-        if (semi) ph_want(";", 1, "expected ; after a php assignment");
+        if (semi) ph_semi("expected ; after a php assignment");
         i64 v = 0;
         if (op == ph_tok(".", 1)) {
             if (lt == PT_MIXED) { v = ph_c2("php_zv_concat", lv, ph_to_mixed(r, rt), ty_pzv); ph_ety = PT_MIXED; }
@@ -3291,7 +3398,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         set_nd_type(lv3, ph_mcty(lt2));
         i64 r3 = ph_expr(0);
         i64 rt3 = ph_ety;
-        if (semi) ph_want(";", 1, "expected ; after ??=");
+        if (semi) ph_semi("expected ; after ??=");
         if (lt2 != PT_MIXED) ph_todo2(fl, line, "??= on a variable of type", ph_tyname(lt2));
         i64 nn3 = node_new(N_UNARY, line, fl);
         set_nd_op(nn3, ph_tok("!", 1));
@@ -3319,7 +3426,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         ph_next();
         uptr src = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
-        if (semi) ph_want(";", 1, "expected ; after a php assignment");
+        if (semi) ph_semi("expected ; after a php assignment");
         if (ph_var_find(src) < 0) ph_refuse2(fl, line, "an undefined php variable", src, "D4");
         if (ph_var_type(src) != PT_MIXED)
             ph_todo2(fl, line, "a reference to a php variable of type", ph_tyname(ph_var_type(src)));
@@ -3334,7 +3441,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
     }
     i64 v = ph_expr(0);
     i64 vt = ph_ety;
-    if (semi) ph_want(";", 1, "expected ; after a php assignment");
+    if (semi) ph_semi("expected ; after a php assignment");
     if (vt == PT_VOID) ph_refuse(fl, line, "assigning the result of a void function", "D4");
     // `$x = null` makes $x a zval: null is a value of mixed, which is what
     // D4 (c) says a union lowers to.
@@ -3468,7 +3575,7 @@ i64 ph_stmt() {
             if (isprint) break;
             if (!ph_accept(",", 1)) break;
         }
-        ph_want(";", 1, "expected ; after echo");
+        ph_semi("expected ; after echo");
         i64 b = node_new(N_BLOCK, line, fl);
         set_nd_a(b, head);
         return ph_wrap(b);
@@ -3485,7 +3592,7 @@ i64 ph_stmt() {
             if (ph_fn_ret == PT_BOOL && ph_ety != PT_BOOL) e = ph_to_bool(e, ph_ety);
         }
         if (!e && ph_fn_ret == PT_MIXED) e = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
-        ph_want(";", 1, "expected ; after return");
+        ph_semi("expected ; after return");
         i64 r = node_new(N_RETURN, line, fl);
         set_nd_a(r, e);
         return ph_wrap(r);
@@ -3513,7 +3620,7 @@ i64 ph_stmt() {
         ph_want("(", 1, "expected ( after do-while");
         i64 c = ph_to_bool(ph_expr(0), ph_ety);
         ph_want(")", 1, "expected ) after do-while");
-        ph_want(";", 1, "expected ; after do-while");
+        ph_semi("expected ; after do-while");
         i64 neg = node_new(N_UNARY, line, fl);
         set_nd_op(neg, ph_tok("!", 1));
         set_nd_a(neg, c);
@@ -3565,7 +3672,7 @@ i64 ph_stmt() {
         ph_next();
         i64 lv = 1;
         if (ph_tid == T_INT) { lv = ph_tval; ph_next(); }
-        ph_want(";", 1, "expected ; after break/continue");
+        ph_semi("expected ; after break/continue");
         i64 n = node_new(N_BREAK, line, fl);
         if (!isbrk) n = node_new(N_CONTINUE, line, fl);
         set_nd_val(n, ph_ls_level(lv, fl, line));
@@ -3600,7 +3707,7 @@ i64 ph_stmt() {
             ph_const_add(cn, v, ph_ety, fl, line);
             if (!ph_accept(",", 1)) break;
         }
-        ph_want(";", 1, "expected ; after a php const");
+        ph_semi("expected ; after a php const");
         return ph_empty();
     }
     if (ph_is("unset")) {
@@ -3640,7 +3747,7 @@ i64 ph_stmt() {
             if (!ph_accept(",", 1)) break;
         }
         ph_want(")", 1, "expected ) after unset");
-        ph_want(";", 1, "expected ; after unset");
+        ph_semi("expected ; after unset");
         if (!head) return ph_empty();
         i64 b = node_new(N_BLOCK, line, fl);
         set_nd_a(b, head);
@@ -3663,7 +3770,7 @@ i64 ph_stmt() {
             tail = g;
             if (!ph_accept(",", 1)) break;
         }
-        ph_want(";", 1, "expected ; after global");
+        ph_semi("expected ; after global");
         i64 b = node_new(N_BLOCK, line, fl);
         set_nd_a(b, head);
         return b;
@@ -3700,7 +3807,7 @@ i64 ph_stmt() {
             tail2 = st2;
             if (!ph_accept(",", 1)) break;
         }
-        ph_want(";", 1, "expected ; after static");
+        ph_semi("expected ; after static");
         i64 b2 = node_new(N_BLOCK, line, fl);
         set_nd_a(b2, head2);
         return ph_wrap(b2);
@@ -3809,7 +3916,7 @@ i64 ph_stmt() {
         ph_next();
         i64 e = ph_expr(0);
         i64 et = ph_ety;
-        ph_want(";", 1, "expected ; after throw");
+        ph_semi("expected ; after throw");
         ph_can_throw = 1;
         return ph_expr_stmt_of(ph_c1("php_throw", ph_recv(e, et), ty_pzv));
     }
@@ -3925,7 +4032,7 @@ i64 ph_stmt() {
     if (ph_is("function")) { top_add(ph_function()); return ph_empty(); }
 
     i64 e = ph_expr(0);
-    if (!ph_at(")", 1)) ph_want(";", 1, "expected ; after a php expression");
+    if (!ph_at(")", 1)) ph_semi("expected ; after a php expression");
     // var_dump() and the null literal have already emitted everything they do
     // (ph_pending_stmt) and their value is a constant: dropping it keeps the
     // statement list free of dead expressions. A VOID CALL is not that.
@@ -4566,7 +4673,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             ph_next();
             i64 ev = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
             if (ph_accept("=", 1)) { i64 x = ph_expr(0); ev = ph_to_mixed(x, ph_ety); }
-            ph_want(";", 1, "expected ; after an enum case");
+            ph_semi("expected ; after an enum case");
             ph_cfill(ph_stmt_of(ph_c3("php_enum_case", ph_ceref(ceg), ph_strlit(en, cstrlen(en)), ev, ty_pzv)));
             continue;
         }
@@ -4602,7 +4709,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
                         ph_cfill(ph_stmt_of(ph_c3("php_ce_const", ph_ceref(ceg), ph_strlit(n2, cstrlen(n2)),
                                                   ph_to_mixed(cv2, ph_ety), TY_VOID)));
                     }
-                    ph_want(";", 1, "expected ; after a class constant");
+                    ph_semi("expected ; after a class constant");
                     continue;
                 }
             }
@@ -4615,7 +4722,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
                                           ph_to_mixed(cv3, ph_ety), TY_VOID)));
                 if (!ph_accept(",", 1)) break;
             }
-            ph_want(";", 1, "expected ; after a class constant");
+            ph_semi("expected ; after a class constant");
             continue;
         }
 
@@ -4663,7 +4770,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             ph_cfill(ph_stmt_of(ph_c4(fn, ph_ceref(ceg), ph_strlit(pname, cstrlen(pname)), def, ph_int(vis), TY_VOID)));
             if (!ph_accept(",", 1)) break;
         }
-        ph_want(";", 1, "expected ; after a php property");
+        ph_semi("expected ; after a php property");
     }
     ph_next();
     ph_cur_cls = savec;
@@ -4853,7 +4960,7 @@ i64 ph_obj_stmt(uptr d, uptr fl, i64 line, i64 semi) {
                     ph_want("=", 1, "expected = after a php property index");
                     i64 v = ph_expr(0);
                     i64 vt = ph_ety;
-                    if (semi) ph_want(";", 1, "expected ; after a php assignment");
+                    if (semi) ph_semi("expected ; after a php assignment");
                     return ph_expr_stmt_of(ph_store(arr, k, ph_to_mixed(ph_own(v, vt), vt)));
                 }
                 if (k)  arr = ph_c2("php_arr_dim", arr, k, ty_parr);
@@ -4897,13 +5004,13 @@ i64 ph_obj_stmt(uptr d, uptr fl, i64 line, i64 semi) {
                 i64 r2 = ph_expr(0);
                 v = ph_to_mixed(ph_own(r2, ph_ety), ph_ety);
             }
-            if (semi) ph_want(";", 1, "expected ; after a php assignment");
+            if (semi) ph_semi("expected ; after a php assignment");
             return ph_expr_stmt_of(ph_c4("php_zv_pset", ph_tref(rt), ph_strlit(pname, cstrlen(pname)), v, ph_scope(), TY_VOID));
         }
         cur = ph_c3("php_zv_pget", recv, ph_strlit(pname, cstrlen(pname)), ph_scope(), ty_pzv);
         t = PT_MIXED;
     }
-    if (semi) ph_want(";", 1, "expected ; after a php expression");
+    if (semi) ph_semi("expected ; after a php expression");
     return ph_expr_stmt_of(cur);
 }
 
@@ -4925,41 +5032,70 @@ i64 ph_function() {
     i64 fi = ph_nfn;
     ph_nfn = ph_nfn + 1;
     st64(ph_fname + fi * 8, name);
-    st64(ph_fret + fi * 8, PT_INT);
+    st64(ph_fret + fi * 8, PT_MIXED);
     st64(ph_fnp + fi * 8, 0);
+    st64(ph_fvar + fi * 8, 0);
 
     ph_want("(", 1, "expected ( in a php function");
     uptr save = ph_scope_save();
     i64 head = 0;
     i64 tail = 0;
     i64 np = 0;
+    i64 pre = 0;
+    i64 pret = 0;
     loop {
         if (ph_at(")", 1)) break;
-        if (ph_at("...", 3)) ph_todo(fl, line, "a variadic parameter ...$args");
+        i64 variadic = 0;
+        if (ph_at("...", 3)) { ph_next(); variadic = 1; }
         if (ph_at("&", 1)) ph_todo(fl, line, "a by-reference parameter in a typed function");
         i64 pt = -1;
-        if (!ph_at("$", 1)) pt = ph_type_word(1);
-        if (pt < 0) ph_refuse(fl, line, "an untyped php parameter (D4 needs the type)", "D4");
-        if (!ph_at("$", 1)) ph_todo(fl, line, "a php parameter without $name");
+        if (!ph_at("$", 1)) pt = ph_type_word(0);
+        if (!ph_at("$", 1)) ph_todo2(fl, line, "a php parameter", ph_tname);
         ph_next();
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
-        if (ph_at("=", 1)) ph_todo(fl, line, "a default parameter value");
+        i64 dflt = 0;
+        if (ph_accept("=", 1)) { i64 dv = ph_expr(0); dflt = ph_to_mixed(dv, ph_ety); }
+        // a parameter with no declared type IS mixed (D4 (c)); so is one with
+        // a default, because "not passed" has to be expressible
+        if (pt < 0 || dflt) pt = PT_MIXED;
+        if (variadic) pt = PT_ARR;
         if (np >= PH_MAXP) ph_todo(fl, line, "more than 12 parameters");
         ph_var_bind_raw(d, pt);
         st64(ph_fpt + (fi * PH_MAXP + np) * 8, pt);
+        st64(ph_fpd + (fi * PH_MAXP + np) * 8, dflt);
         np = np + 1;
         i64 pn = param_new(ph_mcty(pt), ph_mangle(d, "v_"));
         if (tail) set_nd_next(tail, pn);
         if (!tail) head = pn;
         tail = pn;
+        if (pt == PT_MIXED) {
+            // a zval parameter that was not passed arrives as 0
+            i64 miss = node_new(N_UNARY, line, fl);
+            set_nd_op(miss, ph_tok("!", 1));
+            i64 pr = node_new(N_IDENT, line, fl);
+            set_nd_name(pr, ph_mangle(d, "v_"));
+            set_nd_type(pr, ty_pzv);
+            set_nd_a(miss, pr);
+            set_nd_type(miss, TY_U8);
+            i64 fill = 0;
+            if (dflt) fill = ph_set(ph_mangle(d, "v_"), dflt);
+            if (!dflt) fill = ph_stmt_of(ph_c2("php_argcount", ph_strlit("", 0),
+                                               ph_strlit(name, cstrlen(name)), TY_VOID));
+            i64 iff = node_new(N_IF, line, fl);
+            set_nd_a(iff, miss);
+            set_nd_b(iff, fill);
+            if (pret) set_nd_next(pret, iff);
+            if (!pret) pre = iff;
+            pret = iff;
+        }
+        if (variadic) { st64(ph_fvar + fi * 8, 1); break; }
         if (!ph_accept(",", 1)) break;
     }
     ph_want(")", 1, "expected ) in a php function");
     st64(ph_fnp + fi * 8, np);
-    i64 rt = PT_INT;
+    i64 rt = PT_MIXED;
     if (ph_at(":", 1)) { ph_next(); rt = ph_type_word(1); }
-    if (!ph_at(":", 1)) { if (rt == PT_INT) rt = PT_INT; }
     st64(ph_fret + fi * 8, rt);
     uptr mn = ph_mangle(name, "f_");
     p_set_decl_name(mn);
@@ -4974,9 +5110,21 @@ i64 ph_function() {
     ph_hoist_head = 0;
     ph_hoist_tail = 0;
     i64 body = ph_block();
+    if (pre) {
+        i64 t = pre;
+        loop { if (!nd_next(t)) break; t = nd_next(t); }
+        set_nd_next(t, nd_a(body));
+        set_nd_a(body, pre);
+    }
     if (ph_hoist_head) {
         set_nd_next(ph_hoist_tail, nd_a(body));
         set_nd_a(body, ph_hoist_head);
+    }
+    // a php function that falls off the end answers null
+    if (rt == PT_MIXED) {
+        i64 t2 = nd_a(body);
+        if (!t2) set_nd_a(body, ph_ret_null(line, fl));
+        if (t2) { loop { if (!nd_next(t2)) break; t2 = nd_next(t2); } set_nd_next(t2, ph_ret_null(line, fl)); }
     }
     ph_hoist_head = hh;
     ph_hoist_tail = ht;
