@@ -56,9 +56,9 @@ def one(path):
     m = SEC.search(src)
     if not m:
         return None
-    php = path[:-5] + '.dg.php'
+    php = os.path.abspath(path[:-5] + '.dg.php')
     binf = tempfile.mktemp(prefix='dg.', suffix='.bin')
-    d = os.path.dirname(path) or '.'
+    d = os.path.dirname(os.path.abspath(path)) or '.'
     try:
         open(php, 'w').write(m.group(1))
         c = subprocess.run([MCPHP, '--exe', php, '-o', binf], stdout=subprocess.DEVNULL,

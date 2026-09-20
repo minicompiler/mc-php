@@ -2142,8 +2142,14 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         ph_ety = PT_INT;
         return ph_c2("php_pow_i", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
     }
-    if (op == ph_tok("<<", 2) || op == ph_tok(">>", 2) || op == ph_tok("&", 1)
-        || op == ph_tok("|", 1) || op == ph_tok("^", 1)) {
+    if (op == ph_tok("<<", 2) || op == ph_tok(">>", 2)) {
+        ph_ety = PT_INT;
+        uptr sf = "php_shl_i";
+        if (op == ph_tok(">>", 2)) sf = "php_shr_i";
+        ph_can_throw = 1;
+        return ph_c2(sf, ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
+    }
+    if (op == ph_tok("&", 1) || op == ph_tok("|", 1) || op == ph_tok("^", 1)) {
         ph_ety = PT_INT;
         return ph_bin(op, ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
     }
@@ -2357,8 +2363,21 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
     loop {
         if (ph_at(")", 1)) break;
         if (ph_at("...", 3)) ph_todo(fl, line, "argument unpacking ...$args");
+        i64 sct = ph_can_throw;
+        ph_can_throw = 0;
         i64 a = ph_expr(0);
         i64 t = ph_ety;
+        // An argument that can throw is computed into a temporary with the
+        // unwinding check BETWEEN computing it and the call, exactly as the
+        // echo path already does: php stops at the throwing argument, and
+        // `var_dump("65" / "0")` must print nothing before the catch runs
+        // (T6 printed NULL first).
+        if (ph_can_throw) {
+            i64 tmp = ph_temp(a, ph_mcty(t), "phg_");
+            ph_pending_stmt(ph_check(ph_tline, ph_tfile));
+            a = ph_tref(tmp);
+        }
+        ph_can_throw = ph_can_throw | sct;
         if (n >= maxn) ph_todo(fl, line, "too many arguments for this builtin");
         st64(buf + n * 16, a);
         st64(buf + n * 16 + 8, t);

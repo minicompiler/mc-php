@@ -1331,8 +1331,45 @@ i64 php_zv_ilong(uptr z) {
 uptr php_zv_band(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) & php_zv_ilong(b)); }
 uptr php_zv_bor(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) | php_zv_ilong(b)); }
 uptr php_zv_bxor(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) ^ php_zv_ilong(b)); }
-uptr php_zv_shl(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) << php_zv_ilong(b)); }
-uptr php_zv_shr(uptr a, uptr b) { return php_zlong(php_zv_ilong(a) >> php_zv_ilong(b)); }
+// php: a negative shift is an ArithmeticError, and a shift of 64 or more is
+// 0 (or -1 for a right shift of a negative value), never the hardware's
+// modulo-64 answer.
+i64 php_shift_ok(i64 s) {
+    if (s < 0) {
+        php_throw_str(php_str_new("ArithmeticError", 15),
+                      php_str_new("Bit shift by negative number", 28));
+        return 0;
+    }
+    return 1;
+}
+
+uptr php_zv_shl(uptr a, uptr b) {
+    i64 x = php_zv_ilong(a);
+    i64 s = php_zv_ilong(b);
+    if (!php_shift_ok(s)) return php_znull();
+    if (s >= 64) return php_zlong(0);
+    return php_zlong(x << s);
+}
+
+uptr php_zv_shr(uptr a, uptr b) {
+    i64 x = php_zv_ilong(a);
+    i64 s = php_zv_ilong(b);
+    if (!php_shift_ok(s)) return php_znull();
+    if (s >= 64) { if (x < 0) return php_zlong(-1); return php_zlong(0); }
+    return php_zlong(x >> s);
+}
+
+i64 php_shl_i(i64 x, i64 s) {
+    if (!php_shift_ok(s)) return 0;
+    if (s >= 64) return 0;
+    return x << s;
+}
+
+i64 php_shr_i(i64 x, i64 s) {
+    if (!php_shift_ok(s)) return 0;
+    if (s >= 64) { if (x < 0) return -1; return 0; }
+    return x >> s;
+}
 uptr php_zv_bnot(uptr a) {
     if (php_zv_type(a) == IS_STRING) {
         uptr s = ld64(a);
