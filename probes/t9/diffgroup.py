@@ -18,6 +18,17 @@ import os, re, subprocess, sys, tempfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
+
+def _mkpath(prefix='', suffix=''):
+    # mkstemp, not mktemp: the name is reserved by the kernel, so no other
+    # process can win the race between choosing it and creating it. The file
+    # is unlinked here and re-created by the writer, which is what the callers
+    # want (a PATH, not a handle) without the TOCTOU.
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    os.close(fd)
+    os.unlink(path)
+    return path
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MCPHP = os.environ.get('MCPHP_BIN', os.path.join(HERE, 'mc-php'))
 PHP = os.environ.get('PHP', 'php')
@@ -57,10 +68,10 @@ def one(path):
     if not m:
         return None
     php = os.path.abspath(path[:-5] + '.dg.php')
-    binf = tempfile.mktemp(prefix='dg.', suffix='.bin')
+    binf = _mkpath(prefix='dg.', suffix='.bin')
     d = os.path.dirname(os.path.abspath(path)) or '.'
     try:
-        open(php, 'w').write(m.group(1))
+        open(php, 'w', encoding='latin-1', newline='').write(m.group(1))
         c = subprocess.run([MCPHP, '--exe', php, '-o', binf], stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=40)
         if c.returncode != 0:

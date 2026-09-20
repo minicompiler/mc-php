@@ -6,7 +6,7 @@
 //
 //   php probes/t9/bench/run.php
 //   probes/t9/mcphp.sh probes/t9/bench/run.php
-require "WorkloadTest.php";
+require __DIR__ . "/WorkloadTest.php";
 
 $ok  = 0;
 $bad = 0;

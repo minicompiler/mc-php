@@ -11,6 +11,17 @@ so it is a script and not a paragraph.
 import os, re, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
 
+
+def _mkpath(prefix='', suffix=''):
+    # mkstemp, not mktemp: the name is reserved by the kernel, so no other
+    # process can win the race between choosing it and creating it. The file
+    # is unlinked here and re-created by the writer, which is what the callers
+    # want (a PATH, not a handle) without the TOCTOU.
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    os.close(fd)
+    os.unlink(path)
+    return path
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MCPHP = os.environ.get('MCPHP_BIN', os.path.join(HERE, 'mc-php'))
 SEC = re.compile(r'^--FILE--\r?\n(.*?)(?=^--[A-Z_]+--)', re.S | re.M)
@@ -26,9 +37,9 @@ def why(path):
         return path, '(no --FILE-- section)'
     # next to the .phpt, like php-src's own runner: __DIR__ and siblings resolve
     php = path[:-5] + '.why.php'
-    binf = tempfile.mktemp(prefix='why.', suffix='.bin')
+    binf = _mkpath(prefix='why.', suffix='.bin')
     try:
-        open(php, 'w').write(m.group(1))
+        open(php, 'w', encoding='latin-1', newline='').write(m.group(1))
         p = subprocess.run([MCPHP, '--exe', php, '-o', binf],
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
         msg = p.stderr.decode('latin-1', 'replace').splitlines()

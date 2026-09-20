@@ -1,15 +1,15 @@
 <?php
 // D8: the SAME file runs under `php` with PHPUnit and under mc-php through
-// probes/t9/tests/run.php, which is the "the compiler discovers test*
+// probes/t9/bench/run.php, which is the "the compiler discovers test*
 // methods" half done by hand for one class -- there is no `mc-php test`
 // subcommand yet, and D6 forbids discovering them at run time.
 //
-//   php probes/t9/tests/run.php            (the shim, under php)
-//   probes/t9/mcphp.sh probes/t9/tests/run.php
-//   phpunit probes/t9/tests/WorkloadTest.php   (when phpunit is installed)
+//   php probes/t9/bench/run.php            (the shim, under php)
+//   probes/t9/mcphp.sh probes/t9/bench/run.php
+//   phpunit probes/t9/bench/WorkloadTest.php   (when phpunit is installed)
 
-require "shim.php";
-require "workload.php";
+require __DIR__ . "/shim.php";
+require __DIR__ . "/workload.php";
 
 class WorkloadTest extends PHPUnit\Framework\TestCase
 {

@@ -3,10 +3,18 @@
 // machine (`php -r 'echo class_exists("PHPUnit\\Framework\\TestCase");'`
 // answers nothing), so the php side runs the SAME test file against this
 // shim; with the real phpunit on the include path this declaration has to
-// be guarded, which is one `if (!class_exists(...))` and nothing else.
+// be guarded, which is the `class_exists` below -- with the real phpunit
+// loaded this file is a no-op and the test runs against phpunit's own
+// TestCase, which is what D8 asks for.
 //
 // D6: nothing here enumerates methods. The runner names them (run.php).
 namespace PHPUnit\Framework;
+
+// The real phpunit wins: `false` keeps the autoloader out of it, so this asks
+// "is it already loaded", not "can it be loaded".
+if (class_exists('PHPUnit\Framework\TestCase', false)) {
+    return;
+}
 
 class AssertionFailed extends \Exception {}
 

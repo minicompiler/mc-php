@@ -12,6 +12,17 @@ stderr says the arena ran out.
 """
 import os, re, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
+
+
+def _mkpath(prefix='', suffix=''):
+    # mkstemp, not mktemp: the name is reserved by the kernel, so no other
+    # process can win the race between choosing it and creating it. The file
+    # is unlinked here and re-created by the writer, which is what the callers
+    # want (a PATH, not a handle) without the TOCTOU.
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    os.close(fd)
+    os.unlink(path)
+    return path
 MC = os.environ.get('MCPHP_BIN',
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mc-php'))
 SEC = re.compile(r'^--FILE--\r?\n(.*?)(?=^--[A-Z_]+--)', re.S | re.M)
@@ -20,10 +31,10 @@ def one(p):
     except OSError: return None
     m=SEC.search(s)
     if not m: return None
-    php=os.path.abspath(p[:-5]+'.ar.php'); b=tempfile.mktemp(suffix='.bin')
+    php=os.path.abspath(p[:-5]+'.ar.php'); b=_mkpath(suffix='.bin')
     d=os.path.dirname(php)
     try:
-        open(php,'w').write(m.group(1))
+        open(php,'w',encoding='latin-1',newline='').write(m.group(1))
         c=subprocess.run([MC,'--exe',php,'-o',b],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=40)
         if c.returncode!=0: return None
         r=subprocess.run([b],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,cwd=d,timeout=20)
