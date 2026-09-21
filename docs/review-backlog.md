@@ -255,3 +255,18 @@ The standing rule above, applied to this pull request. Twelve inline findings, e
 the 784 that compile, 11 of 782 on the arena, 332 / 173 / 129 / 84 in the clustering. They make
 the method right, and the answers were already right -- which is worth knowing, and is the
 opposite of what the `run_pair` abspath defect did.
+
+### Round six
+
+- ~~The scratch file's tagged FALLBACK still measured a different program~~ when `<base>.php`
+  was taken: `__FILE__` and anything derived from it changed. There is no fallback name now --
+  `<base>.php` with `O_CREAT|O_EXCL`, and a name that is taken is SKIPPED and counted (`busy`)
+  rather than measured under another. Over the 1352-test sample that is **0 tests**, so the
+  fallback was buying nothing and hiding something.
+- ~~The D8 gate's mc-php half merged its stderr into stdout and read the last line~~, while the
+  php half beside it rejected any stderr at all -- a run could warn, print the expected summary
+  and pass. Both halves now have their own two streams and their own exit status, and either
+  one writing to stderr fails the gate.
+
+Both re-measured: **no number moved** (568 / 758 / 23 / 2 / 1, arena 11 of 782, clustering
+332 / 173 / 129 / 84, sub-populations 99 and 15).

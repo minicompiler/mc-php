@@ -55,37 +55,29 @@ class Busy(Exception):
 
 
 def sibling(phpt, tag):
-    """Create the scratch `.php` next to the .phpt, exclusively.
+    """Create `<base>.php` next to the .phpt, exclusively, or raise Busy.
 
-    The file has to be beside the .phpt: `__DIR__`, a relative `require` and a
-    sibling data file all resolve from there. It must NOT clobber one that is
-    already there -- php-src ships `.php` files next to its tests.
+    The file has to be beside the .phpt: `__DIR__`, a relative `require` and
+    a sibling data file all resolve from there. And it has to carry the
+    CANONICAL name, the one probes/t0/phpt-run.py gives the test, because a
+    program that reads `__FILE__`, `basename(__FILE__)` or a path derived
+    from it is otherwise not the program the grid graded.
 
-    `<base>.php` FIRST, because that is the name probes/t0/phpt-run.py gives
-    the test and a program that reads `__FILE__`, `basename(__FILE__)` or a
-    path derived from it is otherwise not the program the grid graded. Only
-    when that name is taken does it fall back to `<base>.<tag>.php` and a
-    counter, and after 64 tries the test is skipped rather than a stranger's
-    file destroyed. `fallbacks` counts how often the canonical name was not
-    available, so the cost of the fallback is a number and not a guess.
+    So there is NO fallback name. `O_CREAT|O_EXCL` means a `.php` php-src
+    already ships beside a test is never clobbered, and when the name is
+    taken the test is SKIPPED and counted (`busy`) rather than measured
+    under a different filename. Over T10's 1352-test sample that happened
+    **0 times**, so the fallback the first version had was buying nothing
+    and hiding something.
     """
     base = phpt[:-5] if phpt.endswith('.phpt') else phpt
-    names = [f'{base}.php'] + [f'{base}.{tag}.php'] + [f'{base}.{tag}{n}.php'
-                                                       for n in range(1, 64)]
-    for i, path in enumerate(names):
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            continue
-        os.close(fd)
-        if i:
-            fallbacks.append(path)
-        return path
-    raise Busy(base)
-
-
-# every test whose canonical `<base>.php` was taken, so the count is reportable
-fallbacks = []
+    path = f'{base}.php'
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        raise Busy(path)
+    os.close(fd)
+    return path
 
 
 def tmpbin(prefix='mcphp.'):
@@ -160,7 +152,8 @@ def run_pair(phpt, tag, budget=None):
     exit codes. `status` is one of:
 
         no-file      the .phpt has no --FILE-- section (or is unreadable)
-        busy         a sibling of that name exists; nothing was written
+        busy         `<base>.php` is taken; nothing was written and nothing
+                     measured, because the canonical name is what the grid uses
         no-compile   mc-php refused or failed; `cerr` carries its stderr
         compile-timeout / run-timeout / error
         ran          both ran: `out`/`rc` (mc-php) and `want`/`wrc` (php)
