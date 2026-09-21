@@ -159,11 +159,16 @@ d8pe=0
 if "$PHP" probes/t10/bench/run.php > "$MCPHP_TMP/d8p.out" 2> "$MCPHP_TMP/d8p.err"
 then :; else d8pe=$?; fi
 d8a=$(tail -1 "$MCPHP_TMP/d8p.out")
+# how many test* methods the class DECLARES: the gate requires that many to
+# have run, in both worlds. A last line ending in "0 failed" is satisfied by
+# a runner that executed nothing at all, and d8check.py compares the names
+# STATICALLY -- it cannot prove one was invoked.
+d8want=$(grep -c 'function[[:space:]][[:space:]]*test' probes/t10/bench/WorkloadTest.php)
 [ "$d8pe" = 0 ] || { printf '  php exited %s\n' "$d8pe"; fail=1; }
 if [ -s "$MCPHP_TMP/d8p.err" ]; then
     printf '  php wrote to stderr:\n'; sed 's/^/    /' "$MCPHP_TMP/d8p.err"; fail=1
 fi
-rm -f "$MCPHP_TMP/d8p.out" "$MCPHP_TMP/d8p.err"
+# (d8p.out is kept until the comparison below)
 # and the mc-php half on the same terms: its own streams, its own status.
 # Merging them with 2>&1 and reading the last line let a run write a warning
 # to stderr, print the expected summary, and pass -- while the php half
@@ -177,9 +182,21 @@ d8b=$(tail -1 "$MCPHP_TMP/d8.out")
 if [ -s "$MCPHP_TMP/d8.err" ]; then
     printf '  mc-php wrote to stderr:\n'; sed 's/^/    /' "$MCPHP_TMP/d8.err"; fail=1
 fi
-rm -f "$MCPHP_TMP/d8.bin" "$MCPHP_TMP/d8.bin.out" "$MCPHP_TMP/d8.bin.err" \
-      "$MCPHP_TMP/d8.out" "$MCPHP_TMP/d8.err"
+rm -f "$MCPHP_TMP/d8.bin" "$MCPHP_TMP/d8.bin.out" "$MCPHP_TMP/d8.bin.err"
 printf '  php     %s\n  mc-php  %s\n' "$d8a" "$d8b"
+# the WHOLE output of each half, not its last line: both worlds have to
+# print the same lines, and there have to be as many `ok` lines as the class
+# declares methods.
+d8ok=$(grep -c '^ok ' "$MCPHP_TMP/d8p.out" || true)
+d8okm=$(grep -c '^ok ' "$MCPHP_TMP/d8.out" || true)
+printf '  %s test* methods declared; php ran %s, mc-php ran %s\n' "$d8want" "$d8ok" "$d8okm"
+[ "$d8ok" = "$d8want" ] || { printf '  php did not run every declared test\n'; fail=1; }
+[ "$d8okm" = "$d8want" ] || { printf '  mc-php did not run every declared test\n'; fail=1; }
+if ! cmp -s "$MCPHP_TMP/d8p.out" "$MCPHP_TMP/d8.out"; then
+    printf '  the two worlds printed different things:\n'
+    diff -u "$MCPHP_TMP/d8p.out" "$MCPHP_TMP/d8.out" | sed -n '3,14p' | sed 's/^/    /'
+    fail=1
+fi
 # NOT phpunit and NOT `mc-php test`, and the reason is on record rather than
 # implied: phpunit is not installed on this host (bench/shim.php's own note)
 # and `mc-php test` does not exist -- D8 (a) names it as the mechanism the
@@ -191,6 +208,7 @@ printf '   does not exist yet -- d8check.py checks the hand-written list against
 printf '   the class, so a test method cannot be declared and never run)\n'
 case "$d8a" in *" 0 failed") ;; *) fail=1 ;; esac
 [ "$d8a" = "$d8b" ] || fail=1
+rm -f "$MCPHP_TMP/d8p.out" "$MCPHP_TMP/d8p.err" "$MCPHP_TMP/d8.out" "$MCPHP_TMP/d8.err"
 
 printf '\n== 11. D8: the bench, php against the mc-php binary ==\n'
 sh probes/t10/bench/bench10.sh || fail=1

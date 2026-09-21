@@ -303,3 +303,12 @@ Both re-measured: **no number moved** (568 / 758 / 23 / 2 / 1, arena 11 of 782, 
   carry it to be able to say so.
 - ~~The pull request's own description still carried the first run's headline~~ (1675 / 748 /
   73 / 85) against the checked-in 1676 and 1688 / 749 / 75 / 87.
+
+### Round nine
+
+- ~~The D8 gate kept only the last LINE of each half and accepted anything ending in
+  `0 failed`~~, which a runner that executed nothing at all would satisfy -- and `d8check.py`
+  compares the names STATICALLY, so it cannot prove one was invoked. The gate now counts the
+  `test*` methods the class DECLARES, requires that many `ok` lines from each half, and `cmp`s
+  the two whole outputs against each other. Measured: **6 declared, php ran 6, mc-php ran 6,
+  and the two worlds printed the same thing**, with nothing on either stderr.
