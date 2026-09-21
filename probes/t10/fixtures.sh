@@ -35,7 +35,13 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 lim() {
     perl -e 'my $t = shift; my $p = fork; exec(@ARGV) or exit 127 if !$p;
              $SIG{ALRM} = sub { kill 9, $p; waitpid $p, 0; exit 124 };
-             alarm $t; waitpid $p, 0; exit $? >> 8' 30 "$@"
+             alarm $t; waitpid $p, 0;
+             # A child killed by a SIGNAL has its number in the low seven
+             # bits and nothing in the high byte, so `$? >> 8` reported 0:
+             # a fixture that SEGFAULTED came out as a clean exit 0 and
+             # could pass the comparison. 128 + n is the shell convention
+             # and is a code php never answers.
+             exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' 30 "$@"
 }
 
 # One name for the binary, removed after each fixture: this loop is serial and

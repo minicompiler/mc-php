@@ -212,3 +212,12 @@ The standing rule above, applied to this pull request. Twelve inline findings, e
   -- which no probe has done, T9's 1637 and T8's 1450 included. Not fixed here: isolating the
   filesystem tests is a change to `probes/t0/phpt-run.py`'s working-directory policy, T0's
   file and a decision of its own.
+
+### Round four
+
+- ~~`fixtures.sh`'s timeout wrapper lost SIGNAL termination~~: perl's `$?` carries a signal number
+  in its low seven bits with nothing in the high byte, so `exit $? >> 8` reported **0** for a
+  fixture that SEGFAULTED -- a crashed fixture could pass the comparison. It is `128 + n` now,
+  the shell's own convention and a code php never answers. Measured: a child killed with SIGSEGV
+  gives 139, `exit 7` gives 7, `exit 0` gives 0.
+- ~~The corrected-results table still said 74 fixtures~~ where the invariant beside it said 75.

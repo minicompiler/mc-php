@@ -80,7 +80,7 @@ not the compiler.
 | greens in T0's "touched by none" | 1626 of 1637 | **1651 of 1676, 1663 of 1688** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **758 of 784 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 782 that RAN** | **the denominator counted tests it never ran** |
-| **fixtures byte for byte** | **60 of 60, merged streams** | **74 of 74, each stream and the exit code** | **`2>&1` and `$(...)`** |
+| **fixtures byte for byte** | **60 of 60, merged streams** | **75 of 75, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
 | **the D8 bench** | **5.85x and 1.45x** | **7.21x and 1.44x** | **T9's own compiler refuses its own `main.php`** |
