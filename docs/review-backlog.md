@@ -361,3 +361,26 @@ measured before the fix.
 - ~~`clone` left the new object's readonly marks empty~~ (rounds ten and eleven's own fix), so
   an already-initialised readonly property could be written on the clone. php keeps it
   initialised and refuses. The marks are copied with the properties.
+
+### Round thirteen -- three findings, and all three were MEASURED before anything was written
+
+Two of them are wrong, and the measurement is how that is known rather than asserted.
+
+- **"Spread argument exceptions are not checked before unpacking"** (`php.mc:2939`) -- the
+  structural point is right (the spread path does not isolate `ph_can_throw` or emit a
+  `ph_check()` the way the ordinary-argument path does) and the OBSERVABLE case does not
+  reproduce: `function boom() { throw new Exception("boom"); } f(...boom());` inside a `try`
+  prints `caught boom` then `end` under mc-php, byte for byte php's, and the callee's body
+  does not run. Left as it is, with the reproducer: adding the boundary is a few lines, but it
+  would change the lowering of every `f(...$x)` and the grid was measured without it, and the
+  case it would fix is not one this corpus has produced.
+- ~~"Method visibility incorrectly checked against property table"~~ (`php_rt.txt:4267`) --
+  **incorrect.** `php_ce_method` writes a method's visibility into table 72 as well
+  (`php_rt.txt:4068`, `vis * 8 + 1`, the tag that tells a method from a property), so the
+  lookup is right. `g/65-visibility.php` exercises exactly the two the finding names, a
+  `private function im()` and a `private static function sm()`, and both raise.
+- ~~"Protected access incorrectly permits ancestor scopes"~~ (`php_rt.txt:4274`) --
+  **incorrect about php.** The manual's rule is "within the class itself and by inheriting and
+  PARENT classes", and php agrees: `class A { function peek(B $b) { return $b->p; } }` with
+  `class B extends A { protected $p = 1; }` prints 1 under php, and so does mc-php, for a
+  protected property and for a protected method. Measured side by side.
