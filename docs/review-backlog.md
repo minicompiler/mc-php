@@ -63,7 +63,7 @@ after.**
 ## 2. Language semantics that are wrong (a program can observe every one) -- DONE
 
 Every line below is closed by a FIXTURE that runs under `php` and under mc-php and is compared
-byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **77 / 77** as this pull request ends), or by
+byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **79 / 79** as this pull request ends), or by
 a measurement recorded beside it. The fixture is named at the end of each line.
 
 - ~~**`&&` and `||` do not short-circuit**~~ (#5 `php.mc:2202`). Both operands were lowered and
@@ -801,3 +801,25 @@ Five findings: two new, two in code that had not changed, and one re-post.
   effect, which is rare and which no test in the sample has; running it here
   would also mean reproducing the grid's skip DECISION, which is a second
   behaviour rather than a fix. Recorded in `RESULTS.md` with the reasoning.
+
+### Round twenty-four
+
+Two documentation findings, and a third the review's own summary line named
+without filing -- which turned out to be the most serious thing in this
+round.
+
+- **A FAILED typed by-reference coercion wrote NULL into the caller's
+  variable.** Not in the findings list; the overview sentence said "failed
+  typed by-reference coercions mutating caller values" and it was right.
+  `php_param_coerce` raises and answers `php_znull()` on a refusal, and
+  round twenty's `php_param_coerce_ref` stored that answer back before the
+  exception unwound. Measured: `m(int &$x)` with an array printed `NULL`
+  where php prints `array(0) {}`. The write-back is skipped when an
+  exception is pending; `g/80-byref-typed.php` carries the coercion that
+  succeeds (`"5"` leaves 6 behind), the one that fails (the caller's array
+  untouched) and the value that needs none.
+- ~~The backlog's own headline still said 77 / 77.~~ 79 / 79.
+- ~~`RESULTS.md` said `probes/t9/` is left exactly as it was~~, and this pull
+  request deletes `probes/t9/bench/unwind.php`. It now says what was deleted
+  and why: an orphan copied forward from T6 that no gate ran, found by
+  `d8check.py`, with T7's and T8's copies and T6's original untouched.

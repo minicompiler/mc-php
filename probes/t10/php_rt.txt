@@ -5022,6 +5022,11 @@ uptr php_param_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argna
 uptr php_param_coerce_ref(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) {
     uptr c = php_param_coerce(z, want, cls, fn, argno, argname);
     if (!z || c == z) return z;
+    // a FAILED coercion raised and answered null, and storing that wrote
+    // null into the caller's own variable on the way out: php leaves it
+    // exactly as it was. Measured -- `m(int &$x)` with an array printed
+    // `NULL` here and `array(0) {}` there.
+    if (ph_exc) return z;
     return php_zv_store(z, c);
 }
 

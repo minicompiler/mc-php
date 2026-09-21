@@ -11,7 +11,10 @@ over the fixtures.
 Run: `sh probes/t10/run.sh`. Host: macOS 26 / arm64, **mc 1.1.0**, PHP 8.5.10
 (Homebrew, NTS), php-src at `php-8.5.10`.
 
-`probes/t9/` is left exactly as it was. Every measurement here was taken
+`probes/t9/` is left as it was but for one deletion, and it is on purpose:
+`probes/t9/bench/unwind.php` was an orphan copied forward from T6 that no
+gate ran, which `d8check.py` found; T7's and T8's copies went with it and
+T6's original is untouched. Nothing else under `probes/t9/` was changed. Every measurement here was taken
 against a SNAPSHOT of the compiler (`probes/t10/grid.sh`,
 `probes/t10/fixtures.sh`), which is T7's own note: the first baseline there
 measured a binary that was being rebuilt underneath it.
@@ -405,13 +408,13 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **78 of 78** numbered fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **79 of 79** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** refusals named, exit 3.
 * `lencheck` **501 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
-* `d8check` -- **84 fixture / 1 helper / 3 instrument / 1 library / 2 bench**, 91 `.php`,
-  and the repo-wide sweep over **359** `.php` under `probes/`,
+* `d8check` -- **85 fixture / 1 helper / 3 instrument / 1 library / 2 bench**, 92 `.php`,
+  and the repo-wide sweep over **360** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
 * the grid's tmp peak **1908 KiB over 27728 tests** on the round-nineteen run
@@ -593,3 +596,9 @@ skips never reaches these tools -- `wrong.txt` and `skip.txt` are disjoint by
 construction. The real case is a SKIPIF with a side effect, which no test in
 this sample has, and reproducing it here would mean reproducing the skip
 DECISION as well.
+
+**Round twenty-four** found the sharpest defect of the last few rounds in a
+sentence the reviewer did not file as a finding: a typed by-reference
+coercion that FAILS raised and answered null, and round twenty's write-back
+stored that null into the caller's own variable before the exception
+unwound. php leaves the variable exactly as it was. `g/80-byref-typed.php`.
