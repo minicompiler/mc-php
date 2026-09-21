@@ -581,3 +581,15 @@ SIGKILL runs no trap, so round twenty-one's compiler-child fix could not
 cover the timeout that actually happens: the candidate is started in its own
 process group and the group is what the timeout kills -- measured at 1
 surviving compiler before and 0 after.
+
+**Round twenty-three** put `harness.py`'s own four subprocesses behind one
+group-aware runner -- `base_environment` sets `TEST_PHP_EXECUTABLE` so a
+.phpt CAN spawn a nested php, and the compiler is a child too -- and refuted
+one finding with a measurement (`kill -9, $p` is how perl spells the process
+group, and a grandchild `sleep 30` is gone after the alarm). One is recorded
+rather than fixed: **`run_pair` does not run `--SKIPIF--`**, because the grid
+runs that section to decide whether to run the test AT ALL and a test it
+skips never reaches these tools -- `wrong.txt` and `skip.txt` are disjoint by
+construction. The real case is a SKIPIF with a side effect, which no test in
+this sample has, and reproducing it here would mean reproducing the skip
+DECISION as well.
