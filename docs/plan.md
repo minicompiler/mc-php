@@ -194,6 +194,28 @@ D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixt
     from memory. Nothing written in PHP lands without its test in both worlds and its row in the
     bench table.
 
+    AMENDED (T10, `docs/review-backlog.md` section 3): the rule covers the `.php` under
+    `probes/*/g` and `probes/*/r` too, and until T10 they carried neither a PHPUnit class nor a
+    bench row. They are EXEMPT, with the reason and the enforcement both written down, because
+    the unit D8 governs is the PROGRAM and a differential fixture is not one -- it is already a
+    test, and a stronger one. (c) A fixture's test is the differential gate itself
+    (`probes/t10/fixtures.sh`): its stdout, its stderr and its exit code are compared BYTE FOR
+    BYTE against `php` on the same source, so its oracle is the reference implementation and not
+    a value someone typed into an `assertSame`, and it runs in both worlds by construction --
+    which is what D8 (a) asks a test to prove. It carries no bench row because a three-line
+    program measures process start-up and nothing else (T9 measured it: `php` pays about 38 ms
+    before the first statement, against a whole `main.php` of 39.5 ms). (d) A probe cannot waive
+    the rule for itself, so the exemption is a SCRIPT and not a paragraph:
+    `probes/t10/d8check.py` (`run.sh` step 0) puts every `.php` under the probe into exactly one
+    of four regimes -- `fixture` (matched by the two globs `fixtures.sh` actually walks),
+    `instrument` (the `TestCase` shim, the test class, the runner that names the methods: the
+    mechanism of D8 (a), which cannot test itself), `library` (required BY the test class AND BY
+    a bench program, so exercised in both worlds and timed in both) and `bench` (a row in
+    `bench10.sh`, which refuses to time a program until `php` and mc-php print the same answer)
+    -- and exits non-zero naming any file in none of them. It found one on its first run:
+    `probes/t10/bench/unwind.php`, copied forward from T6 and referenced by nothing, deleted
+    here (T6's original is untouched and still reproduces).
+
 D9. DECIDED (owner, 2026-09-15): the TYPE SYSTEM is PHP's, in full -- the manual's own list
     (`null`, `bool`, `int`, `float`, `string` and numeric strings, `array`, `object`, enums,
     resources, `callable`, `mixed`, `void`, `never`, `self`/`parent`/`static`, `?T`, unions

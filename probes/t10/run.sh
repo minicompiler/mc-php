@@ -56,6 +56,9 @@ df -h / | tail -1 | awk '{ printf "  disk before: %s used, %s free\n", $3, $4 }'
 
 echo ""
 echo "== 0. the compiler =="
+# D8 over every .php this probe wrote, before anything is built: a file with
+# neither a test in both worlds nor a bench row fails the run.
+python3 probes/t10/d8check.py || fail=1
 python3 probes/t10/lencheck.py
 python3 probes/t10/aritycheck.py
 # mc --exe must not overwrite a signed executable at the same inode: the
