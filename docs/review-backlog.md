@@ -739,3 +739,34 @@ were not touched.
   resolved against the directory the loop itself spells; measured, a
   synthetic `probes/t98/main.php` is reported and the real tree is clean.
 - ~~The fixture count is 77 in `docs/plan.md` and `probes/README.md`.~~ 78.
+
+### Round twenty-two
+
+Four findings, all real.
+
+- ~~A SIGKILL on the wrapper leaves the compiler running.~~ Correct, and the
+  previous round's fix could not cover it: `subprocess.run`'s timeout and
+  `lim`'s alarm both send SIGKILL, which runs no trap. **Measured, both
+  ways**: a 3-million-statement source compiled for two seconds and then
+  killed leaves **1 surviving compiler** when the wrapper alone is killed and
+  **0** when the process group is. `probes/t0/phpt-run.py` starts the
+  candidate with `start_new_session` and kills the group on a timeout;
+  `fixtures.sh`'s perl child calls `setpgrp` and the alarm kills the negative
+  pid. The TERM/INT traps in `mcphp.sh` stay for a polite kill.
+- ~~`harness.py`, `why.py` and `diffgroup.py` compare the candidate with php's
+  BYTES where the grid matches the test's own expectation.~~ Correct, and it
+  is the sharper version of round eighteen's normalization finding: the grid
+  greens a candidate that satisfies `--EXPECTF--` or `--EXPECTREGEX--`, not
+  one that reproduces php's particular output. `agrees(sec, ...)` is the
+  grid's `output_matches` over the parsed sections now, with php's output as
+  the fallback when a test carries no expectation at all, and the two
+  analysis tools ask the same function.
+  **It moves nothing in this sample, and the reason is worth writing down**:
+  the 1351 tests are the grid's own `wrong` bucket, so `output_matches` is
+  false for every one of them by construction. Re-measured end to end --
+  812 compile, 788 differ, 22 crash, 2 time out, 0 agree, 539 do not compile,
+  and the clustering 338 / 181 / 143 / 86 -- all identical. Where it does
+  change an answer is OUTSIDE that sample:
+  `ext/standard/tests/file/is_dir_basic` (a green) is `agrees True` under the
+  matcher and was False against php's bytes, because php's own run printed a
+  `mkdir(): File exists` warning its EXPECTF tolerates.

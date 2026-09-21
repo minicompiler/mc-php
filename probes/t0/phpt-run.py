@@ -55,7 +55,7 @@ and removed afterward. php-src/ is entirely gitignored, so this never
 touches anything committed.
 """
 import argparse
-import os
+import os, signal
 import random
 import re
 import shlex
@@ -247,16 +247,40 @@ def base_environment(php, srcdir):
     return env
 
 
-def _run(cmd, stdin, env, timeout, cwd):
+def _killpg(p):
+    """The process GROUP, falling back to the process itself."""
     try:
-        p = subprocess.run(
-            cmd,
-            input=(stdin.encode('latin-1') if stdin is not None else b''),
+        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            p.kill()
+        except OSError:
+            pass
+
+
+def _run(cmd, stdin, env, timeout, cwd):
+    # start_new_session, and on a timeout the whole GROUP. The candidate is a
+    # shell wrapper that compiles and then execs; `subprocess.run`'s timeout
+    # SIGKILLs the wrapper alone, so the compiler it had started survived,
+    # kept writing the binary and outlived the directory the caller then
+    # removed -- the orphan the temporary-space bound exists to prevent, and
+    # a SIGKILL runs no trap the wrapper could install.
+    try:
+        p = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            env=env, cwd=cwd, timeout=timeout,
+            env=env, cwd=cwd, start_new_session=True,
         )
+        try:
+            out, _ = p.communicate(
+                input=(stdin.encode('latin-1') if stdin is not None else b''),
+                timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _killpg(p)
+            p.communicate()
+            raise
         return SimpleNamespace(returncode=p.returncode,
-                                stdout=p.stdout.decode('latin-1'),
+                                stdout=out.decode('latin-1'),
                                 timed_out=False)
     except subprocess.TimeoutExpired:
         return SimpleNamespace(returncode=-1, stdout='', timed_out=True)

@@ -46,8 +46,14 @@ timedout=""
 lim() {
     rm -f "$tmp/alarm"
     perl -e 'my $t = shift; my $mark = shift;
-             my $p = fork; exec(@ARGV) or exit 127 if !$p;
-             $SIG{ALRM} = sub { kill 9, $p; waitpid $p, 0;
+             # the child leads its OWN process group, and the alarm kills
+             # the group: mcphp.sh starts the compiler as a child, so
+             # `kill 9, $p` left it running and writing its binary after
+             # the wrapper was gone -- measured, one surviving compiler
+             # per timeout.
+             my $p = fork;
+             if (!$p) { setpgrp(0, 0); exec(@ARGV) or exit 127 }
+             $SIG{ALRM} = sub { kill -9, $p; kill 9, $p; waitpid $p, 0;
                                 open my $fh, ">", $mark; close $fh; exit 124 };
              alarm $t; waitpid $p, 0;
              # A child killed by a SIGNAL has its number in the low seven

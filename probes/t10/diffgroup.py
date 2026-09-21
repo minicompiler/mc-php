@@ -70,7 +70,7 @@ def one(path):
     # differing only in a trailing newline or a CRLF is the same output
     # there, so testing the raw bytes here called an exit-code-only mismatch
     # a blank-line or text difference
-    if harness._grid.normalize(r['want']) == harness._grid.normalize(r['out']):
+    if harness.agrees(r.get('sec'), r['out'], r['want'], r['rc'], r['rc']):
         # the grid grades the exit code too, so this is a real disagreement
         return (path, 'an exit code', f"exit {r['wrc']}", f"exit {r['rc']}")
     want = r['want'].split('\n')

@@ -569,3 +569,15 @@ when the wrapper was killed, which is exactly the orphan the disk bound
 exists to prevent. Three signal traps cleaned up and RETURNED, so an
 interrupted run continued with its temporary directory gone; they exit now,
 measured.
+
+**Round twenty-two** sharpened the same point twice. The grid does not ask
+"is this php's output", it asks "does this satisfy the test's own
+expectation" -- an `--EXPECTF--` pattern greens a candidate that does not
+reproduce php's bytes -- so `harness.agrees` is `output_matches` over the
+parsed sections now, and `why.py` and `diffgroup.py` ask that same function.
+It moves nothing here, for a reason worth keeping: this sample is the grid's
+`wrong` bucket, where `output_matches` is false by construction. And a
+SIGKILL runs no trap, so round twenty-one's compiler-child fix could not
+cover the timeout that actually happens: the candidate is started in its own
+process group and the group is what the timeout kills -- measured at 1
+surviving compiler before and 0 after.

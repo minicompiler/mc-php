@@ -155,16 +155,24 @@ def _extras(sec, testdir):
     return args, stdin, env, ini
 
 
-def _agree(out, want, rc, wrc):
-    """The grid's OWN comparison: `normalize` (php trim, then CRLF) on both
-    sides and the same exit code. Comparing the raw bytes called a pair that
-    differs only in a trailing newline or a CRLF a disagreement, where
-    `probes/t0/phpt-run.py` grades it as the same output -- so the
-    why.py/diffgroup.py counts could name a test the grid never did. The RAW
-    streams stay in the result, because the first-difference tables want the
-    bytes.
+def agrees(sec, out, want, rc, wrc):
+    """The grid's OWN verdict, and it is not a comparison with php's bytes.
+
+    `probes/t0/phpt-run.py` greens a candidate whose output satisfies the
+    TEST'S OWN expectation -- `output_matches`, which is `--EXPECT--` after
+    `normalize` but a PATTERN for `--EXPECTF--` and `--EXPECTREGEX--` -- and
+    whose exit code equals the oracle's. Two versions of this compared the
+    raw bytes and then the normalized bytes of the two RUNS, so a candidate
+    whose output the pattern accepts, and which the grid therefore calls
+    green, came out here as a disagreement with the wrong reason attached.
+    With no expectation section at all there is nothing to match against and
+    php's own output is the only answer available, which is the fallback.
     """
-    return _grid.normalize(out) == _grid.normalize(want) and rc == wrc
+    if rc != wrc:
+        return False
+    if sec and ('EXPECT' in sec or 'EXPECTF' in sec or 'EXPECTREGEX' in sec):
+        return _grid.output_matches(sec, _grid.normalize(out))
+    return _grid.normalize(out) == _grid.normalize(want)
 
 
 def jobs():
@@ -289,10 +297,10 @@ def run_pair(phpt, tag, budget=None):
         if c.returncode == 255:
             cout = c.stdout.decode('latin-1')
             cwant = e.stdout.decode('latin-1')
-            return {'status': 'ran', 'out': cout, 'rc': 255,
+            return {'status': 'ran', 'out': cout, 'rc': 255, 'sec': sec,
                     'err': c.stderr.decode('latin-1', 'replace'),
                     'want': cwant, 'wrc': e.returncode,
-                    'agrees': _agree(cout, cwant, 255, e.returncode)}
+                    'agrees': agrees(sec, cout, cwant, 255, e.returncode)}
         if c.returncode != 0:
             return {'status': 'no-compile', 'crc': c.returncode,
                     'cerr': c.stderr.decode('latin-1', 'replace'),
@@ -322,7 +330,7 @@ def run_pair(phpt, tag, budget=None):
         unlink(php, binf)
     out = g.stdout.decode('latin-1')
     want = e.stdout.decode('latin-1')
-    return {'status': 'ran', 'out': out, 'rc': g.returncode,
+    return {'status': 'ran', 'out': out, 'rc': g.returncode, 'sec': sec,
             'err': g.stderr.decode('latin-1', 'replace'),
             'want': want, 'wrc': e.returncode,
-            'agrees': _agree(out, want, g.returncode, e.returncode)}
+            'agrees': agrees(sec, out, want, g.returncode, e.returncode)}

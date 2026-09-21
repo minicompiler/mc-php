@@ -53,10 +53,11 @@ def why(path):
         return path, '(compiled; agrees on this harness)'
     if r['rc'] < 0:
         return path, f"(compiled; crashed: signal {-r['rc']})"
-    # the grid's OWN comparison, not the raw bytes: a pair differing only in
-    # a trailing newline or a CRLF is the SAME output there, so comparing raw
-    # here sent an exit-code-only mismatch to the output-differs group
-    if harness._grid.normalize(r['out']) == harness._grid.normalize(r['want']):
+    # the grid's OWN question, which is "does the output satisfy the TEST'S
+    # expectation" and not "is it php's bytes": an EXPECTF whose pattern
+    # accepts the candidate is the same output to the grid, so anything
+    # narrower sent an exit-code-only mismatch to the output-differs group
+    if harness.agrees(r.get('sec'), r['out'], r['want'], r['rc'], r['rc']):
         return path, f"(compiled; same output, exit {r['rc']} where php exits {r['wrc']})"
     return path, '(compiled; output differs)'
 
