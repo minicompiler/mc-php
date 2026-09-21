@@ -390,3 +390,13 @@ Two of them are wrong, and the measurement is how that is known rather than asse
 - A pid is RECYCLED, so the orphan sweep's `kill -0` can find a LIVE process that is some other
   program entirely and keep a dead run's directory for ever -- the failure the sweep exists to
   stop. It now also removes any sibling a day old whatever its pid says.
+
+### Round fourteen
+
+- ~~Three stale numbers~~: `CLAUDE.md`'s T10 headline still said `green 1637 -> 1688` above a
+  line reading 1689, `probes/README.md` still said `strings` 262, and `RESULTS.md`'s
+  re-measured table still said 1967 refusals against the 1929 the grid above it reports.
+- **"Invoke the compiler instead of mcphp.sh for the D8 benchmark"** (`bench10.sh:43`) --
+  **incorrect.** `bench10.sh` calls `probes/t10/mc-php --exe ... -o ...`, the compiler, and
+  `grep -n mcphp.sh probes/t10/bench/bench10.sh` finds nothing. The bench runs: its output and
+  the record it writes, `probes/t10/bench/results/2026-09-21.json`, are in the tree.

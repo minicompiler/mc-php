@@ -75,7 +75,7 @@ not the compiler.
 | number | T9 published | T10 measured | |
 |---|---|---|---|
 | corpus green | 1637 | **1689** (band +/- 12, measured) | |
-| corpus refused | 2309 | **1967** | block 4 |
+| corpus refused | 2309 | **1929** | blocks 4 and the review rounds |
 | `tests/lang` / `Zend/tests` / `strings` | 102 / 709 / 262 | **104 / 749 / 263** | |
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **757 of the 781 that compile** | **never ran the binary** |

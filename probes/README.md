@@ -206,7 +206,7 @@ and printed the wrong thing**. T7 builds the first and takes the second apart.
 **green 1637 -> 1689.**
 `phpt: green 1689 / wrong 14469 / refused 1929 / skip 2947 / php-fail 361 / total 21034`
 over the whole corpus; per directory `tests/lang` **104** (was 102), `Zend/tests` **749**
-(was 709), `ext/standard/tests/strings` **262** (was 262). **1664 of the 1689 greens are in
+(was 709), `ext/standard/tests/strings` **263** (was 262). **1664 of the 1689 greens are in
 T0's "touched by none" set**, and `refused` fell **2309 -> 1929** -- one block, because
 `require __DIR__ . "/x.php"` and a top-level `return` were refusals and are not any more.
 

@@ -167,7 +167,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   refused by name with exit 3; `lencheck` 97 / 0 wrong, `aritycheck` 179 / 0 wrong.
 - T10 done (`probes/t10`), on **mc 1.1.0**: the review backlog -- 59 Copilot findings across
   #1..#7 that nothing had acted on (`docs/review-backlog.md`), all three sections, plus one
-  the sections did not name and a disk that ran out. **green 1637 -> 1688**:
+  the sections did not name and a disk that ran out. **green 1637 -> 1689**:
   `phpt: green 1689 / wrong 14469 / refused 1929 / skip 2947 / php-fail 361 / total 21034`;
   per directory `tests/lang` 104 (was 102), `Zend/tests` 749 (was 709),
   `ext/standard/tests/strings` 263 (was 262). **1664 of the 1689 greens are in T0's
