@@ -25,6 +25,18 @@ measured a binary that was being rebuilt underneath it.
 | `ext/standard/tests/strings` | **263** | 310 | 107 | 54 | 0 | 734 | 262 |
 | the whole corpus | **1689** | 14469 | 1929 | 2947 | 361 | 21034 | 1637 |
 
+Re-run after the round-seventeen compiler change (the spread's
+compute-then-check boundary), same snapshot discipline, `T10_JOBS=6`: the
+three directories are **identical** -- 104 / 749 / 263 -- and the corpus is
+**green 1677 / wrong 14481 / refused 1929 / skip 2947 / php-fail 361 / total
+21034**. The 12 greens between the two runs are named rather than assumed:
+`comm` over the two green sets gives **12 lost, 0 gained**, and all twelve are
+the filesystem tests of the band below (`dir/chdir_basic`, `dir/getcwd_basic`,
+`file/is_dir_basic`, `file/rename_variation1` and nine of their kind). Not one
+of them contains a `...`, so the fix is isolated from the band. Disk: `df -h /`
+reports **12Gi used, 212Gi available before AND after**, tmp peak **2152 KiB**
+over the whole 21395-test run.
+
 **The corpus number carries a band of about +/- 12, and it was MEASURED.**
 The backlog says the grid is what is not in question; nobody had run it
 twice. Two runs of one binary, earlier in this pull request, gave **1676 and
@@ -99,7 +111,7 @@ that does not compile fell 570 -> **539** and the block that compiles rose
 output all along.) Running them, over a sample of 1351 `wrong`
 tests of which **812 compile** (810 run to completion, 2 time out):
 
-| label | count | share of the 784 |
+| label | count | share of the 812 |
 |---|---|---|
 | the output really does differ | **788** | 97.0% |
 | crashed (a signal) | 22 | 2.7% |
@@ -127,7 +139,7 @@ part: **a differential tool has to be checked against a case whose answer is
 known**, and neither T10's first draft nor any probe before it did that for
 `run_pair`. What survives is the shape of the correction rather than its
 size -- the label `(compiled; output differs)` covered four outcomes and
-covers one now, and 26 of the 784 are a crash, a timeout or a test the grid
+covers one now, and 24 of the 812 are a crash, a timeout or a test the grid
 graded on its own expectation.
 
 ### What "the arena is the answer" really was
@@ -415,7 +427,13 @@ Two things worth writing down for the next probe, neither of them mc's:
   `maxn + 1 + PH_SPREADN` buffer and corrupted the compiler instead of
   reaching a diagnostic. The overrun is fixed here (a bound before every
   spread store); the wrong ANSWER for two spreads is older, is a different
-  bug in how the slots are filled, and is left with its reproducer.
+  bug in how the slots are filled, and is left with its reproducer. A THIRD
+  defect on the same path, found by the same reviewer on its seventeenth
+  pass, IS fixed: a spread whose expression throws had no compute-then-check
+  boundary, so `f(...boom())` ran `php_unpack_at` and then the callee's body
+  with the exception pending -- `g/77-spread-throw.php` printed `body`
+  before `caught boom` against a compiler built from the commit before.
+  Six lines give the spread what the ordinary argument path already had.
 * A closure registered with `register_shutdown_function` does not get its
   DEFAULT parameter values: `function ($a = 'x')` sees null. The argument
   COUNT is right now (the row records it and `php_shutdown` passes it, the
@@ -432,9 +450,10 @@ Two things worth writing down for the next probe, neither of them mc's:
 ## The reviewer of this probe's own pull request (#9)
 
 The standing rule of `docs/review-backlog.md` § 3 -- a pull request is not
-merged before its findings are read -- applied to T10 itself. Twelve inline
-findings, **every one real**, listed with their fix in `docs/review-backlog.md`
-§ 4. Six needed code, and two of those are worth repeating here because they
+merged before its findings are read -- applied to T10 itself. **Seventeen
+rounds and 59 findings**, listed one by one with their fix, their measurement
+or their refutation in `docs/review-backlog.md` § 4. The first twelve were
+inline and every one was real. Six needed code, and two of those are worth repeating here because they
 are the same family the probe is about:
 
 * **A top-level `return` inside a `try`/`finally` took the exit and jumped
@@ -454,7 +473,22 @@ are the same family the probe is about:
 
 And **`nocompile.py`'s skip list named one compiled outcome of five**, so the
 other four were counted as tests that do not compile: the block was published
-as **737** and is **568**, which is now the same number the arena section
+as **737** and is **539**, which is now the same number the arena section
 reports from the other side. It is the one place where T10 published a
 number with the same defect it was written to remove, and the reviewer is
 what caught it.
+
+Three of the seventeen rounds are worth naming because of what they say about
+the method rather than the code. **Round fourteen** caught `run_pair` handing
+php a relative path, which is what retracted this probe's own headline (§ 69).
+**Round sixteen** caught the committed dated bench record disagreeing with
+every number quoted beside it -- the exact failure D8 (b) asks for a dated
+record to prevent -- and the four numbers are read out of that file now.
+**Round seventeen** raised fourteen findings in code that had not changed
+since the round before, of which **thirteen were real** and one, a claim that
+macOS `find` has no `-maxdepth`, is refuted by one command on this host. Of
+the thirteen, two moved no number and say so with the count behind it: the
+corpus has **2** `EXPECT*_EXTERNAL` tests and neither asserts a diagnostic, and
+the published `why.tsv` has **0** rows in the statuses `nocompile.py` was
+miscounting. That is the useful shape -- a tool can be wrong and its answer
+right, and only the measurement tells you which.

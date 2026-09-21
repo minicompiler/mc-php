@@ -17,6 +17,8 @@ so the label is one of
                                         the grid graded wrong
     (compiled; crashed: signal N)       the binary died
     (compiled; timed out)
+    (php timed out)                     the ORACLE ran out of time and the
+                                        candidate was never compiled
 
     python3 probes/t10/why.py OUT.tsv [FILE.phpt ...]      (else stdin)
 """
@@ -41,6 +43,10 @@ def why(path):
         return path, '(compiler timed out)'
     if s == 'run-timeout':
         return path, '(compiled; timed out)'
+    if s == 'php-timeout':
+        # the ORACLE ran out of time: the grid's `php-fail`, not a verdict
+        # on the candidate, which was never compiled
+        return path, '(php timed out)'
     if s != 'ran':
         return path, f"({r.get('error', s)})"
     if r['agrees']:
@@ -55,7 +61,7 @@ def why(path):
 def main():
     out = sys.argv[1]
     files = sys.argv[2:] or [l.split('\t')[0].strip() for l in sys.stdin if l.strip()]
-    with ThreadPoolExecutor(max_workers=os.cpu_count() or 8) as ex:
+    with ThreadPoolExecutor(max_workers=harness.jobs()) as ex:
         rows = list(ex.map(why, files))
     with open(out, 'w') as f:
         for path, msg in rows:

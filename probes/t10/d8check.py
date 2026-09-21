@@ -47,6 +47,20 @@ INSTRUMENTS = {
 }
 
 
+
+# A whole-line comment names a file, it does not run one. Dropping them is
+# what stops a `# probes/t9/bench/unwind.php` in prose from standing in for a
+# gate -- the second half of the same finding as the self-reference above.
+def _uncomment(src):
+    out = []
+    for line in src.splitlines():
+        t = line.lstrip()
+        if t.startswith('#') or t.startswith('//'):
+            continue
+        out.append(line)
+    return '\n'.join(out)
+
+
 def rel(p):
     return os.path.relpath(p, HERE)
 
@@ -152,7 +166,10 @@ def repo_sweep():
         elif os.path.isdir(os.path.join(REPO, d, 'bench')):
             bad.append(f'{d}: exempted as pre-D8 and it has grown a bench/')
 
-    text = ''
+    # One entry per source, NOT one concatenated string: a file that names
+    # its own path -- in a comment, in its own doc string -- was proving
+    # itself referenced. Each candidate is searched in every OTHER source.
+    srcs = {}
     required = set()
     for root, dirs, names in os.walk(os.path.join(REPO, 'probes')):
         dirs[:] = [d for d in dirs if d != 'out']
@@ -173,11 +190,12 @@ def repo_sweep():
                 src = open(f, encoding='latin-1').read()
             except OSError:
                 continue
-            text += src
+            srcs[os.path.relpath(f, REPO)] = _uncomment(src)
             if n.endswith('.php'):
                 for m in REQ.finditer(src):
                     required.add(os.path.relpath(
                         os.path.join(os.path.dirname(f), m.group(1)), REPO))
+    text = '\n'.join(srcs.values())
     progs = set(re.findall(r'^for prog in (.+?); do', text, re.M))
     basenames = {w for line in progs for w in line.split() if w.endswith('.php')}
 
@@ -189,7 +207,10 @@ def repo_sweep():
             continue
         if len(parts) >= 3 and parts[2] in ('g', 'r'):
             continue
-        if f in required or f in text:
+        if f in required:
+            continue
+        # every source but this one
+        if any(f in t for p, t in srcs.items() if p != f):
             continue
         if os.path.basename(f) in basenames:
             continue

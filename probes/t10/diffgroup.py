@@ -83,7 +83,7 @@ def one(path):
 def main():
     out = sys.argv[1]
     files = sys.argv[2:] or [l.split('\t')[0].strip() for l in sys.stdin if l.strip()]
-    with ThreadPoolExecutor(max_workers=os.cpu_count() or 8) as ex:
+    with ThreadPoolExecutor(max_workers=harness.jobs()) as ex:
         rows = [r for r in ex.map(one, files) if r]
     with open(out, 'w') as f:
         for r in rows:

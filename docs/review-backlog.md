@@ -195,8 +195,8 @@ The standing rule above, applied to this pull request. Twelve inline findings, e
   **It costs T10 its own headline.** The first version of this pull request reported
   **143 tests (18.2%) that print exactly what php prints and exit with a different code** and
   recommended them as the next probe's first block. With php actually running there are
-  **zero**: of the 784 sampled tests that compile, **758 really differ**, 23 crash, 2 time out
-  and 1 agrees. Section 1 of this backlog was worked, and in working it T10 published a new
+  **zero**: of the 812 sampled tests that compile, **788 really differ**, 22 crash, 2 time out
+  and none agrees. Section 1 of this backlog was worked, and in working it T10 published a new
   number of the same kind -- which is the argument for the rule at the end of § 3, and for one
   more: **a differential tool has to be checked against a case whose answer is known.**
 
@@ -254,8 +254,10 @@ The standing rule above, applied to this pull request. Twelve inline findings, e
 - ~~§ 2 above still said the fixture gate was 71 / 71~~ where it ends at 75 / 75.
 - ~~The sub-population row said `99 / 102` without saying which run each belongs to.~~
 
-**None of the five harness fixes moved a number**: 568 that do not compile, 758 / 23 / 2 / 1 of
-the 784 that compile, 11 of 782 on the arena, 332 / 173 / 129 / 84 in the clustering. They make
+**None of the five harness fixes moved a number**: 570 that do not compile, 757 / 23 / 2 / 1 of
+the 784 that compile, 11 of 782 on the arena, 332 / 173 / 126 / 86 in the clustering. (Those are
+the round-six numbers; rounds fifteen and sixteen moved four of them again -- the final sample is
+539 / 812 with 788 / 22 / 2 / 0, 11 of 810 on the arena and 338 / 181 / 143 / 86.) They make
 the method right, and the answers were already right -- which is worth knowing, and is the
 opposite of what the `run_pair` abspath defect did.
 
@@ -444,3 +446,79 @@ Two of them are wrong, and the measurement is how that is known rather than asse
   point of D8 (b) asking for a dated one: a bench number in prose has nowhere to be checked.
   The machine was loaded for this run (php's own start-up is 77 ms against T9's 38 ms), and a
   dated record is what makes that visible rather than confusing.
+
+### Round seventeen
+
+The reviewer's seventeenth pass carried **1 open finding and 14 "previously
+missed"** -- findings in code that had not changed since the pass before, which
+is the first time this review surfaced that category. Every one of the fifteen
+is answered below.
+
+**The open one, and it is a real defect in the compiler.**
+
+- ~~`php.mc`: a spread argument that throws is not checked before unpacking.~~
+  The ordinary argument path saves and clears `ph_can_throw`, hoists a throwing
+  argument into a temporary and inserts `ph_check` between the temporary and the
+  call; the `...` path did neither, so `f(...boom())` ran `php_unpack_at` and
+  then the CALLEE'S BODY with the exception still pending. Reproduced against a
+  compiler built from the previous commit: `g/77-spread-throw.php` printed
+  `body` before `caught boom`, where php prints only `caught boom`. Six added
+  lines in `ph_read_args` give the spread the same boundary; the fixture is
+  byte-identical to php on both streams and the exit code now, and it carries
+  the ordinary spread and a spread after a positional argument beside the
+  throwing case.
+
+**The nine tools and scripts.**
+
+- ~~`bench/shim.php`: `class_exists(..., false)` never autoloads.~~ Correct. A
+  real PHPUnit run that has registered its autoloader but not yet touched
+  `TestCase` answered "not there" and got the shim -- the one case the guard
+  exists to lose. The `false` is gone. mc-php has no autoloader, so its answer
+  is unchanged and the shim still wins there.
+- ~~`d8check.py`: `f in text` treats a mention as a reference.~~ Correct, and the
+  self-reference was the sharp edge: the sweep concatenated every `.sh`, `.py`
+  and `.php` under `probes/` INCLUDING the candidate, so an orphan naming its own
+  path passed. The sources are kept one per file now and each candidate is
+  searched in every OTHER one, with whole-line comments dropped first. Proved by
+  measurement: a `probes/t10/scratchx/orphan.php` whose only mention of itself is
+  its own comment is reported (`no fixture gate runs it, no .php requires it, no
+  script names it`), where the old sweep passed it.
+- ~~`why.py` and `diffgroup.py` oversubscribe past `T10_JOBS`.~~ Correct, and it
+  is the same resource this probe's first commit was written to bound. One
+  `harness.jobs()` -- `T10_JOBS` when set, `os.cpu_count()` otherwise -- is what
+  both pools take now.
+- ~~`fixtures.sh` accepts a fixture that timed out in both worlds.~~ Correct: 124
+  is `lim`'s own alarm, and two empty streams with two 124s compared equal. The
+  `g/` gate fails on a 124 from either side before it compares. (The `r/` gate
+  already required exit 3 exactly.)
+- ~~`harness.py` reports an oracle timeout as a candidate run timeout.~~ Correct.
+  The test was "the compiler, else the binary", so a php that ran out of time --
+  the grid's `php-fail` -- came back as `run-timeout` and `why.py` labelled it
+  `(compiled; timed out)` for a test that was never compiled. There is a
+  `php-timeout` status now and `why.py` prints `(php timed out)`.
+- ~~`nocompile.py` counts non-test statuses as tests that do not compile.~~
+  Correct in principle. A compiler diagnostic is `file:line: message` and never
+  begins with a bracket, so the filter is now "any message that opens with `(`",
+  which covers the five compiled outcomes and equally `(compiler timed out)`,
+  `(php timed out)`, `(a sibling ...)`, `(no --FILE-- section)` and `(error)`.
+  **It moves nothing in this run**: the published `why.tsv` has 0 rows in those
+  statuses, so the block is 539 before and after.
+- ~~`subpop.py` omits `EXPECT_EXTERNAL` from the population.~~ Correct, and fixed
+  by going through the grid's own `parse_phpt` + `resolve_sections` rather than a
+  second regex. **It moves nothing either**: the corpus has **2**
+  `EXPECT*_EXTERNAL` tests and **neither** asserts a diagnostic line, so the
+  population is 4647 with the fix and without it.
+- **`tmp.sh`: `-maxdepth` is a GNU primary that BSD `find` does not have.** This
+  one is wrong, and the measurement is one command. macOS's own
+  `/usr/bin/find` documents `-maxdepth` (`man 1 find`, line 307: `"-maxdepth 0"
+  limits the whole search to the command line arguments`) and performs it:
+  `touch -t 202001010000 d && /usr/bin/find d -maxdepth 0 -mtime +1 -exec rm -rf
+  {} +` removes the directory, exit 0, on Darwin 25.6.0. The fallback works on
+  the platform the finding says it fails on.
+
+**The five stale splits** (`CLAUDE.md`, `docs/plan.md`, this file, `probes/README.md`
+and `RESULTS.md` twice) all carried `784 / 757 / 23 / 2 / 1`, which rounds
+fifteen and sixteen replaced. Each now reads the final sample, recounted from
+the committed `out/why.tsv` rather than copied from prose: **1351 tests,
+812 compile, 788 differ, 22 crash, 2 time out, 0 agree**, 539 that do not
+compile, and 338 / 181 / 143 / 86 in the clustering.

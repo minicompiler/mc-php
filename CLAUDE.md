@@ -178,9 +178,9 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   * **Four tools reported numbers they had never measured**, and they are what chose every
     block since T5. They are one tool now, `probes/t10/harness.py`: stdout byte for byte AND
     the same exit code, which is the pair the grid itself grades on. `why.py` labelled a test
-    `(compiled; output differs)` WITHOUT running the binary -- of 784 sampled tests that
-    compile, **757 really differ**, 23 crash, 2 time out and 1 agrees on both. The
-    clustering of the 758 is worth the sample: **332 are `var_dump of a value`** and its head
+    `(compiled; output differs)` WITHOUT running the binary -- of 812 sampled tests that
+    compile, **788 really differ**, 22 crash, 2 time out and none agrees on both. The
+    clustering of the 788 is worth the sample: **338 are `var_dump of a value`** and its head
     is `php 'int(N)' / mc ''` -- php printed a value and mc-php printed nothing, a program
     that stopped early rather than a value formatted wrongly.
     `arena.py` divided by `len(files)` while turning every failure into `None`: of the
@@ -190,7 +190,19 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     clobbered a sibling of that name. And `nocompile.py`'s skip list named ONE compiled
     outcome of five, so the other four were counted as tests that do not compile: that block
     was published as 737 and is **539** -- the reviewer of this probe's own pull request
-    caught it, in T10's first draft.
+    caught it, in T10's first draft. Seventeen review rounds in all: the last one raised
+    fourteen findings in code that had not changed since the round before, thirteen of them
+    real (a spread argument that throws had no compute-then-check boundary, so
+    `f(...boom())` ran the CALLEE'S BODY with the exception pending; `class_exists(..., false)`
+    in the PHPUnit shim never autoloaded; `d8check.py`'s orphan sweep believed a file that
+    named its own path; `why.py`/`diffgroup.py` fanned out past `T10_JOBS`; `fixtures.sh`
+    called two 124s agreement; `harness.py` reported an ORACLE timeout as the candidate's) and
+    one refuted by one command (macOS `/usr/bin/find` does have `-maxdepth`). Two of the
+    thirteen moved no number and say so with the count: the corpus has 2 `EXPECT*_EXTERNAL`
+    tests and neither asserts a diagnostic, and `why.tsv` has 0 rows in the statuses
+    `nocompile.py` was miscounting. Re-running the corpus grid after the compiler change gives
+    the same three directories (104 / 749 / 263) and **green 1677** -- 12 fewer, every one of
+    them a filesystem test of the measured band and none containing a `...`.
   * **Twenty-two semantics a program can observe**, seventeen fixed and closed by a fixture,
     five closed by measurement, one recorded as a divergence with its number: short circuit (`&&`, `||`, `??`,
     `?:`, and the right side's own PENDING statements move inside the branch with it),

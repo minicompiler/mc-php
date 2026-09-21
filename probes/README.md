@@ -218,9 +218,9 @@ circuit. What the probe is worth is the corrected numbers.
   they are what chose every block since T5. `probes/t10/harness.py` is the single definition of
   "these two agree" now -- stdout byte for byte AND the same exit code, which is the pair
   `probes/t0/phpt-run.py` itself grades on. `why.py` labelled a test
-  `(compiled; output differs)` **without ever running the binary**: of 784 sampled tests that
-  compile, **757 really differ**, 23 crash, 2 time out and 1 agrees on both. The clustering of
-  the 758 is what the sample is for: **332 are `var_dump of a value`**, and its head is
+  `(compiled; output differs)` **without ever running the binary**: of 812 sampled tests that
+  compile, **788 really differ**, 22 crash, 2 time out and none agrees on both. The clustering
+  of the 788 is what the sample is for: **338 are `var_dump of a value`**, and its head is
   `php 'int(N)' / mc ''` -- php printed a value and mc-php printed nothing, a program that
   stopped early rather than a value formatted wrongly. `arena.py`
   divided by `len(files)` while turning every failure into `None`: of the 1352-test list only
@@ -262,7 +262,10 @@ while running it with `cwd` set to the test's own directory, so php answered `Co
 input file` for every test in the sample while the candidate ran anyway. The first version of
 this probe reported **143 tests (18.2%) that print exactly what php prints and exit with a
 different code** and named them the next block; with php actually running there are **zero** --
-of the 784 that compile, **757 really differ**, 23 crash, 2 time out, 1 agrees. T10 worked
+of the 812 that compile, **788 really differ**, 22 crash, 2 time out, none agrees. The review
+of #9 ran to **seventeen rounds and 59 findings**; the last of them found a spread argument
+that throws running the callee's body before unwinding (`g/77-spread-throw.php`), and one
+claim -- that macOS `find` has no `-maxdepth` -- refuted by one command. T10 worked
 section 1 of the backlog and published a new number of the same kind in the doing, which is the
 argument for one more rule: a differential tool has to be checked against a case whose answer is
 known.

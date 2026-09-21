@@ -61,7 +61,13 @@ for f in $P/g/*.php; do
     lim "$PHP" "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?
     lim $P/mcphp.sh "$f" > "$tmp/m.out" 2> "$tmp/m.err"; me=$?
     rm -f "$MCPHP_OUT" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
-    if cmp -s "$tmp/p.out" "$tmp/m.out" && cmp -s "$tmp/p.err" "$tmp/m.err" \
+    # 124 is `lim`'s own alarm, not an exit code either side chose. A
+    # fixture that HANGS in both worlds leaves both streams empty and both
+    # codes 124, which the comparison below would otherwise call agreement.
+    if [ "$pe" = 124 ] || [ "$me" = 124 ]; then
+        printf '  FAIL  %s (timed out: php %s, mc-php %s)\n' "$(basename "$f")" "$pe" "$me"
+        fail=1
+    elif cmp -s "$tmp/p.out" "$tmp/m.out" && cmp -s "$tmp/p.err" "$tmp/m.err" \
        && [ "$pe" = "$me" ]; then
         nok=$((nok + 1))
     else

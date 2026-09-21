@@ -12,12 +12,17 @@ workable instead of countable.
 """
 import collections, re, sys
 
-# Every message why.py writes for a test that COMPILED begins with this.
-# The filter used to name `(compiled; output differs)` alone, so the other
-# compiled outcomes -- `agrees on this harness`, `same output, exit N where
-# php exits M`, `crashed: signal N`, `timed out` -- were counted as tests
-# that DO NOT COMPILE and inflated the block by every one of them.
-SKIP = '(compiled;'
+# A compiler DIAGNOSTIC is what this tool groups, and mc's own `err_at`
+# writes `file:line: message` -- it never begins with a bracket. Every other
+# thing why.py can write does: the five compiled outcomes (`output differs`,
+# `agrees on this harness`, `same output, exit N ...`, `crashed: signal N`,
+# `timed out`), and equally `(compiler timed out)`, `(php timed out)`,
+# `(a sibling of that name exists; skipped)`, `(no --FILE-- section)` and
+# `(error)`, none of which is a test that failed to compile either.
+# Naming `(compiled;` alone left those five counted as tests that DO NOT
+# COMPILE. (In the run this probe publishes there are none of them, so the
+# block is 539 either way; the filter was still wrong.)
+SKIP = '('
 
 
 

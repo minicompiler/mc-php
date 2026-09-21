@@ -145,6 +145,20 @@ def _extras(sec, testdir):
     return args, stdin, env, ini
 
 
+def jobs():
+    """The probe's bounded worker count, the one `run.sh` sets.
+
+    The analysis tools each start a compiler AND a php AND a binary per
+    worker, so `os.cpu_count()` fans out past the limit the grid honours and
+    spends the temporary space this probe measures. T10_JOBS is the bound.
+    """
+    try:
+        n = int(os.environ.get('T10_JOBS', '') or 0)
+    except ValueError:
+        n = 0
+    return n if n > 0 else (os.cpu_count() or 8)
+
+
 def run_pair(phpt, tag, budget=None):
     """Compile the test's --FILE-- and run it, beside php, on the same input.
 
@@ -240,7 +254,19 @@ def run_pair(phpt, tag, budget=None):
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            env=env, cwd=run_cwd, timeout=left)
     except subprocess.TimeoutExpired as t:
-        return {'status': 'compile-timeout' if t.cmd and t.cmd[0] == MCPHP else 'run-timeout'}
+        # WHICH process ran out of time. The test used to be "was it the
+        # compiler, else the binary", so an ORACLE that timed out -- the
+        # grid's own `php-fail` bucket -- was reported as the candidate
+        # binary timing out, and why.py then labelled it `(compiled; timed
+        # out)` for a test that had never been compiled at all.
+        cmd0 = t.cmd[0] if t.cmd else ''
+        if cmd0 == PHP:
+            st = 'php-timeout'
+        elif cmd0 == MCPHP:
+            st = 'compile-timeout'
+        else:
+            st = 'run-timeout'
+        return {'status': st}
     except OSError as ex:
         return {'status': 'error', 'error': f'{ex.__class__.__name__}: {ex}'}
     finally:

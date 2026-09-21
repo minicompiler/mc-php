@@ -22,7 +22,13 @@ namespace PHPUnit\Framework;
 // this, and it needs no top-level `return` in an included file: php ends the
 // include there and the caller continues, and an mc-php include is INLINED,
 // so it cannot express that (it is refused by name).
-if (!class_exists('PHPUnit\Framework\TestCase', false)) {
+//
+// And the lookup AUTOLOADS. With `false` it asked only what is already
+// loaded, so a real PHPUnit run that has registered its autoloader but not
+// yet touched `TestCase` answered "not there" and got the shim -- the one
+// case the guard exists to lose. mc-php has no autoloader, so its answer is
+// the same either way and the shim still wins there.
+if (!class_exists('PHPUnit\Framework\TestCase')) {
 
 class AssertionFailed extends \Exception {}
 

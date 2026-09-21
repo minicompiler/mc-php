@@ -2934,9 +2934,18 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
         if (ph_at(")", 1)) break;
         if (ph_at("...", 3)) {
             ph_next();
+            // The same compute-then-check boundary the ordinary argument
+            // below has. Without it a spread expression that THROWS --
+            // `f(...boom())` -- left the pending exception uninspected and
+            // ran php_unpack_at and then the callee's body, so what the
+            // catch saw was whatever those raised instead of the throw.
+            i64 spct = ph_can_throw;
+            ph_can_throw = 0;
             i64 sp = ph_expr(0);
             i64 spt = ph_ety;
             i64 tmp = ph_temp(ph_to_mixed(sp, spt), ty_pzv, "phu_");
+            if (ph_can_throw) ph_pending_stmt(ph_check(ph_tline, ph_tfile));
+            ph_can_throw = ph_can_throw | spct;
             i64 nsp = PH_SPREADN;
             if (maxn < nsp) nsp = maxn;
             i64 k = 0;
