@@ -138,8 +138,19 @@ printf '\n== 9. how often the arena (D7) is the answer ==\n'
 MCPHP_BIN="$root/probes/t10/mc-php" python3 probes/t10/arena.py < "$OUT/why.list"
 
 printf '\n== 10. D8: the workload tests, in both worlds ==\n'
-"$PHP" probes/t10/bench/run.php | tail -1
-probes/t10/mcphp.sh probes/t10/bench/run.php | tail -1
+# GATED. T9's step 10 piped both halves to `tail -1` with nothing behind
+# them, so the mc-php half's refusal went to stderr, its stdout was empty,
+# and "6 ok / 0 failed in BOTH worlds" was php's side alone -- the mc-php
+# half had never run under any probe. Both lines are printed, both are
+# required, and they have to agree.
+d8a=$("$PHP" probes/t10/bench/run.php 2>&1 | tail -1)
+MCPHP_OUT=$MCPHP_TMP/d8.bin probes/t10/mcphp.sh probes/t10/bench/run.php \
+    > "$MCPHP_TMP/d8.out" 2>&1
+d8b=$(tail -1 "$MCPHP_TMP/d8.out")
+rm -f "$MCPHP_TMP/d8.bin" "$MCPHP_TMP/d8.bin.out" "$MCPHP_TMP/d8.bin.err" "$MCPHP_TMP/d8.out"
+printf '  php     %s\n  mc-php  %s\n' "$d8a" "$d8b"
+case "$d8a" in *" 0 failed") ;; *) fail=1 ;; esac
+[ "$d8a" = "$d8b" ] || fail=1
 
 printf '\n== 11. D8: the bench, php against the mc-php binary ==\n'
 sh probes/t10/bench/bench10.sh || fail=1

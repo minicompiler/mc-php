@@ -12,9 +12,17 @@ namespace PHPUnit\Framework;
 
 // The real phpunit wins: `false` keeps the autoloader out of it, so this asks
 // "is it already loaded", not "can it be loaded".
-if (class_exists('PHPUnit\Framework\TestCase', false)) {
-    return;
-}
+//
+// The guard is a CONDITIONAL DECLARATION and not an early `return`, which is
+// what it was until T10. php hoists an unconditional class declaration, so
+// `class_exists` above the declaration in the same file was already TRUE and
+// the file returned at its first statement -- correct under php only because
+// the hoist had already run. A class declared inside an `if` is NOT hoisted
+// and is declared when the branch runs, which is php's own idiom for exactly
+// this, and it needs no top-level `return` in an included file: php ends the
+// include there and the caller continues, and an mc-php include is INLINED,
+// so it cannot express that (it is refused by name).
+if (!class_exists('PHPUnit\Framework\TestCase', false)) {
 
 class AssertionFailed extends \Exception {}
 
@@ -35,4 +43,6 @@ abstract class TestCase
     public function assertFalse($got): void { $this->assertSame(false, $got); }
     public function assertEquals($want, $got): void { $this->assertSame($want, $got); }
     public function assertCount(int $n, $got): void { $this->assertSame($n, \count($got)); }
+}
+
 }

@@ -184,6 +184,7 @@ i64 ph_in_try;
 uptr ph_frv;                   // the local holding the value, 0 = no try yet
 uptr ph_frf;                   // its flag
 i64 ph_toplevel;               // parsing main: an uncaught throwable is fatal
+uptr ph_entry;                 // the absolute path of the file mc-php was given
 i64  ph_pushing;
 i64  ph_type_word(i64 must);
 i64  ph_type_tail(i64 t);
@@ -266,7 +267,7 @@ void ph_phpfatal(uptr fl, i64 line, uptr msg) {
 // with "not implemented" would make that column a lie.
 void ph_todo(uptr fl, i64 line, uptr what) {
     uptr m = p_cat("mc-php: ", what, 0, cstrlen(what));
-    m = p_cat(m, " is not implemented yet (probes/t9/RESULTS.md)", 0, 46);
+    m = p_cat(m, " is not implemented yet (probes/t10/RESULTS.md)", 0, 47);
     err_at(fl, line, m);
 }
 
@@ -4773,30 +4774,59 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
 uptr ph_seen[PH_MAXINC];
 i64  ph_nseen;
 
+// The literal bytes of the CURRENT string token, or 0 when it is not one or
+// when it interpolates. A double-quoted literal is already a NODE by the time
+// it gets here, so the bytes come out of it -- the shape define() reads for
+// the same reason.
+uptr ph_str_lit_bytes() {
+    if (ph_tid == PHT_DSTR) {
+        i64 dn = ph_tnode;
+        if (nd_kind(dn) != N_CALL) return 0;
+        if (!str_eq(nd_name(dn), "php_str_lit")) return 0;
+        i64 raw = nd_next(nd_a(dn));
+        if (!raw) return 0;
+        return xstrdup(nd_name(raw), nd_val(raw));
+    }
+    if (ph_tid == T_STR) return ph_tname;
+    if (ph_tid == PHT_PSTR) return ph_tname;
+    return 0;
+}
+
 void ph_require(i64 once, uptr fl, i64 line) {
     ph_next();
     if (ph_at("(", 1)) ph_next();
-    uptr rel = ph_tname;
-    // `require "x.php"`: a double-quoted literal is already a NODE by the
-    // time it gets here, so the bytes come out of it -- the shape define()
-    // reads for the same reason. One that interpolates is a computed path.
-    if (ph_tid == PHT_DSTR) {
-        rel = 0;
-        i64 dn = ph_tnode;
-        if (nd_kind(dn) == N_CALL) {
-            if (str_eq(nd_name(dn), "php_str_lit")) {
-                i64 raw = nd_next(nd_a(dn));
-                if (raw) rel = xstrdup(nd_name(raw), nd_val(raw));
-            }
+    // `require __DIR__ . "/x.php"` is php-src's own spelling and the path is
+    // known at COMPILE time, so D1's "computed" does not describe it:
+    // __DIR__ is a compile-time constant and the concatenation of two
+    // literals is a literal. Nothing else is folded -- a variable, a call or
+    // an interpolation is still refused by name.
+    //
+    // It was refused, and that is why D8's mc-php half never ran: every
+    // probe's bench/run.php and bench/main.php opens with one of these, so
+    // "6 ok / 0 failed in BOTH worlds" and the two bench ratios T9 published
+    // were php's side alone. run.sh's step 10 wrote the mc-php half to a
+    // `| tail -1` with no `|| fail=1` behind it, so the refusal went to
+    // stderr and nothing graded it.
+    uptr dir = 0;
+    if (ph_tid == T_IDENT) {
+        if (str_eq(ph_tname, "__DIR__")) {
+            dir = path_norm(path_join(ph_absfile(fl), "."));
+            ph_next();
+            if (!ph_at(".", 1)) ph_refuse(fl, line, "an include of a computed path", "D1");
+            ph_next();
         }
-        if (!rel) ph_refuse(fl, line, "an include of a computed path", "D1");
     }
-    if (ph_tid != T_STR && ph_tid != PHT_PSTR && ph_tid != PHT_DSTR)
-        ph_refuse(fl, line, "an include of a computed path", "D1");
+    uptr rel = ph_str_lit_bytes();
+    if (!rel) ph_refuse(fl, line, "an include of a computed path", "D1");
     ph_next();
     if (ph_at(")", 1)) ph_next();
     if (!ph_at(";", 1)) err_at(fl, line, "mc-php: expected ; after require");
     uptr full = path_norm(path_join(fl, rel));
+    if (dir) {
+        uptr r2 = rel;
+        if (ld8(r2) == 47) r2 = r2 + 1;
+        full = path_norm(path_join(p_cat(dir, "/x", 0, 2), r2));
+    }
     i64 i = 0;
     i64 seen = 0;
     loop {
@@ -5105,6 +5135,30 @@ i64 ph_stmt_1() {
         return ph_wrap(b);
     }
     if (ph_is("return")) {
+        // php's `return` at the TOP LEVEL ends the script; the ordinary
+        // N_RETURN returns from the generated `main` and so jumps over
+        // php_shutdown, php_flush and the exit code. The program printed
+        // NOTHING and exited with a junk status -- 54, 82, 94, 142 and 178
+        // on five runs of the same source, because the output buffer was
+        // never written. Measured on probes/t10/bench/shim.php, and it is
+        // the reason D8's mc-php half had never run under any probe.
+        //
+        // In the ENTRY file the answer is php's exactly: end the script,
+        // run the shutdown functions and the destructors, flush, exit 0 (a
+        // value returned there does not set the status). In an INCLUDED
+        // file php ends the include and the CALLER CONTINUES, which an
+        // inlined include cannot express, so it is refused by name rather
+        // than answered wrongly.
+        if (ph_toplevel) {
+            i64 tlline = ph_tline;
+            uptr tlfile = ph_tfile;
+            ph_next();
+            if (!ph_at(";", 1)) ph_expr(0);
+            ph_semi("expected ; after return");
+            if (!str_eq(ph_absfile(tlfile), ph_entry))
+                ph_todo(tlfile, tlline, "a top-level return in an included file");
+            return ph_wrap(ph_expr_stmt_of(ph_c1("php_exit", ph_int(0), TY_VOID)));
+        }
         ph_next();
         i64 e = 0;
         i64 rthrow = 0;
@@ -7333,6 +7387,7 @@ void ph_program() {
     i64 line = ph_tline;
     uptr fl = p_file();
     ph_toplevel = 1;
+    ph_entry = ph_absfile(fl);
     ph_fn_ret = PT_VOID;
     ph_fn_retref = 0;
     ph_sync();
