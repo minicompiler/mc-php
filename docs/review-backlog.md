@@ -45,8 +45,11 @@ on -- and the three callers read it.
   (#6/#7 `bench/bench.sh:23`). Not copied forward; `bench10.sh` builds and times T10's.
 - ~~`run.sh` reads `T6_JOBS` in t7 and t8~~ (#6/#7 `run.sh:32`, `:33`). `T10_JOBS`.
 - ~~`why.py` writes `<test>.why.php` beside the input and deletes it in `finally`~~
-  (#4 `why.py:28`). `harness.sibling()` creates it `O_CREAT|O_EXCL`, tries a counter, gives up
-  after 64, and never removes one it did not create.
+  (#4 `why.py:28`). `harness.sibling()` creates it `O_CREAT|O_EXCL` and never removes one it
+  did not create. Since round six it uses the CANONICAL `<base>.php` -- the name the grid
+  itself gives the test, so `__FILE__` is what the grid graded -- with no fallback name at
+  all: a name that is taken is skipped and counted (`busy`), which over the 1352-test sample
+  is 0 tests.
 
 **And one the section did not name, found by running out of disk.** The grid's tmp directory was
 bounded by nothing: `mcphp.sh` EXECs the binary it compiled and so cannot delete it, the sweeper
@@ -270,3 +273,19 @@ opposite of what the `run_pair` abspath defect did.
 
 Both re-measured: **no number moved** (568 / 758 / 23 / 2 / 1, arena 11 of 782, clustering
 332 / 173 / 129 / 84, sub-populations 99 and 15).
+
+### Round seven
+
+- ~~The `...` spread path wrote past its buffer~~ (`php.mc:2943`): each spread appended up to
+  `nsp` slots without looking at `n`, so a second or a third `...` in one call ran past the
+  `maxn + 1 + PH_SPREADN` allocation and corrupted the COMPILER instead of reaching the
+  too-many-arguments diagnostic the ordinary path raises. Bounded before every spread store.
+  It uncovered an older bug it does not fix, recorded with its reproducer in `RESULTS.md`:
+  `max(...[1,2], ...[3,9])` answers **2** where php says 9 (one spread is right).
+- ~~`set -e` made the D8 gate's own status checks unreachable~~ (`run.sh:150`, `:159`): a bare
+  command that fails ENDS the script, so `d8pe=$?` and everything after it never ran -- round
+  five's fix was itself broken by the shell. Both halves take their status inside an
+  `if ...; then :; else ...; fi`, and the two `[ -s ... ] && { ...; }` lines became `if`
+  statements for the same reason (an AND-list whose test fails is a non-zero last command).
+- ~~Two descriptions of `harness.sibling()` still claimed a counter and a 64-attempt
+  fallback~~, which round six removed.

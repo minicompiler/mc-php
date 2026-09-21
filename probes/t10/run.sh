@@ -146,22 +146,30 @@ printf '\n== 10. D8: the workload tests, in both worlds ==\n'
 # php's half is captured the same way the mc-php half is: a pipeline's
 # status is `tail`'s, so a php that exited non-zero -- or warned before
 # printing its last line -- satisfied the gate.
-"$PHP" probes/t10/bench/run.php > "$MCPHP_TMP/d8p.out" 2> "$MCPHP_TMP/d8p.err"
-d8pe=$?
+# `set -e` is on, so a bare command that fails ENDS the script: the status
+# has to be taken inside a conditional or the check below is unreachable.
+d8pe=0
+if "$PHP" probes/t10/bench/run.php > "$MCPHP_TMP/d8p.out" 2> "$MCPHP_TMP/d8p.err"
+then :; else d8pe=$?; fi
 d8a=$(tail -1 "$MCPHP_TMP/d8p.out")
 [ "$d8pe" = 0 ] || { printf '  php exited %s\n' "$d8pe"; fail=1; }
-[ -s "$MCPHP_TMP/d8p.err" ] && { printf '  php wrote to stderr:\n'; sed 's/^/    /' "$MCPHP_TMP/d8p.err"; fail=1; }
+if [ -s "$MCPHP_TMP/d8p.err" ]; then
+    printf '  php wrote to stderr:\n'; sed 's/^/    /' "$MCPHP_TMP/d8p.err"; fail=1
+fi
 rm -f "$MCPHP_TMP/d8p.out" "$MCPHP_TMP/d8p.err"
 # and the mc-php half on the same terms: its own streams, its own status.
 # Merging them with 2>&1 and reading the last line let a run write a warning
 # to stderr, print the expected summary, and pass -- while the php half
 # beside it was rejecting exactly that.
-MCPHP_OUT=$MCPHP_TMP/d8.bin probes/t10/mcphp.sh probes/t10/bench/run.php \
+d8me=0
+if MCPHP_OUT=$MCPHP_TMP/d8.bin probes/t10/mcphp.sh probes/t10/bench/run.php \
     > "$MCPHP_TMP/d8.out" 2> "$MCPHP_TMP/d8.err"
-d8me=$?
+then :; else d8me=$?; fi
 d8b=$(tail -1 "$MCPHP_TMP/d8.out")
 [ "$d8me" = 0 ] || { printf '  mc-php exited %s\n' "$d8me"; fail=1; }
-[ -s "$MCPHP_TMP/d8.err" ] && { printf '  mc-php wrote to stderr:\n'; sed 's/^/    /' "$MCPHP_TMP/d8.err"; fail=1; }
+if [ -s "$MCPHP_TMP/d8.err" ]; then
+    printf '  mc-php wrote to stderr:\n'; sed 's/^/    /' "$MCPHP_TMP/d8.err"; fail=1
+fi
 rm -f "$MCPHP_TMP/d8.bin" "$MCPHP_TMP/d8.bin.out" "$MCPHP_TMP/d8.bin.err" \
       "$MCPHP_TMP/d8.out" "$MCPHP_TMP/d8.err"
 printf '  php     %s\n  mc-php  %s\n' "$d8a" "$d8b"

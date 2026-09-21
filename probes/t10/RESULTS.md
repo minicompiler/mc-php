@@ -154,9 +154,12 @@ pair `probes/t0/phpt-run.py` itself grades on. The three callers read it.
 | `run.sh` reading `T6_JOBS` in t7 and t8 | the documented knob was dead |
 | `<test>.why.php` written beside the input | it CLOBBERED a sibling of that name and then deleted it |
 
-`harness.sibling()` creates the scratch file `O_CREAT|O_EXCL`, tries a
-counter, gives up after 64 rather than destroy a stranger's file, and never
-removes one it did not create.
+`harness.sibling()` creates the scratch file `O_CREAT|O_EXCL` and never
+removes one it did not create. Since round six of the review it uses the
+CANONICAL `<base>.php` -- the name `probes/t0/phpt-run.py` itself gives the
+test, so `__FILE__` and anything derived from it are what the grid graded --
+and there is NO fallback name: a name that is taken is skipped and counted
+(`busy`), which over the 1352-test sample is 0 tests.
 
 ## Block 1b: the grid's disk cost, which the section did not name
 
@@ -464,6 +467,15 @@ Two things worth writing down for the next probe, neither of them mc's:
 * `"${x}"` does not interpolate and is not diagnosed: mc-php prints the five
   characters. Deprecated in php 8.2, removed in php 9, worth 13 tests of the
   three graded directories and 14 of the corpus.
+* **Two `...` spreads in one call answer the wrong thing**, and a third is
+  now a named refusal rather than a buffer overrun. `max(...[1,2], ...[3,9])`
+  is **2** where php says 9; one spread (`max(...[1,2,3,9])`) is right. Found
+  by the reviewer of #9 as an OVERRUN -- each spread appended up to `nsp`
+  slots without looking at `n`, so a second or third wrote past the
+  `maxn + 1 + PH_SPREADN` buffer and corrupted the compiler instead of
+  reaching a diagnostic. The overrun is fixed here (a bound before every
+  spread store); the wrong ANSWER for two spreads is older, is a different
+  bug in how the slots are filled, and is left with its reproducer.
 * A closure registered with `register_shutdown_function` does not get its
   DEFAULT parameter values: `function ($a = 'x')` sees null. The argument
   COUNT is right now (the row records it and `php_shutdown` passes it, the

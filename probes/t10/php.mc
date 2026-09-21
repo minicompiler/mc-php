@@ -2937,6 +2937,13 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
             i64 k = 0;
             loop {
                 if (k >= nsp) break;
+                // The buffer holds maxn + 1 + PH_SPREADN slots and a spread
+                // appends up to nsp of them WITHOUT looking at n, so a
+                // second or a third `...` wrote past the end and corrupted
+                // the compiler instead of reaching the too-many-arguments
+                // diagnostic the ordinary path raises below.
+                if (n >= maxn + PH_SPREADN)
+                    ph_todo(fl, line, "too many arguments for this builtin");
                 st64(buf + n * 24, ph_c2("php_unpack_at", ph_tref(tmp), ph_int(k), ty_pzv));
                 st64(buf + n * 24 + 8, PT_MIXED);
                 st64(buf + n * 24 + 16, 0);
