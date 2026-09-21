@@ -334,7 +334,7 @@ as a computed path (it is not: both halves are compile-time literals, and it is 
 spelling), and a top-level `return` returned from the generated `main`, skipping `php_shutdown`,
 `php_flush` and the exit code -- the program printed nothing and exited with a junk status (54,
 82, 94, 142 and 178 on five runs of the same source). Both halves run now: **6 ok / 0 failed in
-each**, `main.php` 7.21x and `heavy.php` 1.44x.
+each**, `main.php` 6.84x and `heavy.php` 1.48x (the committed record).
 
 **And the grid itself has a band.** The backlog says the grid is what is NOT in question; nobody
 had run it twice. Two runs of the SAME BINARY over the whole corpus give **green 1676 and 1688 (an earlier binary)**,

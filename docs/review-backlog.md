@@ -434,3 +434,13 @@ Two of them are wrong, and the measurement is how that is known rather than asse
   `bench10.sh:43` is `probes/t10/mc-php --exe ... -o ...`, and `grep -n mcphp.sh
   probes/t10/bench/bench10.sh` finds nothing. The `set -e` half of the same comment WAS right
   and is the first line above.
+
+### Round sixteen
+
+- ~~The committed dated bench record disagreed with every number quoted around it~~: the JSON
+  said 6.84x / 1.48x while the pull request said 7.43x / 1.42x and the reports 7.21x / 1.44x --
+  three runs, one of them committed, and the prose quoting the others. The record is
+  regenerated and **every report now reads its four numbers out of it**, which is the whole
+  point of D8 (b) asking for a dated one: a bench number in prose has nowhere to be checked.
+  The machine was loaded for this run (php's own start-up is 77 ms against T9's 38 ms), and a
+  dated record is what makes that visible rather than confusing.

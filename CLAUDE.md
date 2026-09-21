@@ -214,7 +214,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     spelling), and a top-level `return` returning from the generated `main`, skipping
     `php_shutdown`, `php_flush` and the exit code, so the program printed NOTHING and exited
     with a junk status (54, 82, 94, 142 and 178 on five runs of the same source). Both halves
-    run now: **6 ok / 0 failed in each**, `main.php` 7.21x, `heavy.php` 1.44x.
+    run now: **6 ok / 0 failed in each**, `main.php` 6.84x, `heavy.php` 1.48x (the committed record).
   * **D8 over the fixtures** (backlog § 3): the plan states the exemption -- the unit D8
     governs is the PROGRAM, and a differential fixture is already a test and a stronger one --
     and `probes/t10/d8check.py` ENFORCES it, putting every `.php` in one of four regimes and

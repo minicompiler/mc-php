@@ -83,7 +83,7 @@ not the compiler.
 | **fixtures byte for byte** | **60 of 60, merged streams** | **75 of 75, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
-| **the D8 bench** | **5.85x and 1.45x** | **7.21x and 1.44x** | **T9's own compiler refuses its own `main.php`** |
+| **the D8 bench** | **5.85x and 1.45x** | **6.84x and 1.48x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
 | assert a php diagnostic line | 93 green of 4647 | **102 green of 4647** | |
 | mention `__destruct` | 14 green of 333 | **15 green of 333** | |
 | `lencheck` / `aritycheck` | 468 / 272 | **496 / 272** | |
@@ -330,92 +330,27 @@ agree.
 
 ```
   php     tests: 6 ok / 0 failed
-  mc-php  tests: 6 ok / 0 failed        <- the first time, in any probe
-```
-
-## The tables that choose the next block
-
-A sample of **1351** `wrong` tests -- every one under `tests/lang` and
-`ext/standard/tests/strings`, plus the first 900 of `Zend/tests` -- run
-beside php. **539 do not compile and 812 compile**, and 539 + 812 is the
-sample exactly. (T10's first draft of this section said 737, which was
-`nocompile.py` counting every compiled outcome it did not have in its skip
-list; the reviewer of #9 caught it, and 568 is now the same number the arena
-section reports from the other side.)
-
-The block that does not compile, by the compiler's own message:
-
-```
-    56  expected ; after a php expression        (returnByReference, foreach
-    54  mc-php: <a named limit>                   over an IteratorAggregate)
-    31  PHP Fatal error                          (asymmetric visibility)
-    30  expected ; after a php property          (property hooks)
-    29  expected ) in a php call                 (passByReference)
-    23  expected ; after a php assignment
-    17  a reference to a php variable of type    (array 7, object 4)
-    15  a php function ... : spl_autoload_register
-    14  ... crypt          12  a reference &$x
-    11  expected = after a php array index
-    10  a php file that does not open with <?php (leading inline html)
-```
-
-and the 788 that compile and really do print something else, by the shape of
-the first differing line:
-
-```
-   338  var_dump of a value
-   181  a php diagnostic
-   143  a blank line       (one side printed a banner the other did not:
-    86  other text          the program died before it, or after)
-    16  a float        11  an integer        9  print_r of a container
-     2  var_export of an element    1  print_r of an element
-     1  a container delimiter
-```
-
-**The head is still flat**, as T9 left it: the largest single
-first-difference PAIR is worth 26 (`php 'int(N)' / mc ''` -- mc-php printed
-nothing where php printed a value) and the next 20 (`php 'array(N) {' / mc
-''`). What is left in the graded directories is a bounded feature with a
-name -- property hooks (30), asymmetric visibility (31), references
-(29 + 17 + 12), generators (§ below, unchanged from T9) -- or a long tail of
-one function each.
-
-**The group worth naming is `var_dump of a value`, 338 of the 788**, and its
-head says what it is: php prints a value and mc-php prints nothing, which is
-a program that stopped early rather than a value formatted wrongly. That,
-and the 22 that CRASH, is what the next probe should take first.
-
-## D7, re-measured
-
-`probes/t10/arena.py` over the 1351-test list: **11 of the 810 that RAN**.
-The table above says why that is not comparable with T9's "2 of 1572" as a
-rate -- T9's denominator counted 570 tests that never ran -- but the tests
-themselves are the same shape they have been since T6: eleven programs that
-build a very large string on purpose. Nothing new, and copy-on-write is
-still not built.
-
-## The two sub-populations
-
-| population | T7 | T8 | T9 | T10 |
-|---|---|---|---|---|
-| assert a `Warning:`/`Deprecated:`/`Notice:`/`Fatal error:` line (4647) | 71 | 83 | 93 | **102** |
-| mention `__destruct` (333) | 11 | 14 | 14 | **15** |
-
-Neither was a target.
-
-## D8: the tests and the bench, both halves, for the first time
-
-```
-  php     tests: 6 ok / 0 failed
   mc-php  tests: 6 ok / 0 failed
+  6 test* methods declared; php ran 6, mc-php ran 6, and the two outputs
+  are byte for byte the same
 
-  == main.php ==   both answer 13608   the binary is 314354 bytes
-    php 0.0710 s   mc-php 0.0096 s   php -r (start-up) 0.0703 s
-    php / mc-php = 7.21x        php WORK / mc-php = 0.08x
+  == main.php ==   both answer 13608   the binary is 314418 bytes
+    php 0.0786 s   mc-php 0.0115 s   php -r (start-up) 0.0773 s
+    php / mc-php = 6.84x        php WORK / mc-php = 0.11x
   == heavy.php ==  both answer 99450
-    php 0.0727 s   mc-php 0.0510 s   php -r (start-up) 0.0702 s
-    php / mc-php = 1.44x        php WORK / mc-php = 0.03x
+    php 0.0797 s   mc-php 0.0539 s   php -r (start-up) 0.0772 s
+    php / mc-php = 1.48x        php WORK / mc-php = 0.05x
 ```
+
+**Those four numbers are read out of the committed record**,
+`probes/t10/bench/results/2026-09-21.json`, which D8 (b) asks for and which
+`bench10.sh` writes on every run (`time2.py` writes the object itself, so
+nothing re-parses a printed line). The reviewer of #9 caught the report
+quoting a LATER run than the one committed -- 7.43x and 1.42x against the
+record's 6.84x and 1.48x -- and that is why the record exists: a bench
+number in prose has nowhere to be checked against. The machine was loaded
+when this one was taken (php's own start-up is 77 ms here against 38 ms in
+T9's), which is exactly the kind of thing a dated record makes visible.
 
 The two ratios measure different things and both are honest: mc-php wins the
 whole program because php pays ~39 ms of start-up before the first
