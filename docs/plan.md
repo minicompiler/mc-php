@@ -276,7 +276,7 @@ D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connec
 | T7 | php's diagnostics, and the tests that compile and print the wrong thing | the diagnostic channel built (position, text, streams, exit codes) and T6's `(compiled; output differs)` block clustered by `probes/t7/diffgroup.py` and worked in descending order | green/total -- **phpt: green 1218 / wrong 13968 / refused 2917 / skip 2947 / php-fail 345 / total 21050** (`probes/t7`); per directory `tests/lang` 82, `Zend/tests` 539, `ext/standard/tests/strings` 194 |
 
 | T9 | func_get_args, the two blocks T8 inverted, and the generator decision | D6's correction built; the `(compiled; output differs)` and `(does not compile)` blocks re-clustered over a UNIFORM corpus-wide sample and worked in descending value; D8's first non-fixture `.php` with its tests in both worlds and its bench | green/total -- **phpt: green 1637 / wrong 14140 / refused 2309 / skip 2947 / php-fail 362 / total 21033** (`probes/t9`); per directory `tests/lang` 102, `Zend/tests` 709, `ext/standard/tests/strings` 262 |
-| T10 | the review backlog (59 Copilot findings across #1..#7) | `docs/review-backlog.md` worked in its own order: the four tools that reported numbers they had not measured, the twenty-two semantics a program can observe, D8 over the fixtures -- and, found by running out of disk, the grid's unbounded tmp | green/total -- **phpt: green 1676 / wrong 14444 / refused 1967 / skip 2947 / php-fail 361 / total 21034** and 1688 on a second run of the same binary (`probes/t10`); per directory `tests/lang` 104, `Zend/tests` 749, `ext/standard/tests/strings` 262; fixtures 75/75 on each stream and the exit code; `refused` 2309 -> 1967; the grid's tmp peak 1892 KiB over 27728 tests |
+| T10 | the review backlog (59 Copilot findings across #1..#7) | `docs/review-backlog.md` worked in its own order: the four tools that reported numbers they had not measured, the twenty-two semantics a program can observe, D8 over the fixtures -- and, found by running out of disk, the grid's unbounded tmp | green/total -- **phpt: green 1689 / wrong 14469 / refused 1929 / skip 2947 / php-fail 361 / total 21034** (`probes/t10`); per directory `tests/lang` 104, `Zend/tests` 749, `ext/standard/tests/strings` 263; fixtures 75/75 on each stream and the exit code; `refused` 2309 -> 1929; the grid's tmp peak 1892 KiB over 27728 tests |
 
 | T8 | the block that does not compile, and the names it asks for | T7's `(does not compile)` block grouped by `probes/t8/nocompile.py` and worked in descending order; the 288 missing names worked in descending frequency | green/total -- **phpt: green 1450 / wrong 13607 / refused 3026 / skip 2947 / php-fail 365 / total 21030** (`probes/t8`); per directory `tests/lang` 93, `Zend/tests` 635, `ext/standard/tests/strings` 223 |
 
@@ -285,21 +285,20 @@ Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
 
 T10 is done (2026-09-21, macos/aarch64; `probes/t10/RESULTS.md`), on **mc 1.1.0**: the review
 backlog, all three sections (`docs/review-backlog.md`).
-`phpt: green 1676 / wrong 14444 / refused 1967 / skip 2947 / php-fail 361 / total 21034` and
-`green 1688 / wrong 14433 / ... / total 21035` on a second run of the same binary, against T9's
+`phpt: green 1689 / wrong 14469 / refused 1929 / skip 2947 / php-fail 361 / total 21034`, against T9's
 `green 1637`; per directory `tests/lang` **104**, `Zend/tests` **749**,
-`ext/standard/tests/strings` **262**; **1651 of 1676 and 1663 of 1688 are in T0's "touched by
-none" set**. `refused` fell **2309 -> 1967**. The green moved only +39 to +51 because the work was
+`ext/standard/tests/strings` **263**; **1664 of the 1689 greens are in T0's "touched by
+none" set**. `refused` fell **2309 -> 1929**. The green moved only +52 because the work was
 CORRECTNESS: a `.phpt` that was already green does not become greener for the compiler being
 right about short circuit. What the probe is actually worth is the corrected numbers.
 
 **Four tools had been reporting numbers they never measured**, and they are what chose every
 block since T5. `why.py` labelled a test `(compiled; output differs)` WITHOUT running the
-binary; running them shows that of 784 sampled tests that compile, **758 really differ**, 23
+binary; running them shows that of 784 sampled tests that compile, **757 really differ**, 23
 crash, 2 time out and 1 agrees on both. `arena.py` divided by `len(files)` while
 turning every failure into `None`: of T10's 1352-test list only **782 RAN**, so the published
 rate understated by 1.7x. `nocompile.py`'s skip list named one compiled outcome of five, so
-the block that does not compile was published as 737 and is **568** -- the reviewer of #9
+the block that does not compile was published as 737 and is **570** -- the reviewer of #9
 caught that one, in T10's own first draft. `fixtures.sh` merged the streams with `2>&1` and
 compared with `$(...)`, which strips trailing newlines. `bench/bench.sh` in t7 and t8 built and timed **t6's**
 compiler.
@@ -315,12 +314,12 @@ spelling), and a top-level `return` returned from the generated `main`, skipping
 each**, `main.php` 7.21x and `heavy.php` 1.44x.
 
 **And the grid itself has a band.** The backlog says the grid is what is NOT in question; nobody
-had run it twice. Two runs of the SAME BINARY over the whole corpus give **green 1676 and 1688**,
+had run it twice. Two runs of the SAME BINARY over the whole corpus give **green 1676 and 1688 (an earlier binary)**,
 the smaller set a strict SUBSET of the larger, and all twelve of the difference are FILESYSTEM
 tests -- 9 under `ext/standard/tests/file`, 3 under `ext/standard/tests/dir` -- which `chdir()`
 and write files in a shared working directory while six of them run at once. The three directory
-numbers do not move: 104 / 749 / 262 came out identical on three separate runs across two
-different compilers. **A per-block move smaller than a dozen tests should be read on the
+numbers do not move: 104 / 749 / 262 came out identical on four separate runs across three compilers, and
+263 on the fifth (round ten's sscanf fix). **A per-block move smaller than a dozen tests should be read on the
 directories**, and the corpus number is worth quoting with its band -- which no probe has done,
 T9's 1637 and T8's 1450 included.
 

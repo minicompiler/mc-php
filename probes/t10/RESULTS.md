@@ -16,20 +16,19 @@ against a SNAPSHOT of the compiler (`probes/t10/grid.sh`,
 `probes/t10/fixtures.sh`), which is T7's own note: the first baseline there
 measured a binary that was being rebuilt underneath it.
 
-## Answer: green 1637 -> 1676 and 1688, on two runs of the same binary
+## Answer: green 1637 -> 1689
 
 | grid | green | wrong | refused | skip | php-fail | total | T9's green |
 |---|---|---|---|---|---|---|---|
 | `tests/lang` | **104** | 141 | 36 | 12 | 1 | 293 | 102 |
 | `Zend/tests` | **749** | 3754 | 691 | 112 | 6 | 5306 | 709 |
-| `ext/standard/tests/strings` | **262** | 311 | 107 | 54 | 0 | 734 | 262 |
-| the whole corpus, run A | **1676** | 14444 | 1967 | 2947 | 361 | 21034 | 1637 |
-| the whole corpus, run B | **1688** | 14433 | 1967 | 2947 | 360 | 21035 | 1637 |
+| `ext/standard/tests/strings` | **263** | 310 | 107 | 54 | 0 | 734 | 262 |
+| the whole corpus | **1689** | 14469 | 1929 | 2947 | 361 | 21034 | 1637 |
 
-**The two corpus rows are the SAME BINARY, run twice**, and they are the last
-thing T10 measured. The backlog says the grid is what is NOT in question; it
-has a band, and nobody had looked. The 1676 set is a strict SUBSET of the
-1688 set -- 0 tests green in A and not in B, 12 the other way -- and all
+**The corpus number carries a band of about +/- 12, and it was MEASURED.**
+The backlog says the grid is what is not in question; nobody had run it
+twice. Two runs of one binary, earlier in this pull request, gave **1676 and
+1688** -- and the 1676 set is a strict SUBSET of the 1688 set -- 0 tests green in A and not in B, 12 the other way -- and all
 twelve are filesystem tests: **9 under `ext/standard/tests/file`, 3 under
 `ext/standard/tests/dir`** (`chdir_basic`, `getcwd_basic`, `is_dir_basic`,
 `is_file_basic`, `rename_variation1`, `file_get_contents_variation7` and
@@ -39,19 +38,20 @@ and not with the compiler. `php-fail` moves with them (361 / 360), which is
 php's own side doing the same thing.
 
 So **the corpus green carries about +/- 12, and the three directory numbers
-do not**: 104 / 749 / 262 came out identical on three separate runs across
-two different compilers. A per-block move smaller than a dozen tests should
-be read on the directories, and the corpus number is worth quoting with its
-band -- which no probe has done, T9's 1637 and T8's 1450 included.
+do not**: `tests/lang` 104 and `Zend/tests` 749 came out identical on five
+separate runs across four compilers, and `strings` moved 262 -> 263 exactly
+once, for round ten's `sscanf` fix. A per-block move smaller than a dozen
+tests should be read on the directories, and the corpus number is worth
+quoting with its band -- which no probe has done, T9's 1637 and T8's 1450
+included.
 
-`refused` fell **2309 -> 1967** over the corpus and **725 -> 691** under
+`refused` fell **2309 -> 1929** over the corpus and **725 -> 691** under
 `Zend/tests`, and that is one block: `require __DIR__ . "/x.php"` and a
 top-level `return` were refusals and are not any more (block 4). `wrong`
 rose with it, because a test that now COMPILES gets far enough to print
 something that can disagree.
 
-**1651 of run A's 1676 greens and 1663 of run B's 1688 are in T0's "touched
-by none" set** -- the 84.2% of the corpus none of § 3's decisions touches --
+**1664 of the 1689 greens are in T0's "touched by none" set** -- the 84.2% of the corpus none of § 3's decisions touches --
 against T9's 1626 of 1637.
 
 T9's line on the same corpus and harness:
@@ -59,7 +59,7 @@ T9's line on the same corpus and harness:
 T8's: `green 1450`. T7's: `green 1218`. T6's: `green 1073`. T5's: `green 80`.
 T0's, before any compiler existed: `green 0`.
 
-The green moved **+39 to +51 on a block of pure CORRECTNESS work**, which is
+The green moved **+52 on a block of pure CORRECTNESS work**, which is
 the smallest per-block move of any probe so far and is the expected shape:
 § 2 of the backlog fixes what a program OBSERVES, not what it can express,
 and a `.phpt` that was already green does not become greener for being right
@@ -74,32 +74,32 @@ not the compiler.
 
 | number | T9 published | T10 measured | |
 |---|---|---|---|
-| corpus green | 1637 | **1676 / 1688** (two runs, same binary) | |
+| corpus green | 1637 | **1689** (band +/- 12, measured) | |
 | corpus refused | 2309 | **1967** | block 4 |
-| `tests/lang` / `Zend/tests` / `strings` | 102 / 709 / 262 | **104 / 749 / 262** | |
-| greens in T0's "touched by none" | 1626 of 1637 | **1651 of 1676, 1663 of 1688** | |
-| **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **758 of 784 that compile** | **never ran the binary** |
-| **the arena** | **2 of 1572** | **11 of 782 that RAN** | **the denominator counted tests it never ran** |
+| `tests/lang` / `Zend/tests` / `strings` | 102 / 709 / 262 | **104 / 749 / 263** | |
+| greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
+| **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **757 of the 781 that compile** | **never ran the binary** |
+| **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
 | **fixtures byte for byte** | **60 of 60, merged streams** | **75 of 75, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
 | **the D8 bench** | **5.85x and 1.45x** | **7.21x and 1.44x** | **T9's own compiler refuses its own `main.php`** |
-| assert a php diagnostic line | 93 green of 4647 | **99 (run A) / 102 (run B)** | |
+| assert a php diagnostic line | 93 green of 4647 | **102 green of 4647** | |
 | mention `__destruct` | 14 green of 333 | **15 green of 333** | |
 | `lencheck` / `aritycheck` | 468 / 272 | **496 / 272** | |
 
 ### What "compiled; output differs" really was
 
 `why.py` never ran the binary, so every test that COMPILED was labelled
-`(compiled; output differs)`. Running them, over a sample of 1352 `wrong`
-tests of which **784 compile** (782 run to completion, 2 time out):
+`(compiled; output differs)`. Running them, over a sample of 1351 `wrong`
+tests of which **781 compile** (779 run to completion, 2 time out):
 
 | label | count | share of the 784 |
 |---|---|---|
-| the output really does differ | **758** | 96.7% |
-| crashed (a signal) | 23 | 2.9% |
+| the output really does differ | **757** | 96.9% |
+| crashed (a signal) | 22 | 2.8% |
 | timed out | 2 | 0.3% |
-| agrees on both: the `.phpt`'s own expectation is what the grid graded | 1 | 0.1% |
+
 | **the output agrees and the exit code does not** | **0** | **0%** |
 
 **The last row is a retraction, and it is T10's own.** The first version of
@@ -128,10 +128,10 @@ graded on its own expectation.
 ### What "the arena is the answer" really was
 
 `arena.py` turned every exception into `None` and divided by `len(files)`.
-Of T10's 1352-test list, **568 do not compile and 2 time out**: a denominator
-of 1352 understates by 1.7x, and the outcome it hides is the one that most
-needs reporting. The line is `arena exhausted in 11 of 782 tests that RAN
-(1352 in the list)`, with every other outcome on its own line and an
+Of T10's 1351-test list, **570 do not compile and 2 time out**: a denominator
+of 1351 understates by 1.7x, and the outcome it hides is the one that most
+needs reporting. The line is `arena exhausted in 11 of 779 tests that RAN
+(1351 in the list)`, with every other outcome on its own line and an
 `assert` that nothing was dropped. The eleven are all large-string
 programs -- `explode_bug`, `wordwrap_memory_limit`, `chunk_split_variation3`,
 `htmlentities-utf-3` and their kind -- which is the shape D7 predicted and
@@ -159,7 +159,7 @@ removes one it did not create. Since round six of the review it uses the
 CANONICAL `<base>.php` -- the name `probes/t0/phpt-run.py` itself gives the
 test, so `__FILE__` and anything derived from it are what the grid graded --
 and there is NO fallback name: a name that is taken is skipped and counted
-(`busy`), which over the 1352-test sample is 0 tests.
+(`busy`), which over the 1351-test sample is 0 tests.
 
 ## Block 1b: the grid's disk cost, which the section did not name
 
@@ -186,11 +186,10 @@ the directory and keeps the maximum so the claim carries a number.
 | | tmp peak | disk before | disk after |
 |---|---|---|---|
 | 6333 tests (three directories) | **1860 KiB** | 212Gi free | 212Gi free |
-| 27728 tests (three directories and the corpus, one run) | **1892 KiB** | 212Gi free | 212Gi free |
-| 21395 tests (a second corpus run) | **1908 KiB** | 212Gi free | 212Gi free |
+| 27728 tests (three directories and the corpus, one run) | **1908 KiB** | 212Gi free | 212Gi free |
 
 **The grid's disk cost is bounded by the job count, not by the corpus size**:
-4.4x the tests for a 2.6% larger peak. 4184 orphaned binaries (665 MB)
+4.4x the tests for a 2.6% larger peak, over six runs. 4184 orphaned binaries (665 MB)
 from the killed run were swept before any of this was measured.
 
 `fixtures.sh` set no `MCPHP_TMP` at all, so every fixture run leaked its
@@ -331,9 +330,9 @@ agree.
 
 ## The tables that choose the next block
 
-A sample of **1352** `wrong` tests -- every one under `tests/lang` and
+A sample of **1351** `wrong` tests -- every one under `tests/lang` and
 `ext/standard/tests/strings`, plus the first 900 of `Zend/tests` -- run
-beside php. **568 do not compile and 784 compile**, and 568 + 784 is the
+beside php. **570 do not compile and 781 compile**, and 570 + 781 is the
 sample exactly. (T10's first draft of this section said 737, which was
 `nocompile.py` counting every compiled outcome it did not have in its skip
 list; the reviewer of #9 caught it, and 568 is now the same number the arena
@@ -355,14 +354,14 @@ The block that does not compile, by the compiler's own message:
     10  a php file that does not open with <?php (leading inline html)
 ```
 
-and the 758 that compile and really do print something else, by the shape of
+and the 757 that compile and really do print something else, by the shape of
 the first differing line:
 
 ```
    332  var_dump of a value
    173  a php diagnostic
-   129  a blank line       (one side printed a banner the other did not:
-    84  other text          the program died before it, or after)
+   126  a blank line       (one side printed a banner the other did not:
+    86  other text          the program died before it, or after)
     16  a float        11  an integer        9  print_r of a container
      2  var_export of an element    1  print_r of an element
      1  a container delimiter
@@ -376,14 +375,14 @@ name -- property hooks (30), asymmetric visibility (31), references
 (29 + 17 + 12), generators (§ below, unchanged from T9) -- or a long tail of
 one function each.
 
-**The group worth naming is `var_dump of a value`, 332 of the 758**, and its
+**The group worth naming is `var_dump of a value`, 332 of the 757**, and its
 head says what it is: php prints a value and mc-php prints nothing, which is
 a program that stopped early rather than a value formatted wrongly. That,
-and the 23 that CRASH, is what the next probe should take first.
+and the 22 that CRASH, is what the next probe should take first.
 
 ## D7, re-measured
 
-`probes/t10/arena.py` over the 1352-test list: **11 of the 782 that RAN**.
+`probes/t10/arena.py` over the 1351-test list: **11 of the 779 that RAN**.
 The table above says why that is not comparable with T9's "2 of 1572" as a
 rate -- T9's denominator counted 570 tests that never ran -- but the tests
 themselves are the same shape they have been since T6: eleven programs that
@@ -394,7 +393,7 @@ still not built.
 
 | population | T7 | T8 | T9 | T10 |
 |---|---|---|---|---|
-| assert a `Warning:`/`Deprecated:`/`Notice:`/`Fatal error:` line (4647) | 71 | 83 | 93 | **99 (run A) / 102 (run B)** |
+| assert a `Warning:`/`Deprecated:`/`Notice:`/`Fatal error:` line (4647) | 71 | 83 | 93 | **102** |
 | mention `__destruct` (333) | 11 | 14 | 14 | **15** |
 
 Neither was a target.
@@ -406,10 +405,10 @@ Neither was a target.
   mc-php  tests: 6 ok / 0 failed
 
   == main.php ==   both answer 13608   the binary is 314354 bytes
-    php 0.0396 s   mc-php 0.0054 s   php -r (start-up) 0.0392 s
+    php 0.0710 s   mc-php 0.0096 s   php -r (start-up) 0.0703 s
     php / mc-php = 7.21x        php WORK / mc-php = 0.08x
   == heavy.php ==  both answer 99450
-    php 0.0429 s   mc-php 0.0294 s   php -r (start-up) 0.0421 s
+    php 0.0727 s   mc-php 0.0510 s   php -r (start-up) 0.0702 s
     php / mc-php = 1.44x        php WORK / mc-php = 0.03x
 ```
 
@@ -424,22 +423,22 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **75 of 75** fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **75 of 75** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** refusals named, exit 3.
 * `lencheck` **496 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
-* `d8check` -- **81 fixture / 3 instrument / 1 library / 2 bench**, 87 `.php`,
+* `d8check` -- **81 fixture / 1 helper / 3 instrument / 1 library / 2 bench**, 88 `.php`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
-* the grid's tmp peak **1892 KiB over 27728 tests** and 1908 KiB over a
-  second corpus run; `df -h /` identical
+* the grid's tmp peak **1908 KiB over 27728 tests**, the largest of six runs;
+  `df -h /` identical
   before and after.
 * `probes/t9/` untouched.
 
 ## Cost
 
-`probes/t10/php.mc` 7177 -> 7821 lines, `probes/t10/php_rt.txt` 8780 -> 8977.
+`probes/t10/php.mc` 7177 -> 7933 lines, `probes/t10/php_rt.txt` 8780 -> 9032.
 **No new external name.** Everything the four blocks needed was already
 called by `php.mc`: the same 58 T9 listed -- 48 frozen, four core intrinsics
 (`ld8`/`ld64`/`st8`/`st64`), three `<float>`'s, and three libc (`write`,

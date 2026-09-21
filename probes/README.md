@@ -203,14 +203,14 @@ and printed the wrong thing**. T7 builds the first and takes the second apart.
 
 ## T10 -- the review backlog: the measurements that lie, the semantics that are wrong
 
-**green 1637 -> 1676, and 1688 on a second run of the same binary.**
-`phpt: green 1676 / wrong 14444 / refused 1967 / skip 2947 / php-fail 361 / total 21034`
+**green 1637 -> 1689.**
+`phpt: green 1689 / wrong 14469 / refused 1929 / skip 2947 / php-fail 361 / total 21034`
 over the whole corpus; per directory `tests/lang` **104** (was 102), `Zend/tests` **749**
-(was 709), `ext/standard/tests/strings` **262** (was 262). **1651 of 1676 and 1663 of 1688 are in
-T0's "touched by none" set**, and `refused` fell **2309 -> 1967** -- one block, because
+(was 709), `ext/standard/tests/strings` **262** (was 262). **1664 of the 1689 greens are in
+T0's "touched by none" set**, and `refused` fell **2309 -> 1929** -- one block, because
 `require __DIR__ . "/x.php"` and a top-level `return` were refusals and are not any more.
 
-The green moved only +39 to +51, and that is the expected shape: this is CORRECTNESS work, and a
+The green moved only +52, and that is the expected shape: this is CORRECTNESS work, and a
 `.phpt` that was already green does not become greener for the compiler being right about short
 circuit. What the probe is worth is the corrected numbers.
 
@@ -219,14 +219,14 @@ circuit. What the probe is worth is the corrected numbers.
   "these two agree" now -- stdout byte for byte AND the same exit code, which is the pair
   `probes/t0/phpt-run.py` itself grades on. `why.py` labelled a test
   `(compiled; output differs)` **without ever running the binary**: of 784 sampled tests that
-  compile, **758 really differ**, 23 crash, 2 time out and 1 agrees on both. The clustering of
+  compile, **757 really differ**, 23 crash, 2 time out and 1 agrees on both. The clustering of
   the 758 is what the sample is for: **332 are `var_dump of a value`**, and its head is
   `php 'int(N)' / mc ''` -- php printed a value and mc-php printed nothing, a program that
   stopped early rather than a value formatted wrongly. `arena.py`
   divided by `len(files)` while turning every failure into `None`: of the 1352-test list only
   **782 RAN**. `fixtures.sh` merged the streams with `2>&1` and compared with `$(...)`. And
   `nocompile.py`'s skip list named ONE compiled outcome of five, so the block that does not
-  compile was published as 737 and is **568** -- the reviewer of this probe's own pull request
+  compile was published as 737 and is **570** -- the reviewer of this probe's own pull request
   caught that one, in T10's first draft.
 * **Twenty-two semantics a program can observe** (§ 2), seventeen fixed and closed by a
   fixture, five closed by measurement, one recorded as a divergence with its number: short circuit and the right
@@ -250,11 +250,11 @@ circuit. What the probe is worth is the corrected numbers.
   of 6333: bounded by the job count and not the corpus.**
 
 **And the grid itself has a band, which no probe had measured.** Two runs of the SAME BINARY
-over the whole corpus give **green 1676 and 1688**, the smaller a strict subset of the larger,
+over the whole corpus give **green 1676 and 1688 (an earlier binary)**, the smaller a strict subset of the larger,
 and all twelve of the difference are FILESYSTEM tests (9 under `ext/standard/tests/file`, 3
 under `ext/standard/tests/dir`) that `chdir()` and write files in a shared working directory
-while six run at once. The three directory numbers do not move -- 104 / 749 / 262 on three
-separate runs across two compilers -- so a per-block move smaller than a dozen tests should be
+while six run at once. The three directory numbers do not move -- 104 / 749 / 262 on four separate
+runs across three compilers, 263 on the fifth -- so a per-block move smaller than a dozen tests should be
 read there.
 
 **The second review round cost T10 its own headline.** `harness.py` handed php a RELATIVE path
@@ -262,7 +262,7 @@ while running it with `cwd` set to the test's own directory, so php answered `Co
 input file` for every test in the sample while the candidate ran anyway. The first version of
 this probe reported **143 tests (18.2%) that print exactly what php prints and exit with a
 different code** and named them the next block; with php actually running there are **zero** --
-of the 784 that compile, **758 really differ**, 23 crash, 2 time out, 1 agrees. T10 worked
+of the 784 that compile, **757 really differ**, 23 crash, 2 time out, 1 agrees. T10 worked
 section 1 of the backlog and published a new number of the same kind in the doing, which is the
 argument for one more rule: a differential tool has to be checked against a case whose answer is
 known.

@@ -168,11 +168,10 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
 - T10 done (`probes/t10`), on **mc 1.1.0**: the review backlog -- 59 Copilot findings across
   #1..#7 that nothing had acted on (`docs/review-backlog.md`), all three sections, plus one
   the sections did not name and a disk that ran out. **green 1637 -> 1688**:
-  `phpt: green 1676 / wrong 14444 / refused 1967 / skip 2947 / php-fail 361 / total 21034`,
-  and 1688 on a SECOND run of the same binary (below);
+  `phpt: green 1689 / wrong 14469 / refused 1929 / skip 2947 / php-fail 361 / total 21034`;
   per directory `tests/lang` 104 (was 102), `Zend/tests` 749 (was 709),
-  `ext/standard/tests/strings` 262 (was 262). **1651 of 1676 and 1663 of 1688 are in T0's
-  "touched by none" set**; `refused` fell **2309 -> 1967**. The green moved only +39 to +51 because
+  `ext/standard/tests/strings` 263 (was 262). **1664 of the 1689 greens are in T0's
+  "touched by none" set**; `refused` fell **2309 -> 1929**. The green moved only +52 because
   the work is CORRECTNESS -- a `.phpt` that was already green does not become greener for the
   compiler being right about short circuit -- and what the probe is worth is the corrected
   numbers below.
@@ -180,7 +179,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     block since T5. They are one tool now, `probes/t10/harness.py`: stdout byte for byte AND
     the same exit code, which is the pair the grid itself grades on. `why.py` labelled a test
     `(compiled; output differs)` WITHOUT running the binary -- of 784 sampled tests that
-    compile, **758 really differ**, 23 crash, 2 time out and 1 agrees on both. The
+    compile, **757 really differ**, 23 crash, 2 time out and 1 agrees on both. The
     clustering of the 758 is worth the sample: **332 are `var_dump of a value`** and its head
     is `php 'int(N)' / mc ''` -- php printed a value and mc-php printed nothing, a program
     that stopped early rather than a value formatted wrongly.
@@ -190,7 +189,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     `bench/bench.sh` in t7 and t8 built and timed **t6's** compiler. `<test>.why.php`
     clobbered a sibling of that name. And `nocompile.py`'s skip list named ONE compiled
     outcome of five, so the other four were counted as tests that do not compile: that block
-    was published as 737 and is **568** -- the reviewer of this probe's own pull request
+    was published as 737 and is **570** -- the reviewer of this probe's own pull request
     caught it, in T10's first draft.
   * **Twenty-two semantics a program can observe**, seventeen fixed and closed by a fixture,
     five closed by measurement, one recorded as a divergence with its number: short circuit (`&&`, `||`, `??`,
@@ -258,16 +257,17 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     whose answer is known.**
   * **And the grid itself has a band, which no probe had measured.** The backlog says the grid
     is what is NOT in question; nobody had run it twice. Two runs of the SAME BINARY over the
-    whole corpus give **green 1676 and 1688**, the smaller a strict SUBSET of the larger, and
+    whole corpus give **green 1676 and 1688 (an earlier binary)**, the smaller a strict SUBSET of the larger, and
     all twelve of the difference are FILESYSTEM tests -- 9 under `ext/standard/tests/file`,
     3 under `ext/standard/tests/dir` -- which `chdir()` and write files in a shared working
     directory while six of them run at once. The three directory numbers do NOT move: 104 /
-    749 / 262 came out identical on three separate runs across two different compilers.
+    749 / 262 came out identical on four separate runs across three compilers, and 263 on
+    the fifth (round ten's sscanf fix).
     **A per-block move smaller than a dozen tests should be read on the directories**, and the
     corpus number is worth quoting with its band -- T9's 1637 and T8's 1450 included.
-  Fixtures: **75 of 75** under `g/` byte for byte php's on each stream and the exit code,
+  Fixtures: **75 of 75** numbered under `g/` byte for byte php's on each stream and the exit code,
   **6 of 6** under `r/` refused by name with exit 3; `lencheck` 496 / 0 wrong, `aritycheck`
-  272 / 0 wrong, `d8check` 87 `.php` all in a regime. **No new mc gap**, and no new external
+  272 / 0 wrong, `d8check` 88 `.php` all in a regime. **No new mc gap**, and no new external
   name: the 38-of-21219 inline-HTML refusal T5 reported is unchanged.
 - T9 done (`probes/t9`), on **mc 1.1.0**: D6's correction built, and T8's two blocks
   worked from a UNIFORM corpus-wide sample (every ninth of `wrong.txt`, split so the
