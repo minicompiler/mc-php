@@ -569,7 +569,9 @@ parameter had a default. The first is now a named limit, the other two are
 byte-identical to php, and `g/78-spread-and-types.php` holds all three with
 the five primitives, a forward call and a variadic beside them. It also asked
 for the probe's own contract to be checkable rather than asserted, so
-`run.sh` ends on `T10: <green> / <total>` read off the grid's summary line.
+`run.sh`'s STDOUT is exactly `T10: <green> / <total>`, read off the grid's
+summary line -- the tables are the working and go to stderr, so
+`sh probes/t10/run.sh > n` leaves one line in `n`.
 
 **Round twenty-one** was all scripts, and two of its nine are worth keeping:
 `tmp.sh` would have deleted a LIVE run's directory once it was a day old --

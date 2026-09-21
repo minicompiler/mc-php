@@ -31,6 +31,14 @@ set -eu
 LC_ALL=C
 export LC_ALL
 
+# STDOUT is the probe's answer and nothing else (CLAUDE.md, probes/README.md:
+# "every probe prints one number"). The grids, the tables and the gates are
+# the WORKING and they go to stderr, where a terminal still shows them and a
+# caller can keep them with `2> log` -- so `sh probes/t10/run.sh > n` leaves
+# exactly `T10: <green> / <total>` in `n`. fd 3 is the way back to the real
+# stdout for that one line.
+exec 3>&1 1>&2
+
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH= cd -- "$here/../.." && pwd)
 cd "$root"
@@ -239,4 +247,4 @@ echo ""
 # than the grid published.
 echo "T10: measured -- see probes/t10/RESULTS.md"
 awk '/^phpt: green/ { for (i = 1; i < NF; i++) if ($i == "total") t = $(i + 1);
-                      printf "T10: %s / %s\n", $3, t }' "$OUT/all.summary"
+                      printf "T10: %s / %s\n", $3, t }' "$OUT/all.summary" >&3

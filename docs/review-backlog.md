@@ -1042,3 +1042,18 @@ going away. php runs under `env -u MCPHP_OUT` on both the fixture and the
 teeth -- with the export restored the gate is `FAIL 82-env-symmetry.php`,
 80 / 81. (`probes/t0/phpt-run.py` never had it: the oracle's environment
 is built separately and only the candidate's gets the variable.)
+
+### Round thirty-four
+
+Two findings.
+
+- ~~The pull request's counts said 80 fixtures and 93 / 361 where the gate
+  now runs 81 and reports 94 / 362.~~ `g/82-env-symmetry.php` moved them one
+  round earlier and the description did not follow.
+- ~~`run.sh`'s stdout is not one number.~~ Taken literally this time, and it
+  costs two lines: `exec 3>&1 1>&2` at the top, and the final `awk` writes
+  to fd 3. The grids, the tables and the gates are the WORKING and go to
+  stderr, where a terminal still shows them and `2> log` keeps them, so
+  `sh probes/t10/run.sh > n` leaves exactly `T10: <green> / <total>` in `n`.
+  Round nineteen answered the same finding by putting the number last;
+  this is the stricter reading and there is no reason not to meet it.
