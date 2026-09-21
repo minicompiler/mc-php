@@ -5015,6 +5015,16 @@ uptr php_param_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argna
     return php_zbool(php_zv_bool(z));
 }
 
+// The same check for a BY-REFERENCE parameter. php coerces the caller's own
+// variable -- `f(int &$x)` with "5" leaves 6 behind, not '5' -- so the
+// coerced value is stored back into the SAME cell and that cell is what the
+// callee keeps: returning the new zval would have silently broken the alias.
+uptr php_param_coerce_ref(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) {
+    uptr c = php_param_coerce(z, want, cls, fn, argno, argname);
+    if (!z || c == z) return z;
+    return php_zv_store(z, c);
+}
+
 void php_argcount(uptr cls, uptr fn) {
     uptr m = php_str_concat(php_str_new("Too few arguments to function ", 30), cls);
     m = php_str_concat(m, php_str_new("::", 2));
@@ -8836,6 +8846,12 @@ uptr php_ref_bind(uptr cell, uptr cur) {
 // emitted for it. Both were silent: `f(...1)` called f with no arguments and
 // a 20-element array lost four values.
 void php_unpack_check(uptr z, i64 cap) {
+    if (php_zv_type(z) == IS_OBJECT) {
+        // php iterates a Traversable here. mc-php does not, and the message
+        // above would have called a legal spread a type error -- so it is a
+        // named limit of this compiler, like the slot count below.
+        php_die("mc-php: a spread of a Traversable is not implemented yet\n", 57);
+    }
     if (php_zv_type(z) != IS_ARRAY) {
         uptr m = php_str_new("Only arrays and Traversables can be unpacked, ", 46);
         m = php_str_concat(m, php_f_get_debug_type(z));
@@ -8843,14 +8859,24 @@ void php_unpack_check(uptr z, i64 cap) {
         php_throw_str(php_str_new("TypeError", 9), m);
         return;
     }
+    if (cap <= 0) return;                  // the callee's arity, not my buffer
     uptr a = ld64(z);
     i64 n = 0;
     i64 i = php_it_next(a, 0);
     loop {
         if (i < 0) break;
         n = n + 1;
-        if (n > cap)
-            php_die("mc-php: a spread of more than 16 values is not implemented yet\n", 63);
+        if (n > cap) {
+            // the CALL's own slot count, not a constant: it is 16 for a
+            // plain function, 6 for a method and 5 for a callable value, and
+            // a seven-element method spread reported "more than 16".
+            php_flush();
+            write(2, "mc-php: a spread of more than ", 30);
+            uptr d = php_itos(cap);
+            write(2, php_str_val(d), php_strlen(d));
+            write(2, " values is not implemented yet\n", 31);
+            exit(255);
+        }
         i = php_it_next(a, i + 1);
     }
 }

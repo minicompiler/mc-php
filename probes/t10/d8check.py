@@ -88,10 +88,38 @@ def bench_programs():
     return [w for w in m.group(1).split() if w.endswith('.php')]
 
 
-def fixture_globs():
-    """The two globs fixtures.sh walks -- so a fixture cannot be orphaned."""
-    src = open(os.path.join(HERE, 'fixtures.sh'), encoding='latin-1').read()
-    return set(re.findall(r'for f in \$P/(\w+)/\*\.php; do', src))
+def fixture_globs(probe=None):
+    """The globs a probe's fixtures.sh walks -- so a fixture cannot be orphaned.
+
+    With no argument, T10's own. With a probe directory, that probe's, and
+    the empty set when it has no fixtures.sh: the repo-wide sweep used to
+    exempt every `probes/*/g` and `probes/*/r` by NAME, so an unreferenced
+    `probes/new/g/orphan.php` passed the only repository-wide check even
+    though nothing ran it.
+    """
+    if probe is None:
+        src = open(os.path.join(HERE, 'fixtures.sh'), encoding='latin-1').read()
+        return set(re.findall(r'for f in \$P/(\w+)/\*\.php; do', src))
+    # every .sh of that probe, in both spellings the repository uses: T8 and
+    # T9 write `for f in probes/tN/g/*.php` in their own fixtures.sh, T5..T7
+    # write it in run.sh, and T10 writes `$P/g`. A directory nothing walks is
+    # not exempt whatever it is called.
+    d = os.path.join(REPO, probe)
+    out = set()
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for n in names:
+        if not n.endswith('.sh'):
+            continue
+        try:
+            src = open(os.path.join(d, n), encoding='latin-1').read()
+        except OSError:
+            continue
+        out |= set(re.findall(r'for \w+ in \$P/(\w+)/\*\.php', src))
+        out |= set(re.findall(r'for \w+ in ' + re.escape(probe) + r'/(\w+)/\*\.php', src))
+    return out
 
 
 def test_methods_are_all_run():
@@ -205,7 +233,9 @@ def repo_sweep():
         parts = f.split('/')
         if any(f.startswith(d + '/') for d in PRE_D8):
             continue
-        if len(parts) >= 3 and parts[2] in ('g', 'r'):
+        # a fixture directory is exempt only when that probe's OWN
+        # fixtures.sh walks it, not because it is called g or r
+        if len(parts) >= 3 and parts[2] in fixture_globs('/'.join(parts[:2])):
             continue
         if f in required:
             continue

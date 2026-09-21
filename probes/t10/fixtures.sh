@@ -32,16 +32,28 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 # on every host that has php; `timeout` is not on macOS.
 # perl forks rather than execs, so the alarm kills the CHILD and this shell
 # never prints "Alarm clock" into the stderr being compared.
+# `timedout` is set by the wrapper itself and not read off the child's exit
+# status: a fixture may legitimately `exit(124)`, and treating that code as
+# the alarm failed a pair whose streams and statuses agreed. The marker file
+# is the alarm's own signal, written before the wrapper exits.
+timedout=""
 lim() {
-    perl -e 'my $t = shift; my $p = fork; exec(@ARGV) or exit 127 if !$p;
-             $SIG{ALRM} = sub { kill 9, $p; waitpid $p, 0; exit 124 };
+    rm -f "$tmp/alarm"
+    perl -e 'my $t = shift; my $mark = shift;
+             my $p = fork; exec(@ARGV) or exit 127 if !$p;
+             $SIG{ALRM} = sub { kill 9, $p; waitpid $p, 0;
+                                open my $fh, ">", $mark; close $fh; exit 124 };
              alarm $t; waitpid $p, 0;
              # A child killed by a SIGNAL has its number in the low seven
              # bits and nothing in the high byte, so `$? >> 8` reported 0:
              # a fixture that SEGFAULTED came out as a clean exit 0 and
              # could pass the comparison. 128 + n is the shell convention
              # and is a code php never answers.
-             exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' 30 "$@"
+             exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' 30 "$tmp/alarm" "$@"
+    _rc=$?
+    timedout=no
+    if [ -f "$tmp/alarm" ]; then timedout=yes; fi
+    return $_rc
 }
 
 # One name for the binary, removed after each fixture: this loop is serial and
@@ -58,13 +70,13 @@ for f in $P/g/*.php; do
     # d8check.py puts it in a regime of its own.
     case $(basename "$f") in inc.php) continue ;; esac
     ng=$((ng + 1))
-    lim "$PHP" "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?
-    lim $P/mcphp.sh "$f" > "$tmp/m.out" 2> "$tmp/m.err"; me=$?
+    lim "$PHP" "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?; pto=$timedout
+    lim $P/mcphp.sh "$f" > "$tmp/m.out" 2> "$tmp/m.err"; me=$?; mto=$timedout
     rm -f "$MCPHP_OUT" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
-    # 124 is `lim`'s own alarm, not an exit code either side chose. A
-    # fixture that HANGS in both worlds leaves both streams empty and both
+    # A fixture that HANGS in both worlds leaves both streams empty and both
     # codes 124, which the comparison below would otherwise call agreement.
-    if [ "$pe" = 124 ] || [ "$me" = 124 ]; then
+    # The ALARM says so, not the code: a fixture may legitimately exit(124).
+    if [ "$pto" = yes ] || [ "$mto" = yes ]; then
         printf '  FAIL  %s (timed out: php %s, mc-php %s)\n' "$(basename "$f")" "$pe" "$me"
         fail=1
     elif cmp -s "$tmp/p.out" "$tmp/m.out" && cmp -s "$tmp/p.err" "$tmp/m.err" \
@@ -89,6 +101,7 @@ for f in $P/r/*.php; do
     nr=$((nr + 1))
     lim $P/mcphp.sh "$f" > "$tmp/r.out" 2> "$tmp/r.err"; rc=$?
     rm -f "$MCPHP_OUT" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
+    if [ "$timedout" = yes ]; then rc=timeout; fi
     msg=$(sed 's/^[^:]*:[0-9]*: //' "$tmp/r.err" | head -1)
     case "$rc:$msg" in
         3:*"is refused by design"*) nrok=$((nrok + 1)) ;;

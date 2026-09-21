@@ -224,7 +224,7 @@ D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixt
     names its path, a bench script names its basename in a `for prog in` list, or it is under
     one of three enumerated pre-D8 directories -- `probes/t0`, `probes/t4` and
     `probes/gap-lexer-ownership`, each with its reason in the script, and the sweep FAILS when
-    an exempted directory is gone or has grown a `bench/`, so the list cannot rot. 356 `.php`
+    an exempted directory is gone or has grown a `bench/`, so the list cannot rot. 359 `.php`
     swept; the three orphan copies of `unwind.php` are deleted, T6's original untouched.
 
     (e) The PHPUnit half of (a) is EXEMPT while its two mechanisms do not exist, and this is
@@ -335,7 +335,7 @@ as a computed path (it is not: both halves are compile-time literals, and it is 
 spelling), and a top-level `return` returned from the generated `main`, skipping `php_shutdown`,
 `php_flush` and the exit code -- the program printed nothing and exited with a junk status (54,
 82, 94, 142 and 178 on five runs of the same source). Both halves run now: **6 ok / 0 failed in
-each**, `main.php` 6.84x and `heavy.php` 1.48x (the committed record).
+each**, `main.php` 6.73x and `heavy.php` 1.41x (the committed record).
 
 **And the grid itself has a band.** The backlog says the grid is what is NOT in question; nobody
 had run it twice. Two runs of the SAME BINARY over the whole corpus give **green 1676 and 1688 (an earlier binary)**,

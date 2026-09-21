@@ -647,3 +647,63 @@ own twelve) and **20 tests out of `php-fail` into `wrong`**, because the
 source tree was cleaned of the leftovers the pre-CLEAN harness had made. The
 round-eighteen finding, measured from the other side: the contamination was
 costing the grid 20 tests of its denominator.
+
+### Round twenty
+
+Thirteen findings. Twelve changed something; one is refuted with a
+measurement.
+
+**The compiler and the runtime.**
+
+- **`function f(int &$x)` accepts an invalid value.** Refuted for the ordinary
+  function, where mc-php **refuses it at compile time** -- `/tmp/r1.php:2:
+  mc-php: a php parameter: & is not implemented yet`, exit 2 -- because the
+  path reads `&` before the type word and a type before the `&` never reaches
+  a `$`. ~~The METHOD path does accept it, and there IS a divergence there --
+  a different one.~~ The TypeError is raised correctly; what was lost is the
+  WRITE-BACK: php coerces the caller's own variable (`m(int &$x)` with `"5"`
+  leaves 6 behind) and mc-php left `'5'`, because `php_param_coerce` returns a
+  new zval and the alias went with it. `php_param_coerce_ref` stores the
+  coerced value into the same cell and returns that cell; measured, the two
+  worlds are byte identical now.
+- ~~The unpack check rejects a Traversable.~~ Correct, and the message it
+  raised claimed Traversables are supported. php iterates one; mc-php does
+  not, so an object operand is now the named limit
+  `mc-php: a spread of a Traversable is not implemented yet` rather than a
+  TypeError that says the opposite of what it does.
+- ~~The slot-limit message hard-codes 16.~~ Correct: the cap is 16 for a plain
+  function, 6 for a method, 5 for a callable. The message is built from the
+  cap now -- and, found while measuring it, **the check itself was wrong for a
+  non-variadic callee**: `$m->m(...[1..7])` on a six-parameter method prints
+  php's answer, because php IGNORES arguments past the arity, and the new
+  check was killing it. The count is checked only when the ceiling is this
+  compiler's buffer (`nsp == PH_SPREADN`), not when it is the callee's own
+  arity. Both cases measured against php.
+
+**The tools.**
+
+- ~~`fixtures.sh` treats exit 124 as its timeout.~~ Correct: a fixture may
+  exit(124) legitimately. The alarm writes a marker file and the gate reads
+  THAT; `g/79-exit-124.php` is the case, and it FAILS under the old condition
+  (`77 / 78`, `FAIL 79-exit-124.php (timed out: php 124, mc-php 124)`) and
+  passes under the new one (78 / 78).
+- ~~`d8check.py` exempts `probes/*/g` and `*/r` by NAME.~~ Correct -- an
+  unreferenced `probes/new/g/orphan.php` passed the only repo-wide sweep. The
+  exemption is derived from the probe's own scripts now, in both spellings the
+  repository uses (`$P/g` in T10's `fixtures.sh`, `probes/tN/g` in T8/T9's and
+  in T5..T7's `run.sh`). Measured: the real tree is clean and a synthetic
+  `probes/t99/g/orphan.php` is the one thing reported.
+- ~~`tmpbin()` puts analysis binaries outside the bounded directory.~~ Correct,
+  and it is the space this probe claims to bound: `MCPHP_TMP` when the caller
+  made one, the system default otherwise.
+- ~~`why.py` and `diffgroup.py` compare raw output before classifying an
+  exit-code-only mismatch.~~ Correct, and `run_pair`'s own verdict already used
+  the grid's `normalize`: the three now agree.
+- ~~`run.sh`'s last line is prose.~~ Correct. `T10: <green> / <total>` is last.
+- ~~The bench record does not carry the php runtime configuration.~~ Correct, and
+  D8 (b) asks for it. The record now has `opcache`, `jit` and `jit_buffer`,
+  including the disabled values (here: `loaded-off-cli`, `disable`, `64M`).
+  Regenerating it moved the two ratios to **6.73x** and **1.41x**, and every
+  report reads them out of the file.
+- ~~Three stale gate counts~~ (`CLAUDE.md`, `docs/plan.md`, `RESULTS.md`): 84
+  fixture files, 91 `.php` in a T10 regime, 359 swept, `lencheck` 501.

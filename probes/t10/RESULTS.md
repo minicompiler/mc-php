@@ -25,8 +25,17 @@ measured a binary that was being rebuilt underneath it.
 | `ext/standard/tests/strings` | **263** | 310 | 107 | 54 | 0 | 734 | 262 |
 | the whole corpus | **1689** | 14469 | 1929 | 2947 | 361 | 21034 | 1637 |
 
-Re-run twice more, same snapshot discipline, `T10_JOBS=6`. After the
-round-nineteen compiler change (`php_unpack_check` and the declared type on a
+Re-run three times more, same snapshot discipline, `T10_JOBS=6`. After the
+round-twenty compiler change (`php_param_coerce_ref`, the Traversable limit
+and the slot check scoped to this compiler's own buffer) the corpus is
+**green 1689 / wrong 14489 / refused 1929 / skip 2947 / php-fail 341 / total
+21054** with the directories identical again -- and the green set is
+**test for test the published one**: `comm` gives 0 lost and 0 gained against
+the after-grid's own 1689. The remaining difference from it is the 20 tests
+that left `php-fail` when the tree was cleaned. Peak 1908 KiB, `df -h /` 12Gi
+used and 212Gi available before and after.
+
+After the round-nineteen compiler change (`php_unpack_check` and the declared type on a
 parameter with a default) the three directories are **identical** again --
 104 / 749 / 263 -- and the corpus is **green 1688 / wrong 14489 / refused 1929
 / skip 2947 / php-fail 342 / total 21053**. Two deltas against the published
@@ -108,10 +117,10 @@ not the compiler.
 | **fixtures byte for byte** | **60 of 60, merged streams** | **77 of 77, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
-| **the D8 bench** | **5.85x and 1.45x** | **6.84x and 1.48x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
+| **the D8 bench** | **5.85x and 1.45x** | **6.73x and 1.41x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
 | assert a php diagnostic line | 93 green of 4647 | **102 green of 4647** | |
 | mention `__destruct` | 14 green of 333 | **15 green of 333** | |
-| `lencheck` / `aritycheck` | 468 / 272 | **496 / 272** | |
+| `lencheck` / `aritycheck` | 468 / 272 | **501 / 272** | |
 
 ### What "compiled; output differs" really was
 
@@ -363,12 +372,12 @@ agree.
   6 test* methods declared; php ran 6, mc-php ran 6, and the two outputs
   are byte for byte the same
 
-  == main.php ==   both answer 13608   the binary is 314418 bytes
-    php 0.0786 s   mc-php 0.0115 s   php -r (start-up) 0.0773 s
-    php / mc-php = 6.84x        php WORK / mc-php = 0.11x
+  == main.php ==   both answer 13608   the binary is 314594 bytes
+    php 0.0774 s   mc-php 0.0115 s   php -r (start-up) 0.0764 s
+    php / mc-php = 6.73x        php WORK / mc-php = 0.09x
   == heavy.php ==  both answer 99450
-    php 0.0797 s   mc-php 0.0539 s   php -r (start-up) 0.0772 s
-    php / mc-php = 1.48x        php WORK / mc-php = 0.05x
+    php 0.0754 s   mc-php 0.0534 s   php -r (start-up) 0.0772 s
+    php / mc-php = 1.41x        php WORK / mc-php = 0.00x
 ```
 
 **Those four numbers are read out of the committed record**,
@@ -376,10 +385,14 @@ agree.
 `bench10.sh` writes on every run (`time2.py` writes the object itself, so
 nothing re-parses a printed line). The reviewer of #9 caught the report
 quoting a LATER run than the one committed -- 7.43x and 1.42x against the
-record's 6.84x and 1.48x -- and that is why the record exists: a bench
+record's 6.73x and 1.41x -- and that is why the record exists: a bench
 number in prose has nowhere to be checked against. The machine was loaded
 when this one was taken (php's own start-up is 77 ms here against 38 ms in
-T9's), which is exactly the kind of thing a dated record makes visible.
+T9's), which is exactly the kind of thing a dated record makes visible. The
+record carries the php runtime configuration the ratio depends on as well --
+`opcache` loaded-off-cli, `jit` disable, `jit_buffer` 64M -- which D8 (b) asks for and the
+first version of it did not have: a record that says only the version cannot
+be compared with one taken on a host that had opcache on.
 
 The two ratios measure different things and both are honest: mc-php wins the
 whole program because php pays ~39 ms of start-up before the first
@@ -392,17 +405,17 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **77 of 77** numbered fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **78 of 78** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** refusals named, exit 3.
-* `lencheck` **496 literal lengths, 0 wrong**; `aritycheck` **272 library
+* `lencheck` **501 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
-* `d8check` -- **81 fixture / 1 helper / 3 instrument / 1 library / 2 bench**, 88 `.php`,
-  and the repo-wide sweep over **356** `.php` under `probes/`,
+* `d8check` -- **84 fixture / 1 helper / 3 instrument / 1 library / 2 bench**, 91 `.php`,
+  and the repo-wide sweep over **359** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
-* the grid's tmp peak **2152 KiB over 27728 tests** (the round-seventeen re-run;
-  1908 KiB was the largest of the six before it);
+* the grid's tmp peak **1908 KiB over 27728 tests** on the round-nineteen run
+  (2152 KiB on the round-seventeen one, 1908 the largest of the six before it);
   `df -h /` identical
   before and after.
 * `probes/t9/` untouched.

@@ -2,10 +2,13 @@
   "date": "2026-09-21",
   "host": "Darwin 25.6.0 arm64",
   "php": "8.5.10",
+  "opcache": "loaded-off-cli",
+  "jit": "disable",
+  "jit_buffer": "64M",
   "mc": "mc 1.1.0",
   "reps": 7,
   "programs": [
-    {"program": "probes/t10/bench/main.php", "reps": 7, "php_median_s": 0.07863, "mcphp_median_s": 0.011502, "php_startup_median_s": 0.077312, "php_best_s": 0.077208, "mcphp_best_s": 0.011026, "ratio_php_over_mcphp": 6.836, "ratio_work_over_mcphp": 0.115, "answer": "13608", "bytes": 314418},
-    {"program": "probes/t10/bench/heavy.php", "reps": 7, "php_median_s": 0.079729, "mcphp_median_s": 0.053906, "php_startup_median_s": 0.077238, "php_best_s": 0.075374, "mcphp_best_s": 0.05159, "ratio_php_over_mcphp": 1.479, "ratio_work_over_mcphp": 0.046, "answer": "99450", "bytes": 314418}
+    {"program": "probes/t10/bench/main.php", "reps": 7, "php_median_s": 0.077375, "mcphp_median_s": 0.011493, "php_startup_median_s": 0.076369, "php_best_s": 0.076447, "mcphp_best_s": 0.011313, "ratio_php_over_mcphp": 6.732, "ratio_work_over_mcphp": 0.088, "answer": "13608", "bytes": 314594},
+    {"program": "probes/t10/bench/heavy.php", "reps": 7, "php_median_s": 0.07544, "mcphp_median_s": 0.053414, "php_startup_median_s": 0.077238, "php_best_s": 0.073598, "mcphp_best_s": 0.050797, "ratio_php_over_mcphp": 1.412, "answer": "99450", "bytes": 314594}
   ]
 }

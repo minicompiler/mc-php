@@ -81,8 +81,18 @@ def sibling(phpt, tag):
 
 
 def tmpbin(prefix='mcphp.'):
-    """A path for the binary -- reserved by the kernel, so no TOCTOU."""
-    fd, path = tempfile.mkstemp(prefix=prefix, suffix='.bin')
+    """A path for the binary -- reserved by the kernel, so no TOCTOU.
+
+    Inside MCPHP_TMP when the caller made one: that directory is what
+    run.sh's watcher samples, what its peak is measured over and what the
+    next run's sweep collects, so a binary anywhere else is space this
+    probe claims to bound and does not. Without it, the system default,
+    which is what a bare `python3 why.py` gets.
+    """
+    d = os.environ.get('MCPHP_TMP') or None
+    if d and not os.path.isdir(d):
+        d = None
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix='.bin', dir=d)
     os.close(fd)
     os.unlink(path)
     return path

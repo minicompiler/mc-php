@@ -231,6 +231,6 @@ echo ""
 # read off the grid's OWN summary line, not recounted from the bucket files:
 # a .phpt name can carry a newline and `wc -l` would answer a different number
 # than the grid published.
+echo "T10: measured -- see probes/t10/RESULTS.md"
 awk '/^phpt: green/ { for (i = 1; i < NF; i++) if ($i == "total") t = $(i + 1);
                       printf "T10: %s / %s\n", $3, t }' "$OUT/all.summary"
-echo "T10: measured -- see probes/t10/RESULTS.md"

@@ -226,7 +226,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     spelling), and a top-level `return` returning from the generated `main`, skipping
     `php_shutdown`, `php_flush` and the exit code, so the program printed NOTHING and exited
     with a junk status (54, 82, 94, 142 and 178 on five runs of the same source). Both halves
-    run now: **6 ok / 0 failed in each**, `main.php` 6.84x, `heavy.php` 1.48x (the committed record).
+    run now: **6 ok / 0 failed in each**, `main.php` 6.73x, `heavy.php` 1.41x (the committed record).
   * **D8 over the fixtures** (backlog § 3): the plan states the exemption -- the unit D8
     governs is the PROGRAM, and a differential fixture is already a test and a stronger one --
     and `probes/t10/d8check.py` ENFORCES it, putting every `.php` in one of four regimes and
@@ -278,9 +278,9 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     the fifth (round ten's sscanf fix).
     **A per-block move smaller than a dozen tests should be read on the directories**, and the
     corpus number is worth quoting with its band -- T9's 1637 and T8's 1450 included.
-  Fixtures: **77 of 77** numbered under `g/` byte for byte php's on each stream and the exit code,
-  **6 of 6** under `r/` refused by name with exit 3; `lencheck` 496 / 0 wrong, `aritycheck`
-  272 / 0 wrong, `d8check` 88 `.php` in a regime and 356 under `probes/` swept for orphans. **No new mc gap**, and no new external
+  Fixtures: **78 of 78** numbered under `g/` byte for byte php's on each stream and the exit code,
+  **6 of 6** under `r/` refused by name with exit 3; `lencheck` 501 / 0 wrong, `aritycheck`
+  272 / 0 wrong, `d8check` 91 `.php` in a regime and 359 under `probes/` swept for orphans. **No new mc gap**, and no new external
   name: the 38-of-21219 inline-HTML refusal T5 reported is unchanged.
 - T9 done (`probes/t9`), on **mc 1.1.0**: D6's correction built, and T8's two blocks
   worked from a UNIFORM corpus-wide sample (every ninth of `wrong.txt`, split so the

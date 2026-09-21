@@ -2952,8 +2952,16 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
             // compiler's fixed slot count cannot: a non-array operand is a
             // TypeError there and was silently no arguments here, and an
             // array longer than the slots was silently truncated.
+            // The COUNT is only mine to complain about when the ceiling is
+            // this compiler's buffer. When nsp is the callee's own arity,
+            // the values past it are the ones php ignores for a
+            // non-variadic callee -- `$m->m(...[1..7])` on a six-parameter
+            // method prints php's answer and must keep printing it. 0 asks
+            // for the operand check alone.
+            i64 scap = 0;
+            if (nsp == PH_SPREADN) scap = nsp;
             ph_pending_stmt(ph_stmt_of(ph_c2("php_unpack_check", ph_tref(tmp),
-                                             ph_int(nsp), TY_VOID)));
+                                             ph_int(scap), TY_VOID)));
             ph_pending_stmt(ph_check(ph_tline, ph_tfile));
             i64 k = 0;
             loop {
@@ -6854,7 +6862,13 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
             st64(pca + 24, ph_strlit(ph_cur_fn, cstrlen(ph_cur_fn)));
             st64(pca + 32, ph_int(np + 1));
             st64(pca + 40, ph_strlit(bare2, cstrlen(bare2)));
-            i64 cz = ph_set(ph_mangle(d, "v_"), ph_calln("php_param_coerce", pca, 6, ty_pzv));
+            // a by-reference parameter IS the caller's cell, and php coerces
+            // THAT: `m(int &$x)` with "5" leaves 6 in the caller's variable.
+            // The plain call returns a new zval and the alias was silently
+            // lost -- measured, the caller kept '5'.
+            uptr pcfn = "php_param_coerce";
+            if (byref) pcfn = "php_param_coerce_ref";
+            i64 cz = ph_set(ph_mangle(d, "v_"), ph_calln(pcfn, pca, 6, ty_pzv));
             if (pret) set_nd_next(pret, cz);
             if (!pret) pre = cz;
             pret = cz;

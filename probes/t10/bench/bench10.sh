@@ -39,6 +39,19 @@ part=$tmp/record.json
     printf '{\n  "date": "%s",\n' "$stamp"
     printf '  "host": "%s",\n' "$(uname -srm)"
     printf '  "php": "%s",\n' "$("$PHP" -r 'echo PHP_VERSION;')"
+    # D8 (b): the runtime configuration the ratio depends on, including the
+    # disabled values -- a record that says only the version cannot be
+    # compared with one taken on a host that had opcache on.
+    printf '  "opcache": "%s",\n' \
+        "$("$PHP" -r 'echo extension_loaded("Zend OPcache")
+            ? (ini_get("opcache.enable_cli") ? "enabled-cli" : "loaded-off-cli")
+            : "not loaded";')"
+    printf '  "jit": "%s",\n' \
+        "$("$PHP" -r '$j = ini_get("opcache.jit");
+            echo ($j === false || $j === "") ? "none" : $j;')"
+    printf '  "jit_buffer": "%s",\n' \
+        "$("$PHP" -r '$b = ini_get("opcache.jit_buffer_size");
+            echo ($b === false || $b === "") ? "none" : $b;')"
     printf '  "mc": "%s",\n' "$($MC --version)"
     printf '  "reps": %s,\n  "programs": [\n' "$REPS"
 } > "$part"

@@ -66,7 +66,11 @@ def one(path):
     # same on both sides. `split` without the rstrip keeps that difference
     # as a differing last element, and `shape()` still sees lines with no
     # line ending -- which is what its patterns are written against.
-    if r['want'] == r['out']:
+    # the grid's OWN comparison, as `run_pair`'s own verdict uses: a pair
+    # differing only in a trailing newline or a CRLF is the same output
+    # there, so testing the raw bytes here called an exit-code-only mismatch
+    # a blank-line or text difference
+    if harness._grid.normalize(r['want']) == harness._grid.normalize(r['out']):
         # the grid grades the exit code too, so this is a real disagreement
         return (path, 'an exit code', f"exit {r['wrc']}", f"exit {r['rc']}")
     want = r['want'].split('\n')
