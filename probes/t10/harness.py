@@ -54,6 +54,47 @@ class Busy(Exception):
     """A sibling of that name already exists and is not ours to overwrite."""
 
 
+OWNER = '.mcphp-owner'
+
+
+def _me():
+    """This process, identified well enough to tell a recycled pid apart."""
+    try:
+        st = subprocess.run(['ps', '-o', 'lstart=', '-p', str(os.getpid())],
+                            capture_output=True).stdout.decode().strip()
+    except OSError:
+        st = ''
+    return f'{os.getpid()}\n{st}\n'
+
+
+def _stale_scratch(path):
+    """Is `path` a scratch file this tool made and then lost?
+
+    A `.php` php-src ships beside a test has no owner marker and is never
+    touched. One with a marker whose process is gone -- or whose pid has
+    been recycled, which the start time catches -- is a run that was killed
+    between the create and its `finally`, and leaving it makes every later
+    run call that test `busy` and quietly shrink the sample.
+    """
+    try:
+        with open(path + OWNER) as f:
+            pid, _, st = f.read().partition('\n')
+    except OSError:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (ValueError, ProcessLookupError):
+        return True
+    except PermissionError:
+        return False
+    try:
+        now = subprocess.run(['ps', '-o', 'lstart=', '-p', pid],
+                             capture_output=True).stdout.decode().strip()
+    except OSError:
+        return False
+    return bool(now) and now != st.strip()
+
+
 def sibling(phpt, tag):
     """Create `<base>.php` next to the .phpt, exclusively, or raise Busy.
 
@@ -72,11 +113,33 @@ def sibling(phpt, tag):
     """
     base = phpt[:-5] if phpt.endswith('.phpt') else phpt
     path = f'{base}.php'
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
+    # An OWNER marker beside it, so a run killed between the create and the
+    # `finally` does not make every later run call that test `busy` and
+    # quietly shrink the sample. The marker holds this process's pid and
+    # start time (`probes/t10/tmp.sh` uses the same pair for the same
+    # reason); a scratch file whose owner is gone is taken over, and a
+    # `.php` php-src really ships has no marker and is never touched.
+    fd = None
+    for attempt in (0, 1):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            break
+        except FileExistsError:
+            if attempt or not _stale_scratch(path):
+                raise Busy(path)
+            for q in (path, path + OWNER):
+                try:
+                    os.unlink(q)
+                except OSError:
+                    pass
+    if fd is None:
         raise Busy(path)
     os.close(fd)
+    try:
+        with open(path + OWNER, 'w') as f:
+            f.write(_me())
+    except OSError:
+        pass
     return path
 
 
@@ -359,7 +422,7 @@ def run_pair(phpt, tag, budget=None):
     except OSError as ex:
         return {'status': 'error', 'error': f'{ex.__class__.__name__}: {ex}'}
     finally:
-        unlink(php, binf)
+        unlink(php, php + OWNER, binf)
     out = g.stdout.decode('latin-1')
     want = e.stdout.decode('latin-1')
     return {'status': 'ran', 'out': out, 'rc': g.returncode, 'sec': sec,

@@ -38,7 +38,12 @@ def why(path):
         return path, '(a sibling of that name exists; skipped)'
     if s == 'no-compile':
         msg = r['cerr'].splitlines()
-        return path, (msg[0] if msg else f"(exit {r['crc']}, silent)")
+        # NOT in brackets: `nocompile.py` groups the compiler's own
+        # diagnostics and skips anything that opens with one, so a silent
+        # failure dressed as `(exit N, silent)` was dropped from the block
+        # it belongs to instead of being counted in it.
+        return path, (msg[0] if msg else
+                      f"the compiler failed with exit {r['crc']} and said nothing")
     if s == 'compile-timeout':
         return path, '(compiler timed out)'
     if s == 'run-timeout':

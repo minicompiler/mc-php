@@ -157,6 +157,75 @@ def test_methods_are_all_run():
 # six shapes the mc lexer could not own. Each is named with its reason, and
 # the sweep below FAILS when one of them is gone -- so the list cannot rot
 # into an excuse for a directory nobody looks at any more.
+# The pre-D8 exemption is a SNAPSHOT of the files, not a licence for the
+# directory: `f.startswith(d + '/')` exempted everything those three
+# directories will ever hold, so a new orphan dropped into `probes/t0`
+# would have passed the only repository-wide check. These 59 are the ones
+# that were there when D8 was written; a file added to one of them is an
+# orphan like any other, and a file DELETED from one is reported too, so
+# the list cannot quietly rot.
+PRE_D8_FILES = frozenset([
+    'probes/gap-lexer-ownership/a-single-quote.php',
+    'probes/gap-lexer-ownership/b-single-char.php',
+    'probes/gap-lexer-ownership/c-hash.php',
+    'probes/gap-lexer-ownership/d-attribute.php',
+    'probes/gap-lexer-ownership/e-dollar.php',
+    'probes/gap-lexer-ownership/f-rawtext.php',
+    'probes/t0/classify.php',
+    'probes/t4/dollar/a.php',
+    'probes/t4/entry/ip.php',
+    'probes/t4/entry/ip2.php',
+    'probes/t4/entry/plain.php',
+    'probes/t4/entry/rw.php',
+    'probes/t4/g/01-echo.php',
+    'probes/t4/g/02-assign.php',
+    'probes/t4/g/03-d4-retype.php',
+    'probes/t4/g/04-function.php',
+    'probes/t4/g/05-control.php',
+    'probes/t4/g/06-interp.php',
+    'probes/t4/g/07-class.php',
+    'probes/t4/g/08-require.php',
+    'probes/t4/g/09-eval.php',
+    'probes/t4/g/10-float.php',
+    'probes/t4/g/11-numbers.php',
+    'probes/t4/g/12-singlequote.php',
+    'probes/t4/g/13-hash.php',
+    'probes/t4/g/14-inline-html.php',
+    'probes/t4/g/inc.php',
+    'probes/t4/lex/01-open-tag.php',
+    'probes/t4/lex/02-close-tag.php',
+    'probes/t4/lex/03-dollar-name.php',
+    'probes/t4/lex/04-hash-comment.php',
+    'probes/t4/lex/05-slash-comment.php',
+    'probes/t4/lex/06-block-comment.php',
+    'probes/t4/lex/07-single-quote.php',
+    'probes/t4/lex/08-double-quote.php',
+    'probes/t4/lex/09-heredoc.php',
+    'probes/t4/lex/10-arrow.php',
+    'probes/t4/lex/11-nullsafe.php',
+    'probes/t4/lex/12-fatarrow.php',
+    'probes/t4/lex/13-paamayim.php',
+    'probes/t4/lex/14-ellipsis.php',
+    'probes/t4/lex/15-pow.php',
+    'probes/t4/lex/16-spaceship.php',
+    'probes/t4/lex/17-coalesce.php',
+    'probes/t4/lex/18-coalesce-assign.php',
+    'probes/t4/lex/19-concat-assign.php',
+    'probes/t4/lex/20-angle-ne.php',
+    'probes/t4/lex/21-attribute.php',
+    'probes/t4/lex/22-hex.php',
+    'probes/t4/lex/23-binary.php',
+    'probes/t4/lex/24-octal.php',
+    'probes/t4/lex/25-underscore-int.php',
+    'probes/t4/lex/26-float.php',
+    'probes/t4/lex/27-namespace-sep.php',
+    'probes/t4/lex/28-mc-keywords.php',
+    'probes/t4/lex/29-php-keywords.php',
+    'probes/t4/lex/30-single-char.php',
+    'probes/t4/lex/31-single-escape.php',
+    'probes/t4/main.php',
+])
+
 PRE_D8 = {
     'probes/t0': 'T0 predates D8: classify.php is read by breakdown.py, not run',
     'probes/t4': 'T4 predates D8: one lexical construct per file, globbed by its own run.sh',
@@ -246,7 +315,7 @@ def repo_sweep():
     for f in every_php():
         n += 1
         parts = f.split('/')
-        if any(f.startswith(d + '/') for d in PRE_D8):
+        if f in PRE_D8_FILES:
             continue
         # a fixture directory is exempt only when that probe's OWN
         # fixtures.sh walks it, not because it is called g or r
@@ -261,7 +330,13 @@ def repo_sweep():
             continue
         bad.append(f'{f}: no fixture gate runs it, no .php requires it, '
                    f'no script names it')
-    print(f'  {n:4d}  .php under probes/, swept for orphans')
+    # a name in the snapshot that is no longer on disk: the list is part of
+    # the enforcement and a stale entry is a hole in it
+    for f in sorted(PRE_D8_FILES):
+        if not os.path.isfile(os.path.join(REPO, f)):
+            bad.append(f'{f}: in the pre-D8 snapshot and not on disk')
+    print(f'  {n:4d}  .php under probes/, swept for orphans '
+          f'({len(PRE_D8_FILES)} of them pre-D8)')
     return bad
 
 

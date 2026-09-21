@@ -615,3 +615,14 @@ the eleven are the same eleven. It also found that `WorkloadTest`'s
 equal-score branch had never executed -- 7919 modulo 1000 has period 1000,
 so 40 records have 40 distinct scores -- which is a test that passed without
 testing what it is named after.
+
+**Round twenty-six** closed three holes that no measurement had fallen
+through yet: the pre-D8 exemption was by DIRECTORY, so a new orphan in
+`probes/t0` would have passed the repository-wide sweep (it is a snapshot of
+59 named files now, and a name that leaves the disk is reported too); a
+killed run's scratch `.php` made every later run call that test `busy` and
+shrink the sample silently (it carries an owner marker now -- a file php-src
+ships has none and is never touched, one whose owner is gone is taken over,
+one whose owner is alive is still `busy`, all three measured); and
+`nocompile.py` dropped a silent compile failure, which was round seventeen's
+own doing.

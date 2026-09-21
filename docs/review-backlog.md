@@ -845,3 +845,38 @@ Three findings, all real, and one of them moves a published number.
   `strcmp` makes it `5 ok / 1 failed`, in both worlds.
 - ~~`RESULTS.md`'s re-measurement table still said 77 fixtures~~ where the
   invariant section of the same file said 79.
+
+### Round twenty-six
+
+Four findings, all real, and none of them moves a measured number -- which
+is itself the point of three of them: each is a hole through which a FUTURE
+measurement could go wrong.
+
+- ~~The pre-D8 exemption is by DIRECTORY.~~ Correct: `f.startswith(d + '/')`
+  exempted everything `probes/t0`, `probes/t4` and
+  `probes/gap-lexer-ownership` will ever hold, so a new orphan dropped into
+  one of them passed the only repository-wide check. The exemption is a
+  SNAPSHOT of the 59 files that were there when D8 was written, and it
+  cannot rot in either direction: a file added to one of those directories
+  is an orphan like any other (measured -- `probes/t0/orphan-new.php` is
+  reported) and a name in the snapshot that is no longer on disk is
+  reported too.
+- ~~A killed run's scratch `.php` makes every later run call that test
+  `busy`.~~ Correct, and it would shrink the sample silently. The scratch
+  file carries an owner marker with this process's pid and start time (the
+  pair `tmp.sh` uses, for the same reason): a `.php` php-src really ships
+  has no marker and is never touched, one whose owner is gone is taken
+  over, one whose owner is alive is still `busy`. All three measured.
+- ~~`nocompile.py` drops a silent compile failure.~~ Correct, and it was
+  round seventeen's own doing: the filter became "any message that opens
+  with a bracket" and `why.py` wrote `(exit N, silent)` for a compile
+  failure with no stderr. The message is now
+  `the compiler failed with exit N and said nothing`, which is what it is
+  and which the rule already covers. Re-measured: the sample has 0 of them,
+  so the block is 539 either way and the two tables are unchanged.
+- ~~`CLAUDE.md` says T10 is measured on mc 1.1.0 while the rules say the
+  repository consumes mc 1.0.0.~~ Correct, and the rule was the imprecise
+  half. Both files now say what is true: a consumer of mc's **1.0 frozen
+  surface**, BUILT with whatever 1.x is installed -- the freeze is additive,
+  so a later minor keeps every name 1.0.0 published -- with each probe
+  recording the version it measured on.

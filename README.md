@@ -13,5 +13,7 @@ does not offer today come AFTER everything PHP already provides works.
 Status: **proof of concept**. `docs/plan.md` is the plan and the test grid; `probes/` holds the
 preliminary measurements (T1..T5) that decide the design before any of the compiler exists.
 
-Consumer of mc 1.0.0 (frozen surface, `docs/reference/hooks.md` § 8 there): nothing here edits
-mc's `src/`; a gap in mc's surface is reported to mc, never worked around here.
+Consumer of mc's 1.0 frozen surface (`docs/reference/hooks.md` § 8 there): nothing here edits
+mc's `src/`; a gap in mc's surface is reported to mc, never worked around here. Built with
+whatever 1.x is installed -- the freeze is additive, so a later minor keeps every name 1.0.0
+published -- and each probe records the version it measured on (mc 1.1.0 for T10).

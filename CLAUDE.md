@@ -1,7 +1,11 @@
 # mc-php -- operating rules
 
-Read `docs/plan.md` first. This repository is a CONSUMER of mc 1.0.0 (frozen surface): it never
-edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patched around here.
+Read `docs/plan.md` first. This repository is a CONSUMER of mc's **1.0 frozen surface**
+(`docs/reference/hooks.md` § 8 there): it never edits mc's `src/`; a surface gap is reported to mc
+with a reproducer, never patched around here. It is BUILT with whatever 1.x is installed -- the
+freeze is additive, so a later minor keeps every name 1.0.0 published -- and each probe records
+the version it measured on (T5 onward on **mc 1.1.0**, which is what `mc --version`
+answers here).
 
 - A `.php` file is PHP: it must run under `php` unchanged. No dialect. mc-php accepts a SUBSET:
   no `eval`/interpreter (D1) and static variable types (D4); a refusal is a named compile error.
