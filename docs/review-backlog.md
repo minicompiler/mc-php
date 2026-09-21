@@ -949,3 +949,15 @@ Two findings, both real, both about a gate claiming more than it ran.
   into the function's own comment, with the note that `required` (a parsed
   `require`) and `benched` (a resolved bench loop) are exact answers and not
   part of this scan.
+
+### Round twenty-nine
+
+Two findings, both stale text, both fixed. The pull request's own
+description and its gate table said 79 fixtures and `d8check` 92 / 360 where
+the tree has 80, 93 and 361 -- the numbers moved with `g/81-maxmin-wide.php`
+in the round before and the description did not. And `README.md`'s status
+paragraph still said `probes/` holds "the preliminary measurements (T1..T5)
+that decide the design before any of the compiler exists", which stopped
+being true at T5: it now names the order (T1..T4 decided the design, T5
+built the first compiler and runtime, T6..T10 worked the wrong-reason table
+down), where the compiler lives, and what the number is.
