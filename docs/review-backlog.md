@@ -770,3 +770,34 @@ Four findings, all real.
   `ext/standard/tests/file/is_dir_basic` (a green) is `agrees True` under the
   matcher and was False against php's bytes, because php's own run printed a
   `mkdir(): File exists` warning its EXPECTF tolerates.
+
+### Round twenty-three
+
+Five findings: two new, two in code that had not changed, and one re-post.
+
+- **`fixtures.sh`'s alarm kills only the wrapper.** Refuted, and measured:
+  `kill -9, $p` is how perl spells the process GROUP (`perldoc -f kill`: a
+  negative SIGNAL kills process groups), and the child makes itself the
+  leader with `setpgrp(0, 0)` one line above. A harness whose child spawns a
+  `sleep 30` and is killed by the alarm leaves **no grandchild** -- exit 124,
+  `grandchild gone`. The redundant `kill 9, $p` after it is dropped and the
+  measurement is in the comment.
+- ~~`harness.py`'s own subprocesses are not group-aware.~~ Correct, and it is
+  the same finding one level in: `base_environment` sets
+  `TEST_PHP_EXECUTABLE` precisely so a .phpt CAN spawn a nested php, and the
+  compiler is a child too. All four calls -- oracle, CLEAN, compiler,
+  binary -- go through one `_run` that starts a session and kills the group
+  on a timeout, the same shape `probes/t0/phpt-run.py` got in round
+  twenty-two.
+- ~~The CLEAN call inherits the analysis process's stdin.~~ Correct: the grid
+  passes an empty buffer and a CLEAN that reads stdin would otherwise block
+  or eat something else's input. `input=b''`, as every other call in the
+  function now has.
+- **`run_pair` does not run `--SKIPIF--`.** Recorded, not fixed, and the
+  reason is what the section IS: the grid runs SKIPIF **to decide whether to
+  run the test at all**, and a test it skips never reaches `why.py` -- the
+  lists these tools read are `wrong.txt`, which is disjoint from `skip.txt`
+  by construction. What the finding is really about is a SKIPIF with a side
+  effect, which is rare and which no test in the sample has; running it here
+  would also mean reproducing the grid's skip DECISION, which is a second
+  behaviour rather than a fix. Recorded in `RESULTS.md` with the reasoning.

@@ -17,7 +17,7 @@ three copies:
 for byte and the same exit code, both taken from the SAME source file in the
 SAME directory the `.phpt` sits in.
 """
-import importlib.util, os, re, shlex, subprocess, tempfile, time
+import importlib.util, os, re, shlex, signal, subprocess, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MCPHP = os.environ.get('MCPHP_BIN', os.path.join(HERE, 'mc-php'))
@@ -155,6 +155,32 @@ def _extras(sec, testdir):
     return args, stdin, env, ini
 
 
+def _run(cmd, *, input=b'', stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+         env=None, cwd=None, timeout=None):
+    """`subprocess.run`, except that a timeout kills the process GROUP.
+
+    A .phpt may spawn a nested php (`TEST_PHP_EXECUTABLE`, which
+    `base_environment` sets for exactly that reason) and the compiler is a
+    child too, so killing the one process this started left descendants
+    holding pipes and writing into the shared test directory while later
+    workers ran. `probes/t0/phpt-run.py` does the same thing for the same
+    reason; the measurement is in docs/review-backlog.md round twenty-two.
+    """
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=stdout,
+                         stderr=stderr, env=env, cwd=cwd,
+                         start_new_session=True)
+    try:
+        out, err = p.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except OSError:
+            p.kill()
+        p.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+
 def agrees(sec, out, want, rc, wrc):
     """The grid's OWN verdict, and it is not a comparison with php's bytes.
 
@@ -253,9 +279,8 @@ def run_pair(phpt, tag, budget=None):
         # ORACLE the contaminated one. And a .phpt that rewrites its own
         # scratch source or an included sibling while the oracle runs would
         # otherwise be COMPILED from different bytes than the grid compiled.
-        e = subprocess.run([PHP] + INI + ini + ['-q', php] + argv, input=stdin,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           env=env, cwd=run_cwd, timeout=budget)
+        e = _run([PHP] + INI + ini + ['-q', php] + argv, input=stdin or b'',
+                 env=env, cwd=run_cwd, timeout=budget)
         # --CLEAN-- between the two, exactly where the grid runs it
         # (probes/t0/phpt-run.py, right after the oracle): a test that
         # creates a file and removes it there left the file behind for the
@@ -266,9 +291,12 @@ def run_pair(phpt, tag, budget=None):
             cf = php[:-4] + '.clean.php'
             try:
                 open(cf, 'w', encoding='latin-1', newline='').write(clean)
-                subprocess.run([PHP] + INI + ['-q', cf], stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, env=env, cwd=run_cwd,
-                               timeout=budget)
+                # input=b'' as the grid passes: a CLEAN that reads stdin
+                # would otherwise inherit the analysis process's and block
+                # or eat something else's input.
+                _run([PHP] + INI + ['-q', cf], input=b'',
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     env=env, cwd=run_cwd, timeout=budget)
             except (OSError, subprocess.SubprocessError):
                 pass
             finally:
@@ -283,9 +311,8 @@ def run_pair(phpt, tag, budget=None):
         # mcphp.sh is spawned by probes/t0/phpt-run.py with the test env and
         # cwd=srcdir, so a source whose include resolution depends on either
         # was being compiled under a different harness than the one graded.
-        c = subprocess.run([MCPHP, '--exe', php, '-o', binf], stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE, env=env, cwd=run_cwd,
-                           timeout=cbud)
+        c = _run([MCPHP, '--exe', php, '-o', binf], env=env, cwd=run_cwd,
+                 timeout=cbud)
         left = budget - (time.monotonic() - t0)
         # 255 is a php COMPILE-TIME fatal and not a failure to compile: php
         # reports those while parsing and exits 255, so mcphp.sh prints both
@@ -307,9 +334,8 @@ def run_pair(phpt, tag, budget=None):
                     'cout': c.stdout.decode('latin-1', 'replace')}
         if left <= 0:
             raise subprocess.TimeoutExpired([binf], budget)
-        g = subprocess.run([binf] + argv, input=stdin,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           env=env, cwd=run_cwd, timeout=left)
+        g = _run([binf] + argv, input=stdin or b'', env=env, cwd=run_cwd,
+                 timeout=left)
     except subprocess.TimeoutExpired as t:
         # WHICH process ran out of time. The test used to be "was it the
         # compiler, else the binary", so an ORACLE that timed out -- the
