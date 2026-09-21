@@ -31,7 +31,15 @@ mcphp_tmp_init() {
         [ -d "$_d" ] || continue
         _pid=${_d##*.}
         case $_pid in ''|*[!0-9]*) continue ;; esac
-        kill -0 "$_pid" 2>/dev/null || rm -rf "$_d"
+        # A dead pid, or -- because a pid is RECYCLED and a live one may be
+        # some other process entirely -- anything a day old. Without the
+        # second test one unlucky collision keeps an orphan for ever, which
+        # is the failure this whole function exists to stop.
+        if kill -0 "$_pid" 2>/dev/null; then
+            find "$_d" -maxdepth 0 -mtime +1 -exec rm -rf {} + 2>/dev/null
+        else
+            rm -rf "$_d"
+        fi
     done
     MCPHP_TMP=$_base/$_pfx.$$
     export MCPHP_TMP

@@ -384,3 +384,9 @@ Two of them are wrong, and the measurement is how that is known rather than asse
   PARENT classes", and php agrees: `class A { function peek(B $b) { return $b->p; } }` with
   `class B extends A { protected $p = 1; }` prints 1 under php, and so does mc-php, for a
   protected property and for a protected method. Measured side by side.
+
+### One more, found by sweeping up after the last grid
+
+- A pid is RECYCLED, so the orphan sweep's `kill -0` can find a LIVE process that is some other
+  program entirely and keep a dead run's directory for ever -- the failure the sweep exists to
+  stop. It now also removes any sibling a day old whatever its pid says.
