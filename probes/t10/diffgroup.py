@@ -60,21 +60,23 @@ def one(path):
         return (path, f"({r.get('error', s)})", '', '')
     if r['agrees']:
         return (path, '(agrees on this harness)', '', '')
-    # keepends, because rstrip('\n') + split makes a pair that differs ONLY
-    # in a final newline compare EQUAL -- and the branch below would then
-    # report an exit code that is the same on both sides, or the loop would
-    # find no differing line and call a real mismatch agreement.
-    want = r['want'].splitlines(keepends=True)
-    got = r['out'].splitlines(keepends=True)
-    if want == got:
+    # The equality is tested on the RAW strings. `rstrip('\n')` before
+    # splitting made a pair that differs ONLY in a final newline compare
+    # EQUAL, and the branch below then reported an exit code that is the
+    # same on both sides. `split` without the rstrip keeps that difference
+    # as a differing last element, and `shape()` still sees lines with no
+    # line ending -- which is what its patterns are written against.
+    if r['want'] == r['out']:
         # the grid grades the exit code too, so this is a real disagreement
         return (path, 'an exit code', f"exit {r['wrc']}", f"exit {r['rc']}")
+    want = r['want'].split('\n')
+    got = r['out'].split('\n')
     for i in range(max(len(want), len(got))):
         a = want[i] if i < len(want) else '<eof>'
         b = got[i] if i < len(got) else '<eof>'
         if a != b:
-            return (path, shape(a, b), a.rstrip('\n')[:120], b.rstrip('\n')[:120])
-    # unreachable: want != got above, so some index differs
+            return (path, shape(a, b), a[:120], b[:120])
+    # unreachable: the raw strings differ above, so some index differs
     return (path, '(agrees on this harness)', '', '')
 
 

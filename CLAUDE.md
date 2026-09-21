@@ -167,11 +167,11 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   refused by name with exit 3; `lencheck` 97 / 0 wrong, `aritycheck` 179 / 0 wrong.
 - T10 done (`probes/t10`), on **mc 1.1.0**: the review backlog -- 59 Copilot findings across
   #1..#7 that nothing had acted on (`docs/review-backlog.md`), all three sections, plus one
-  the sections did not name and a disk that ran out. **green 1637 -> 1675**:
-  `phpt: green 1675 / wrong 14445 / refused 1967 / skip 2947 / php-fail 361 / total 21034`;
-  per directory `tests/lang` 104 (was 102), `Zend/tests` 748 (was 709),
-  `ext/standard/tests/strings` 262 (was 262). **1650 of the 1675 greens are in T0's
-  "touched by none" set**; `refused` fell **2309 -> 1967**. The green moved only +38 because
+  the sections did not name and a disk that ran out. **green 1637 -> 1688**:
+  `phpt: green 1688 / wrong 14433 / refused 1967 / skip 2947 / php-fail 360 / total 21035`;
+  per directory `tests/lang` 104 (was 102), `Zend/tests` 749 (was 709),
+  `ext/standard/tests/strings` 262 (was 262). **1663 of the 1688 greens are in T0's
+  "touched by none" set**; `refused` fell **2309 -> 1967**. The green moved only +51 because
   the work is CORRECTNESS -- a `.phpt` that was already green does not become greener for the
   compiler being right about short circuit -- and what the probe is worth is the corrected
   numbers below.
@@ -179,15 +179,18 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     block since T5. They are one tool now, `probes/t10/harness.py`: stdout byte for byte AND
     the same exit code, which is the pair the grid itself grades on. `why.py` labelled a test
     `(compiled; output differs)` WITHOUT running the binary -- of 784 sampled tests that
-    compile and run, **615 really differ, 143 (18.2%) print exactly what php prints and exit
-    with a different code**, 25 crash or time out, 1 agrees on both. That exit-code group is
+    compile, **616 really differ, 142 (18.1%) print exactly what php prints and exit with a
+    different code**, 25 crash or time out, 1 agrees on both. That exit-code group is
     ONE shape (a php program that ends in a fatal exits non-zero; this compiler exits 0), it
     is the largest nameable block left, and nothing could see it because stdout matched.
     `arena.py` divided by `len(files)` while turning every failure into `None`: of the
     1352-test list only **782 RAN**, so the rate understated by 1.7x. `fixtures.sh` merged the
     streams with `2>&1` and compared with `$(...)`, which strips trailing newlines.
     `bench/bench.sh` in t7 and t8 built and timed **t6's** compiler. `<test>.why.php`
-    clobbered a sibling of that name.
+    clobbered a sibling of that name. And `nocompile.py`'s skip list named ONE compiled
+    outcome of five, so the other four were counted as tests that do not compile: that block
+    was published as 737 and is **568** -- the reviewer of this probe's own pull request
+    caught it, in T10's first draft.
   * **Twenty-two semantics a program can observe**, seventeen fixed and closed by a fixture,
     five closed by measurement, one refused with its number: short circuit (`&&`, `||`, `??`,
     `?:`, and the right side's own PENDING statements move inside the branch with it),
@@ -211,7 +214,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     spelling), and a top-level `return` returning from the generated `main`, skipping
     `php_shutdown`, `php_flush` and the exit code, so the program printed NOTHING and exited
     with a junk status (54, 82, 94, 142 and 178 on five runs of the same source). Both halves
-    run now: **6 ok / 0 failed in each**, `main.php` 7.35x, `heavy.php` 1.46x.
+    run now: **6 ok / 0 failed in each**, `main.php` 7.33x, `heavy.php` 1.46x.
   * **D8 over the fixtures** (backlog § 3): the plan states the exemption -- the unit D8
     governs is the PROGRAM, and a differential fixture is already a test and a stronger one --
     and `probes/t10/d8check.py` ENFORCES it, putting every `.php` in one of four regimes and
@@ -220,15 +223,28 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   * **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at
     about 20000 of 21395 tests. `mcphp.sh` EXECs the binary and cannot delete it; the caller,
     which WAITS, names it with `MCPHP_OUT` and unlinks it the moment the subprocess returns,
-    and each run sweeps the dead siblings at startup. **Peak 1872 KiB over 21395 tests and
-    1860 KiB over 6333 -- bounded by the job count, not the corpus**; `df -h /` identical
-    before and after.
+    and each run sweeps the dead siblings at startup. **Peak 1860 KiB over a run of 27728
+    tests and 1860 KiB over one of 6333 -- the same to the kilobyte, so it is bounded by the
+    job count and not the corpus**; `df -h /` identical before and after.
   * **`do { } while (cond)` dropped its condition's pending statements**, so the unwinding
     check landed before the loop and a throwing condition spun for ever. `while` and `for` take
     them with `ph_take_pend`; `do` did not.
-  Fixtures: **73 of 73** under `g/` byte for byte php's on each stream and the exit code,
+  * **The reviewer of T10's own pull request (#9) left twelve findings and every one was
+    real** -- the standing rule of the backlog's § 3, applied to T10 itself. Six needed code:
+    a top-level `return` inside a `try`/`finally` took the exit and jumped over the finally
+    (ONE guard, `if (!ph_toplevel)` around the deferred-return flag's allocation, so the flag
+    a return raised was read by nobody); `harness.py` ran the CANDIDATE before the oracle in
+    the test's own directory and ignored `--ARGS--`/`--STDIN--`/`--ENV--`/`--INI--` while the
+    grid passes all four, so a `.phpt` that writes a file beside itself contaminated the
+    ORACLE and a test with a section could be measured as a DIFFERENT program (php runs
+    first now, and the sections come from the grid's own `parse_phpt`, imported rather than
+    copied); `diffgroup.py` stripped trailing newlines before comparing; `nocompile.py`
+    counted four of the five compiled outcomes as failures to compile; and the D8 gate now
+    prints why it invokes neither phpunit nor `mc-php test` and `d8check.py` fails when the
+    class declares a `test*` the runner does not name.
+  Fixtures: **74 of 74** under `g/` byte for byte php's on each stream and the exit code,
   **6 of 6** under `r/` refused by name with exit 3; `lencheck` 496 / 0 wrong, `aritycheck`
-  272 / 0 wrong, `d8check` 85 `.php` all in a regime. **No new mc gap**, and no new external
+  272 / 0 wrong, `d8check` 86 `.php` all in a regime. **No new mc gap**, and no new external
   name: the 38-of-21219 inline-HTML refusal T5 reported is unchanged.
 - T9 done (`probes/t9`), on **mc 1.1.0**: D6's correction built, and T8's two blocks
   worked from a UNIFORM corpus-wide sample (every ninth of `wrong.txt`, split so the
