@@ -54,7 +54,18 @@ class WorkloadTest extends PHPUnit\Framework\TestCase
 
     public function testSortIsTotalAndStableOnTheKey(): void
     {
+        // wl_make_records gives 40 DISTINCT scores -- the step 7919 has
+        // period 1000 modulo 1000 -- so the equal-score branch below never
+        // ran and this test did not cover what its name promises. Three
+        // records share a score, with names out of order, and the tie is
+        // asserted by name.
         $rows = wl_make_records(40);
+        $rows[] = ["id" => 100, "name" => "tie-c", "score" => 500,
+                   "tags" => ["a0"], "ok" => true,  "ratio" => 1];
+        $rows[] = ["id" => 101, "name" => "tie-a", "score" => 500,
+                   "tags" => ["a1"], "ok" => false, "ratio" => 2];
+        $rows[] = ["id" => 102, "name" => "tie-b", "score" => 500,
+                   "tags" => ["a2"], "ok" => true,  "ratio" => 3];
         $copy = $rows;
         usort($copy, function ($a, $b) {
             if ($a["score"] === $b["score"]) {
@@ -62,12 +73,19 @@ class WorkloadTest extends PHPUnit\Framework\TestCase
             }
             return $a["score"] < $b["score"] ? -1 : 1;
         });
-        $this->assertSame(40, count($copy));
+        $this->assertSame(43, count($copy));
         $prev = -1;
+        $ties = [];
         foreach ($copy as $r) {
             $this->assertSame(true, $r["score"] >= $prev);
             $prev = (int) $r["score"];
+            if ($r["score"] === 500 && $r["id"] >= 100) {
+                $ties[] = $r["name"];
+            }
         }
+        // the equal-score branch really ran, and in name order
+        $this->assertSame(3, count($ties));
+        $this->assertSame("tie-a,tie-b,tie-c", implode(",", $ties));
     }
 
     public function testTheThreePhasesAgreeWithTheirCounts(): void

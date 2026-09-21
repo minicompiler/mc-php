@@ -116,8 +116,8 @@ not the compiler.
 | `tests/lang` / `Zend/tests` / `strings` | 102 / 709 / 262 | **104 / 749 / 263** | |
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **788 of the 812 that compile** | **never ran the binary** |
-| **the arena** | **2 of 1572** | **11 of 810 that RAN** | **the denominator counted tests it never ran** |
-| **fixtures byte for byte** | **60 of 60, merged streams** | **77 of 77, each stream and the exit code** | **`2>&1` and `$(...)`** |
+| **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
+| **fixtures byte for byte** | **60 of 60, merged streams** | **79 of 79, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
 | **the D8 bench** | **5.85x and 1.45x** | **6.73x and 1.41x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
@@ -170,9 +170,13 @@ graded on its own expectation.
 ### What "the arena is the answer" really was
 
 `arena.py` turned every exception into `None` and divided by `len(files)`.
-Of T10's 1351-test list, **539 do not compile and 2 time out**: a denominator
-of 1351 understates by 1.7x, and the outcome it hides is the one that most
-needs reporting. The line is `arena exhausted in 11 of 810 tests that RAN
+Of T10's 1351-test list, **539 do not compile, 31 are a php COMPILE-TIME
+fatal and 2 time out**: a denominator of 1351 understates by 1.7x, and the
+outcome it hides is the one that most needs reporting. (The 31 came out of
+the denominator in round twenty-five, and they are the same distinction:
+`run_pair` calls a compile-time fatal `ran`, because the GRID grades that
+pair on its output, but no binary was executed and searching the COMPILER's
+stderr for `arena exhausted` asks about a different arena than D7's.) The line is `arena exhausted in 11 of 779 tests that RAN
 (1351 in the list)`, with every other outcome on its own line and an
 `assert` that nothing was dropped. The eleven are all large-string
 programs -- `explode_bug`, `wordwrap_memory_limit`, `chunk_split_variation3`,
@@ -602,3 +606,12 @@ sentence the reviewer did not file as a finding: a typed by-reference
 coercion that FAILS raised and answered null, and round twenty's write-back
 stored that null into the caller's own variable before the exception
 unwound. php leaves the variable exactly as it was. `g/80-byref-typed.php`.
+
+**Round twenty-five** moved a published number for the fourth time in this
+review, and by the same kind of distinction: a php compile-time fatal is a
+pair the GRID grades on its output and a test that never ran a binary, so
+the arena's denominator had 31 of them in it. `11 of 810` is **`11 of 779`**;
+the eleven are the same eleven. It also found that `WorkloadTest`'s
+equal-score branch had never executed -- 7919 modulo 1000 has period 1000,
+so 40 records have 40 distinct scores -- which is a test that passed without
+testing what it is named after.

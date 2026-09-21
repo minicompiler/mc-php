@@ -324,7 +324,13 @@ def run_pair(phpt, tag, budget=None):
         if c.returncode == 255:
             cout = c.stdout.decode('latin-1')
             cwant = e.stdout.decode('latin-1')
+            # `ran` because the GRID grades this pair on its output, and
+            # `compile_fatal` because no binary was executed: arena.py's
+            # denominator is "tests that RAN" and counted these, and it
+            # then searched the COMPILER's stderr for `arena exhausted`,
+            # which is a different arena from the one D7 is about.
             return {'status': 'ran', 'out': cout, 'rc': 255, 'sec': sec,
+                    'compile_fatal': 1,
                     'err': c.stderr.decode('latin-1', 'replace'),
                     'want': cwant, 'wrc': e.returncode,
                     'agrees': agrees(sec, cout, cwant, 255, e.returncode)}

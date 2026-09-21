@@ -29,6 +29,10 @@ def one(p):
     s = r['status']
     if s != 'ran':
         return (s, p)
+    # a php COMPILE-TIME fatal: the grid grades the pair on its output, but
+    # no binary ran, so it belongs in neither half of "N of M that RAN"
+    if r.get('compile_fatal'):
+        return ('compile-fatal', p)
     return ('exhausted' if 'arena exhausted' in r['err'] else 'ran', p)
 
 

@@ -823,3 +823,25 @@ round.
   request deletes `probes/t9/bench/unwind.php`. It now says what was deleted
   and why: an orphan copied forward from T6 that no gate ran, found by
   `d8check.py`, with T7's and T8's copies and T6's original untouched.
+
+### Round twenty-five
+
+Three findings, all real, and one of them moves a published number.
+
+- ~~`arena.py` counts a php COMPILE-TIME fatal as a test that RAN.~~ Correct,
+  and it is the same distinction round fifteen drew from the other side:
+  `run_pair` calls exit 255 `ran` because the GRID grades that pair on its
+  output, but no binary was executed -- and `arena.py` was then searching
+  the COMPILER's stderr for `arena exhausted`, which is a different arena
+  from the one D7 asks about. The result carries `compile_fatal` and
+  `arena.py` gives it a bucket of its own. **It moves the number**:
+  `arena exhausted in 11 of 810` is `11 of 779`, with `not run: 31
+  compile-fatal` on its own line. The eleven tests are the same eleven.
+- ~~`WorkloadTest`'s tie branch never executed.~~ Correct: `wl_make_records`
+  steps the score by 7919 modulo 1000, which has period 1000, so 40 records
+  have 40 distinct scores and the equal-score comparison the test is named
+  after was dead. Three records now share a score with their names out of
+  order, and the tie is asserted by name. Proved to have teeth: negating the
+  `strcmp` makes it `5 ok / 1 failed`, in both worlds.
+- ~~`RESULTS.md`'s re-measurement table still said 77 fixtures~~ where the
+  invariant section of the same file said 79.
