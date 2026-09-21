@@ -961,3 +961,27 @@ that decide the design before any of the compiler exists", which stopped
 being true at T5: it now names the order (T1..T4 decided the design, T5
 built the first compiler and runtime, T6..T10 worked the wrong-reason table
 down), where the compiler lives, and what the number is.
+
+### Round thirty
+
+Three findings, all real, all in the analysis harness and its gate.
+
+- ~~`d8check` reads a `require` inside a php BLOCK comment as a real
+  dependency.~~ Correct: `_uncomment` handled `#`, `//` and python
+  docstrings and not `/* ... */`, and the REQ scan ran over the RAW source
+  besides. Both closed. Measured: a `probes/t96/caller.php` whose only
+  mention of `hidden.php` is `/* require __DIR__ . "/hidden.php" */` no
+  longer exempts it -- both files are reported.
+- ~~A `tmpbin()` failure leaves the canonical sibling behind.~~ Correct, and
+  it is the same shape as round twenty-six from a different road: the
+  allocation happened BEFORE the `try/finally`, so a full temporary
+  filesystem left `<base>.php` and its owner marker on disk and every later
+  worker called that test `busy`. Measured both ways -- with the allocation
+  outside, `pre-fix leftovers: ['foreachLoop.001.php',
+  'foreachLoop.001.php.mcphp-owner']`; inside, the failure is an ordinary
+  `error` status and **nothing is left**.
+- ~~A compile that spends the whole budget is reported as a RUN timeout.~~
+  Correct: the `left <= 0` guard raised `TimeoutExpired([binf])` and the
+  handler reads `cmd[0]`, so a test that never started a binary went into
+  the run-timeout bucket. It raises with the compiler's command now, which
+  is what it was.

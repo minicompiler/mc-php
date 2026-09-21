@@ -325,7 +325,13 @@ def run_pair(phpt, tag, budget=None):
         php = sibling(phpt, tag)
     except Busy:
         return {'status': 'busy'}
-    binf = tmpbin(prefix=tag + '.')
+    # binf is allocated INSIDE the protected block: `tmpbin` can raise (a
+    # full temporary filesystem), and doing it before the `try` left the
+    # canonical sibling behind, so every later worker called that test
+    # `busy` and dropped it from the sample -- the failure round
+    # twenty-six's owner marker exists to recover from, reached by a
+    # different road.
+    binf = None
     cwd = os.path.dirname(os.path.abspath(php)) or '.'
     # The scratch file lives beside the .phpt (cwd) and `{PWD}` in an --INI--
     # expands to that directory, but the two PROCESSES run from the source
@@ -336,6 +342,7 @@ def run_pair(phpt, tag, budget=None):
     argv, stdin, env, ini = _extras(sec or {}, cwd)
     run_cwd = _SRCDIR
     try:
+        binf = tmpbin(prefix=tag + '.')
         open(php, 'w', encoding='latin-1', newline='').write(src)
         # The grid's order, in full: php runs FIRST, and the candidate is
         # COMPILED after it (probes/t0/phpt-run.py runs the oracle, then
@@ -406,7 +413,10 @@ def run_pair(phpt, tag, budget=None):
                     'cerr': c.stderr.decode('latin-1', 'replace'),
                     'cout': c.stdout.decode('latin-1', 'replace')}
         if left <= 0:
-            raise subprocess.TimeoutExpired([binf], budget)
+            # the COMPILER's command: the budget was spent compiling, and
+            # naming the binary here classified it as a run that timed out
+            # when no binary had been started.
+            raise subprocess.TimeoutExpired([MCPHP], budget)
         g = _run([binf] + argv, input=stdin or b'', env=env, cwd=run_cwd,
                  timeout=left)
     except subprocess.TimeoutExpired as t:

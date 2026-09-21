@@ -63,6 +63,7 @@ def _uncomment(src):
     `require`) and `benched` (a resolved bench loop) are separate, exact
     answers rather than part of this scan.
     """
+    src = re.sub(r'/\*[\s\S]*?\*/', '', src)      # php and C block comments
     src = re.sub(r'"""[\s\S]*?"""', '', src)
     src = re.sub(r"\'\'\'[\s\S]*?\'\'\'", '', src)
     out = []
@@ -317,7 +318,10 @@ def repo_sweep():
                 continue
             srcs[os.path.relpath(f, REPO)] = _uncomment(src)
             if n.endswith('.php'):
-                for m in REQ.finditer(src):
+                # the UNCOMMENTED source: a `/* require __DIR__ . "/x.php" */`
+                # in a php block comment was read as a real dependency and
+                # would have exempted an untested file.
+                for m in REQ.finditer(_uncomment(src)):
                     required.add(os.path.relpath(
                         os.path.join(os.path.dirname(f), m.group(1)), REPO))
     text = '\n'.join(srcs.values())
