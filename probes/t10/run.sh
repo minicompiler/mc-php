@@ -125,7 +125,14 @@ printf '\n== 7b. the tests that DO NOT COMPILE, by the compiler own message ==\n
 python3 probes/t10/nocompile.py "$OUT/why.tsv" | tee "$OUT/nocompile.table"
 
 printf '\n== 8. the tests that COMPILE and disagree, by what differs ==\n'
-awk -F'\t' '$2 == "(compiled; output differs)" { print $1 }' "$OUT/why.tsv" > "$OUT/dg.list"
+# every row why.py wrote for a test that COMPILED AND RAN, not just the ones
+# whose output differs: diffgroup's `an exit code` group is for the pairs
+# that agree on stdout and not on the code, and this filter admitted only
+# `(compiled; output differs)`, so that group could never be produced from
+# here. (It is empty today, and it took a filter that could carry it to say
+# so -- the whole point of section 1.)
+awk -F'\t' '$2 ~ /^\(compiled; (output differs|same output, exit)/ { print $1 }' \
+    "$OUT/why.tsv" > "$OUT/dg.list"
 MCPHP_BIN="$root/probes/t10/mc-php" python3 probes/t10/diffgroup.py "$OUT/dg.tsv" \
     < "$OUT/dg.list" | tee "$OUT/dg.table"
 

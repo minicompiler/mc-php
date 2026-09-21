@@ -289,3 +289,17 @@ Both re-measured: **no number moved** (568 / 758 / 23 / 2 / 1, arena 11 of 782, 
   statements for the same reason (an AND-list whose test fails is a non-zero last command).
 - ~~Two descriptions of `harness.sibling()` still claimed a counter and a 64-attempt
   fallback~~, which round six removed.
+
+### Round eight
+
+- ~~`harness.py` COMPILED the candidate before running the oracle~~, where the grid runs php
+  first and only then invokes `mcphp.sh` (which compiles and runs). A `.phpt` that rewrites its
+  own scratch source or an included sibling while the oracle runs would have been compiled from
+  different bytes than the grid compiled. The order is the grid's now, in full.
+- ~~`diffgroup.py`'s `an exit code` group was unreachable from `run.sh`~~: the filter that
+  builds `dg.list` admitted only `(compiled; output differs)`, while `why.py` labels a
+  stdout-equal / exit-different pair `(compiled; same output, exit ...)`. Both labels now.
+  The group is EMPTY today -- that is the retraction above -- and it took a filter that could
+  carry it to be able to say so.
+- ~~The pull request's own description still carried the first run's headline~~ (1675 / 748 /
+  73 / 85) against the checked-in 1676 and 1688 / 749 / 75 / 87.

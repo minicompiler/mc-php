@@ -193,25 +193,28 @@ def run_pair(phpt, tag, budget=None):
     argv, stdin, env, ini = _extras(sec or {}, cwd)
     try:
         open(php, 'w', encoding='latin-1', newline='').write(src)
+        # The grid's order, in full: php runs FIRST, and the candidate is
+        # COMPILED after it (probes/t0/phpt-run.py runs the oracle, then
+        # invokes mcphp.sh, which compiles and runs). Two reasons, and the
+        # first version of this had neither. A .phpt may write, delete or
+        # rename a file beside itself, so whichever side runs second sees
+        # what the first left -- and running the candidate first made the
+        # ORACLE the contaminated one. And a .phpt that rewrites its own
+        # scratch source or an included sibling while the oracle runs would
+        # otherwise be COMPILED from different bytes than the grid compiled.
+        e = subprocess.run([PHP] + INI + ini + ['-q', php] + argv, input=stdin,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           env=env, cwd=cwd, timeout=budget)
         t0 = time.monotonic()
         c = subprocess.run([MCPHP, '--exe', php, '-o', binf], stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, timeout=budget)
         left = budget - (time.monotonic() - t0)
-        if left <= 0:
-            raise subprocess.TimeoutExpired([binf], budget)
         if c.returncode != 0:
             return {'status': 'no-compile', 'crc': c.returncode,
                     'cerr': c.stderr.decode('latin-1', 'replace'),
                     'cout': c.stdout.decode('latin-1', 'replace')}
-        # php FIRST, then the candidate -- the order probes/t0/phpt-run.py
-        # runs them in. A .phpt may write, delete or rename a file beside
-        # itself, and whichever side runs second sees what the first left;
-        # running the candidate first meant the ORACLE was the contaminated
-        # one, which is the reverse of what a differential measurement can
-        # tolerate.
-        e = subprocess.run([PHP] + INI + ini + ['-q', php] + argv, input=stdin,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           env=env, cwd=cwd, timeout=budget)
+        if left <= 0:
+            raise subprocess.TimeoutExpired([binf], budget)
         g = subprocess.run([binf] + argv, input=stdin,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            env=env, cwd=cwd, timeout=left)
