@@ -219,10 +219,10 @@ circuit. What the probe is worth is the corrected numbers.
   "these two agree" now -- stdout byte for byte AND the same exit code, which is the pair
   `probes/t0/phpt-run.py` itself grades on. `why.py` labelled a test
   `(compiled; output differs)` **without ever running the binary**: of 784 sampled tests that
-  compile, **616 really differ, 142 (18.1%) print exactly what php prints and exit with a
-  different code**, 25 crash or time out, and 1 agrees on both. That exit-code group is ONE
-  shape -- a php program that ends in a fatal exits non-zero and this compiler exits 0 -- it is
-  the largest nameable block left, and nothing could see it because stdout matched. `arena.py`
+  compile, **758 really differ**, 23 crash, 2 time out and 1 agrees on both. The clustering of
+  the 758 is what the sample is for: **332 are `var_dump of a value`**, and its head is
+  `php 'int(N)' / mc ''` -- php printed a value and mc-php printed nothing, a program that
+  stopped early rather than a value formatted wrongly. `arena.py`
   divided by `len(files)` while turning every failure into `None`: of the 1352-test list only
   **782 RAN**. `fixtures.sh` merged the streams with `2>&1` and compared with `$(...)`. And
   `nocompile.py`'s skip list named ONE compiled outcome of five, so the block that does not
@@ -241,13 +241,23 @@ circuit. What the probe is worth is the corrected numbers.
   `run.sh` step 10 piped both halves to `tail -1` with nothing behind them. `require __DIR__ .
   "/x.php"` was refused as a computed path and a top-level `return` returned from the generated
   `main`, printing nothing and exiting with a junk status. Both halves run now: **6 ok / 0
-  failed in each**, `main.php` 7.33x, `heavy.php` 1.46x. `probes/t10/d8check.py` is the
+  failed in each**, `main.php` 7.27x, `heavy.php` 1.46x. `probes/t10/d8check.py` is the
   enforcement D8 lacked: four regimes, and a `.php` in none of them fails the run.
 * **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at
   about 20000 of 21395 tests. The caller names the binary with `MCPHP_OUT` and unlinks it the
   moment the subprocess returns; each run sweeps the dead siblings at startup. **Peak 1860 KiB
   over a run of 27728 tests against 1860 KiB over one of 6333: the same to the kilobyte,
   bounded by the job count and not the corpus.**
+
+**The second review round cost T10 its own headline.** `harness.py` handed php a RELATIVE path
+while running it with `cwd` set to the test's own directory, so php answered `Could not open
+input file` for every test in the sample while the candidate ran anyway. The first version of
+this probe reported **143 tests (18.2%) that print exactly what php prints and exit with a
+different code** and named them the next block; with php actually running there are **zero** --
+of the 784 that compile, **758 really differ**, 23 crash, 2 time out, 1 agrees. T10 worked
+section 1 of the backlog and published a new number of the same kind in the doing, which is the
+argument for one more rule: a differential tool has to be checked against a case whose answer is
+known.
 
 **The reviewer of T10's own pull request (#9) left twelve findings and every one was real** --
 the standing rule of `docs/review-backlog.md` § 3, applied to T10. They are listed with their

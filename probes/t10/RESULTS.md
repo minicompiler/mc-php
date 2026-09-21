@@ -57,12 +57,12 @@ not the compiler.
 | corpus refused | 2309 | **1967** | block 4 |
 | `tests/lang` / `Zend/tests` / `strings` | 102 / 709 / 262 | **104 / 749 / 262** | |
 | greens in T0's "touched by none" | 1626 of 1637 | **1663 of 1688** | |
-| **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **see below** | **never ran the binary** |
+| **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **758 of 784 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 782 that RAN** | **the denominator counted tests it never ran** |
 | **fixtures byte for byte** | **60 of 60, merged streams** | **74 of 74, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
-| **the D8 bench** | **5.85x and 1.45x** | **7.33x and 1.46x** | **T9's own compiler refuses its own `main.php`** |
+| **the D8 bench** | **5.85x and 1.45x** | **7.27x and 1.46x** | **T9's own compiler refuses its own `main.php`** |
 | assert a php diagnostic line | 93 green of 4647 | **102 green of 4647** | |
 | mention `__destruct` | 14 green of 333 | **15 green of 333** | |
 | `lencheck` / `aritycheck` | 468 / 272 | **496 / 272** | |
@@ -75,17 +75,34 @@ tests of which **784 compile** (782 run to completion, 2 time out):
 
 | label | count | share of the 784 |
 |---|---|---|
-| the output really does differ | **616** | 78.6% |
-| **the output AGREES and the exit code does not** | **142** | **18.1%** |
-| crashed (a signal) or timed out | 25 | 3.2% |
+| the output really does differ | **758** | 96.7% |
+| crashed (a signal) | 23 | 2.9% |
+| timed out | 2 | 0.3% |
 | agrees on both: the `.phpt`'s own expectation is what the grid graded | 1 | 0.1% |
+| **the output agrees and the exit code does not** | **0** | **0%** |
 
-**Not quite one in five of the block every probe since T5 has been working
-was a different bug.** 133 of the 142 are `exit 0 where php exits 1`, which
-is one shape and not 133: a php program that ends in a fatal exits non-zero
-and this compiler ends it and exits 0. It is the single largest nameable
-group left in the sample -- larger than any message in the block that does
-not compile -- and nothing could see it, because stdout matched.
+**The last row is a retraction, and it is T10's own.** The first version of
+this document reported **143 tests (18.2%) that print exactly what php
+prints and exit with a different code**, called it "the single largest
+nameable group left" and recommended it as the next probe's first block.
+It does not exist. It was `run_pair` handing php a RELATIVE path while
+running it with `cwd` set to the test's own directory, so php answered
+`Could not open input file` -- exit 1, empty stdout -- for every test in the
+sample, and every mc-php run that printed nothing and exited 0 came out as
+"the same output with a different exit code". The candidate ran anyway,
+because its binary is an absolute `mkstemp` path. `phpt-run.py`'s own
+`classify` opens with `path = os.path.abspath(path)` for exactly this
+reason; `run_pair` did not, from the § 1 commit until the reviewer of #9
+found the INI defect beside it and this came out with it.
+
+So section 1 of the backlog was worked, and in working it T10 published a
+new number of the same kind. What that says about the method is the useful
+part: **a differential tool has to be checked against a case whose answer is
+known**, and neither T10's first draft nor any probe before it did that for
+`run_pair`. What survives is the shape of the correction rather than its
+size -- the label `(compiled; output differs)` covered four outcomes and
+covers one now, and 26 of the 784 are a crash, a timeout or a test the grid
+graded on its own expectation.
 
 ### What "the arena is the answer" really was
 
@@ -309,28 +326,31 @@ The block that does not compile, by the compiler's own message:
     10  a php file that does not open with <?php (leading inline html)
 ```
 
-and the 616 that compile and really do print something else, by the shape of
+and the 758 that compile and really do print something else, by the shape of
 the first differing line:
 
 ```
-   213  a blank line          (php printed nothing where mc-php printed a
-   185  a php diagnostic       banner: the program died before it, or after)
-   185  var_dump of a value
-    13  other text        13  an integer        3  a float
-     3  print_r of a container
+   332  var_dump of a value
+   173  a php diagnostic
+   129  a blank line       (one side printed a banner the other did not:
+    84  other text          the program died before it, or after)
+    16  a float        11  an integer        9  print_r of a container
+     2  var_export of an element    1  print_r of an element
+     1  a container delimiter
 ```
 
 **The head is still flat**, as T9 left it: the largest single
-first-difference PAIR in the sample is worth 13
-(`php '' / mc 'Warning: Array to string conversion'`, and the same count for
-`Class "ReflectionClass" not found`). What is left in the graded directories
-is a bounded feature with a name -- property hooks (30), asymmetric
-visibility (31), references (29 + 17 + 12), generators (§ below, unchanged
-from T9) -- or a long tail of one function each.
+first-difference PAIR is worth 26 (`php 'int(N)' / mc ''` -- mc-php printed
+nothing where php printed a value) and the next 20 (`php 'array(N) {' / mc
+''`). What is left in the graded directories is a bounded feature with a
+name -- property hooks (30), asymmetric visibility (31), references
+(29 + 17 + 12), generators (§ below, unchanged from T9) -- or a long tail of
+one function each.
 
-**The one new nameable group is the exit code**: 133 tests print exactly what
-php prints and exit 0 where php exits 1. That is the biggest single thing
-T10's own § 1 fix uncovered, and it is what the next probe should take first.
+**The group worth naming is `var_dump of a value`, 332 of the 758**, and its
+head says what it is: php prints a value and mc-php prints nothing, which is
+a program that stopped early rather than a value formatted wrongly. That,
+and the 23 that CRASH, is what the next probe should take first.
 
 ## D7, re-measured
 
@@ -358,7 +378,7 @@ Neither was a target.
 
   == main.php ==   both answer 13608   the binary is 314354 bytes
     php 0.0396 s   mc-php 0.0054 s   php -r (start-up) 0.0392 s
-    php / mc-php = 7.33x        php WORK / mc-php = 0.08x
+    php / mc-php = 7.27x        php WORK / mc-php = 0.08x
   == heavy.php ==  both answer 99450
     php 0.0429 s   mc-php 0.0294 s   php -r (start-up) 0.0421 s
     php / mc-php = 1.46x        php WORK / mc-php = 0.03x

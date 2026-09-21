@@ -294,9 +294,8 @@ right about short circuit. What the probe is actually worth is the corrected num
 
 **Four tools had been reporting numbers they never measured**, and they are what chose every
 block since T5. `why.py` labelled a test `(compiled; output differs)` WITHOUT running the
-binary; running them shows that of 784 sampled tests that compile, **616 really differ, 142
-(18.1%) print exactly what php prints and exit with a different code**, 25 crash or time out,
-and 1 agrees on both. The exit-code group is one shape -- a php program that ends in a
+binary; running them shows that of 784 sampled tests that compile, **758 really differ**, 23
+crash, 2 time out and 1 agrees on both. The exit-code group is one shape -- a php program that ends in a
 fatal exits non-zero and this compiler exits 0 -- and it is the single largest nameable block
 left; nothing could see it because stdout matched. `arena.py` divided by `len(files)` while
 turning every failure into `None`: of T10's 1352-test list only **782 RAN**, so the published
@@ -314,7 +313,16 @@ as a computed path (it is not: both halves are compile-time literals, and it is 
 spelling), and a top-level `return` returned from the generated `main`, skipping `php_shutdown`,
 `php_flush` and the exit code -- the program printed nothing and exited with a junk status (54,
 82, 94, 142 and 178 on five runs of the same source). Both halves run now: **6 ok / 0 failed in
-each**, `main.php` 7.33x and `heavy.php` 1.46x.
+each**, `main.php` 7.27x and `heavy.php` 1.46x.
+
+**And T10 published a number of the same kind while removing them.** Its first version reported
+**143 tests (18.2%) that print exactly what php prints and exit with a different code** and named
+them the next probe's first block. The reviewer of #9 found that `harness.py` imported the grid's
+`DEFAULT_INI` without the `-d` prefixes or the `{E_ALL}` substitution, and chasing that found the
+cause: `run_pair` handed php a RELATIVE path while running it with `cwd` set to the test's own
+directory, so php answered `Could not open input file` for every test in the sample while the
+candidate ran anyway. With php actually running there are **zero** such tests. One more rule
+follows from it: **a differential tool has to be checked against a case whose answer is known.**
 
 **And the grid had no bound on its disk.** A full-corpus run filled a 460 GiB boot volume at
 about 20000 of 21395 tests: `mcphp.sh` EXECs the binary it compiled and cannot delete it, the

@@ -33,7 +33,19 @@ _spec = importlib.util.spec_from_file_location(
     'phptrun', os.path.join(HERE, '..', 't0', 'phpt-run.py'))
 _grid = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_grid)
-INI = _grid.DEFAULT_INI
+
+# DEFAULT_INI is a list of bare `name=value` strings with ONE placeholder,
+# and the grid turns it into `-d name=value` pairs and substitutes `{E_ALL}`
+# from the running php inside main() -- which an import does not execute. So
+# both steps are done here, once, exactly as `main()` and `run_php` do them:
+# without the substitution php is handed a literal `error_reporting={E_ALL}`
+# (it parses as 0, and every diagnostic test then disagrees for the wrong
+# reason), and without the `-d` php reads `output_handler=` as the name of a
+# script to run.
+_EALL = _grid.e_all(PHP)
+INI = []
+for _kv in _grid.DEFAULT_INI:
+    INI += ['-d', _kv.format(E_ALL=_EALL)]
 
 
 class Busy(Exception):
@@ -137,6 +149,18 @@ def run_pair(phpt, tag, compile_timeout=40, run_timeout=20):
     `agrees` is true only when stdout AND the exit code match, which is what
     the grid grades on.
     """
+    # ABSOLUTE first, and it is not a tidiness: `sibling()` derives the
+    # scratch `.php` from this path, and the two processes below run with
+    # `cwd` set to the TEST's directory. A relative `phpt` (which is what
+    # `find php-src/... | ...` writes into every wrong.txt, and so what every
+    # caller hands over) therefore named a file that did not exist from
+    # there, and php answered `Could not open input file` -- exit 1, empty
+    # stdout -- for EVERY test. The candidate ran anyway, because its binary
+    # is an absolute mkstemp path. See probes/t10/RESULTS.md: it is what the
+    # `143 tests print exactly what php prints and exit 0 where php exits 1`
+    # headline really was, and phpt-run.py's own `classify` starts with this
+    # line for the same reason.
+    phpt = os.path.abspath(phpt)
     sec = sections(phpt)
     src = sec.get('FILE') if sec else file_section(phpt)
     if src is None:

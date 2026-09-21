@@ -176,3 +176,21 @@ The standing rule above, applied to this pull request. Twelve inline findings, e
   the same defect as `nocompile.py`'s filter seen from the other end.
 - ~~Two bench comments pointed at `probes/t10/bench/bench.sh`~~, which does not exist: the
   script is `bench10.sh`.
+
+### And one the second round found, which is T10's own
+
+- ~~`harness.py` handed php a RELATIVE path while running it with `cwd` set to the test's own
+  directory~~, so php answered `Could not open input file` -- exit 1, empty stdout -- for
+  **every test in the sample**, while the candidate ran anyway (its binary is an absolute
+  `mkstemp` path). `probes/t0/phpt-run.py`'s own `classify` opens with
+  `path = os.path.abspath(path)` for exactly this reason. The reviewer's finding on the
+  unsubstituted `{E_ALL}` placeholder and the missing `-d` prefixes is what led to it, and both
+  are fixed together: the INI is built from the grid's list the way `main()` and `run_php`
+  build it, and `run_pair` starts by making the path absolute.
+  **It costs T10 its own headline.** The first version of this pull request reported
+  **143 tests (18.2%) that print exactly what php prints and exit with a different code** and
+  recommended them as the next probe's first block. With php actually running there are
+  **zero**: of the 784 sampled tests that compile, **758 really differ**, 23 crash, 2 time out
+  and 1 agrees. Section 1 of this backlog was worked, and in working it T10 published a new
+  number of the same kind -- which is the argument for the rule at the end of § 3, and for one
+  more: **a differential tool has to be checked against a case whose answer is known.**

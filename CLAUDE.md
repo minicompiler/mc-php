@@ -179,10 +179,10 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     block since T5. They are one tool now, `probes/t10/harness.py`: stdout byte for byte AND
     the same exit code, which is the pair the grid itself grades on. `why.py` labelled a test
     `(compiled; output differs)` WITHOUT running the binary -- of 784 sampled tests that
-    compile, **616 really differ, 142 (18.1%) print exactly what php prints and exit with a
-    different code**, 25 crash or time out, 1 agrees on both. That exit-code group is
-    ONE shape (a php program that ends in a fatal exits non-zero; this compiler exits 0), it
-    is the largest nameable block left, and nothing could see it because stdout matched.
+    compile, **758 really differ**, 23 crash, 2 time out and 1 agrees on both. The
+    clustering of the 758 is worth the sample: **332 are `var_dump of a value`** and its head
+    is `php 'int(N)' / mc ''` -- php printed a value and mc-php printed nothing, a program
+    that stopped early rather than a value formatted wrongly.
     `arena.py` divided by `len(files)` while turning every failure into `None`: of the
     1352-test list only **782 RAN**, so the rate understated by 1.7x. `fixtures.sh` merged the
     streams with `2>&1` and compared with `$(...)`, which strips trailing newlines.
@@ -214,7 +214,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     spelling), and a top-level `return` returning from the generated `main`, skipping
     `php_shutdown`, `php_flush` and the exit code, so the program printed NOTHING and exited
     with a junk status (54, 82, 94, 142 and 178 on five runs of the same source). Both halves
-    run now: **6 ok / 0 failed in each**, `main.php` 7.33x, `heavy.php` 1.46x.
+    run now: **6 ok / 0 failed in each**, `main.php` 7.27x, `heavy.php` 1.46x.
   * **D8 over the fixtures** (backlog § 3): the plan states the exemption -- the unit D8
     governs is the PROGRAM, and a differential fixture is already a test and a stronger one --
     and `probes/t10/d8check.py` ENFORCES it, putting every `.php` in one of four regimes and
@@ -242,6 +242,19 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     counted four of the five compiled outcomes as failures to compile; and the D8 gate now
     prints why it invokes neither phpunit nor `mc-php test` and `d8check.py` fails when the
     class declares a `test*` the runner does not name.
+  * **The second review round cost T10 its own headline, and that is the entry worth
+    keeping.** The reviewer found that `harness.py` imported the grid's `DEFAULT_INI`
+    without the `-d` prefixes `run_php` adds or the `{E_ALL}` substitution `main()` does --
+    and chasing it found the bigger one: `run_pair` handed php a RELATIVE path while running
+    it with `cwd` set to the test's own directory, so **php answered `Could not open input
+    file` for every test in the sample** while the candidate ran anyway (its binary is an
+    absolute `mkstemp` path). `probes/t0/phpt-run.py`'s own `classify` opens with
+    `os.path.abspath` for exactly this reason. The first version of this probe reported
+    **143 tests (18.2%) that print exactly what php prints and exit with a different code**
+    and named them the next block; with php actually running there are **zero**. T10 worked
+    section 1 of the backlog and published a new number of the same kind in the doing, which
+    is the argument for one more rule: **a differential tool has to be checked against a case
+    whose answer is known.**
   Fixtures: **74 of 74** under `g/` byte for byte php's on each stream and the exit code,
   **6 of 6** under `r/` refused by name with exit 3; `lencheck` 496 / 0 wrong, `aritycheck`
   272 / 0 wrong, `d8check` 86 `.php` all in a regime. **No new mc gap**, and no new external
