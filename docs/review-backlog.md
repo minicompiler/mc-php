@@ -63,7 +63,7 @@ after.**
 ## 2. Language semantics that are wrong (a program can observe every one) -- DONE
 
 Every line below is closed by a FIXTURE that runs under `php` and under mc-php and is compared
-byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **80 / 80** as this pull request ends), or by
+byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **81 / 81** as this pull request ends), or by
 a measurement recorded beside it. The fixture is named at the end of each line.
 
 - ~~**`&&` and `||` do not short-circuit**~~ (#5 `php.mc:2202`). Both operands were lowered and
@@ -1030,3 +1030,15 @@ it measures.
   truncates first, so a signal between the truncate and the write leaves it
   empty and the reader cannot tell that from a run that measured nothing.
   It writes `.peak.new` and renames.
+
+### Round thirty-three
+
+One finding, and it is the other half of round thirty-two's. ~~`fixtures.sh`
+exports `MCPHP_OUT` for the whole script, so PHP saw it while `mcphp.sh`
+now unsets it before the program runs~~ -- the asymmetry moved rather than
+going away. php runs under `env -u MCPHP_OUT` on both the fixture and the
+`php -l` road, and `g/82-env-symmetry.php` is the case: it prints
+`getenv("MCPHP_OUT")` and asserts the two worlds agree. Proved to have
+teeth -- with the export restored the gate is `FAIL 82-env-symmetry.php`,
+80 / 81. (`probes/t0/phpt-run.py` never had it: the oracle's environment
+is built separately and only the candidate's gets the variable.)

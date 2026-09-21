@@ -117,7 +117,7 @@ not the compiler.
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **788 of the 812 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
-| **fixtures byte for byte** | **60 of 60, merged streams** | **80 of 80, each stream and the exit code** | **`2>&1` and `$(...)`** |
+| **fixtures byte for byte** | **60 of 60, merged streams** | **81 of 81, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
 | **the D8 bench** | **5.85x and 1.45x** | **6.73x and 1.41x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
@@ -412,7 +412,7 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **80 of 80** numbered fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **81 of 81** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** parse under `php -l` and are refused by
   mc-php with a named message, exit 3. That pair IS the differential for a
@@ -421,8 +421,8 @@ running and `bench10.sh` refusing to time a pair that does not agree.
   mc-php declines what php accepts.
 * `lencheck` **501 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
-* `d8check` -- **80 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 93 `.php`,
-  and the repo-wide sweep over **361** `.php` under `probes/`,
+* `d8check` -- **81 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 94 `.php`,
+  and the repo-wide sweep over **362** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
 * the grid's tmp peak **1908 KiB over 27728 tests** on the round-nineteen run
