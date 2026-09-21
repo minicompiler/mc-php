@@ -196,3 +196,19 @@ The standing rule above, applied to this pull request. Twelve inline findings, e
   and 1 agrees. Section 1 of this backlog was worked, and in working it T10 published a new
   number of the same kind -- which is the argument for the rule at the end of § 3, and for one
   more: **a differential tool has to be checked against a case whose answer is known.**
+
+### And the grid's own band, which the section above says is not in question
+
+- **"What is NOT in question: the grid"** is true of its VERDICT and not of its total. Two runs
+  of the SAME BINARY over the whole corpus give **green 1676 and 1688**; the smaller set is a
+  strict SUBSET of the larger, and all twelve of the difference are FILESYSTEM tests -- 9 under
+  `ext/standard/tests/file`, 3 under `ext/standard/tests/dir` (`chdir_basic`, `getcwd_basic`,
+  `is_dir_basic`, `is_file_basic`, `rename_variation1`, `file_get_contents_variation7` and
+  their kind) -- which `chdir()` and write files in a shared working directory while six of
+  them run at once. `php-fail` moves with them, which is php's own side doing the same thing.
+  The three DIRECTORY numbers do not move at all: 104 / 749 / 262 came out identical on three
+  separate runs across two different compilers. **A per-block move smaller than a dozen tests
+  should be read on the directories**, and the corpus number belongs in a report with its band
+  -- which no probe has done, T9's 1637 and T8's 1450 included. Not fixed here: isolating the
+  filesystem tests is a change to `probes/t0/phpt-run.py`'s working-directory policy, T0's
+  file and a decision of its own.

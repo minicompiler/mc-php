@@ -168,10 +168,11 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
 - T10 done (`probes/t10`), on **mc 1.1.0**: the review backlog -- 59 Copilot findings across
   #1..#7 that nothing had acted on (`docs/review-backlog.md`), all three sections, plus one
   the sections did not name and a disk that ran out. **green 1637 -> 1688**:
-  `phpt: green 1688 / wrong 14433 / refused 1967 / skip 2947 / php-fail 360 / total 21035`;
+  `phpt: green 1676 / wrong 14444 / refused 1967 / skip 2947 / php-fail 361 / total 21034`,
+  and 1688 on a SECOND run of the same binary (below);
   per directory `tests/lang` 104 (was 102), `Zend/tests` 749 (was 709),
-  `ext/standard/tests/strings` 262 (was 262). **1663 of the 1688 greens are in T0's
-  "touched by none" set**; `refused` fell **2309 -> 1967**. The green moved only +51 because
+  `ext/standard/tests/strings` 262 (was 262). **1651 of 1676 and 1663 of 1688 are in T0's
+  "touched by none" set**; `refused` fell **2309 -> 1967**. The green moved only +39 to +51 because
   the work is CORRECTNESS -- a `.phpt` that was already green does not become greener for the
   compiler being right about short circuit -- and what the probe is worth is the corrected
   numbers below.
@@ -214,7 +215,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     spelling), and a top-level `return` returning from the generated `main`, skipping
     `php_shutdown`, `php_flush` and the exit code, so the program printed NOTHING and exited
     with a junk status (54, 82, 94, 142 and 178 on five runs of the same source). Both halves
-    run now: **6 ok / 0 failed in each**, `main.php` 7.27x, `heavy.php` 1.46x.
+    run now: **6 ok / 0 failed in each**, `main.php` 7.21x, `heavy.php` 1.44x.
   * **D8 over the fixtures** (backlog § 3): the plan states the exemption -- the unit D8
     governs is the PROGRAM, and a differential fixture is already a test and a stronger one --
     and `probes/t10/d8check.py` ENFORCES it, putting every `.php` in one of four regimes and
@@ -255,9 +256,18 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     section 1 of the backlog and published a new number of the same kind in the doing, which
     is the argument for one more rule: **a differential tool has to be checked against a case
     whose answer is known.**
-  Fixtures: **74 of 74** under `g/` byte for byte php's on each stream and the exit code,
+  * **And the grid itself has a band, which no probe had measured.** The backlog says the grid
+    is what is NOT in question; nobody had run it twice. Two runs of the SAME BINARY over the
+    whole corpus give **green 1676 and 1688**, the smaller a strict SUBSET of the larger, and
+    all twelve of the difference are FILESYSTEM tests -- 9 under `ext/standard/tests/file`,
+    3 under `ext/standard/tests/dir` -- which `chdir()` and write files in a shared working
+    directory while six of them run at once. The three directory numbers do NOT move: 104 /
+    749 / 262 came out identical on three separate runs across two different compilers.
+    **A per-block move smaller than a dozen tests should be read on the directories**, and the
+    corpus number is worth quoting with its band -- T9's 1637 and T8's 1450 included.
+  Fixtures: **75 of 75** under `g/` byte for byte php's on each stream and the exit code,
   **6 of 6** under `r/` refused by name with exit 3; `lencheck` 496 / 0 wrong, `aritycheck`
-  272 / 0 wrong, `d8check` 86 `.php` all in a regime. **No new mc gap**, and no new external
+  272 / 0 wrong, `d8check` 87 `.php` all in a regime. **No new mc gap**, and no new external
   name: the 38-of-21219 inline-HTML refusal T5 reported is unchanged.
 - T9 done (`probes/t9`), on **mc 1.1.0**: D6's correction built, and T8's two blocks
   worked from a UNIFORM corpus-wide sample (every ninth of `wrong.txt`, split so the
