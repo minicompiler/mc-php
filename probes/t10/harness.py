@@ -229,6 +229,10 @@ def _run(cmd, *, input=b'', stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     workers ran. `probes/t0/phpt-run.py` does the same thing for the same
     reason; the measurement is in docs/review-backlog.md round twenty-two.
     """
+    # stdout AND stderr are PIPEs by default and both come back in the
+    # CompletedProcess: `run_pair` reads `c.stderr` for a compile failure
+    # and `g.stderr` for every run, and only the CLEAN call asks for
+    # DEVNULL.
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=stdout,
                          stderr=stderr, env=env, cwd=cwd,
                          start_new_session=True)

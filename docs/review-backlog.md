@@ -63,7 +63,7 @@ after.**
 ## 2. Language semantics that are wrong (a program can observe every one) -- DONE
 
 Every line below is closed by a FIXTURE that runs under `php` and under mc-php and is compared
-byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **79 / 79** as this pull request ends), or by
+byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **80 / 80** as this pull request ends), or by
 a measurement recorded beside it. The fixture is named at the end of each line.
 
 - ~~**`&&` and `||` do not short-circuit**~~ (#5 `php.mc:2202`). Both operands were lowered and
@@ -880,3 +880,47 @@ measurement could go wrong.
   surface**, BUILT with whatever 1.x is installed -- the freeze is additive,
   so a later minor keeps every name 1.0.0 published -- with each probe
   recording the version it measured on.
+
+### Round twenty-seven
+
+Six findings. Two fixed in the compiler and the scripts, three refuted with
+a measurement, one re-posted and answered again.
+
+- ~~`max`/`min` silently drop everything past the tenth value.~~ Correct, and
+  it is the sharpest thing in this round: `php_maxmin` carries ten values
+  (`MAXPARAMS` is 12 and two are spent on the direction and the count) and
+  the loop stopped there without saying so. Measured: `max(1,...,11)`
+  answered **10** where php says 11, `min(11,...,1)` answered **2** where
+  php says 1, and `max(...[1..10,99])` answered **10** where php says 99.
+  max and min are ASSOCIATIVE, so the call folds in chunks of ten -- the
+  same answer, no new runtime entry point and no second array.
+  `g/81-maxmin-wide.php` carries the three plus the shapes that were
+  already right (two values, an array, string comparison, a float).
+- ~~The watcher's age sweep can delete an active binary.~~ Correct: it took
+  every file older than a minute except `peak` and `owner`, which is a
+  binary a slow compile is still writing and the `d8p.out` that `run.sh`
+  writes and then reads. It is five minutes now -- twenty times the grid's
+  own 15-second budget -- and only the four artefact names these tools
+  create (`mcphp*`, `why.*`, `dg.*`, `ar.*`), so nothing else in the
+  directory is its business.
+- **`_run()` sends stderr to DEVNULL and returns none.** Refuted: the
+  default is `stderr=subprocess.PIPE` and the helper returns a
+  `CompletedProcess` carrying both streams; only the CLEAN call asks for
+  DEVNULL. Measured: a run gives `err len 0` and a no-compile gives a
+  populated `cerr`, and `why.py` completed over all **1351** tests after
+  that change. The contract is now written above the `Popen`.
+- **`ph_argref` leaks to the next call.** Refuted by reading and by
+  measurement: `ph_read_args` copies it into a local and CLEARS it at
+  entry, and the assignment is the statement before the call. `sscanf`
+  followed by `str_replace` and `substr` is byte for byte php's.
+- **`ph_had_spread` leaks to later calls.** Refuted for every order tried.
+  The line the finding points at restores the value the ENCLOSING argument
+  list had, which is what a nested call needs. Measured: after
+  `f(...[1,2])`, `max(3, 4)` takes the two-argument fast path and
+  `strlen("abc", "extra")` still raises `the wrong number of arguments for:
+  strlen` -- the diagnostic the clamp at line 3942 would have skipped -- and
+  both are byte for byte what they are without the spread before them.
+- **The one-number contract** was re-posted and is answered in round
+  nineteen: `run.sh` ends on `T10: <green> / <total>`, and the tables above
+  it are the analysis section 1 of this backlog demands, each its own
+  script.

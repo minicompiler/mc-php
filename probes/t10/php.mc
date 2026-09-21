@@ -3788,22 +3788,49 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             }
         }
         if (na < 1) ph_todo2(fl, line, "the wrong number of arguments for", name);
-        u8 mm[96];
         i64 want = 1;
         if (str_eq(name, "min")) want = 0 - 1;
-        st64(mm, ph_int(want));
-        st64(mm + 8, ph_int(na));
+        // php_maxmin takes ten values (MAXPARAMS is 12 and two are spent on
+        // the direction and the count), and the loop used to stop there
+        // WITHOUT saying so: `max(1,...,11)` answered 10, and a spread of
+        // more than ten values dropped the rest. max and min are
+        // associative, so a longer list folds in chunks of ten -- the same
+        // answer with no new runtime entry point and no second array.
+        i64 res = 0;
         i64 q = 0;
         loop {
-            if (q >= 10) break;
-            i64 vv = ph_int(0);
-            if (q < na) vv = ph_to_mixed(ph_a(av, q), ph_aty(av, q));
-            st64(mm + 16 + q * 8, vv);
-            q = q + 1;
+            if (q >= na) break;
+            u8 mm[96];
+            i64 k = 0;
+            st64(mm, ph_int(want));
+            i64 first = 0;
+            if (res) { st64(mm + 16, res); k = 1; first = 1; }
+            loop {
+                if (k >= 10) break;
+                if (q >= na) break;
+                st64(mm + 16 + k * 8, ph_to_mixed(ph_a(av, q), ph_aty(av, q)));
+                q = q + 1;
+                k = k + 1;
+            }
+            // ONE value and no partial result is php's own array form
+            // (`max([1,2,3])`), which this must not turn into: the count
+            // says how many of the ten slots carry a value.
+            i64 cnt = k;
+            i64 z = k;
+            loop {
+                if (z >= 10) break;
+                st64(mm + 16 + z * 8, ph_int(0));
+                z = z + 1;
+            }
+            st64(mm + 8, ph_int(cnt));
+            ph_ety = PT_MIXED;
+            ph_can_throw = 1;
+            res = ph_calln("php_maxmin", mm, 12, ty_pzv);
+            if (first) { }
         }
         ph_ety = PT_MIXED;
         ph_can_throw = 1;
-        return ph_calln("php_maxmin", mm, 12, ty_pzv);
+        return res;
     }
     if (str_eq(name, "define")) {
         ph_need(na, 2, name, fl, line);

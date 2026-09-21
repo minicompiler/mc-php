@@ -65,7 +65,16 @@ mcphp_tmp_watch() {
           k=$(du -sk "$MCPHP_TMP" 2>/dev/null | awk '{ print $1 }')
           o=$(cat "$MCPHP_TMP/peak" 2>/dev/null)
           [ -n "$k" ] && { [ -z "$o" ] || [ "$k" -gt "$o" ]; } && echo "$k" > "$MCPHP_TMP/peak"
-          find "$MCPHP_TMP" -type f -mmin +1 ! -name peak ! -name owner -delete 2>/dev/null
+          # ONLY the per-test artefacts, and only long after any of them
+          # can still be in use. `! -name peak ! -name owner` at one minute
+          # deleted everything else in the directory -- including a binary
+          # a slow compile was still writing, and the `d8p.out` run.sh
+          # writes and then reads. The grid's budget is 15 s, so five
+          # minutes is twenty times the life of anything legitimate, and
+          # the names are the four these tools create.
+          find "$MCPHP_TMP" -type f -mmin +5 \
+               \( -name 'mcphp*' -o -name 'why.*' -o -name 'dg.*' \
+                  -o -name 'ar.*' \) -delete 2>/dev/null
           sleep 2
       done ) &
     MCPHP_SWEEP=$!
