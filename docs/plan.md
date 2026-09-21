@@ -338,9 +338,9 @@ about 20000 of 21395 tests: `mcphp.sh` EXECs the binary it compiled and cannot d
 sweeper collected a file only once its mtime was a minute old, and the directory carried the pid
 so a killed run's was never collected by anyone. The caller -- the process that WAITS -- names
 the binary with `MCPHP_OUT` and unlinks it the moment the subprocess returns, and each run sweeps
-the dead siblings at startup. **Measured: peak 1860 KiB over a run of 27728 tests and 1860 KiB
-over one of 6333 -- the same to the kilobyte, so the cost is bounded by the job count and not by
-the corpus; `df -h /` identical before and after.**
+the dead siblings at startup. **Measured: peak 1892 KiB over a run of 27728 tests, 1908 KiB over a second
+corpus run of 21395 and 1860 KiB over one of 6333 -- so the cost is bounded by the job count and
+not by the corpus; `df -h /` identical before and after.**
 
 T9 is done (2026-09-20, macos/aarch64; `probes/t9/RESULTS.md`), on **mc 1.1.0**:
 D6's correction built, and T8's two blocks worked from a UNIFORM corpus-wide

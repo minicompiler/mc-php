@@ -60,7 +60,7 @@ after.**
 ## 2. Language semantics that are wrong (a program can observe every one) -- DONE
 
 Every line below is closed by a FIXTURE that runs under `php` and under mc-php and is compared
-byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **71 / 71**), or by
+byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **75 / 75** as this pull request ends), or by
 a measurement recorded beside it. The fixture is named at the end of each line.
 
 - ~~**`&&` and `||` do not short-circuit**~~ (#5 `php.mc:2202`). Both operands were lowered and
@@ -221,3 +221,37 @@ The standing rule above, applied to this pull request. Twelve inline findings, e
   the shell's own convention and a code php never answers. Measured: a child killed with SIGSEGV
   gives 139, `exit 7` gives 7, `exit 0` gives 0.
 - ~~The corrected-results table still said 74 fixtures~~ where the invariant beside it said 75.
+
+### Round five, over code the earlier rounds had not changed
+
+- ~~`bench10.sh` compared the two programs' answers with `$(...)`~~ -- the very defect § 1 fixed
+  in the fixture gate, still in the bench: a binary with a missing or extra final newline was
+  timed as comparable. Each stream to its own file, `cmp`, and both exit statuses.
+- ~~D8 (b) wants a committed, DATED record and `bench10.sh` only printed~~. It writes
+  `probes/t10/bench/results/<date>.json` now -- host, php, mc, reps, and per program the
+  medians, the bests and both ratios -- and `time2.py` writes that object itself rather than
+  the caller re-parsing the line it printed (the first attempt did re-parse, and produced
+  invalid JSON).
+- ~~`harness.py` named its scratch file `<base>.<tag>.php` where the grid names it
+  `<base>.php`~~, so a test that reads `__FILE__` was not the program the grid graded. The
+  canonical name is tried FIRST, `O_CREAT|O_EXCL` so a shipped sibling is still never
+  clobbered, with the tagged name as the fallback and a count of how often it was needed
+  (**0** over the 1352-test sample).
+- ~~`harness.py` started from a bare `os.environ`~~ where the grid seeds
+  `TEST_PHP_EXECUTABLE`, `TEST_PHP_EXECUTABLE_ESCAPED`, `TEST_PHP_SRCDIR` and the sanitized
+  SSH variables. `probes/t0/phpt-run.py` grew `base_environment()` and both callers use it.
+- ~~`harness.py` allowed 40 s to compile and 20 s to run where the grid allows 15 s for
+  both together~~, so a test the grid called a timeout could be reported here as a completed
+  difference. One budget, read from the grid's own `DEFAULT_TIMEOUT`.
+- ~~`run.sh`'s D8 gate read php's half through a pipeline~~, so the status it checked was
+  `tail`'s. Both streams and the status are captured, and a php that writes to stderr fails
+  the gate.
+- ~~1860 KiB was quoted for a run whose measured peak was 1892~~, and the second corpus run's
+  1908 appeared nowhere. All three peaks, with the test count each belongs to.
+- ~~§ 2 above still said the fixture gate was 71 / 71~~ where it ends at 75 / 75.
+- ~~The sub-population row said `99 / 102` without saying which run each belongs to.~~
+
+**None of the five harness fixes moved a number**: 568 that do not compile, 758 / 23 / 2 / 1 of
+the 784 that compile, 11 of 782 on the arena, 332 / 173 / 129 / 84 in the clustering. They make
+the method right, and the answers were already right -- which is worth knowing, and is the
+opposite of what the `run_pair` abspath defect did.

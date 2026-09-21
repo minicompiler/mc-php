@@ -245,9 +245,9 @@ circuit. What the probe is worth is the corrected numbers.
   enforcement D8 lacked: four regimes, and a `.php` in none of them fails the run.
 * **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at
   about 20000 of 21395 tests. The caller names the binary with `MCPHP_OUT` and unlinks it the
-  moment the subprocess returns; each run sweeps the dead siblings at startup. **Peak 1860 KiB
-  over a run of 27728 tests against 1860 KiB over one of 6333: the same to the kilobyte,
-  bounded by the job count and not the corpus.**
+  moment the subprocess returns; each run sweeps the dead siblings at startup. **Peak 1892 KiB
+  over a run of 27728 tests, 1908 KiB over a second corpus run of 21395 and 1860 KiB over one
+  of 6333: bounded by the job count and not the corpus.**
 
 **And the grid itself has a band, which no probe had measured.** Two runs of the SAME BINARY
 over the whole corpus give **green 1676 and 1688**, the smaller a strict subset of the larger,

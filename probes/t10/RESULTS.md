@@ -84,7 +84,7 @@ not the compiler.
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
 | **the D8 bench** | **5.85x and 1.45x** | **7.21x and 1.44x** | **T9's own compiler refuses its own `main.php`** |
-| assert a php diagnostic line | 93 green of 4647 | **99 / 102 green of 4647** | |
+| assert a php diagnostic line | 93 green of 4647 | **99 (run A) / 102 (run B)** | |
 | mention `__destruct` | 14 green of 333 | **15 green of 333** | |
 | `lencheck` / `aritycheck` | 468 / 272 | **496 / 272** | |
 
@@ -183,10 +183,11 @@ the directory and keeps the maximum so the claim carries a number.
 | | tmp peak | disk before | disk after |
 |---|---|---|---|
 | 6333 tests (three directories) | **1860 KiB** | 212Gi free | 212Gi free |
-| 27728 tests (three directories and the corpus, one run) | **1860 KiB** | 212Gi free | 212Gi free |
+| 27728 tests (three directories and the corpus, one run) | **1892 KiB** | 212Gi free | 212Gi free |
+| 21395 tests (a second corpus run) | **1908 KiB** | 212Gi free | 212Gi free |
 
 **The grid's disk cost is bounded by the job count, not by the corpus size**:
-4.4x the tests, the same peak to the kilobyte. 4184 orphaned binaries (665 MB)
+4.4x the tests for a 2.6% larger peak. 4184 orphaned binaries (665 MB)
 from the killed run were swept before any of this was measured.
 
 `fixtures.sh` set no `MCPHP_TMP` at all, so every fixture run leaked its
@@ -390,7 +391,7 @@ still not built.
 
 | population | T7 | T8 | T9 | T10 |
 |---|---|---|---|---|
-| assert a `Warning:`/`Deprecated:`/`Notice:`/`Fatal error:` line (4647) | 71 | 83 | 93 | **99 / 102** |
+| assert a `Warning:`/`Deprecated:`/`Notice:`/`Fatal error:` line (4647) | 71 | 83 | 93 | **99 (run A) / 102 (run B)** |
 | mention `__destruct` (333) | 11 | 14 | 14 | **15** |
 
 Neither was a target.

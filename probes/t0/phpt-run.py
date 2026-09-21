@@ -70,6 +70,10 @@ from types import SimpleNamespace
 #    it builds before spawning any test; see php-src/run-tests.php around the
 #    definition of $ini_overwrites). date.timezone=UTC and precision=14 are
 #    what make float/date output reproducible across hosts.
+# one budget for the candidate's COMPILE AND RUN together, and the same
+# for php: probes/t10/harness.py reads it so the two cannot drift
+DEFAULT_TIMEOUT = 15.0
+
 DEFAULT_INI = [
     'output_handler=',
     'open_basedir=',
@@ -222,6 +226,25 @@ def resolve_sections(sections, testdir):
             except OSError:
                 return f'cannot read {key} target: {name}'
     return None
+
+
+def base_environment(php, srcdir):
+    """The environment php-src's own run-tests.php injects into every test.
+
+    Some .phpt (Zend/tests/exit/exit_values.phpt and its kind) spawn a nested
+    `php` through getenv('TEST_PHP_EXECUTABLE...') and silently do nothing
+    useful without it. It is a function so that probes/t10/harness.py can
+    reuse it: a tool that explains this grid's verdict has to run the test in
+    this grid's environment, and building a second copy is how the two drift.
+    """
+    php_abs = shutil.which(php) or os.path.abspath(php)
+    env = dict(os.environ)
+    env['TEST_PHP_EXECUTABLE'] = php_abs
+    env['TEST_PHP_EXECUTABLE_ESCAPED'] = shlex.quote(php_abs)
+    env['TEST_PHP_SRCDIR'] = srcdir
+    for k in ('SSH_CLIENT', 'SSH_AUTH_SOCK', 'SSH_TTY', 'SSH_CONNECTION'):
+        env[k] = 'deleted'
+    return env
 
 
 def _run(cmd, stdin, env, timeout, cwd):
@@ -450,7 +473,7 @@ def main():
                      os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mcphp-stub.sh')))
     ap.add_argument('--refuse-code', type=int, default=3)
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
-    ap.add_argument('--timeout', type=float, default=15.0)
+    ap.add_argument('--timeout', type=float, default=DEFAULT_TIMEOUT)
     ap.add_argument('--sample', type=int, default=0,
                      help='random sample of N files instead of the whole list (seed 0)')
     ap.add_argument('--srcdir', default=None,
@@ -484,17 +507,7 @@ def main():
 
     exts_loaded = load_extensions(args.php)
 
-    # the handful of env vars php-src's own run-tests.php injects into every
-    # test's environment; some .phpt (e.g. Zend/tests/exit/exit_values.phpt)
-    # spawn a nested `php` themselves via getenv('TEST_PHP_EXECUTABLE...')
-    # and silently do nothing useful without it.
-    php_abs = shutil.which(args.php) or os.path.abspath(args.php)
-    base_env = dict(os.environ)
-    base_env['TEST_PHP_EXECUTABLE'] = php_abs
-    base_env['TEST_PHP_EXECUTABLE_ESCAPED'] = shlex.quote(php_abs)
-    base_env['TEST_PHP_SRCDIR'] = srcdir
-    for k in ('SSH_CLIENT', 'SSH_AUTH_SOCK', 'SSH_TTY', 'SSH_CONNECTION'):
-        base_env[k] = 'deleted'
+    base_env = base_environment(args.php, srcdir)
 
     buckets = {'green': [], 'wrong': [], 'refused': [], 'skip': [], 'php-fail': []}
 

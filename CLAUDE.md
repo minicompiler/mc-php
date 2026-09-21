@@ -224,9 +224,9 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   * **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at
     about 20000 of 21395 tests. `mcphp.sh` EXECs the binary and cannot delete it; the caller,
     which WAITS, names it with `MCPHP_OUT` and unlinks it the moment the subprocess returns,
-    and each run sweeps the dead siblings at startup. **Peak 1860 KiB over a run of 27728
-    tests and 1860 KiB over one of 6333 -- the same to the kilobyte, so it is bounded by the
-    job count and not the corpus**; `df -h /` identical before and after.
+    and each run sweeps the dead siblings at startup. **Peak 1892 KiB over a run of 27728
+    tests, 1908 KiB over a second corpus run of 21395 and 1860 KiB over one of 6333 -- so it
+    is bounded by the job count and not the corpus**; `df -h /` identical before and after.
   * **`do { } while (cond)` dropped its condition's pending statements**, so the unwinding
     check landed before the loop and a throwing condition spun for ever. `while` and `for` take
     them with `ph_take_pend`; `do` did not.

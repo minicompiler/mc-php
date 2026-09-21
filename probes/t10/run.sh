@@ -143,7 +143,15 @@ printf '\n== 10. D8: the workload tests, in both worlds ==\n'
 # and "6 ok / 0 failed in BOTH worlds" was php's side alone -- the mc-php
 # half had never run under any probe. Both lines are printed, both are
 # required, and they have to agree.
-d8a=$("$PHP" probes/t10/bench/run.php 2>&1 | tail -1)
+# php's half is captured the same way the mc-php half is: a pipeline's
+# status is `tail`'s, so a php that exited non-zero -- or warned before
+# printing its last line -- satisfied the gate.
+"$PHP" probes/t10/bench/run.php > "$MCPHP_TMP/d8p.out" 2> "$MCPHP_TMP/d8p.err"
+d8pe=$?
+d8a=$(tail -1 "$MCPHP_TMP/d8p.out")
+[ "$d8pe" = 0 ] || { printf '  php exited %s\n' "$d8pe"; fail=1; }
+[ -s "$MCPHP_TMP/d8p.err" ] && { printf '  php wrote to stderr:\n'; sed 's/^/    /' "$MCPHP_TMP/d8p.err"; fail=1; }
+rm -f "$MCPHP_TMP/d8p.out" "$MCPHP_TMP/d8p.err"
 MCPHP_OUT=$MCPHP_TMP/d8.bin probes/t10/mcphp.sh probes/t10/bench/run.php \
     > "$MCPHP_TMP/d8.out" 2>&1
 d8b=$(tail -1 "$MCPHP_TMP/d8.out")

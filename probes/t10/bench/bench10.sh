@@ -23,16 +23,52 @@ REPS=${REPS:-7}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+# D8 (b) wants a COMMITTED, DATED record and not a line that scrolls past,
+# so the run writes one; `--no-record` is for a scratch run.
+stamp=$(date -u +%Y-%m-%d)
+rec=probes/t10/bench/results/$stamp.json
+[ "${1:-}" = "--no-record" ] && rec=$tmp/scratch.json
+mkdir -p "$(dirname "$rec")"
+{
+    printf '{\n  "date": "%s",\n' "$stamp"
+    printf '  "host": "%s",\n' "$(uname -srm)"
+    printf '  "php": "%s",\n' "$("$PHP" -r 'echo PHP_VERSION;')"
+    printf '  "mc": "%s",\n' "$($MC --version)"
+    printf '  "reps": %s,\n  "programs": [\n' "$REPS"
+} > "$rec"
+first=1
+
 for prog in main.php heavy.php; do
     rm -f "$tmp/bench"
     probes/t10/mc-php --exe "probes/t10/bench/$prog" -o "$tmp/bench"
-    a=$("$PHP" "probes/t10/bench/$prog")
-    b=$("$tmp/bench")
-    if [ "$a" != "$b" ]; then
-        echo "bench: php says '$a', mc-php says '$b' -- not comparable"
+    # BYTE for byte and the exit status, both: `$(...)` strips every trailing
+    # newline, which is the very defect this probe fixed in the fixture gate
+    # (docs/review-backlog.md section 1) and which was still here. A binary
+    # with a missing or extra final newline was timed as comparable.
+    "$PHP" "probes/t10/bench/$prog" > "$tmp/a.out" 2> "$tmp/a.err"; ae=$?
+    "$tmp/bench" > "$tmp/b.out" 2> "$tmp/b.err"; be=$?
+    if ! cmp -s "$tmp/a.out" "$tmp/b.out" || ! cmp -s "$tmp/a.err" "$tmp/b.err" \
+       || [ "$ae" != "$be" ]; then
+        printf 'bench: %s -- php exit %s, mc-php exit %s, and the streams differ:\n' \
+            "$prog" "$ae" "$be"
+        diff -u "$tmp/a.out" "$tmp/b.out" | head -10
+        diff -u "$tmp/a.err" "$tmp/b.err" | head -10
+        echo "bench: not comparable"
         exit 1
     fi
-    printf '\n== %s ==\n  both answer %s\n' "$prog" "$a"
-    ls -l "$tmp/bench" | awk '{ printf "  the binary is %s bytes\n", $5 }'
-    python3 probes/t10/bench/time2.py "$PHP" "$tmp/bench" "$REPS" "probes/t10/bench/$prog"
+    a=$(cat "$tmp/a.out")
+    printf '\n== %s ==\n  both answer %s (exit %s, both streams byte for byte)\n' \
+        "$prog" "$a" "$ae"
+    size=$(ls -l "$tmp/bench" | awk '{ print $5 }')
+    printf '  the binary is %s bytes\n' "$size"
+    python3 probes/t10/bench/time2.py "$PHP" "$tmp/bench" "$REPS" \
+        "probes/t10/bench/$prog" --json "$tmp/t.json"
+    [ "$first" = 1 ] || printf ',\n' >> "$rec"
+    first=0
+    # the row is what time2.py MEASURED, not a re-parse of what it printed
+    python3 -c 'import json,sys; o=json.load(open(sys.argv[1]));
+o["answer"]=sys.argv[2]; o["bytes"]=int(sys.argv[3]);
+sys.stdout.write("    " + json.dumps(o))' "$tmp/t.json" "$a" "$size" >> "$rec"
 done
+printf '\n  ]\n}\n' >> "$rec"
+printf '\n  recorded: %s\n' "$rec"

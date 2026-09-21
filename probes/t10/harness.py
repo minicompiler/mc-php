@@ -17,7 +17,7 @@ three copies:
 for byte and the same exit code, both taken from the SAME source file in the
 SAME directory the `.phpt` sits in.
 """
-import importlib.util, os, re, shlex, subprocess, tempfile
+import importlib.util, os, re, shlex, subprocess, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MCPHP = os.environ.get('MCPHP_BIN', os.path.join(HERE, 'mc-php'))
@@ -42,6 +42,8 @@ _spec.loader.exec_module(_grid)
 # (it parses as 0, and every diagnostic test then disagrees for the wrong
 # reason), and without the `-d` php reads `output_handler=` as the name of a
 # script to run.
+_SRCDIR = os.path.abspath(os.environ.get('PHP_SRCDIR',
+                                          os.path.join(HERE, '..', '..', 'php-src')))
 _EALL = _grid.e_all(PHP)
 INI = []
 for _kv in _grid.DEFAULT_INI:
@@ -53,24 +55,37 @@ class Busy(Exception):
 
 
 def sibling(phpt, tag):
-    """Create `<test>.<tag>.php` next to the .phpt, exclusively.
+    """Create the scratch `.php` next to the .phpt, exclusively.
 
     The file has to be beside the .phpt: `__DIR__`, a relative `require` and a
     sibling data file all resolve from there. It must NOT clobber one that is
-    already there -- php-src ships `.php` files next to its tests. A name that
-    is taken is tried again with a counter, and after 64 tries the test is
-    skipped rather than a stranger's file destroyed.
+    already there -- php-src ships `.php` files next to its tests.
+
+    `<base>.php` FIRST, because that is the name probes/t0/phpt-run.py gives
+    the test and a program that reads `__FILE__`, `basename(__FILE__)` or a
+    path derived from it is otherwise not the program the grid graded. Only
+    when that name is taken does it fall back to `<base>.<tag>.php` and a
+    counter, and after 64 tries the test is skipped rather than a stranger's
+    file destroyed. `fallbacks` counts how often the canonical name was not
+    available, so the cost of the fallback is a number and not a guess.
     """
     base = phpt[:-5] if phpt.endswith('.phpt') else phpt
-    for n in range(64):
-        path = f'{base}.{tag}.php' if n == 0 else f'{base}.{tag}{n}.php'
+    names = [f'{base}.php'] + [f'{base}.{tag}.php'] + [f'{base}.{tag}{n}.php'
+                                                       for n in range(1, 64)]
+    for i, path in enumerate(names):
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
             continue
         os.close(fd)
+        if i:
+            fallbacks.append(path)
         return path
     raise Busy(base)
+
+
+# every test whose canonical `<base>.php` was taken, so the count is reportable
+fallbacks = []
 
 
 def tmpbin(prefix='mcphp.'):
@@ -115,7 +130,11 @@ def _extras(sec, testdir):
     """(argv, stdin, env-additions, extra ini) exactly as the grid builds them."""
     args = shlex.split(sec.get('ARGS', '').strip()) if sec.get('ARGS', '').strip() else []
     stdin = sec['STDIN'].encode('latin-1') if 'STDIN' in sec else b''
-    env = dict(os.environ)
+    # the GRID's base environment, not a bare os.environ: a .phpt that spawns
+    # a nested php through TEST_PHP_EXECUTABLE runs a different program
+    # without it (probes/t0/phpt-run.py's own note), and this tool exists to
+    # reproduce that grid's verdict.
+    env = _grid.base_environment(PHP, _SRCDIR)
     env['REDIRECT_STATUS'] = '1'
     for line in sec.get('ENV', '').splitlines():
         line = line.strip()
@@ -134,7 +153,7 @@ def _extras(sec, testdir):
     return args, stdin, env, ini
 
 
-def run_pair(phpt, tag, compile_timeout=40, run_timeout=20):
+def run_pair(phpt, tag, budget=None):
     """Compile the test's --FILE-- and run it, beside php, on the same input.
 
     Returns a dict with `status` and, when it ran, the two streams and the two
@@ -161,6 +180,13 @@ def run_pair(phpt, tag, compile_timeout=40, run_timeout=20):
     # headline really was, and phpt-run.py's own `classify` starts with this
     # line for the same reason.
     phpt = os.path.abspath(phpt)
+    # ONE budget for the candidate's compile AND run, and the same for php:
+    # probes/t0/phpt-run.py gives the candidate `--timeout` for both together
+    # (15 s by default), so a separate 40 + 20 here reported a completed
+    # difference for a test the grid had already called a timeout -- and the
+    # table then explained a verdict the grid never gave.
+    if budget is None:
+        budget = _grid.DEFAULT_TIMEOUT
     sec = sections(phpt)
     src = sec.get('FILE') if sec else file_section(phpt)
     if src is None:
@@ -174,8 +200,12 @@ def run_pair(phpt, tag, compile_timeout=40, run_timeout=20):
     argv, stdin, env, ini = _extras(sec or {}, cwd)
     try:
         open(php, 'w', encoding='latin-1', newline='').write(src)
+        t0 = time.monotonic()
         c = subprocess.run([MCPHP, '--exe', php, '-o', binf], stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE, timeout=compile_timeout)
+                           stderr=subprocess.PIPE, timeout=budget)
+        left = budget - (time.monotonic() - t0)
+        if left <= 0:
+            raise subprocess.TimeoutExpired([binf], budget)
         if c.returncode != 0:
             return {'status': 'no-compile', 'crc': c.returncode,
                     'cerr': c.stderr.decode('latin-1', 'replace'),
@@ -188,10 +218,10 @@ def run_pair(phpt, tag, compile_timeout=40, run_timeout=20):
         # tolerate.
         e = subprocess.run([PHP] + INI + ini + ['-q', php] + argv, input=stdin,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           env=env, cwd=cwd, timeout=run_timeout)
+                           env=env, cwd=cwd, timeout=budget)
         g = subprocess.run([binf] + argv, input=stdin,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           env=env, cwd=cwd, timeout=run_timeout)
+                           env=env, cwd=cwd, timeout=left)
     except subprocess.TimeoutExpired as t:
         return {'status': 'compile-timeout' if t.cmd and t.cmd[0] == MCPHP else 'run-timeout'}
     except OSError as ex:
