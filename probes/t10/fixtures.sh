@@ -17,18 +17,38 @@ PHP=${PHP:-php}
 P=probes/t10
 # A measurement takes a SNAPSHOT of the compiler (T7's note): an edit during
 # the run cannot then corrupt it.
-tmp=${TMPDIR:-/tmp}/mcphp-fx.$$
-mkdir -p "$tmp"
+# Where the binaries go and what bounds it: probes/t10/tmp.sh. This script
+# did not set MCPHP_TMP at all before, so every fixture run left its binary
+# (about 2 MB) in $TMPDIR for ever.
+. "$here/tmp.sh"
+mcphp_tmp_init mcphp-fx
+tmp=$MCPHP_TMP
 cp $P/mc-php "$tmp/mc-php"
 MCPHP_BIN=$tmp/mc-php
 export MCPHP_BIN
 trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# A fixture that loops for ever must not hang the gate with no output. perl is
+# on every host that has php; `timeout` is not on macOS.
+# perl forks rather than execs, so the alarm kills the CHILD and this shell
+# never prints "Alarm clock" into the stderr being compared.
+lim() {
+    perl -e 'my $t = shift; my $p = fork; exec(@ARGV) or exit 127 if !$p;
+             $SIG{ALRM} = sub { kill 9, $p; waitpid $p, 0; exit 124 };
+             alarm $t; waitpid $p, 0; exit $? >> 8' 30 "$@"
+}
+
+# One name for the binary, removed after each fixture: this loop is serial and
+# it WAITS, so it is the process that can do it (mcphp.sh execs and cannot).
+MCPHP_OUT=$tmp/fx.bin
+export MCPHP_OUT
 fail=0
 ng=0; nok=0
 for f in $P/g/*.php; do
     ng=$((ng + 1))
-    "$PHP" "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?
-    $P/mcphp.sh "$f" > "$tmp/m.out" 2> "$tmp/m.err"; me=$?
+    lim "$PHP" "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?
+    lim $P/mcphp.sh "$f" > "$tmp/m.out" 2> "$tmp/m.err"; me=$?
+    rm -f "$MCPHP_OUT" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
     if cmp -s "$tmp/p.out" "$tmp/m.out" && cmp -s "$tmp/p.err" "$tmp/m.err" \
        && [ "$pe" = "$me" ]; then
         nok=$((nok + 1))
@@ -49,7 +69,8 @@ echo "  fixtures: $nok / $ng agree with php (stdout, stderr and the exit code)"
 nr=0; nrok=0
 for f in $P/r/*.php; do
     nr=$((nr + 1))
-    $P/mcphp.sh "$f" > "$tmp/r.out" 2> "$tmp/r.err"; rc=$?
+    lim $P/mcphp.sh "$f" > "$tmp/r.out" 2> "$tmp/r.err"; rc=$?
+    rm -f "$MCPHP_OUT" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
     msg=$(sed 's/^[^:]*:[0-9]*: //' "$tmp/r.err" | head -1)
     case "$rc:$msg" in
         3:*"is refused by design"*) nrok=$((nrok + 1)) ;;

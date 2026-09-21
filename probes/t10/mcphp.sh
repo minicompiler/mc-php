@@ -24,10 +24,19 @@ MCPHP=${MCPHP_BIN:-$here/mc-php}
 src=$1
 shift
 
-# The binaries go in one directory the caller sweeps (MCPHP_TMP), because the
-# shell EXECs the program below and so cannot clean up after it.
-dir=${MCPHP_TMP:-${TMPDIR:-/tmp}}
-tmp=$dir/mcphp.$$.$(basename "$src" .php)
+# Where the binary goes. The CALLER names it through MCPHP_OUT when it can,
+# because the caller is the process that WAITS for this one and so is the only
+# one that knows when the file is dead: the `exec` at the bottom means this
+# shell cannot delete it itself. Without MCPHP_OUT they pile up in MCPHP_TMP
+# until its sweeper collects them, which at 37 tests/s is about 3000 binaries
+# (6 GB) live at once -- that is what filled the boot volume at 20000 of
+# 21395 tests. The fallback is kept so a direct call still works.
+if [ -n "${MCPHP_OUT:-}" ]; then
+    tmp=$MCPHP_OUT
+else
+    dir=${MCPHP_TMP:-${TMPDIR:-/tmp}}
+    tmp=$dir/mcphp.$$.$(basename "$src" .php)
+fi
 err=$tmp.err
 
 # Both of the compiler's streams are captured, because a php COMPILE-TIME
@@ -42,8 +51,9 @@ if [ "$rc" != 0 ]; then
     # 255 is a php compile-time fatal: php reports those while parsing too,
     # and exits 255. The text is already written; passing the code through is
     # what makes the grid compare it.
-    [ "$rc" = 255 ] && exit 255
-    grep -q 'is refused by design' "$err" && exit 3
+    if [ "$rc" = 255 ]; then rm -f "$err" "$out" "$tmp"; exit 255; fi
+    if grep -q 'is refused by design' "$err"; then rm -f "$err" "$out" "$tmp"; exit 3; fi
+    rm -f "$err" "$out" "$tmp"
     exit 2
 fi
 

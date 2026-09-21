@@ -1,12 +1,20 @@
 #!/bin/sh
-# T9 -- func_get_args, the block that prints the wrong thing, the block that
-# does not compile, the names, and the generator decision
-# (docs/plan.md section 4 row T9)
+# T10 -- the review backlog: the measurements that lie, the semantics that are
+# wrong, and D8 over the fixtures (docs/review-backlog.md, docs/plan.md row T10)
 #
-# T8 answered 1450 of 21044 and INVERTED its own failure table: 758 of 1396
-# sampled `wrong` tests compiled and printed the wrong thing, 638 did not
-# compile. T9 works both, in that order, re-measuring between blocks, and
-# takes D6's correction (func_get_args) first.
+# GitHub's Copilot reviewer left 59 inline findings across #1..#7 that nothing
+# acted on. They are grouped by cost in docs/review-backlog.md and worked in
+# that order:
+#
+#   1. the measurements that LIE -- four tools reported numbers they had not
+#      measured, so they chose what every block since T5 worked on. Fixed
+#      first, in probes/t10/harness.py, which is now the one definition of
+#      "these two agree" (stdout, stderr and the exit code).
+#   2. the semantics a program can OBSERVE -- short circuit, parameters by
+#      value, finally, a pending exception, visibility, hoisting, typed
+#      parameters, `?->` and thirteen one-line answers.
+#   3. D8 over the fixtures: probes/t10/d8check.py puts every .php in this
+#      probe into one of four regimes and fails on a file in none of them.
 #
 # Four grid runs, then the tables that choose the next block:
 #   (a) tests/lang   (b) Zend/tests   (c) ext/standard/tests/strings
@@ -15,9 +23,8 @@
 # streams and the exit code) and the refusals under r/ (named, exit 3);
 # then why.py's wrong-reason table, nocompile.py's groups of the block that
 # does not compile, diffgroup.py's clustering of the block that does,
-# arena.py's answer to D7, and D8's two obligations for the one .php this
-# probe wrote that is not a fixture -- its tests in both worlds and its
-# bench against php.
+# arena.py's answer to D7, and D8's two obligations for the .php this probe
+# wrote that is not a fixture -- its tests in both worlds and its bench.
 #
 # Exits 0 only when every run measured; a red grid is still a measurement.
 set -eu
@@ -35,17 +42,15 @@ OUT=probes/t10/out
 JOBS=${T10_JOBS:-12}
 fail=0
 
-# mcphp.sh EXECs the program it compiled, so it cannot clean up after itself:
-# the binaries land here and this is what sweeps them.
-MCPHP_TMP=${TMPDIR:-/tmp}/mcphp-t10.$$
-export MCPHP_TMP
-mkdir -p "$MCPHP_TMP"
-# and swept WHILE it runs: 21395 binaries is about 6 GB otherwise
-( while [ -d "$MCPHP_TMP" ]; do find "$MCPHP_TMP" -type f -mmin +1 -delete 2>/dev/null; sleep 20; done ) &
-sweeper=$!
-trap 'kill "$sweeper" 2>/dev/null; rm -rf "$MCPHP_TMP"' EXIT INT TERM
+# Where the compiled binaries go, and what bounds that directory: see
+# probes/t10/tmp.sh, which is the one definition and carries the measurement.
+. "$here/tmp.sh"
+mcphp_tmp_init mcphp-t10
+mcphp_tmp_watch
+trap 'mcphp_tmp_done' EXIT INT TERM
+df -h / | tail -1 | awk '{ printf "  disk before: %s used, %s free\n", $3, $4 }' 
 
-[ -d "$SRC" ] || { echo "T9: no php-src -- clone php-8.5.10 at the repository root"; exit 1; }
+[ -d "$SRC" ] || { echo "T10: no php-src -- clone php-8.5.10 at the repository root"; exit 1; }
 "$MC" --version
 "$PHP" --version | head -1
 
@@ -137,5 +142,5 @@ printf '\n== 11. D8: the bench, php against the mc-php binary ==\n'
 sh probes/t10/bench/bench10.sh || fail=1
 
 echo ""
-[ "$fail" = 0 ] || { echo "T9: something did not measure"; exit 1; }
-echo "T9: measured -- see probes/t10/RESULTS.md"
+[ "$fail" = 0 ] || { echo "T10: something did not measure"; exit 1; }
+echo "T10: measured -- see probes/t10/RESULTS.md"

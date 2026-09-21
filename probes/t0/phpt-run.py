@@ -62,6 +62,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -259,7 +260,30 @@ def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     cmd = shlex.split(candidate) + [php_file]
     if args:
         cmd += shlex.split(args)
-    return _run(cmd, stdin, env, timeout, cwd)
+    # The candidate compiles the test and EXECs the binary, so it cannot
+    # delete it (probes/t*/mcphp.sh's own note: without the exec, the timeout
+    # below kills the shell and leaves the program spinning). THIS process is
+    # the one that waits for it, so this is where the file is named and
+    # unlinked. Without that the binaries -- about 2 MB each -- accumulate for
+    # the whole run: a full-corpus grid filled a 460 GiB boot volume at about
+    # 20000 of 21395 tests. With it the peak is the job count times 2 MB,
+    # whatever the size of the corpus.
+    #
+    # MCPHP_OUT is honoured by probes/t10/mcphp.sh and ignored by the frozen
+    # earlier probes, which still fall back to their own MCPHP_TMP.
+    env = dict(env)
+    fd, out = tempfile.mkstemp(prefix='mcphp-out.', suffix='.bin',
+                               dir=os.environ.get('MCPHP_TMP') or None)
+    os.close(fd)
+    env['MCPHP_OUT'] = out
+    try:
+        return _run(cmd, stdin, env, timeout, cwd)
+    finally:
+        for p in (out, out + '.err', out + '.out'):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 def e_all(php_exe):

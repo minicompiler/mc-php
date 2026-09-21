@@ -9,12 +9,10 @@ cd "$root"
 bin=$1; out=$2; full=${3:-}
 MCPHP_BIN=$(CDPATH= cd -- "$(dirname -- "$bin")" && pwd)/$(basename "$bin")
 export MCPHP_BIN
-MCPHP_TMP=${TMPDIR:-/tmp}/mcphp-grid.$$
-export MCPHP_TMP
-mkdir -p "$MCPHP_TMP"
-( while [ -d "$MCPHP_TMP" ]; do find "$MCPHP_TMP" -type f -mmin +1 -delete 2>/dev/null; sleep 20; done ) &
-sw=$!
-trap 'kill $sw 2>/dev/null; rm -rf "$MCPHP_TMP"' EXIT INT TERM
+. "$(dirname -- "$0")/tmp.sh"
+mcphp_tmp_init mcphp-grid
+mcphp_tmp_watch
+trap 'mcphp_tmp_done' EXIT INT TERM
 rm -rf "$out"; mkdir -p "$out"
 for d in tests/lang Zend/tests ext/standard/tests/strings; do
     n=$(echo "$d" | tr '/' '_')
