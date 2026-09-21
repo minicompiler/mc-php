@@ -165,6 +165,71 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   here measured a binary that was being rebuilt underneath it.
   Fixtures: **30 of 30** under `g/` byte for byte php's on both streams, **5 of 5** under `r/`
   refused by name with exit 3; `lencheck` 97 / 0 wrong, `aritycheck` 179 / 0 wrong.
+- T10 done (`probes/t10`), on **mc 1.1.0**: the review backlog -- 59 Copilot findings across
+  #1..#7 that nothing had acted on (`docs/review-backlog.md`), all three sections, plus one
+  the sections did not name and a disk that ran out. **green 1637 -> 1675**:
+  `phpt: green 1675 / wrong 14445 / refused 1967 / skip 2947 / php-fail 361 / total 21034`;
+  per directory `tests/lang` 104 (was 102), `Zend/tests` 748 (was 709),
+  `ext/standard/tests/strings` 262 (was 262). **1650 of the 1675 greens are in T0's
+  "touched by none" set**; `refused` fell **2309 -> 1967**. The green moved only +38 because
+  the work is CORRECTNESS -- a `.phpt` that was already green does not become greener for the
+  compiler being right about short circuit -- and what the probe is worth is the corrected
+  numbers below.
+  * **Four tools reported numbers they had never measured**, and they are what chose every
+    block since T5. They are one tool now, `probes/t10/harness.py`: stdout byte for byte AND
+    the same exit code, which is the pair the grid itself grades on. `why.py` labelled a test
+    `(compiled; output differs)` WITHOUT running the binary -- of 784 sampled tests that
+    compile and run, **615 really differ, 143 (18.2%) print exactly what php prints and exit
+    with a different code**, 25 crash or time out, 1 agrees on both. That exit-code group is
+    ONE shape (a php program that ends in a fatal exits non-zero; this compiler exits 0), it
+    is the largest nameable block left, and nothing could see it because stdout matched.
+    `arena.py` divided by `len(files)` while turning every failure into `None`: of the
+    1352-test list only **782 RAN**, so the rate understated by 1.7x. `fixtures.sh` merged the
+    streams with `2>&1` and compared with `$(...)`, which strips trailing newlines.
+    `bench/bench.sh` in t7 and t8 built and timed **t6's** compiler. `<test>.why.php`
+    clobbered a sibling of that name.
+  * **Twenty-two semantics a program can observe**, seventeen fixed and closed by a fixture,
+    five closed by measurement, one refused with its number: short circuit (`&&`, `||`, `??`,
+    `?:`, and the right side's own PENDING statements move inside the branch with it),
+    parameters BY VALUE (in the callee's prologue, so no call road can forget), `finally` on a
+    `return` from the try and from the catch, a pending exception stopping the CONDITION of
+    `if`/`while`/`for`/`do`, visibility actually enforced, global function hoisting, typed
+    method parameters coerced, `?->`, and thirteen one-liners. Refused with its number:
+    `"${x}"`, deprecated in php 8.2 and worth 13 tests of the graded directories.
+  * **`ph_cast(TY_U8, <pointer>)` keeps the LOW BYTE**, so `if ((u8) zval_ptr)` is false for
+    every address ending in `0x00`. It silently skipped the by-value copy, and -- pre-existing
+    since T9 -- `func_num_args`'s own counter, depending on nothing but where the arena landed:
+    two class methods rather than one or three was enough to arrange it. No diagnostic, no
+    reproducible failure, it moves with the size of the program. `ph_truthy` (`!!x`, mc's own
+    64-bit test, twice) replaces both, and **anything here that asks "is this pointer non-null"
+    must use it**.
+  * **D8's mc-php half had NEVER run, under any probe.** `run.sh`'s step 10 piped both halves
+    to `tail -1` with nothing behind them, so "6 ok / 0 failed in BOTH worlds" and T9's two
+    bench ratios were php's side alone -- and T9's own compiler refuses T9's own
+    `bench/main.php`. Two compiler defects: `require __DIR__ . "/x.php"` refused as a computed
+    path (it is not -- both halves are compile-time literals, and it is php-src's own
+    spelling), and a top-level `return` returning from the generated `main`, skipping
+    `php_shutdown`, `php_flush` and the exit code, so the program printed NOTHING and exited
+    with a junk status (54, 82, 94, 142 and 178 on five runs of the same source). Both halves
+    run now: **6 ok / 0 failed in each**, `main.php` 7.35x, `heavy.php` 1.46x.
+  * **D8 over the fixtures** (backlog § 3): the plan states the exemption -- the unit D8
+    governs is the PROGRAM, and a differential fixture is already a test and a stronger one --
+    and `probes/t10/d8check.py` ENFORCES it, putting every `.php` in one of four regimes and
+    failing on a file in none. It found `bench/unwind.php`, copied forward twice and referenced
+    by nothing.
+  * **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at
+    about 20000 of 21395 tests. `mcphp.sh` EXECs the binary and cannot delete it; the caller,
+    which WAITS, names it with `MCPHP_OUT` and unlinks it the moment the subprocess returns,
+    and each run sweeps the dead siblings at startup. **Peak 1872 KiB over 21395 tests and
+    1860 KiB over 6333 -- bounded by the job count, not the corpus**; `df -h /` identical
+    before and after.
+  * **`do { } while (cond)` dropped its condition's pending statements**, so the unwinding
+    check landed before the loop and a throwing condition spun for ever. `while` and `for` take
+    them with `ph_take_pend`; `do` did not.
+  Fixtures: **73 of 73** under `g/` byte for byte php's on each stream and the exit code,
+  **6 of 6** under `r/` refused by name with exit 3; `lencheck` 496 / 0 wrong, `aritycheck`
+  272 / 0 wrong, `d8check` 85 `.php` all in a regime. **No new mc gap**, and no new external
+  name: the 38-of-21219 inline-HTML refusal T5 reported is unchanged.
 - T9 done (`probes/t9`), on **mc 1.1.0**: D6's correction built, and T8's two blocks
   worked from a UNIFORM corpus-wide sample (every ninth of `wrong.txt`, split so the
   three GRADED directories are not drowned by `ext/dom` 734, `ext/spl` 713,

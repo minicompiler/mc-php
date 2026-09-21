@@ -201,6 +201,53 @@ and printed the wrong thing**. T7 builds the first and takes the second apart.
 
 `sh probes/t7/run.sh`. Details: `probes/t7/RESULTS.md`.
 
+## T10 -- the review backlog: the measurements that lie, the semantics that are wrong
+
+**green 1637 -> 1675.**
+`phpt: green 1675 / wrong 14445 / refused 1967 / skip 2947 / php-fail 361 / total 21034`
+over the whole corpus; per directory `tests/lang` **104** (was 102), `Zend/tests` **748**
+(was 709), `ext/standard/tests/strings` **262** (was 262). **1650 of the 1675 greens are in
+T0's "touched by none" set**, and `refused` fell **2309 -> 1967** -- one block, because
+`require __DIR__ . "/x.php"` and a top-level `return` were refusals and are not any more.
+
+The green moved only +38, and that is the expected shape: this is CORRECTNESS work, and a
+`.phpt` that was already green does not become greener for the compiler being right about short
+circuit. What the probe is worth is the corrected numbers.
+
+* **Four tools reported numbers they had never measured** (`docs/review-backlog.md` § 1), and
+  they are what chose every block since T5. `probes/t10/harness.py` is the single definition of
+  "these two agree" now -- stdout byte for byte AND the same exit code, which is the pair
+  `probes/t0/phpt-run.py` itself grades on. `why.py` labelled a test
+  `(compiled; output differs)` **without ever running the binary**: of 784 sampled tests that
+  compile and run, **615 really differ, 143 (18.2%) print exactly what php prints and exit with
+  a different code**, 25 crash or time out, and 1 agrees on both. That exit-code group is ONE
+  shape -- a php program that ends in a fatal exits non-zero and this compiler exits 0 -- it is
+  the largest nameable block left, and nothing could see it because stdout matched. `arena.py`
+  divided by `len(files)` while turning every failure into `None`: of the 1352-test list only
+  **782 RAN**. `fixtures.sh` merged the streams with `2>&1` and compared with `$(...)`.
+* **Twenty-two semantics a program can observe** (§ 2), seventeen fixed and closed by a
+  fixture, five closed by measurement, one refused with its number: short circuit and the right
+  operand's own pending statements, parameters BY VALUE in the callee's prologue, `finally` on
+  a `return`, a pending exception stopping a CONDITION, visibility, hoisting, typed method
+  parameters, `?->`, and thirteen one-liners.
+* **`ph_cast(TY_U8, <pointer>)` keeps the low byte**, so `if ((u8) p)` is false for every
+  address ending in `0x00`. It silently skipped the by-value copy and, since T9,
+  `func_num_args`'s counter -- with no diagnostic and no reproducible failure, because it moves
+  with the size of the program. `ph_truthy` (`!!x`) replaces both.
+* **D8's mc-php half had never run, under any probe** (§ 3, and one the section did not name).
+  `run.sh` step 10 piped both halves to `tail -1` with nothing behind them. `require __DIR__ .
+  "/x.php"` was refused as a computed path and a top-level `return` returned from the generated
+  `main`, printing nothing and exiting with a junk status. Both halves run now: **6 ok / 0
+  failed in each**, `main.php` 7.35x, `heavy.php` 1.46x. `probes/t10/d8check.py` is the
+  enforcement D8 lacked: four regimes, and a `.php` in none of them fails the run.
+* **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at
+  about 20000 of 21395 tests. The caller names the binary with `MCPHP_OUT` and unlinks it the
+  moment the subprocess returns; each run sweeps the dead siblings at startup. **Peak 1872 KiB
+  over 21395 tests against 1860 KiB over 6333: bounded by the job count, not the corpus.**
+
+`sh probes/t10/run.sh` (about 90 minutes: 73 fixtures, 6 refusals, four grids, the breakdown
+and the five tables). Details: `probes/t10/RESULTS.md`.
+
 ## T9 -- func_get_args, the two blocks T8 inverted, and the generator decision
 
 `phpt: green 1637 / wrong 14140 / refused 2309 / skip 2947 / php-fail 362 / total 21033`
