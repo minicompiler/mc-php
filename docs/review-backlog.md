@@ -1005,3 +1005,28 @@ Two findings: one real, one refuted with a measurement.
   `--CLEAN--` of `sleep(60)` against a 15-second budget: the pair comes back
   **`ran True` in 16.8 s**, the candidate compiled and run, which is what
   the grid does with it.
+
+### Round thirty-two
+
+Three findings, all real, all about the harness being VISIBLE to the program
+it measures.
+
+- ~~`MCPHP_OUT` is inherited by the compiled program.~~ Correct: `mcphp.sh`
+  execs the binary, so the wrapper's own scratch name was in the program's
+  environment while the ORACLE ran without it -- two different environments
+  for the same test. `unset MCPHP_OUT` before the exec; the caller still
+  holds the path and still unlinks it. Measured: `getenv("MCPHP_OUT")` is
+  `bool(false)` under both now. (No `.phpt` in the corpus reads it -- 0 of
+  21395 -- so no published number moves.)
+- ~~The owner marker is an extra file in the test directory.~~ Correct, and
+  it is round twenty-six's fix creating a new problem: the grid puts exactly
+  one file beside a `.phpt`, and a `.php.mcphp-owner` is something a test
+  that globs its own directory can see. The marker lives in `MCPHP_TMP`
+  (the bounded directory, swept with everything else) under a digest of the
+  absolute path. Measured: the only file beside the test during a run is
+  the `.php`, and the three recovery cases -- no marker, dead owner, live
+  owner -- still answer ran / ran / busy.
+- ~~The peak can be published half-written.~~ Correct: `echo > peak`
+  truncates first, so a signal between the truncate and the write leaves it
+  empty and the reader cannot tell that from a run that measured nothing.
+  It writes `.peak.new` and renames.

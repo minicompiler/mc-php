@@ -64,7 +64,13 @@ mcphp_tmp_watch() {
     ( while [ -d "$MCPHP_TMP" ]; do
           k=$(du -sk "$MCPHP_TMP" 2>/dev/null | awk '{ print $1 }')
           o=$(cat "$MCPHP_TMP/peak" 2>/dev/null)
-          [ -n "$k" ] && { [ -z "$o" ] || [ "$k" -gt "$o" ]; } && echo "$k" > "$MCPHP_TMP/peak"
+          # write and RENAME: a truncating `>` that is interrupted between
+          # the truncate and the write publishes an empty peak, and the
+          # reader cannot tell that from a run that measured nothing.
+          [ -n "$k" ] && { [ -z "$o" ] || [ "$k" -gt "$o" ]; } && {
+              echo "$k" > "$MCPHP_TMP/.peak.new"
+              mv -f "$MCPHP_TMP/.peak.new" "$MCPHP_TMP/peak"
+          }
           # ONLY the per-test artefacts, and only long after any of them
           # can still be in use. `! -name peak ! -name owner` at one minute
           # deleted everything else in the directory -- including a binary
@@ -74,7 +80,7 @@ mcphp_tmp_watch() {
           # the names are the four these tools create.
           find "$MCPHP_TMP" -type f -mmin +5 \
                \( -name 'mcphp*' -o -name 'why.*' -o -name 'dg.*' \
-                  -o -name 'ar.*' \) -delete 2>/dev/null
+                  -o -name 'ar.*' \) ! -name '.peak.new' -delete 2>/dev/null
           sleep 2
       done ) &
     MCPHP_SWEEP=$!

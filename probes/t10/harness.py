@@ -17,7 +17,7 @@ three copies:
 for byte and the same exit code, both taken from the SAME source file in the
 SAME directory the `.phpt` sits in.
 """
-import importlib.util, os, re, shlex, signal, subprocess, tempfile, time
+import hashlib, importlib.util, os, re, shlex, signal, subprocess, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MCPHP = os.environ.get('MCPHP_BIN', os.path.join(HERE, 'mc-php'))
@@ -57,6 +57,23 @@ class Busy(Exception):
 OWNER = '.mcphp-owner'
 
 
+def _owner_path(path):
+    """Where the marker lives, and it is NOT beside the test.
+
+    The grid creates exactly one file next to a `.phpt` -- the `.php` it
+    compiles -- so a marker there is a file the program can see: a .phpt
+    that globs its own directory, counts entries or opens `*` would be
+    classified on the harness. It goes in MCPHP_TMP (the bounded directory,
+    swept with everything else) or the system temporary directory, named by
+    a digest of the absolute path so two workers cannot collide.
+    """
+    d = os.environ.get('MCPHP_TMP')
+    if not d or not os.path.isdir(d):
+        d = tempfile.gettempdir()
+    h = hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:24]
+    return os.path.join(d, 'mcphp-owner.' + h)
+
+
 def _me():
     """This process, identified well enough to tell a recycled pid apart."""
     try:
@@ -77,7 +94,7 @@ def _stale_scratch(path):
     run call that test `busy` and quietly shrink the sample.
     """
     try:
-        with open(path + OWNER) as f:
+        with open(_owner_path(path)) as f:
             pid, _, st = f.read().partition('\n')
     except OSError:
         return False
@@ -127,7 +144,7 @@ def sibling(phpt, tag):
         except FileExistsError:
             if attempt or not _stale_scratch(path):
                 raise Busy(path)
-            for q in (path, path + OWNER):
+            for q in (path, _owner_path(path)):
                 try:
                     os.unlink(q)
                 except OSError:
@@ -136,7 +153,7 @@ def sibling(phpt, tag):
         raise Busy(path)
     os.close(fd)
     try:
-        with open(path + OWNER, 'w') as f:
+        with open(_owner_path(path), 'w') as f:
             f.write(_me())
     except OSError:
         pass
@@ -436,7 +453,7 @@ def run_pair(phpt, tag, budget=None):
     except OSError as ex:
         return {'status': 'error', 'error': f'{ex.__class__.__name__}: {ex}'}
     finally:
-        unlink(php, php + OWNER, binf)
+        unlink(php, _owner_path(php), binf)
     out = g.stdout.decode('latin-1')
     want = e.stdout.decode('latin-1')
     return {'status': 'ran', 'out': out, 'rc': g.returncode, 'sec': sec,
