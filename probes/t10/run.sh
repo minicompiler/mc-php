@@ -40,6 +40,11 @@ PHP=${PHP:-php}
 SRC=php-src
 OUT=probes/t10/out
 JOBS=${T10_JOBS:-12}
+# and EXPORT the resolved value, not just the caller's: harness.jobs() falls
+# back to os.cpu_count() when T10_JOBS is unset, so with no T10_JOBS in the
+# environment the grid ran 12 workers and the analysis tools ran one per CPU
+# -- past the bound this probe measures its temporary space against.
+T10_JOBS=$JOBS; export T10_JOBS
 fail=0
 
 # Where the compiled binaries go, and what bounds that directory: see

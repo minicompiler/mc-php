@@ -522,3 +522,52 @@ fifteen and sixteen replaced. Each now reads the final sample, recounted from
 the committed `out/why.tsv` rather than copied from prose: **1351 tests,
 812 compile, 788 differ, 22 crash, 2 time out, 0 agree**, 539 that do not
 compile, and 338 / 181 / 143 / 86 in the clustering.
+
+### Round eighteen
+
+Nine findings: six new and three more in code that had not changed. Seven
+needed a change, one is a documentation correction the previous round caused,
+and one is a re-reading of an amendment this probe already recorded.
+
+- ~~`bench10.sh` truncates the dated record before it measures.~~ Correct, and
+  it is the file D8 (b) asks for precisely because it survives: a compile
+  failure, a stream mismatch, a timeout or a `^C` left half a JSON object at
+  the committed path and destroyed the previous valid one. The record is built
+  in `$tmp`, parsed with `json.load` and MOVED into place on success.
+- ~~`harness.py` never runs `--CLEAN--`.~~ Correct, and measured in both
+  directions: `run_pair` on `ext/standard/tests/file/005_basic.phpt` left
+  `005_basic` and `005_basic.tmp` in the source tree before the fix and leaves
+  **nothing** after it. The section runs between the oracle and the compile,
+  which is where `probes/t0/phpt-run.py` runs it.
+- ~~`harness.py` compiles with the analysis process's environment and working
+  directory.~~ Correct: the grid spawns `mcphp.sh` with the test environment and
+  `cwd=srcdir`, so a source whose include resolution depends on either was
+  compiled under a different harness than the one graded. The compiler
+  subprocess takes `env` and `cwd=run_cwd` now, as the binary already did.
+- ~~`arena.py` hard-codes six workers.~~ Correct -- it was the one analysis tool
+  round seventeen did not reach. `harness.jobs()`.
+- ~~`run.sh` does not export the RESOLVED job limit.~~ Correct, and it is what
+  made round seventeen's fix incomplete: with no `T10_JOBS` in the caller's
+  environment the grid ran 12 workers and `harness.jobs()` fell back to
+  `os.cpu_count()`. `T10_JOBS=$JOBS; export T10_JOBS`.
+- ~~`docs/plan.md` D8 (e) still quotes `class_exists(..., false)`.~~ Correct, and
+  the previous round caused it. Both it and the two stale paragraphs in
+  ~~`bench/shim.php`~~ now describe the autoloading lookup that is there.
+- ~~The pull request's own description says "784 sampled tests that compile and
+  run".~~ Correct: the measured breakdown is 812 that compile, of which 810 run
+  to completion (788 differ, 22 crash) and 2 time out. The description is
+  rewritten from the same recount as the five files of round seventeen.
+- **`docs/plan.md` D8 (c): a differential fixture is not the mandated
+  coverage.** Recorded as an amendment rather than an omission, and the shape
+  was the owner's to choose. D8's unit is the PROGRAM. A `g/` fixture IS a test,
+  and a stronger one than the PHPUnit row D8 (a) asks for: it is compared
+  against php byte for byte on stdout AND stderr AND the exit code, where a
+  PHPUnit assertion compares what the test's own author thought to assert. A
+  benchmark row for a four-line fixture measures process start-up. What makes
+  it an exemption and not prose is `d8check.py`: the fixture regime is a regime
+  with its own obligation -- every `g/` and `r/` file must be walked by
+  `fixtures.sh`'s own globs, which the script reads OUT of `fixtures.sh` and
+  fails if they change -- and the repo-wide sweep then requires every other
+  `.php` under `probes/` to be in one of the five regimes or named by a gate.
+  (e) records the PHPUnit half as exempt for as long as `mc-php test` does not
+  exist, with the mechanism named.

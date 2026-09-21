@@ -4,15 +4,13 @@
 // answers nothing), so the php side runs the SAME test file against this
 // shim; with the real phpunit on the include path this declaration has to
 // be guarded, which is the `class_exists` below -- with the real phpunit
-// loaded this file is a no-op and the test runs against phpunit's own
-// TestCase, which is what D8 asks for.
+// available this file is a no-op and the test runs against phpunit's own
+// TestCase, which is what D8 asks for. The lookup AUTOLOADS (see the guard's
+// own note), so "available" means loaded or loadable, not loaded already.
 //
 // D6: nothing here enumerates methods. The runner names them (run.php).
 namespace PHPUnit\Framework;
 
-// The real phpunit wins: `false` keeps the autoloader out of it, so this asks
-// "is it already loaded", not "can it be loaded".
-//
 // The guard is a CONDITIONAL DECLARATION and not an early `return`, which is
 // what it was until T10. php hoists an unconditional class declaration, so
 // `class_exists` above the declaration in the same file was already TRUE and

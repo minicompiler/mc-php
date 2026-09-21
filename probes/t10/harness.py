@@ -226,9 +226,31 @@ def run_pair(phpt, tag, budget=None):
         e = subprocess.run([PHP] + INI + ini + ['-q', php] + argv, input=stdin,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            env=env, cwd=run_cwd, timeout=budget)
+        # --CLEAN-- between the two, exactly where the grid runs it
+        # (probes/t0/phpt-run.py, right after the oracle): a test that
+        # creates a file and removes it there left the file behind for the
+        # candidate AND for whatever ran next in the same directory, so the
+        # classification could describe a state the grid never had.
+        clean = (sec or {}).get('CLEAN', '')
+        if clean.strip():
+            cf = php[:-4] + '.clean.php'
+            try:
+                open(cf, 'w', encoding='latin-1', newline='').write(clean)
+                subprocess.run([PHP] + INI + ['-q', cf], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, env=env, cwd=run_cwd,
+                               timeout=budget)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            finally:
+                unlink(cf)
         t0 = time.monotonic()
+        # the SAME environment and working directory the grid compiles in:
+        # mcphp.sh is spawned by probes/t0/phpt-run.py with the test env and
+        # cwd=srcdir, so a source whose include resolution depends on either
+        # was being compiled under a different harness than the one graded.
         c = subprocess.run([MCPHP, '--exe', php, '-o', binf], stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE, timeout=budget)
+                           stderr=subprocess.PIPE, env=env, cwd=run_cwd,
+                           timeout=budget)
         left = budget - (time.monotonic() - t0)
         # 255 is a php COMPILE-TIME fatal and not a failure to compile: php
         # reports those while parsing and exits 255, so mcphp.sh prints both

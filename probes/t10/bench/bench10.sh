@@ -29,13 +29,19 @@ stamp=$(date -u +%Y-%m-%d)
 rec=probes/t10/bench/results/$stamp.json
 [ "${1:-}" = "--no-record" ] && rec=$tmp/scratch.json
 mkdir -p "$(dirname "$rec")"
+# The record is built in $tmp and MOVED into place at the end. It used to be
+# truncated here, before either program had compiled, so a compile failure, a
+# mismatch, a timeout or a ^C left half a JSON object at the committed path
+# and destroyed the previous valid one -- the file D8 (b) asks for precisely
+# because it is the thing that survives.
+part=$tmp/record.json
 {
     printf '{\n  "date": "%s",\n' "$stamp"
     printf '  "host": "%s",\n' "$(uname -srm)"
     printf '  "php": "%s",\n' "$("$PHP" -r 'echo PHP_VERSION;')"
     printf '  "mc": "%s",\n' "$($MC --version)"
     printf '  "reps": %s,\n  "programs": [\n' "$REPS"
-} > "$rec"
+} > "$part"
 first=1
 
 for prog in main.php heavy.php; do
@@ -77,12 +83,15 @@ for prog in main.php heavy.php; do
     printf '  the binary is %s bytes\n' "$size"
     python3 probes/t10/bench/time2.py "$PHP" "$tmp/bench" "$REPS" \
         "probes/t10/bench/$prog" --json "$tmp/t.json"
-    [ "$first" = 1 ] || printf ',\n' >> "$rec"
+    [ "$first" = 1 ] || printf ',\n' >> "$part"
     first=0
     # the row is what time2.py MEASURED, not a re-parse of what it printed
     python3 -c 'import json,sys; o=json.load(open(sys.argv[1]));
 o["answer"]=sys.argv[2]; o["bytes"]=int(sys.argv[3]);
-sys.stdout.write("    " + json.dumps(o))' "$tmp/t.json" "$a" "$size" >> "$rec"
+sys.stdout.write("    " + json.dumps(o))' "$tmp/t.json" "$a" "$size" >> "$part"
 done
-printf '\n  ]\n}\n' >> "$rec"
+printf '\n  ]\n}\n' >> "$part"
+# valid JSON before it is published, and one rename rather than a rewrite
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$part"
+mv "$part" "$rec"
 printf '\n  recorded: %s\n' "$rec"

@@ -229,8 +229,9 @@ D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixt
 
     (e) The PHPUnit half of (a) is EXEMPT while its two mechanisms do not exist, and this is
     the exemption rather than an omission: **phpunit is not installed on this host** (the
-    check is `class_exists('PHPUnit\Framework\TestCase', false)`, which is why
-    `probes/t10/bench/shim.php` exists at all) and **`mc-php test` does not exist** -- (a)
+    check is `class_exists('PHPUnit\Framework\TestCase')`, which is why
+    `probes/t10/bench/shim.php` exists at all -- with the DEFAULT autoload, so a host
+    that has phpunit behind an autoloader gets the real `TestCase` and not the shim) and **`mc-php test` does not exist** -- (a)
     names it as the mechanism the COMPILER will provide, and no probe has built it. Until one
     does, the test methods are named by hand in `probes/t10/bench/run.php` and the gate proves
     what it can: that the class's `test*` methods are all named by the runner

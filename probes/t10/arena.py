@@ -34,7 +34,7 @@ def one(p):
 
 def main():
     files = [l.split('\t')[0].strip() for l in sys.stdin if l.strip()]
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=harness.jobs()) as ex:
         rows = list(ex.map(one, files))
     c = Counter(s for s, _ in rows)
     ran = c['ran'] + c['exhausted']

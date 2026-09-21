@@ -492,3 +492,13 @@ corpus has **2** `EXPECT*_EXTERNAL` tests and neither asserts a diagnostic, and
 the published `why.tsv` has **0** rows in the statuses `nocompile.py` was
 miscounting. That is the useful shape -- a tool can be wrong and its answer
 right, and only the measurement tells you which.
+
+**Round eighteen** found the two that matter most for anything measured after
+this probe, both in `harness.py`: it never ran a test's `--CLEAN--` section,
+and it compiled with the analysis process's own environment and working
+directory rather than the grid's. The first is measured in both directions --
+`run_pair` on `ext/standard/tests/file/005_basic.phpt` left `005_basic` and
+`005_basic.tmp` in the source tree before the fix and leaves nothing after it.
+It also caught `bench10.sh` truncating the dated record before it had measured
+anything, so any failure destroyed the previous valid one: the record is built
+in `$tmp`, parsed, and moved into place only on success.
