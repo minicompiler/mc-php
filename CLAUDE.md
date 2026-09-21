@@ -235,8 +235,9 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
   * **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at
     about 20000 of 21395 tests. `mcphp.sh` EXECs the binary and cannot delete it; the caller,
     which WAITS, names it with `MCPHP_OUT` and unlinks it the moment the subprocess returns,
-    and each run sweeps the dead siblings at startup. **Peak 1892 KiB over a run of 27728
-    tests, 1908 KiB over a second corpus run of 21395 and 1860 KiB over one of 6333 -- so it
+    and each run sweeps the dead siblings at startup. **Peak 1908 KiB over a run of 27728
+    tests, 2152 KiB over the round-seventeen re-run of the same 27728 and 1860 KiB over one of
+    6333 -- so it
     is bounded by the job count and not the corpus**; `df -h /` identical before and after.
   * **`do { } while (cond)` dropped its condition's pending statements**, so the unwinding
     check landed before the loop and a throwing condition spun for ever. `while` and `for` take
@@ -277,7 +278,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     the fifth (round ten's sscanf fix).
     **A per-block move smaller than a dozen tests should be read on the directories**, and the
     corpus number is worth quoting with its band -- T9's 1637 and T8's 1450 included.
-  Fixtures: **75 of 75** numbered under `g/` byte for byte php's on each stream and the exit code,
+  Fixtures: **77 of 77** numbered under `g/` byte for byte php's on each stream and the exit code,
   **6 of 6** under `r/` refused by name with exit 3; `lencheck` 496 / 0 wrong, `aritycheck`
   272 / 0 wrong, `d8check` 88 `.php` in a regime and 356 under `probes/` swept for orphans. **No new mc gap**, and no new external
   name: the 38-of-21219 inline-HTML refusal T5 reported is unchanged.

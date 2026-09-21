@@ -222,4 +222,15 @@ sh probes/t10/bench/bench10.sh || fail=1
 
 echo ""
 [ "$fail" = 0 ] || { echo "T10: something did not measure"; exit 1; }
+# THE number, last and on its own line. A probe answers one question with one
+# number (CLAUDE.md, probes/README.md) and T10's is the corpus grid's
+# green/total, the same pair every probe since T1 has ended on; the tables
+# above it are the analysis section 1 of the backlog asks for, each its own
+# script a reader can run alone. Printing it here is what makes the contract
+# checkable rather than asserted.
+# read off the grid's OWN summary line, not recounted from the bucket files:
+# a .phpt name can carry a newline and `wc -l` would answer a different number
+# than the grid published.
+awk '/^phpt: green/ { for (i = 1; i < NF; i++) if ($i == "total") t = $(i + 1);
+                      printf "T10: %s / %s\n", $3, t }' "$OUT/all.summary"
 echo "T10: measured -- see probes/t10/RESULTS.md"

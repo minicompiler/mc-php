@@ -2948,6 +2948,13 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
             ph_can_throw = ph_can_throw | spct;
             i64 nsp = PH_SPREADN;
             if (maxn < nsp) nsp = maxn;
+            // what php checks before it enters the callee, and what this
+            // compiler's fixed slot count cannot: a non-array operand is a
+            // TypeError there and was silently no arguments here, and an
+            // array longer than the slots was silently truncated.
+            ph_pending_stmt(ph_stmt_of(ph_c2("php_unpack_check", ph_tref(tmp),
+                                             ph_int(nsp), TY_VOID)));
+            ph_pending_stmt(ph_check(ph_tline, ph_tfile));
             i64 k = 0;
             loop {
                 if (k >= nsp) break;
@@ -7111,6 +7118,19 @@ i64 ph_function() {
         if (ph_at("&", 1)) { ph_next(); byref = 1; }
         i64 pt = -1;
         if (!ph_at("$", 1) && !ph_at("...", 3)) pt = ph_type_word(0);
+        // The DECLARED primitive, kept for the coercion below: a parameter
+        // with a default -- or one a forward call already fixed -- is forced
+        // to PT_MIXED so that "not passed" is expressible, and with it went
+        // the type check php still performs. `function f(int $x = 1)` then
+        // `f([])` was accepted as a zval and ran the body where php raises a
+        // TypeError. php_param_coerce returns its argument unchanged when it
+        // is 0, so the same call composes with "not passed".
+        i64 pcw = 0;
+        if (pt == PT_INT)    pcw = 1;
+        if (pt == PT_FLOAT)  pcw = 2;
+        if (pt == PT_STRING) pcw = 3;
+        if (pt == PT_BOOL)   pcw = 4;
+        if (pt == PT_ARR)    pcw = 5;
         // `int ...$n`: the type comes first and the ... after it
         if (ph_at("...", 3)) { ph_next(); variadic = 1; }
         if (!ph_at("$", 1)) ph_todo2(fl, line, "a php parameter", ph_tname);
@@ -7148,6 +7168,27 @@ i64 ph_function() {
                 if (pret) set_nd_next(pret, bv);
                 if (!pret) pre = bv;
                 pret = bv;
+            }
+            // the declared type, on the parameters that lost it. BEFORE the
+            // fill below, so a parameter that was not passed is still 0 and
+            // php_param_coerce leaves it for the default.
+            if (pcw && !byref && !variadic) {
+                uptr bare3 = d + 1;
+                i64 pv4 = node_new(N_IDENT, line, fl);
+                set_nd_name(pv4, ph_mangle(d, "v_"));
+                set_nd_type(pv4, ty_pzv);
+                u8 pcb[64];
+                st64(pcb, pv4);
+                st64(pcb + 8, ph_int(pcw));
+                st64(pcb + 16, ph_strlit("", 0));
+                st64(pcb + 24, ph_strlit(name, cstrlen(name)));
+                st64(pcb + 32, ph_int(np + 1));
+                st64(pcb + 40, ph_strlit(bare3, cstrlen(bare3)));
+                i64 cz2 = ph_set(ph_mangle(d, "v_"),
+                                 ph_calln("php_param_coerce", pcb, 6, ty_pzv));
+                if (pret) set_nd_next(pret, cz2);
+                if (!pret) pre = cz2;
+                pret = cz2;
             }
             // a zval parameter that was not passed arrives as 0
             i64 miss = node_new(N_UNARY, line, fl);

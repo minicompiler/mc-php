@@ -25,8 +25,21 @@ measured a binary that was being rebuilt underneath it.
 | `ext/standard/tests/strings` | **263** | 310 | 107 | 54 | 0 | 734 | 262 |
 | the whole corpus | **1689** | 14469 | 1929 | 2947 | 361 | 21034 | 1637 |
 
-Re-run after the round-seventeen compiler change (the spread's
-compute-then-check boundary), same snapshot discipline, `T10_JOBS=6`: the
+Re-run twice more, same snapshot discipline, `T10_JOBS=6`. After the
+round-nineteen compiler change (`php_unpack_check` and the declared type on a
+parameter with a default) the three directories are **identical** again --
+104 / 749 / 263 -- and the corpus is **green 1688 / wrong 14489 / refused 1929
+/ skip 2947 / php-fail 342 / total 21053**. Two deltas against the published
+run, both named: **one green lost**, `ext/standard/tests/file/is_dir_basic`,
+one of the band's own twelve; and **20 tests left `php-fail` for `wrong`**,
+because the source tree was cleaned of the leftovers the pre-CLEAN harness had
+made -- dba, phar and `spl/DirectoryIterator_getInode_basic` and their kind,
+whose ORACLE had been failing its own expectation on a stale file. That is the
+round-eighteen contamination finding measured from the other side: it was
+costing the grid 20 tests of its denominator. Peak 1908 KiB, `df -h /` 12Gi
+used and 212Gi available before and after.
+
+After the round-seventeen change (the spread's compute-then-check boundary): the
 three directories are **identical** -- 104 / 749 / 263 -- and the corpus is
 **green 1677 / wrong 14481 / refused 1929 / skip 2947 / php-fail 361 / total
 21034**. The 12 greens between the two runs are named rather than assumed:
@@ -92,7 +105,7 @@ not the compiler.
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **788 of the 812 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 810 that RAN** | **the denominator counted tests it never ran** |
-| **fixtures byte for byte** | **60 of 60, merged streams** | **75 of 75, each stream and the exit code** | **`2>&1` and `$(...)`** |
+| **fixtures byte for byte** | **60 of 60, merged streams** | **77 of 77, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
 | **the D8 bench** | **5.85x and 1.45x** | **6.84x and 1.48x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
@@ -204,9 +217,13 @@ the directory and keeps the maximum so the claim carries a number.
 |---|---|---|---|
 | 6333 tests (three directories) | **1860 KiB** | 212Gi free | 212Gi free |
 | 27728 tests (three directories and the corpus, one run) | **1908 KiB** | 212Gi free | 212Gi free |
+| 27728 tests again, the round-seventeen re-run | **2152 KiB** | 212Gi free | 212Gi free |
 
 **The grid's disk cost is bounded by the job count, not by the corpus size**:
-4.4x the tests for a 2.6% larger peak, over six runs. 4184 orphaned binaries (665 MB)
+4.4x the tests for a 2.6% larger peak, over six runs, and **2152 KiB** on the
+seventh -- a 13% band on a 2 MB number, where the corpus it measures varies by
+4.4x. Every other figure in this repository is one of these three rows, and
+where a document quotes one it now says which. 4184 orphaned binaries (665 MB)
 from the killed run were swept before any of this was measured.
 
 `fixtures.sh` set no `MCPHP_TMP` at all, so every fixture run leaked its
@@ -375,7 +392,7 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **75 of 75** numbered fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **77 of 77** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** refusals named, exit 3.
 * `lencheck` **496 literal lengths, 0 wrong**; `aritycheck` **272 library
@@ -384,7 +401,8 @@ running and `bench10.sh` refusing to time a pair that does not agree.
   and the repo-wide sweep over **356** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
-* the grid's tmp peak **1908 KiB over 27728 tests**, the largest of six runs;
+* the grid's tmp peak **2152 KiB over 27728 tests** (the round-seventeen re-run;
+  1908 KiB was the largest of the six before it);
   `df -h /` identical
   before and after.
 * `probes/t9/` untouched.
@@ -441,6 +459,22 @@ Two things worth writing down for the next probe, neither of them mc's:
   not apply its own defaults -- a separate gap, in the call path and not in
   the shutdown list. `register_shutdown_function('name')` with a STRING
   callback does not fire at all; that is older than T10 and unchanged by it.
+* **A declared parameter type that is not one of the five primitives is not
+  checked.** `?int`, a union, a class name, `callable`, `object` and
+  `iterable` all collapse to `PT_MIXED` in `ph_type_word`, so the name is gone
+  before the prologue is built: `function n(?int $x)` accepts `"abc"` and
+  `function c(C $o)` accepts `5`, where php raises a TypeError for both. The
+  five primitives ARE checked, including on a parameter with a default and on
+  one a forward call fixed (round nineteen). Carrying the declared name to the
+  prologue and testing it with an `instanceof` is feature work, not a guard;
+  its size is **493 `.phpt` of the corpus** that declare one.
+* **A spread of more than 16 values is a named runtime failure**, not a wrong
+  answer and not a php error: `f(...range(1, 20))` answered 16 before round
+  nineteen and now prints `mc-php: a spread of more than 16 values is not
+  implemented yet` and exits 255. The compiler emits a fixed number of slots
+  and cannot see the array's length, so an unbounded variadic path needs a
+  call convention the fixed `MAXPARAMS` frame does not have -- a block for a
+  later probe, and until then the limit says so instead of losing values.
 * `intdiv(PHP_INT_MIN, -1)` answers `-9223372036854775808` where php throws
   `ArithmeticError`, and a throwable's `getFile()` is the path as WRITTEN
   where php's is the path it RESOLVED (visible only under a symlinked
@@ -502,3 +536,13 @@ directory rather than the grid's. The first is measured in both directions --
 It also caught `bench10.sh` truncating the dated record before it had measured
 anything, so any failure destroyed the previous valid one: the record is built
 in `$tmp`, parsed, and moved into place only on success.
+
+**Round nineteen** was the first to find the compiler wrong in a way no
+fixture had: a runtime spread of more than sixteen values silently lost the
+rest, `f(...1)` called the callee with nothing where php raises before
+entering it, and a declared `int` stopped being checked the moment the
+parameter had a default. The first is now a named limit, the other two are
+byte-identical to php, and `g/78-spread-and-types.php` holds all three with
+the five primitives, a forward call and a variadic beside them. It also asked
+for the probe's own contract to be checkable rather than asserted, so
+`run.sh` ends on `T10: <green> / <total>` read off the grid's summary line.

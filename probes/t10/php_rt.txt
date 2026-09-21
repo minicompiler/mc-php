@@ -8830,6 +8830,31 @@ uptr php_ref_bind(uptr cell, uptr cur) {
 // could take and this answers "the k-th element, or NOT PASSED". 0 is what
 // every zval parameter already reads as "not passed", which is what makes a
 // default value and ArgumentCountError both still work.
+// The two things php checks BEFORE it enters the callee and mc-php could
+// not see: that the operand is unpackable at all, and -- mc-php's own limit
+// and not php's -- that it fits the fixed number of slots the compiler
+// emitted for it. Both were silent: `f(...1)` called f with no arguments and
+// a 20-element array lost four values.
+void php_unpack_check(uptr z, i64 cap) {
+    if (php_zv_type(z) != IS_ARRAY) {
+        uptr m = php_str_new("Only arrays and Traversables can be unpacked, ", 46);
+        m = php_str_concat(m, php_f_get_debug_type(z));
+        m = php_str_concat(m, php_str_new(" given", 6));
+        php_throw_str(php_str_new("TypeError", 9), m);
+        return;
+    }
+    uptr a = ld64(z);
+    i64 n = 0;
+    i64 i = php_it_next(a, 0);
+    loop {
+        if (i < 0) break;
+        n = n + 1;
+        if (n > cap)
+            php_die("mc-php: a spread of more than 16 values is not implemented yet\n", 63);
+        i = php_it_next(a, i + 1);
+    }
+}
+
 uptr php_unpack_at(uptr z, i64 k) {
     if (php_zv_type(z) != IS_ARRAY) return 0;
     uptr a = ld64(z);

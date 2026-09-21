@@ -145,6 +145,18 @@ def _extras(sec, testdir):
     return args, stdin, env, ini
 
 
+def _agree(out, want, rc, wrc):
+    """The grid's OWN comparison: `normalize` (php trim, then CRLF) on both
+    sides and the same exit code. Comparing the raw bytes called a pair that
+    differs only in a trailing newline or a CRLF a disagreement, where
+    `probes/t0/phpt-run.py` grades it as the same output -- so the
+    why.py/diffgroup.py counts could name a test the grid never did. The RAW
+    streams stay in the result, because the first-difference tables want the
+    bytes.
+    """
+    return _grid.normalize(out) == _grid.normalize(want) and rc == wrc
+
+
 def jobs():
     """The probe's bounded worker count, the one `run.sh` sets.
 
@@ -243,14 +255,19 @@ def run_pair(phpt, tag, budget=None):
                 pass
             finally:
                 unlink(cf)
+        # ONE deadline for the candidate, compile plus run. Each used to get
+        # the full budget, so a compile that took nearly all of it left the
+        # binary another whole one -- up to 2x the grid's timeout, reported
+        # as `run-timeout` where the grid would have called it a compile.
         t0 = time.monotonic()
+        cbud = max(0.001, budget - (time.monotonic() - t0))
         # the SAME environment and working directory the grid compiles in:
         # mcphp.sh is spawned by probes/t0/phpt-run.py with the test env and
         # cwd=srcdir, so a source whose include resolution depends on either
         # was being compiled under a different harness than the one graded.
         c = subprocess.run([MCPHP, '--exe', php, '-o', binf], stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, env=env, cwd=run_cwd,
-                           timeout=budget)
+                           timeout=cbud)
         left = budget - (time.monotonic() - t0)
         # 255 is a php COMPILE-TIME fatal and not a failure to compile: php
         # reports those while parsing and exits 255, so mcphp.sh prints both
@@ -265,7 +282,7 @@ def run_pair(phpt, tag, budget=None):
             return {'status': 'ran', 'out': cout, 'rc': 255,
                     'err': c.stderr.decode('latin-1', 'replace'),
                     'want': cwant, 'wrc': e.returncode,
-                    'agrees': cout == cwant and e.returncode == 255}
+                    'agrees': _agree(cout, cwant, 255, e.returncode)}
         if c.returncode != 0:
             return {'status': 'no-compile', 'crc': c.returncode,
                     'cerr': c.stderr.decode('latin-1', 'replace'),
@@ -298,4 +315,4 @@ def run_pair(phpt, tag, budget=None):
     return {'status': 'ran', 'out': out, 'rc': g.returncode,
             'err': g.stderr.decode('latin-1', 'replace'),
             'want': want, 'wrc': e.returncode,
-            'agrees': out == want and g.returncode == e.returncode}
+            'agrees': _agree(out, want, g.returncode, e.returncode)}

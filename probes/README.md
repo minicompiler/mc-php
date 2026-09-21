@@ -245,8 +245,9 @@ circuit. What the probe is worth is the corrected numbers.
   enforcement D8 lacked: four regimes, and a `.php` in none of them fails the run.
 * **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at
   about 20000 of 21395 tests. The caller names the binary with `MCPHP_OUT` and unlinks it the
-  moment the subprocess returns; each run sweeps the dead siblings at startup. **Peak 1892 KiB
-  over a run of 27728 tests, 1908 KiB over a second corpus run of 21395 and 1860 KiB over one
+  moment the subprocess returns; each run sweeps the dead siblings at startup. **Peak 1908 KiB
+  over a run of 27728 tests, 2152 KiB over the round-seventeen re-run of the same 27728 and
+  1860 KiB over one
   of 6333: bounded by the job count and not the corpus.**
 
 **And the grid itself has a band, which no probe had measured.** Two runs of the SAME BINARY
@@ -275,7 +276,7 @@ the standing rule of `docs/review-backlog.md` § 3, applied to T10. They are lis
 fix in § 4 of that file; six needed code, including the `nocompile.py` correction above and a
 top-level `return` inside a `try`/`finally` that took the exit and jumped over the finally.
 
-`sh probes/t10/run.sh` (about 90 minutes: 75 fixtures, 6 refusals, four grids, the breakdown
+`sh probes/t10/run.sh` (about 90 minutes: 77 fixtures, 6 refusals, four grids, the breakdown
 and the five tables). Details: `probes/t10/RESULTS.md`.
 
 ## T9 -- func_get_args, the two blocks T8 inverted, and the generator decision

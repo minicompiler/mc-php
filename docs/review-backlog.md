@@ -63,7 +63,7 @@ after.**
 ## 2. Language semantics that are wrong (a program can observe every one) -- DONE
 
 Every line below is closed by a FIXTURE that runs under `php` and under mc-php and is compared
-byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **75 / 75** as this pull request ends), or by
+byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **77 / 77** as this pull request ends), or by
 a measurement recorded beside it. The fixture is named at the end of each line.
 
 - ~~**`&&` and `||` do not short-circuit**~~ (#5 `php.mc:2202`). Both operands were lowered and
@@ -571,3 +571,79 @@ and one is a re-reading of an amendment this probe already recorded.
   `.php` under `probes/` to be in one of the five regimes or named by a gate.
   (e) records the PHPUnit half as exempt for as long as `mc-php test` does not
   exist, with the mechanism named.
+
+### Round nineteen
+
+Nine findings again: four new in the compiler and the runtime, five in code
+that had not changed. Six changed something, one is a number recount, one is a
+recorded gap with its size, and one is the probe contract.
+
+**Four in what mc-php actually does, three of them fixed.**
+
+- ~~A runtime spread is truncated at 16 values.~~ Real, and silent: `f(...range(1,20))`
+  answered **16** where php answers 20. The compiler emits a fixed number of
+  slots and cannot see the array, so the honest answer is a named failure
+  rather than a wrong number: `php_unpack_check` counts the elements before
+  the call and, past the slots, `php_die`s with
+  `mc-php: a spread of more than 16 values is not implemented yet` (exit 255).
+  It is mc-php's own limit and not a php error, so it reads like
+  `arena exhausted` and not like a TypeError. An unbounded variadic path is a
+  block for a later probe: it needs a call convention the fixed `MAXPARAMS`
+  frame does not have.
+- ~~`php_unpack_at` returns 0 for a non-array operand and raises nothing.~~ Real:
+  `f(...1)` called `f` with no arguments where php raises before entering it.
+  The same `php_unpack_check` raises php's own message --
+  `TypeError: Only arrays and Traversables can be unpacked, int given` -- and
+  the two worlds are byte identical on it now.
+- ~~A declared parameter type is dropped when the parameter has a default or a
+  forward call fixed the signature.~~ Real: `function f(int $x = 1)` then
+  `f([])` ran the body where php raises a TypeError. The declared primitive is
+  kept beside the forced `PT_MIXED` and the prologue calls the same
+  `php_param_coerce` the method path already used -- which returns its argument
+  unchanged when it is 0, so "not passed" still reaches the default. Measured on
+  all five primitives, on a forward call, and on a variadic.
+  `g/78-spread-and-types.php`.
+- **A declared type that is not one of the five primitives is still not
+  checked**, and this one is recorded rather than fixed. `?int`, a union, a
+  class, `callable`, `object` and `iterable` all collapse to `PT_MIXED` in
+  `ph_type_word`, so the information is gone before the prologue is built:
+  `function n(?int $x)` accepts `"abc"` and `function c(C $o)` accepts `5`,
+  where php raises a TypeError for both. Fixing it needs the declared NAME
+  carried to the prologue and an `instanceof` at run time -- feature work, not
+  a guard. Its size, measured: **493 `.phpt` of the corpus** declare a
+  non-primitive parameter type.
+
+**Five in the tools and the documents.**
+
+- ~~`harness.py` gives the compile and the run a whole budget each.~~ Correct: a
+  compile that took nearly the limit left the binary another one, so a pair
+  could run for almost 2x the grid's timeout and be reported as `run-timeout`.
+  One deadline covers both now.
+- ~~`harness.py` compares raw stdout where the grid normalizes.~~ Correct. The
+  grid grades through `normalize` (php trim, then CRLF), so a trailing-newline
+  difference was a disagreement here and the same output there. `_agree` runs
+  the grid's own `normalize` on both sides; the raw streams stay in the result
+  because the first-difference tables want the bytes.
+- ~~The fixture count is 76, not 75.~~ It is **77** now, with this round's
+  `g/78`. Every document says 77 and the number comes from the gate.
+- ~~The disk peak is quoted four different ways.~~ Correct, and they were four
+  different runs. `RESULTS.md` has the table (1860 KiB over 6333 tests, 1908
+  over 27728, **2152 over the same 27728 on the round-seventeen re-run**) and
+  every other document now says which run it quotes. The claim is unchanged and
+  the band is worth having: 13% on a 2 MB number while the corpus varies by 4.4x.
+- **The one-number contract.** T10 answers ONE question -- the backlog -- and
+  its number is the corpus grid's green/total, the pair every probe since T1
+  has ended on; the tables above it are the analysis § 1 of this backlog
+  demands, each its own script a reader can run alone. What was missing is that
+  the contract was asserted and not checkable, so `run.sh` now ends on
+  `T10: <green> / <total>`, read off the grid's own summary line rather than
+  recounted from the bucket files (a `.phpt` name can carry a newline).
+
+The round-nineteen grid, re-run because the compiler changed: directories
+identical (104 / 749 / 263), corpus **green 1688 / wrong 14489 / refused 1929
+/ skip 2947 / php-fail 342 / total 21053**. Two deltas against the published
+run and both are named -- one green lost (`is_dir_basic`, one of the band's
+own twelve) and **20 tests out of `php-fail` into `wrong`**, because the
+source tree was cleaned of the leftovers the pre-CLEAN harness had made. The
+round-eighteen finding, measured from the other side: the contamination was
+costing the grid 20 tests of its denominator.
