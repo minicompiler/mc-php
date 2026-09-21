@@ -707,3 +707,35 @@ measurement.
   report reads them out of the file.
 - ~~Three stale gate counts~~ (`CLAUDE.md`, `docs/plan.md`, `RESULTS.md`): 84
   fixture files, 91 `.php` in a T10 regime, 359 swept, `lencheck` 501.
+
+### Round twenty-one
+
+Nine findings, all real, all in the scripts -- the compiler and the runtime
+were not touched.
+
+- ~~`tmp.sh` deletes a LIVE run's directory once it is a day old.~~ Correct, and
+  worse than the orphan it was guarding against: a corpus grid runs for an
+  hour and a long one would have had its binaries removed from under it. The
+  owner writes its own start time (`ps -o lstart= -p $$`) into the directory
+  and the sweep compares it: same pid AND same start time is the real owner,
+  a different start time is a recycled pid, no pid at all is a dead run.
+- ~~`tmp.sh` reads `peak` without waiting for the watcher.~~ Correct. It waits
+  now -- and the fix had a defect of its own, measured before it was believed:
+  the watcher dies of the signal, `wait` answers 143, and under `set -e`
+  inside an EXIT trap that ended the trap before it printed. With `|| :` on
+  both the kill and the wait: `tmp peak: 508 KiB`, exit 0.
+- ~~`mcphp.sh` leaves the compiler running when the wrapper is killed.~~
+  Correct, and it is the orphan the disk bound exists to prevent. The
+  compiler runs in the background and is waited for, with INT and TERM
+  killing it and removing the three files.
+- ~~Three signal traps clean up and RETURN.~~ Correct: an interrupted run
+  carried on with its temporary directory gone and ran the handler again on
+  the way out. `fixtures.sh`, `grid.sh` and `run.sh` now keep the cleanup on
+  EXIT and exit 130 / 143 on the signals. Measured: a TERM'd run prints its
+  peak, does NOT reach the statement after the sleep, exits 143 and leaves
+  no directory.
+- ~~`d8check.py` exempts a file by BASENAME when a bench loop names one.~~
+  Correct -- any other probe's `main.php` counted as benched. The paths are
+  resolved against the directory the loop itself spells; measured, a
+  synthetic `probes/t98/main.php` is reported and the real tree is clean.
+- ~~The fixture count is 77 in `docs/plan.md` and `probes/README.md`.~~ 78.

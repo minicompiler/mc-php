@@ -276,7 +276,7 @@ the standing rule of `docs/review-backlog.md` § 3, applied to T10. They are lis
 fix in § 4 of that file; six needed code, including the `nocompile.py` correction above and a
 top-level `return` inside a `try`/`finally` that took the exit and jumped over the finally.
 
-`sh probes/t10/run.sh` (about 90 minutes: 77 fixtures, 6 refusals, four grids, the breakdown
+`sh probes/t10/run.sh` (about 90 minutes: 78 fixtures, 6 refusals, four grids, the breakdown
 and the five tables). Details: `probes/t10/RESULTS.md`.
 
 ## T9 -- func_get_args, the two blocks T8 inverted, and the generator decision

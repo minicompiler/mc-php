@@ -26,7 +26,13 @@ tmp=$MCPHP_TMP
 cp $P/mc-php "$tmp/mc-php"
 MCPHP_BIN=$tmp/mc-php
 export MCPHP_BIN
-trap 'rm -rf "$tmp"' EXIT INT TERM
+# The cleanup is the EXIT trap and the signal traps EXIT: a handler that
+# only cleans up RETURNS, so an interrupted run carried on with its
+# temporary directory already gone and ran the handler a second time on the
+# way out.
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # A fixture that loops for ever must not hang the gate with no output. perl is
 # on every host that has php; `timeout` is not on macOS.

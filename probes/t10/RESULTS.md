@@ -559,3 +559,13 @@ byte-identical to php, and `g/78-spread-and-types.php` holds all three with
 the five primitives, a forward call and a variadic beside them. It also asked
 for the probe's own contract to be checkable rather than asserted, so
 `run.sh` ends on `T10: <green> / <total>` read off the grid's summary line.
+
+**Round twenty-one** was all scripts, and two of its nine are worth keeping:
+`tmp.sh` would have deleted a LIVE run's directory once it was a day old --
+a corpus grid takes an hour, and a slow one would have lost its binaries
+mid-measurement -- so the owner writes its start time and the sweep compares
+it rather than trusting a pid; and `mcphp.sh` let the compiler keep running
+when the wrapper was killed, which is exactly the orphan the disk bound
+exists to prevent. Three signal traps cleaned up and RETURNED, so an
+interrupted run continued with its temporary directory gone; they exit now,
+measured.

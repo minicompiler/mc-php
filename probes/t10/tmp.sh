@@ -31,12 +31,20 @@ mcphp_tmp_init() {
         [ -d "$_d" ] || continue
         _pid=${_d##*.}
         case $_pid in ''|*[!0-9]*) continue ;; esac
-        # A dead pid, or -- because a pid is RECYCLED and a live one may be
-        # some other process entirely -- anything a day old. Without the
-        # second test one unlucky collision keeps an orphan for ever, which
-        # is the failure this whole function exists to stop.
+        # A dead pid: collect it. A LIVE one: only when it is not the
+        # process that made this directory. A pid is recycled, so `kill -0`
+        # alone would keep an orphan for ever -- but an AGE test is worse,
+        # because a grid legitimately runs for an hour and this would have
+        # deleted a live run's binaries out from under it after a day. The
+        # owner writes its own start time into `owner` and that is what is
+        # compared: same pid AND same start time is the real owner, a
+        # different start time is a recycled pid.
         if kill -0 "$_pid" 2>/dev/null; then
-            find "$_d" -maxdepth 0 -mtime +1 -exec rm -rf {} + 2>/dev/null
+            _was=$(cat "$_d/owner" 2>/dev/null)
+            _now=$(ps -o lstart= -p "$_pid" 2>/dev/null)
+            if [ -n "$_was" ] && [ -n "$_now" ] && [ "$_was" != "$_now" ]; then
+                rm -rf "$_d"
+            fi
         else
             rm -rf "$_d"
         fi
@@ -45,6 +53,7 @@ mcphp_tmp_init() {
     export MCPHP_TMP
     mkdir -p "$MCPHP_TMP"
     : > "$MCPHP_TMP/peak"
+    ps -o lstart= -p $$ > "$MCPHP_TMP/owner" 2>/dev/null || : > "$MCPHP_TMP/owner"
 }
 
 # Sample the directory and keep the maximum, so "bounded by the job count" is
@@ -56,14 +65,22 @@ mcphp_tmp_watch() {
           k=$(du -sk "$MCPHP_TMP" 2>/dev/null | awk '{ print $1 }')
           o=$(cat "$MCPHP_TMP/peak" 2>/dev/null)
           [ -n "$k" ] && { [ -z "$o" ] || [ "$k" -gt "$o" ]; } && echo "$k" > "$MCPHP_TMP/peak"
-          find "$MCPHP_TMP" -type f -mmin +1 ! -name peak -delete 2>/dev/null
+          find "$MCPHP_TMP" -type f -mmin +1 ! -name peak ! -name owner -delete 2>/dev/null
           sleep 2
       done ) &
     MCPHP_SWEEP=$!
 }
 
 mcphp_tmp_done() {
-    kill "$MCPHP_SWEEP" 2>/dev/null
+    # WAIT for the watcher: it truncates and rewrites `peak` whenever the
+    # maximum moves, so reading it the instant after the kill could catch an
+    # empty or half-written file and report `?` for a run that measured fine.
+    kill "$MCPHP_SWEEP" 2>/dev/null || :
+    # `|| :` on BOTH: the watcher dies of the signal above, so `wait`
+    # answers 143, and under `set -e` inside an EXIT trap that ended the
+    # trap before it printed -- measured, the peak line vanished and the
+    # script exited 143.
+    wait "$MCPHP_SWEEP" 2>/dev/null || :
     printf '  tmp peak: %s KiB (%s)\n' "$(cat "$MCPHP_TMP/peak" 2>/dev/null || echo '?')" "$MCPHP_TMP"
     rm -rf "$MCPHP_TMP"
 }

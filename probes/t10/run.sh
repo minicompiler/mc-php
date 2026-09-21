@@ -52,7 +52,13 @@ fail=0
 . "$here/tmp.sh"
 mcphp_tmp_init mcphp-t10
 mcphp_tmp_watch
-trap 'mcphp_tmp_done' EXIT INT TERM
+# The cleanup is the EXIT trap and the signal traps EXIT: a handler that
+# only cleans up RETURNS, so an interrupted run carried on with its
+# temporary directory already gone and ran the handler a second time on the
+# way out.
+trap 'mcphp_tmp_done' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 df -h / | tail -1 | awk '{ printf "  disk before: %s used, %s free\n", $3, $4 }' 
 
 [ -d "$SRC" ] || { echo "T10: no php-src -- clone php-8.5.10 at the repository root"; exit 1; }

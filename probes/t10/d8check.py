@@ -224,8 +224,23 @@ def repo_sweep():
                     required.add(os.path.relpath(
                         os.path.join(os.path.dirname(f), m.group(1)), REPO))
     text = '\n'.join(srcs.values())
-    progs = set(re.findall(r'^for prog in (.+?); do', text, re.M))
-    basenames = {w for line in progs for w in line.split() if w.endswith('.php')}
+    # RESOLVED paths, not bare basenames: a bench loop names `main.php` and
+    # `heavy.php` relative to the directory the loop itself spells, so
+    # matching on the basename alone would have called any other probe's
+    # `main.php` benched by a bench that never sees it.
+    benched = set()
+    for path, src in srcs.items():
+        for line in re.findall(r'^for prog in (.+?); do', src, re.M):
+            for w in line.split():
+                if not w.endswith('.php'):
+                    continue
+                # the directory the same loop reads them from
+                for d in re.findall(r'"\$?\{?\w*\}?/?(probes/[\w./-]*?)/\$prog"', src) or \
+                         re.findall(r'(probes/[\w./-]+)/\$prog', src):
+                    benched.add(os.path.normpath(os.path.join(d, w)))
+                if '/' in w:
+                    benched.add(os.path.normpath(
+                        os.path.join(os.path.dirname(path), w)))
 
     n = 0
     for f in every_php():
@@ -242,7 +257,7 @@ def repo_sweep():
         # every source but this one
         if any(f in t for p, t in srcs.items() if p != f):
             continue
-        if os.path.basename(f) in basenames:
+        if f in benched:
             continue
         bad.append(f'{f}: no fixture gate runs it, no .php requires it, '
                    f'no script names it')

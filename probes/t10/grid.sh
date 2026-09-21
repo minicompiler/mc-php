@@ -12,7 +12,13 @@ export MCPHP_BIN
 . "$(dirname -- "$0")/tmp.sh"
 mcphp_tmp_init mcphp-grid
 mcphp_tmp_watch
-trap 'mcphp_tmp_done' EXIT INT TERM
+# The cleanup is the EXIT trap and the signal traps EXIT: a handler that
+# only cleans up RETURNS, so an interrupted run carried on with its
+# temporary directory already gone and ran the handler a second time on the
+# way out.
+trap 'mcphp_tmp_done' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 rm -rf "$out"; mkdir -p "$out"
 for d in tests/lang Zend/tests ext/standard/tests/strings; do
     n=$(echo "$d" | tr '/' '_')

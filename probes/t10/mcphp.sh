@@ -43,8 +43,17 @@ err=$tmp.err
 # `Fatal error:` is written to BOTH in php's own order -- the stderr form
 # first -- and a shell that let stdout through live could not reproduce it.
 out=$tmp.out
-"$MCPHP" --exe "$src" -o "$tmp" > "$out" 2> "$err"
+# The compiler runs in the BACKGROUND and is waited for, so a signal can
+# reach it. The caller's timeout kills this wrapper; without this the
+# compiler kept going, kept writing the binary, and left exactly the orphan
+# the temporary-directory bound exists to prevent.
+"$MCPHP" --exe "$src" -o "$tmp" > "$out" 2> "$err" &
+mcpid=$!
+trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp"; exit 143' TERM
+trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp"; exit 130' INT
+wait $mcpid
 rc=$?
+trap - TERM INT
 if [ "$rc" != 0 ]; then
     cat "$err" >&2
     cat "$out"
