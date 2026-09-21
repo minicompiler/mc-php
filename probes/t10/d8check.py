@@ -12,6 +12,9 @@ This is the enforcement. Every `.php` under the probe is put in exactly one
 of four regimes, each with its own obligation, and a file in none of them
 fails the run:
 
+  helper     a `g/` file another fixture `require`s and the gate does not
+             run on its own -- `inc.php`. Its test is every fixture that
+             includes it, and this checks that at least one does.
   fixture    `g/*.php`, `r/*.php`. Its test is the DIFFERENTIAL gate itself
              (`fixtures.sh`): stdout, stderr and the exit code compared byte
              for byte against `php` on the same source. That is a stronger
@@ -122,11 +125,28 @@ def main():
         files += [rel(os.path.join(root, n)) for n in names if n.endswith('.php')]
     files.sort()
 
-    counts = {'fixture': 0, 'instrument': 0, 'library': 0, 'bench': 0}
+    # a g/ file that another fixture requires, and that fixtures.sh
+    # therefore skips: the gate's own `case ... in inc.php) continue` list
+    helpers = set(re.findall(r'case \$\(basename "\$f"\) in (\S+)\)',
+                             open(os.path.join(HERE, 'fixtures.sh'),
+                                  encoding='latin-1').read()))
+    included = set()
+    for f in files:
+        if f.split('/')[0] in globs:
+            src = open(os.path.join(HERE, f), encoding='latin-1').read()
+            for m in re.finditer(r"(?:require|include)(?:_once)?[^;]*?['\"]([^'\"]+\.php)", src):
+                included.add(os.path.basename(m.group(1)))
+
+    counts = {'fixture': 0, 'helper': 0, 'instrument': 0, 'library': 0, 'bench': 0}
     bad = []
     for f in files:
         d = f.split('/')[0]
-        if d in globs and f.count('/') == 1:
+        if d in globs and os.path.basename(f) in helpers:
+            if os.path.basename(f) in included:
+                counts['helper'] += 1
+            else:
+                bad.append(f'{f}: skipped by the gate and required by no fixture')
+        elif d in globs and f.count('/') == 1:
             counts['fixture'] += 1
         elif f in INSTRUMENTS:
             counts['instrument'] += 1
@@ -137,7 +157,7 @@ def main():
         else:
             bad.append(f)
 
-    for k in ('fixture', 'instrument', 'library', 'bench'):
+    for k in ('fixture', 'helper', 'instrument', 'library', 'bench'):
         print(f'  {counts[k]:4d}  {k}')
     bad += test_methods_are_all_run()
     if not counts['library'] and not counts['bench']:

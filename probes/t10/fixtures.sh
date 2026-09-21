@@ -51,6 +51,12 @@ export MCPHP_OUT
 fail=0
 ng=0; nok=0
 for f in $P/g/*.php; do
+    # `inc.php` is a HELPER another fixture requires, not a fixture: running
+    # it on its own passed vacuously (php and mc-php both print nothing) and
+    # it made the count 76 where there are 75 numbered fixtures. It is
+    # covered by 08-require and 72-require-dir, which include it, and
+    # d8check.py puts it in a regime of its own.
+    case $(basename "$f") in inc.php) continue ;; esac
     ng=$((ng + 1))
     lim "$PHP" "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?
     lim $P/mcphp.sh "$f" > "$tmp/m.out" 2> "$tmp/m.err"; me=$?

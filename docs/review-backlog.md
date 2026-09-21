@@ -330,3 +330,20 @@ Both re-measured: **no number moved** (568 / 758 / 23 / 2 / 1, arena 11 of 782, 
 
 `g/76-readonly-null-sscanf.php` covers both, and the default compiler's answer for each was
 measured before the fix.
+
+### Round eleven
+
+- ~~`do { ...; continue; } while (cond)` looped for ever~~: mc's `continue` jumps to the top of
+  the `N_LOOP` and the test was placed AFTER the body, so `continue` skipped both the
+  condition's own statements and the test. `do { $i++; continue; } while ($i < 1);` never
+  terminated where php runs it once. The test is at the top now, behind a first-iteration gate
+  -- `ph_loop_of`'s own shape, applied to the condition rather than to the step -- so every
+  edge into the next iteration passes through it.
+- ~~The readonly mark was kept in the object's PROPERTY table~~ (round ten's own fix), where
+  `var_dump`, `print_r`, `foreach`, a clone and a dynamic read would all have seen it. The
+  object record grew a table of its own (`php_obj_romarks`, `OBJ_HDR` 32 -> 40) and the marks
+  are invisible: `var_dump($c)` and `print_r($c)` agree with php byte for byte.
+- ~~`g/inc.php` was counted and RUN as a fixture~~, so the gate said 76 where there are 75
+  numbered fixtures. It is a HELPER two fixtures `require`; the gate skips it by name and
+  `d8check.py` gained a fifth regime for it, which also checks that some fixture really does
+  include it.

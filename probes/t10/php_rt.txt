@@ -828,6 +828,7 @@ void php_vd_zv(uptr z, i64 depth);
 uptr php_obj_tostr(uptr o);
 uptr php_obj_cname(uptr o);
 uptr php_obj_props(uptr o);
+uptr php_obj_romarks(uptr o);
 i64  php_obj_id(uptr o);
 void php_pr_zv(uptr z, i64 depth);
 void php_ex_zv(uptr z, i64 depth);
@@ -2280,7 +2281,11 @@ i64 php_strcasecmp(uptr a, uptr b) { return php_str_cmp(php_case(a, 0), php_case
 //   0 gc (refcount u32, type_info u32) | 8 handle u32 | 16 ce | 24 properties
 // A class entry is the compiler's own record; its first field is the name, so
 // php_obj_cname is one indirection.
-#define OBJ_HDR 32
+// 0 refcount u32 | 4 type u32 | 8 id u32 | 16 ce | 24 props | 32 the
+// readonly marks -- a table of its own, and NOT the property table: a mark
+// kept beside the properties is an observable extra property to var_dump,
+// print_r, var_export, get_object_vars, a clone and a dynamic read.
+#define OBJ_HDR 40
 
 i64 ph_objid;
 
@@ -2305,6 +2310,7 @@ uptr php_obj_new(uptr ce) {
     st32(o + 8, ph_objid);
     st64(o + 16, ce);
     st64(o + 24, php_arr_new(8));
+    st64(o + 32, 0);                 // the readonly marks, made on first use
     return o;
 }
 
@@ -2339,6 +2345,15 @@ uptr php_obj_tostr(uptr o) {
 }
 uptr php_obj_ce(uptr o) { return ld64(o + 16); }
 uptr php_obj_props(uptr o) { return ld64(o + 24); }
+
+// The per-object "this readonly property has been written" set. It is its
+// OWN table: D7 has no bitmap, and the value cannot stand in for it (a
+// property deliberately initialised to null has been written), but a mark
+// in php_obj_props(o) would be visible to every property API there is.
+uptr php_obj_romarks(uptr o) {
+    if (!ld64(o + 32)) st64(o + 32, php_arr_new(4));
+    return ld64(o + 32);
+}
 uptr php_obj_cname(uptr o) { return ld64(ld64(o + 16)); }
 
 // ---- errors ----------------------------------------------------------------
@@ -4352,11 +4367,11 @@ void php_obj_set(uptr o, uptr name, uptr v, uptr scope) {
     // property name can be (php mangles with a NUL and this language
     // forbids one in a literal).
     if (b) {
-        uptr mk = php_str_concat(php_str_new(" ro:", 4), name);
         i64 was = 0;
-        if (php_ht_find(php_obj_props(o), php_str_hash(mk), mk)) was = 1;
+        if (php_ht_find(php_obj_romarks(o), php_str_hash(name), name)) was = 1;
         if (php_ro_check(ce, name, scope, was)) return;
-        if (php_ro_of(ce, name)) php_zv_cpv(php_arr_sslot(php_obj_props(o), mk), php_zlong(1));
+        if (php_ro_of(ce, name))
+            php_zv_cpv(php_arr_sslot(php_obj_romarks(o), name), php_zlong(1));
     }
     php_zv_cpv(php_arr_sslot(php_obj_props(o), name), v);
 }

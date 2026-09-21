@@ -5352,18 +5352,41 @@ i64 ph_stmt_1() {
         i64 iff = node_new(N_IF, line, fl);
         set_nd_a(iff, neg);
         set_nd_b(iff, brk);
-        i64 t = body;
-        loop { if (!nd_next(t)) break; t = nd_next(t); }
+        // The test goes at the TOP of the loop behind a first-iteration
+        // gate, and NOT after the body. mc's `continue` jumps to the top of
+        // the N_LOOP, so a test placed after the body is skipped by it:
+        // `do { $i++; continue; } while ($i < 1);` spun for ever where php
+        // terminates. This is ph_loop_of's own gate, for the condition
+        // rather than for the step -- every edge into the next iteration,
+        // the fall-through and every `continue`, passes through it.
+        ph_nonce = ph_nonce + 1;
+        uptr dfn = p_cat("phd_f", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+        ph_local(dfn, TY_I64);
+        i64 dpre = ph_set(dfn, ph_int(1));
+        i64 dref = node_new(N_IDENT, line, fl);
+        set_nd_name(dref, dfn);
+        set_nd_type(dref, TY_I64);
+        i64 dclr = ph_set(dfn, ph_int(0));
+        i64 dtest = iff;
         if (cpre) {
-            set_nd_next(t, cpre);
-            loop { if (!nd_next(t)) break; t = nd_next(t); }
+            i64 ct = cpre;
+            loop { if (!nd_next(ct)) break; ct = nd_next(ct); }
+            set_nd_next(ct, iff);
+            dtest = cpre;
         }
-        set_nd_next(t, iff);
+        i64 dgate = node_new(N_IF, line, fl);
+        set_nd_a(dgate, dref);
+        set_nd_b(dgate, dclr);
+        set_nd_c(dgate, ph_blk(dtest));
+        set_nd_next(dgate, body);
         i64 b = node_new(N_BLOCK, line, fl);
-        set_nd_a(b, body);
+        set_nd_a(b, dgate);
         i64 lp = node_new(N_LOOP, line, fl);
         set_nd_a(lp, b);
-        return lp;
+        set_nd_next(dpre, lp);
+        i64 ob = node_new(N_BLOCK, line, fl);
+        set_nd_a(ob, dpre);
+        return ob;
     }
     if (ph_is("for")) {
         ph_next();
