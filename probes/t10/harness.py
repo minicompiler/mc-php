@@ -190,7 +190,14 @@ def run_pair(phpt, tag, budget=None):
         return {'status': 'busy'}
     binf = tmpbin(prefix=tag + '.')
     cwd = os.path.dirname(os.path.abspath(php)) or '.'
+    # The scratch file lives beside the .phpt (cwd) and `{PWD}` in an --INI--
+    # expands to that directory, but the two PROCESSES run from the source
+    # root, which is where probes/t0/phpt-run.py runs them (`cwd=srcdir`).
+    # getcwd(), a relative fopen and a relative require all see a different
+    # directory otherwise, so the classification would describe a different
+    # program than the grid graded.
     argv, stdin, env, ini = _extras(sec or {}, cwd)
+    run_cwd = _SRCDIR
     try:
         open(php, 'w', encoding='latin-1', newline='').write(src)
         # The grid's order, in full: php runs FIRST, and the candidate is
@@ -204,7 +211,7 @@ def run_pair(phpt, tag, budget=None):
         # otherwise be COMPILED from different bytes than the grid compiled.
         e = subprocess.run([PHP] + INI + ini + ['-q', php] + argv, input=stdin,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           env=env, cwd=cwd, timeout=budget)
+                           env=env, cwd=run_cwd, timeout=budget)
         t0 = time.monotonic()
         c = subprocess.run([MCPHP, '--exe', php, '-o', binf], stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, timeout=budget)
@@ -217,7 +224,7 @@ def run_pair(phpt, tag, budget=None):
             raise subprocess.TimeoutExpired([binf], budget)
         g = subprocess.run([binf] + argv, input=stdin,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           env=env, cwd=cwd, timeout=left)
+                           env=env, cwd=run_cwd, timeout=left)
     except subprocess.TimeoutExpired as t:
         return {'status': 'compile-timeout' if t.cmd and t.cmd[0] == MCPHP else 'run-timeout'}
     except OSError as ex:

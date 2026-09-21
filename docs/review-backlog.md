@@ -347,3 +347,17 @@ measured before the fix.
   numbered fixtures. It is a HELPER two fixtures `require`; the gate skips it by name and
   `d8check.py` gained a fifth regime for it, which also checks that some fixture really does
   include it.
+
+### Round twelve
+
+- ~~`harness.py` ran both subprocesses from the TEST's directory~~ where `probes/t0/phpt-run.py`
+  runs them from the source root (`cwd=srcdir`). `getcwd()`, a relative `fopen` and a relative
+  `require` all saw a different directory, so the classification could describe a different
+  program. The scratch file still lives beside the `.phpt` and `{PWD}` still expands to that
+  directory -- only the two processes moved.
+- ~~`PH_SPREADN` was 10 while `ph_read_args` is called with `maxn` 16~~, so a spread carrying
+  11 to 16 values was silently TRUNCATED before dispatch: `printf("%d"x12, ...$a)` with twelve
+  of them dropped two and said nothing. It is 16.
+- ~~`clone` left the new object's readonly marks empty~~ (rounds ten and eleven's own fix), so
+  an already-initialised readonly property could be written on the clone. php keeps it
+  initialised and refuses. The marks are copied with the properties.

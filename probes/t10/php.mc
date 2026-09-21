@@ -2910,7 +2910,11 @@ i64 ph_ref_arg(uptr fl, i64 line) {
 // "not passed" for the ones the array does not reach. MAXPARAMS is 12 and
 // two are spent on `this` and the count in a method, so 10 covers every
 // callee this compiler can declare.
-#define PH_SPREADN 10
+// As many slots as the WIDEST call ph_read_args is asked for (maxn 16 on
+// the library and variadic paths). At 10 a spread carrying 11 to 16 values
+// was silently truncated before dispatch -- `sprintf(...$a)` with twelve of
+// them dropped two and said nothing.
+#define PH_SPREADN 16
 i64 ph_had_spread;
 
 uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {

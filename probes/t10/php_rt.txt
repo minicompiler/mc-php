@@ -4247,6 +4247,10 @@ uptr php_clone(uptr z) {
     uptr n = php_obj_new(php_obj_ce(o));
     php_dt_arm(n);
     st64(n + 24, php_arr_copy(php_obj_props(o)));
+    // and the readonly marks WITH the properties: php keeps a readonly
+    // property initialised across a clone and refuses the next write, and a
+    // clone that started with an empty mark table accepted one.
+    if (ld64(o + 32)) st64(n + 32, php_arr_copy(ld64(o + 32)));
     uptr b = php_ht_find(ld64(php_obj_ce(o) + 80), php_str_hash(php_str_new("__clone", 7)), php_str_new("__clone", 7));
     if (b) callp(ld64(b), n);
     return php_zobj(n);

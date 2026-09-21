@@ -19,3 +19,8 @@ var_dump($n, $w, $v);
 var_dump(sscanf("age 25", "%s %d"));
 $m = sscanf("1 2 3", "%d %d %d", $a, $b, $q);
 var_dump($m, $a, $b, $q);
+$e = clone $c;
+try { $e->y = 9; echo "clone write allowed\n"; } catch (Error $err) { echo $err->getMessage(), "\n"; }
+var_dump($e->y);
+$big = [1,2,3,4,5,6,7,8,9,10,11,12];
+printf("%d%d%d%d%d%d%d%d%d%d%d%d\n", ...$big);
