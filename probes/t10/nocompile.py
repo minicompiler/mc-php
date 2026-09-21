@@ -12,7 +12,13 @@ workable instead of countable.
 """
 import collections, re, sys
 
-SKIP = ('(compiled; output differs)',)
+# Every message why.py writes for a test that COMPILED begins with this.
+# The filter used to name `(compiled; output differs)` alone, so the other
+# compiled outcomes -- `agrees on this harness`, `same output, exit N where
+# php exits M`, `crashed: signal N`, `timed out` -- were counted as tests
+# that DO NOT COMPILE and inflated the block by every one of them.
+SKIP = '(compiled;'
+
 
 
 def mask(msg):
@@ -38,7 +44,7 @@ def main():
     total = 0
     for line in open(sys.argv[1]):
         path, msg = line.rstrip('\n').split('\t', 1)
-        if msg in SKIP:
+        if msg.startswith(SKIP):
             continue
         total += 1
         g = re.match(r'a php (function|constant) mc-php does not have: (\w+)',

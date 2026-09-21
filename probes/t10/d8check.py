@@ -77,6 +77,35 @@ def fixture_globs():
     return set(re.findall(r'for f in \$P/(\w+)/\*\.php; do', src))
 
 
+def test_methods_are_all_run():
+    """Every `test*` the class declares is NAMED by the runner, and back.
+
+    D8 (a) wants the SAME file run in both worlds. Under php with the real
+    phpunit installed the runner is phpunit, which DISCOVERS the methods;
+    under mc-php D6 forbids discovering them at run time, so `run.php` names
+    them and `mc-php test` (which does not exist yet) is what will do it from
+    the compiler. Until then the list is written by hand, and a hand-written
+    list is a thing that goes stale: a test method added to the class and not
+    added to the runner would be reported as passing without ever running.
+    This is what stops that.
+    """
+    cls = open(os.path.join(HERE, 'bench/WorkloadTest.php'), encoding='latin-1').read()
+    run = open(os.path.join(HERE, 'bench/run.php'), encoding='latin-1').read()
+    declared = set(re.findall(r'function\s+(test\w+)\s*\(', cls))
+    named = set(re.findall(r'"(test\w+)"', run))
+    if declared == named and declared:
+        print(f'  {len(declared):4d}  test* methods declared, and every one named by the runner')
+        return []
+    bad = []
+    for m in sorted(declared - named):
+        bad.append(f'{m}: declared by WorkloadTest.php, run by nobody')
+    for m in sorted(named - declared):
+        bad.append(f'{m}: named by run.php, declared by nobody')
+    if not declared:
+        bad.append('WorkloadTest.php declares no test* method')
+    return bad
+
+
 def main():
     globs = fixture_globs()
     if globs != {'g', 'r'}:
@@ -110,6 +139,7 @@ def main():
 
     for k in ('fixture', 'instrument', 'library', 'bench'):
         print(f'  {counts[k]:4d}  {k}')
+    bad += test_methods_are_all_run()
     if not counts['library'] and not counts['bench']:
         bad.append('(nothing is benched at all)')
     if bad:

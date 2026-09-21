@@ -3,7 +3,7 @@
 // a JSON round trip (ext/json, written in mc by this probe), a template
 // renderer (string building and array lookup) and a sort-heavy pass
 // (usort with a comparison closure). It runs under `php` unchanged and
-// under an mc-php binary; probes/t10/bench/bench.sh times both.
+// under an mc-php binary; probes/t10/bench/bench10.sh times both.
 
 function wl_make_records(int $n): array {
     $out = [];

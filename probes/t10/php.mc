@@ -5157,6 +5157,20 @@ i64 ph_stmt_1() {
             ph_semi("expected ; after return");
             if (!str_eq(ph_absfile(tlfile), ph_entry))
                 ph_todo(tlfile, tlline, "a top-level return in an included file");
+            // Inside a try that has a `finally`, php runs the finally FIRST.
+            // Taking the exit here would jump over it, so this goes down the
+            // same deferred road a `return` inside a function takes: raise
+            // the flag and break out to the try's own label. The epilogue at
+            // the bottom of ph_try is what turns the flag into the exit --
+            // and it is the top level, so the value is not kept: php ignores
+            // what a top-level return returns.
+            if (ph_in_try && ph_frf) {
+                i64 tsf = ph_set(ph_frf, ph_int(1));
+                i64 tbo = node_new(N_BREAK, tlline, tlfile);
+                set_nd_val(tbo, ph_ls_try());
+                set_nd_next(tsf, tbo);
+                return ph_wrap(tsf);
+            }
             return ph_wrap(ph_expr_stmt_of(ph_c1("php_exit", ph_int(0), TY_VOID)));
         }
         ph_next();
@@ -5561,17 +5575,24 @@ i64 ph_stmt_1() {
         // its value to, so the finally still runs. One pair per function;
         // created by the first try that needs them.
         i64 frpre = 0;
-        if (!ph_toplevel) {
-            if (!ph_frf) {
-                ph_nonce = ph_nonce + 1;
-                uptr dg = php_dec(ph_nonce);
+        if (!ph_frf) {
+            ph_nonce = ph_nonce + 1;
+            uptr dg = php_dec(ph_nonce);
+            ph_frf = p_cat("phff_", dg, 0, cstrlen(dg));
+            ph_local(ph_frf, TY_I64);
+            // The VALUE local exists only inside a function. At the top
+            // level php IGNORES what a `return` returns and the generated
+            // `main` has nothing to hand it to, so the flag alone is what
+            // the epilogue reads -- and the flag is what was missing: it was
+            // not created at the top level at all, so a `return` inside a
+            // top-level try raised nothing and the script carried on past
+            // the try without running its finally.
+            if (!ph_toplevel) {
                 ph_frv = p_cat("phfv_", dg, 0, cstrlen(dg));
-                ph_frf = p_cat("phff_", dg, 0, cstrlen(dg));
                 ph_local(ph_frv, ph_mcty(ph_fn_ret));
-                ph_local(ph_frf, TY_I64);
             }
-            frpre = ph_set(ph_frf, ph_int(0));
         }
+        frpre = ph_set(ph_frf, ph_int(0));
         i64 sin = ph_in_try;
         ph_in_try = 1;
         ph_ls_push(1);
@@ -5651,15 +5672,21 @@ i64 ph_stmt_1() {
         if (chain) { set_nd_next(t, chain); t = chain; }
         if (fin) { set_nd_next(t, fin); t = fin; }
         // a `return` the try or a catch deferred: do it now, or -- when this
-        // try is itself inside one -- break out so the outer finally runs too
-        if (ph_frf && !ph_toplevel) {
+        // try is itself inside one -- break out so the outer finally runs too.
+        // At the TOP LEVEL the deferred action is php's end-of-script and not
+        // a return from the generated `main`: it was skipped entirely here,
+        // so a `return` inside a top-level try raised a flag nothing read and
+        // the script simply carried on past the try.
+        if (ph_frf) {
             i64 fr = node_new(N_IDENT, line, fl);
             set_nd_name(fr, ph_frf);
             set_nd_type(fr, TY_I64);
             i64 act = 0;
             i64 outl = ph_ls_try();
             if (outl) { act = node_new(N_BREAK, line, fl); set_nd_val(act, outl); }
-            if (!outl) {
+            if (!outl && ph_toplevel)
+                act = ph_expr_stmt_of(ph_c1("php_exit", ph_int(0), TY_VOID));
+            if (!outl && !ph_toplevel) {
                 act = node_new(N_RETURN, line, fl);
                 i64 rv = node_new(N_IDENT, line, fl);
                 set_nd_name(rv, ph_frv);

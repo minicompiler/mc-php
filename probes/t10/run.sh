@@ -149,6 +149,15 @@ MCPHP_OUT=$MCPHP_TMP/d8.bin probes/t10/mcphp.sh probes/t10/bench/run.php \
 d8b=$(tail -1 "$MCPHP_TMP/d8.out")
 rm -f "$MCPHP_TMP/d8.bin" "$MCPHP_TMP/d8.bin.out" "$MCPHP_TMP/d8.bin.err" "$MCPHP_TMP/d8.out"
 printf '  php     %s\n  mc-php  %s\n' "$d8a" "$d8b"
+# NOT phpunit and NOT `mc-php test`, and the reason is on record rather than
+# implied: phpunit is not installed on this host (bench/shim.php's own note)
+# and `mc-php test` does not exist -- D8 (a) names it as the mechanism the
+# COMPILER will provide. Until it does, the method list is written by hand in
+# run.php, and probes/t10/d8check.py is what keeps that list honest: it fails
+# when the class declares a `test*` the runner does not name, or the reverse.
+printf '  (the runner is run.php: phpunit is not installed here and `mc-php test`\n'
+printf '   does not exist yet -- d8check.py checks the hand-written list against\n'
+printf '   the class, so a test method cannot be declared and never run)\n'
 case "$d8a" in *" 0 failed") ;; *) fail=1 ;; esac
 [ "$d8a" = "$d8b" ] || fail=1
 

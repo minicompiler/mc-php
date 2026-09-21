@@ -60,8 +60,12 @@ def one(path):
         return (path, f"({r.get('error', s)})", '', '')
     if r['agrees']:
         return (path, '(agrees on this harness)', '', '')
-    want = r['want'].rstrip('\n').split('\n')
-    got = r['out'].rstrip('\n').split('\n')
+    # keepends, because rstrip('\n') + split makes a pair that differs ONLY
+    # in a final newline compare EQUAL -- and the branch below would then
+    # report an exit code that is the same on both sides, or the loop would
+    # find no differing line and call a real mismatch agreement.
+    want = r['want'].splitlines(keepends=True)
+    got = r['out'].splitlines(keepends=True)
     if want == got:
         # the grid grades the exit code too, so this is a real disagreement
         return (path, 'an exit code', f"exit {r['wrc']}", f"exit {r['rc']}")
@@ -69,7 +73,8 @@ def one(path):
         a = want[i] if i < len(want) else '<eof>'
         b = got[i] if i < len(got) else '<eof>'
         if a != b:
-            return (path, shape(a, b), a[:120], b[:120])
+            return (path, shape(a, b), a.rstrip('\n')[:120], b.rstrip('\n')[:120])
+    # unreachable: want != got above, so some index differs
     return (path, '(agrees on this harness)', '', '')
 
 

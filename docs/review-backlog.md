@@ -129,8 +129,50 @@ a measurement recorded beside it. The fixture is named at the end of each line.
   construction) -- and D8 (d) is `probes/t10/d8check.py`, step 0 of `run.sh`, which puts every
   `.php` under the probe into exactly one of four regimes and fails on a file in none of them.
   It found one on its first run: `probes/t10/bench/unwind.php`, T6's exception bench, copied
-  forward twice and referenced by nothing -- deleted. **77 fixture / 3 instrument / 1 library /
-  2 bench, 83 files.**
+  forward twice and referenced by nothing -- deleted. **80 fixture / 3 instrument / 1 library /
+  2 bench, 86 files**, and every `test*` the class declares is named by the runner.
 - **A merge watch must not filter the reviewer's checks, and a pull request is not merged before
   its findings are read.** Standing, for every pull request from here on. T10's own reviewer
   findings are read and fixed inside its pull request before it is reported.
+
+## 4. The reviewer's findings on T10's own pull request (#9) -- DONE
+
+The standing rule above, applied to this pull request. Twelve inline findings, every one real.
+
+- ~~A top-level `return` inside a `try`/`finally` took the exit and jumped over the finally~~
+  (`php.mc:5160`). php runs the finally first, innermost out. The deferred-return FLAG was never
+  created at the top level (`if (!ph_toplevel)` guarded its allocation), so the flag the return
+  raised was read by nobody and the script simply carried on past the try; the epilogue that
+  consumes it was guarded the same way. Both guards are gone and the top-level action is
+  `php_exit(0)` instead of a return from `main`. `g/74-toplevel-return-finally.php` -- two
+  nested `finally`s, a shutdown function and a destructor, in php's order.
+- ~~`diffgroup.py` stripped trailing newlines before comparing~~ (`diffgroup.py:65`), so a pair
+  differing ONLY in a final newline compared equal and was reported as `an exit code` with the
+  same code on both sides. `splitlines(keepends=True)`.
+- ~~`harness.py` ran the CANDIDATE before the oracle~~ (`harness.py:121`), in the test's own
+  directory, so a `.phpt` that writes a file beside itself contaminated the ORACLE. php runs
+  first now, which is also the order `probes/t0/phpt-run.py` uses -- a tool that explains the
+  grid's verdict has to reproduce its conditions.
+- ~~`harness.py` ignored `--ARGS--`, `--STDIN--`, `--ENV--` and `--INI--`~~ (`harness.py:121`)
+  while the grid passes all four, so it could measure a DIFFERENT program and publish a
+  classification for it. It imports `probes/t0/phpt-run.py` and uses the grid's own
+  `parse_phpt`/`resolve_sections`/`DEFAULT_INI` rather than a second copy.
+- ~~`nocompile.py` skipped only `(compiled; output differs)`~~ (`nocompile.py:41`), so every
+  other compiled outcome -- `agrees on this harness`, `same output, exit N`, a crash, a timeout
+  -- was counted as a test that DOES NOT COMPILE. It skips every message beginning
+  `(compiled;`.
+- ~~The D8 gate invokes neither phpunit nor `mc-php test`~~ (`run.sh:153`). Both are unavailable
+  and the reason is now PRINTED by the gate rather than implied: phpunit is not installed on
+  this host and `mc-php test` does not exist -- D8 (a) names it as the mechanism the compiler
+  will provide. What could actually go wrong with a hand-written method list is now a gate:
+  `d8check.py` fails when `WorkloadTest.php` declares a `test*` the runner does not name, or
+  the reverse.
+- ~~The D8 counts in § 3 above said 77 / 83~~ against the measured 79 / 85 -- stale after two
+  fixtures were added. They are read from the run now (80 / 86).
+- ~~The disk table said 1852 KiB where the invariants and the plan said 1872~~ -- two different
+  corpus runs quoted in one document. Both are the final run's.
+- ~~The derived percentage followed the wrong peak~~ (0.4% against the real 0.6%).
+- ~~"737 do not compile" plus "784 compile and run" exceeded the 1352-test sample~~, which is
+  the same defect as `nocompile.py`'s filter seen from the other end.
+- ~~Two bench comments pointed at `probes/t10/bench/bench.sh`~~, which does not exist: the
+  script is `bench10.sh`.
