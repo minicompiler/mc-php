@@ -295,9 +295,7 @@ right about short circuit. What the probe is actually worth is the corrected num
 **Four tools had been reporting numbers they never measured**, and they are what chose every
 block since T5. `why.py` labelled a test `(compiled; output differs)` WITHOUT running the
 binary; running them shows that of 784 sampled tests that compile, **758 really differ**, 23
-crash, 2 time out and 1 agrees on both. The exit-code group is one shape -- a php program that ends in a
-fatal exits non-zero and this compiler exits 0 -- and it is the single largest nameable block
-left; nothing could see it because stdout matched. `arena.py` divided by `len(files)` while
+crash, 2 time out and 1 agrees on both. `arena.py` divided by `len(files)` while
 turning every failure into `None`: of T10's 1352-test list only **782 RAN**, so the published
 rate understated by 1.7x. `nocompile.py`'s skip list named one compiled outcome of five, so
 the block that does not compile was published as 737 and is **568** -- the reviewer of #9

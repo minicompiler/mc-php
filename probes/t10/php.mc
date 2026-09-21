@@ -116,6 +116,7 @@ void ph_set_ref(uptr d);
 uptr ph_scope_save();
 void ph_scope_restore(uptr b);
 i64  ph_closure(uptr fl, i64 line, i64 arrow);
+void ph_tail(i64 head, i64 n);
 i64  ph_prefix_stmts(i64 pre, i64 s);
 void ph_ls_push(i64 kind);
 void ph_ls_pop();
@@ -1985,6 +1986,13 @@ i64 ph_blk(i64 head) {
     return b;
 }
 
+// append `n` after the LAST statement of the chain `head`
+void ph_tail(i64 head, i64 n) {
+    i64 t = head;
+    loop { if (!nd_next(t)) break; t = nd_next(t); }
+    set_nd_next(t, n);
+}
+
 i64 ph_prefix_stmts(i64 pre, i64 s) {
     if (!pre) return s;
     i64 t = pre;
@@ -3579,6 +3587,24 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         ph_ety = PT_INT;
         return ph_c1("php_count", ph_tref(ap), TY_I64);
     }
+    // register_shutdown_function($f, ...$args): the library row pads the
+    // arguments it was not given with null, so the callee could not tell
+    // them from a null that was passed and php_shutdown handed the callback
+    // three of them -- which func_num_args() can see. The count comes from
+    // here, the only place that knows it (the array_push shape above).
+    if (str_eq(name, "register_shutdown_function")) {
+        if (na < 1) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        if (na > 4) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        i64 sf = ph_to_mixed(a0, t0);
+        i64 sa1 = ph_call("php_zundef", 0, 0, 0, 0, 0, ty_pzv);
+        i64 sa2 = ph_call("php_zundef", 0, 0, 0, 0, 0, ty_pzv);
+        i64 sa3 = ph_call("php_zundef", 0, 0, 0, 0, 0, ty_pzv);
+        if (na > 1) sa1 = ph_to_mixed(ph_a(av, 1), ph_aty(av, 1));
+        if (na > 2) sa2 = ph_to_mixed(ph_a(av, 2), ph_aty(av, 2));
+        if (na > 3) sa3 = ph_to_mixed(ph_a(av, 3), ph_aty(av, 3));
+        ph_ety = PT_BOOL;
+        return ph_c4("php_f_reg_shutdown", sf, sa1, sa2, sa3, TY_U8);
+    }
     if (str_eq(name, "var_dump")) {
         i64 head = 0;
         i64 tail = 0;
@@ -5153,8 +5179,28 @@ i64 ph_stmt_1() {
             i64 tlline = ph_tline;
             uptr tlfile = ph_tfile;
             ph_next();
-            if (!ph_at(";", 1)) ph_expr(0);
+            // php EVALUATES the expression and then ends the script, so
+            // `return f();` at the top level still calls f(), and one that
+            // throws still throws. Parsing it and dropping the node lost
+            // every side effect it had. The VALUE is discarded -- php
+            // ignores what a top-level return returns -- so it becomes an
+            // expression statement in front of the exit.
+            i64 tlv = 0;
+            i64 tlthrow = 0;
+            if (!ph_at(";", 1)) {
+                i64 tsave = ph_can_throw;
+                ph_can_throw = 0;
+                tlv = ph_expr_stmt_of(ph_expr(0));
+                tlthrow = ph_can_throw;
+                ph_can_throw = ph_can_throw | tsave;
+            }
             ph_semi("expected ; after return");
+            // T6's rule: the check goes BETWEEN computing the value and
+            // using it. Without it `try { return t(); } catch ...` with a
+            // throwing t() caught the exception and STILL ended the script,
+            // where php carries on after the try -- the return never
+            // happened.
+            if (tlthrow) set_nd_next(tlv, ph_check(tlline, tlfile));
             if (!str_eq(ph_absfile(tlfile), ph_entry))
                 ph_todo(tlfile, tlline, "a top-level return in an included file");
             // Inside a try that has a `finally`, php runs the finally FIRST.
@@ -5169,9 +5215,12 @@ i64 ph_stmt_1() {
                 i64 tbo = node_new(N_BREAK, tlline, tlfile);
                 set_nd_val(tbo, ph_ls_try());
                 set_nd_next(tsf, tbo);
+                if (tlv) { ph_tail(tlv, tsf); return ph_wrap(tlv); }
                 return ph_wrap(tsf);
             }
-            return ph_wrap(ph_expr_stmt_of(ph_c1("php_exit", ph_int(0), TY_VOID)));
+            i64 tlx = ph_expr_stmt_of(ph_c1("php_exit", ph_int(0), TY_VOID));
+            if (tlv) { ph_tail(tlv, tlx); return ph_wrap(tlv); }
+            return ph_wrap(tlx);
         }
         ph_next();
         i64 e = 0;

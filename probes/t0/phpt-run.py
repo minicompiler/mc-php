@@ -275,6 +275,11 @@ def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     fd, out = tempfile.mkstemp(prefix='mcphp-out.', suffix='.bin',
                                dir=os.environ.get('MCPHP_TMP') or None)
     os.close(fd)
+    # mkstemp RESERVES the name by creating the file; the compiler wants the
+    # path free (and macOS kills a re-signed executable written at the same
+    # inode -- mc's M12 note). probes/t10/harness.py's tmpbin() unlinks for
+    # the same reason.
+    os.unlink(out)
     env['MCPHP_OUT'] = out
     try:
         return _run(cmd, stdin, env, timeout, cwd)

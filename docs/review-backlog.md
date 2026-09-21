@@ -112,7 +112,9 @@ a measurement recorded beside it. The fixture is named at the end of each line.
 - ~~`sprintf()`/`printf()` with no arguments reads an argument that is not there~~
   (#4 `php.mc:1428`). `g/71-sprintf-noargs.php`.
 - ~~`ph_dq_read` is unreachable for the core lexer's string tokens~~ (#4 `php.mc:440`) -- closed
-  BY MEASUREMENT, except for one sub-case that is NOT closed and is refused with its number.
+  BY MEASUREMENT, except for one sub-case that is NOT closed. It is not a refusal either --
+  saying so was itself wrong, and the reviewer of #9 caught it: `${` is not a variable-name
+  byte, so the reader emits the characters literally and never reaches `ph_refuse`.
   mc 1.1.0's `p_skip_to` gives the module the `"..."` token, so `"$x"`, `"{$x}"`, `"$a[k]"` and
   `"{$a['k']}"` all interpolate and agree with php. **`"${x}"` does not**, and it is not built:
   php 8.2 DEPRECATED that form, so matching it means emitting php's own

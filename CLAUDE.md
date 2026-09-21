@@ -192,7 +192,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     was published as 737 and is **568** -- the reviewer of this probe's own pull request
     caught it, in T10's first draft.
   * **Twenty-two semantics a program can observe**, seventeen fixed and closed by a fixture,
-    five closed by measurement, one refused with its number: short circuit (`&&`, `||`, `??`,
+    five closed by measurement, one recorded as a divergence with its number: short circuit (`&&`, `||`, `??`,
     `?:`, and the right side's own PENDING statements move inside the branch with it),
     parameters BY VALUE (in the callee's prologue, so no call road can forget), `finally` on a
     `return` from the try and from the catch, a pending exception stopping the CONDITION of

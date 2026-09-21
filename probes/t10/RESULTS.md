@@ -179,7 +179,7 @@ no output at all until it was killed by hand.
 Twenty-two lines. Seventeen are fixed in the compiler and closed by a
 FIXTURE -- a `.php` run under `php` and under mc-php and compared byte for
 byte on stdout, stderr AND the exit code -- five were already true and are
-closed by measurement, and one sub-case is refused with its number. The
+closed by measurement, and one sub-case is NOT built and is recorded with its number as a divergence. The
 per-line table is `docs/review-backlog.md` § 2; what is worth keeping here is
 the shape of the two that were not one-liners and the two finds that were not
 on the list at all.
@@ -217,9 +217,13 @@ splice them into the loop body; `do` did not. So the unwinding check that
 killed the first run of `g/64` and it is why `fixtures.sh` bounds a fixture
 now.
 
-### Refused with its number
+### NOT built, and recorded rather than refused
 
-`"${x}"` does not interpolate. php 8.2 DEPRECATED the form, so matching it
+`"${x}"` does not interpolate: mc-php prints the five characters and says
+nothing. It is **not** a named refusal, which the first version of this
+document claimed -- `${` is not a variable-name byte, so `ph_dq_read` emits
+them literally and never reaches `ph_refuse`, and the reviewer of #9 is what
+caught the claim. php 8.2 DEPRECATED the form, so matching it
 means emitting php's own `Deprecated: Using ${var} in strings is deprecated`
 on both streams as well as interpolating, and it is worth **13 tests of the
 three graded directories and 14 of the whole corpus**
@@ -434,8 +438,16 @@ Two things worth writing down for the next probe, neither of them mc's:
 
 ## Two divergences observed and NOT fixed, with their numbers
 
-* `"${x}"` does not interpolate -- deprecated in php 8.2, removed in php 9,
-  worth 13 tests of the three graded directories and 14 of the corpus.
+* `"${x}"` does not interpolate and is not diagnosed: mc-php prints the five
+  characters. Deprecated in php 8.2, removed in php 9, worth 13 tests of the
+  three graded directories and 14 of the corpus.
+* A closure registered with `register_shutdown_function` does not get its
+  DEFAULT parameter values: `function ($a = 'x')` sees null. The argument
+  COUNT is right now (the row records it and `php_shutdown` passes it, the
+  reviewer of #9's finding), but a closure called through `php_call_zv` does
+  not apply its own defaults -- a separate gap, in the call path and not in
+  the shutdown list. `register_shutdown_function('name')` with a STRING
+  callback does not fire at all; that is older than T10 and unchanged by it.
 * `intdiv(PHP_INT_MIN, -1)` answers `-9223372036854775808` where php throws
   `ArithmeticError`, and a throwable's `getFile()` is the path as WRITTEN
   where php's is the path it RESOLVED (visible only under a symlinked

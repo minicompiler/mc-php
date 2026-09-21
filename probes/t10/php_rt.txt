@@ -751,6 +751,7 @@ void php_ln(i64 l) { ph_dline = l; }
 // ---- the named diagnostics -------------------------------------------------
 // Each one is php-src's own text, checked against php 8.5.10 on this host.
 uptr php_znull();
+uptr php_zundef();
 
 uptr php_undef_var(uptr name) {
     php_mreset();
@@ -850,6 +851,8 @@ void php_zv_cp(uptr d, uptr s) { st64(d, ld64(s)); st32(d + 8, ld32(s + 8)); }
 uptr php_zv_dup(uptr s) { uptr z = php_zv_alloc(); php_zv_cp(z, s); return z; }
 
 uptr php_znull() { uptr z = php_zv_alloc(); php_zv_settype(z, IS_NULL); return z; }
+// "this argument was not passed", which a null that WAS passed is not
+uptr php_zundef() { uptr z = php_zv_alloc(); php_zv_settype(z, IS_UNDEF); return z; }
 uptr php_zlong(i64 v) { uptr z = php_zv_alloc(); st64(z, v); php_zv_settype(z, IS_LONG); return z; }
 uptr php_zbool(u8 b) { uptr z = php_zv_alloc(); if (b) php_zv_settype(z, IS_TRUE); if (!b) php_zv_settype(z, IS_FALSE); return z; }
 uptr php_zdouble(f64 x) { uptr z = php_zv_alloc(); stf64(z, x); php_zv_settype(z, IS_DOUBLE); return z; }
@@ -2107,7 +2110,8 @@ void php_shutdown() {
             uptr bk = php_ht_bkt(ph_sdfn, i);
             if (ld8(bk + 8) != IS_UNDEF) {
                 uptr row = ld64(bk);
-                php_call_zv(php_arr_iget(row, 0), 3, php_arr_iget(row, 1),
+                i64 nsa = php_zv_long(php_arr_iget(row, 4));
+                php_call_zv(php_arr_iget(row, 0), nsa, php_arr_iget(row, 1),
                             php_arr_iget(row, 2), php_arr_iget(row, 3), 0, 0);
                 ph_exc = 0;
             }
@@ -5870,13 +5874,32 @@ u8 php_f_class_alias(uptr cz, uptr az, uptr autoz) {
 uptr ph_sdfn;
 i64  ph_nsdfn;
 
+// `n` is how many arguments AFTER the callback were really passed. The
+// library row pads the slots it was not given with php_znull(), so the
+// callee cannot tell `register_shutdown_function($f)` from
+// `register_shutdown_function($f, null, null, null)` -- and php_shutdown
+// then handed the callback three nulls, which func_num_args() can see. The
+// count comes from the CALL SITE, which is the only place that knows it:
+// ph_call special-cases the name, exactly as it does for array_push.
 u8 php_f_reg_shutdown(uptr f, uptr a1, uptr a2, uptr a3) {
     if (!ph_sdfn) ph_sdfn = php_arr_new(8);
-    uptr row = php_arr_new(4);
+    uptr row = php_arr_new(8);
     php_zv_cpv(php_arr_islot(row, 0), f);
     php_zv_cpv(php_arr_islot(row, 1), a1);
     php_zv_cpv(php_arr_islot(row, 2), a2);
     php_zv_cpv(php_arr_islot(row, 3), a3);
+    // How many arguments AFTER the callback were really passed. The library
+    // row pads the slots it was not given with php_znull(), so this could
+    // not tell `register_shutdown_function($f)` from one called with three
+    // explicit nulls, and php_shutdown handed the callback three of them --
+    // which the callback can see. ph_call special-cases the name (the
+    // array_push shape) and passes php_zundef() for a slot that was not
+    // written, which IS distinguishable from a null that was.
+    i64 sn = 0;
+    if (php_zv_type(a1) != IS_UNDEF) sn = 1;
+    if (php_zv_type(a2) != IS_UNDEF) sn = 2;
+    if (php_zv_type(a3) != IS_UNDEF) sn = 3;
+    php_zv_cpv(php_arr_islot(row, 4), php_zlong(sn));
     php_zv_cpv(php_arr_nextslot(ph_sdfn), php_zarr(row));
     ph_nsdfn = ph_nsdfn + 1;
     return 1;
