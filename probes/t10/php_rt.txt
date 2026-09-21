@@ -4075,10 +4075,10 @@ uptr php_ro_of(uptr ce, uptr name) {
     return 0;
 }
 
-// php allows exactly one write, from inside the declaring scope. D7 has no
-// per-object "initialised" bitmap, so the test is the VALUE: a readonly
-// property still null has not been written. A readonly property deliberately
-// initialised to null and written again is the one case this lets through.
+// php allows exactly one write, from inside the declaring scope. `written`
+// is a per-OBJECT mark its caller keeps (php_obj_set), not the value: the
+// value was a proxy for it until T10, and a readonly property deliberately
+// initialised to NULL could then be written a second time.
 i64 php_ro_check(uptr ce, uptr name, uptr scope, i64 written) {
     uptr d = php_ro_of(ce, name);
     if (!d) return 0;
@@ -4344,11 +4344,19 @@ void php_obj_set(uptr o, uptr name, uptr v, uptr scope) {
         return;
     }
     // readonly: refused from outside the declaring scope, and inside it only
-    // while the property has not been written (see php_ro_check)
+    // while the property has not been written. The test used to be the
+    // VALUE -- "still null means never written" -- so a readonly property
+    // deliberately initialised to NULL could be written a second time and
+    // php refuses that. The mark is per OBJECT now, kept in the object's
+    // own property table under a key beginning with a SPACE, which no php
+    // property name can be (php mangles with a NUL and this language
+    // forbids one in a literal).
     if (b) {
-        i64 was = 1;
-        if (php_zv_type(b) == IS_NULL) was = 0;
+        uptr mk = php_str_concat(php_str_new(" ro:", 4), name);
+        i64 was = 0;
+        if (php_ht_find(php_obj_props(o), php_str_hash(mk), mk)) was = 1;
         if (php_ro_check(ce, name, scope, was)) return;
+        if (php_ro_of(ce, name)) php_zv_cpv(php_arr_sslot(php_obj_props(o), mk), php_zlong(1));
     }
     php_zv_cpv(php_arr_sslot(php_obj_props(o), name), v);
 }
@@ -7271,8 +7279,13 @@ uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5,
         break;
     }
     // with extra arguments php writes THROUGH them and answers the count
+    // php_zundef() is what the call site passes for an output slot it did
+    // not write, and a NULL is a variable that WAS passed and happens to be
+    // null -- which is every undefined `$out` at its first use. Testing for
+    // null here made `sscanf($s, $f, $w, $v)` answer the array instead of
+    // writing through, which is the whole point of the extra arguments.
     i64 extra = 0;
-    if (a1) { if (php_zv_type(a1) != IS_NULL) extra = 1; }
+    if (a1) { if (php_zv_type(a1) != IS_UNDEF) extra = 1; }
     if (!extra) return php_zarr(out);
     uptr h = ld64(php_zarr(out));
     i64 k = 0;
@@ -7286,7 +7299,7 @@ uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5,
         if (k == 4) tgt = a5;
         if (k == 5) tgt = a6;
         if (!tgt) break;
-        if (php_zv_type(tgt) == IS_NULL && k) break;
+        if (php_zv_type(tgt) == IS_UNDEF) break;
         if (idx < 0) break;
         php_zv_cp(tgt, php_it_val(h, idx));
         idx = php_it_next(h, idx + 1);

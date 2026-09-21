@@ -312,3 +312,21 @@ Both re-measured: **no number moved** (568 / 758 / 23 / 2 / 1, arena 11 of 782, 
   `test*` methods the class DECLARES, requires that many `ok` lines from each half, and `cmp`s
   the two whole outputs against each other. Measured: **6 declared, php ran 6, mc-php ran 6,
   and the two worlds printed the same thing**, with nothing on either stderr.
+
+### Round ten -- two of T9's, reproduced and fixed
+
+- ~~`readonly` used the VALUE as the "has it been written" mark~~ (`php_rt.txt:4351`), which its
+  own comment admitted: a property deliberately initialised to NULL could be written a second
+  time and php refuses that. Reproduced: `public readonly ?int $x` set to null in the
+  constructor and then to 5 -- accepted, and php throws. The mark is per OBJECT now, kept in
+  the object's own property table under a key beginning with a SPACE, which no php property
+  name can be.
+- ~~`sscanf`'s outputs were READ rather than taken by reference~~ (`php.mc:1183`): the name was
+  missing from the by-reference mask table, so `sscanf("age 25", "%s %d", $w, $v)` warned
+  `Undefined variable $w` and wrote nothing back. And the runtime's "was anything passed" test
+  was `a1` is not null, which is false for every undefined `$out` at its first use. The mask is
+  registered (positions 2..7) and the call site passes `php_zundef()` for a slot it did not
+  write, the same marker `register_shutdown_function` uses.
+
+`g/76-readonly-null-sscanf.php` covers both, and the default compiler's answer for each was
+measured before the fix.

@@ -1180,6 +1180,7 @@ void ph_brf_init() {
     ph_brf_add("str_ireplace");
     ph_brf_add("preg_match");
     ph_brf_add("preg_match_all");
+    ph_brf_add("sscanf");
 }
 
 i64 ph_brf_has(uptr n) {
@@ -3567,6 +3568,10 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (str_eq(name, "array_splice")) ph_argref = 1;
         if (str_eq(name, "similar_text")) ph_argref = 4;
         if (str_eq(name, "str_replace")) ph_argref = 8;
+        // sscanf($s, $f, &$a, &$b, ...): every argument from the third on.
+        // It was missing, so the outputs were READ and the parsed values
+        // had nowhere to go (docs/review-backlog.md round ten).
+        if (str_eq(name, "sscanf")) ph_argref = 252;
     }
     uptr av = ph_read_args(16, fl, line, pnb);
     i64 na = ld64(pnb);
@@ -3593,6 +3598,30 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         }
         ph_ety = PT_INT;
         return ph_c1("php_count", ph_tref(ap), TY_I64);
+    }
+    // sscanf($s, $f, &$a, ...): the outputs are BY REFERENCE and the row
+    // padded the ones it was not given with null, so the runtime's "was
+    // anything passed" test -- `a1` is not null -- was false for the very
+    // first call, `sscanf($s, $f, $w, $v)` with $w undefined. Same answer as
+    // register_shutdown_function below: php_zundef() for a slot the CALL
+    // SITE did not write. (ph_brf_init registers the name too, so the
+    // source scan boxes the variables.)
+    if (str_eq(name, "sscanf")) {
+        if (na < 2) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        if (na > 8) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        u8 scall[64];
+        st64(scall, ph_to_mixed(a0, t0));
+        st64(scall + 8, ph_to_mixed(ph_a(av, 1), ph_aty(av, 1)));
+        i64 si = 2;
+        loop {
+            if (si >= 8) break;
+            i64 sv = ph_call("php_zundef", 0, 0, 0, 0, 0, ty_pzv);
+            if (si < na) sv = ph_to_mixed(ph_a(av, si), ph_aty(av, si));
+            st64(scall + si * 8, sv);
+            si = si + 1;
+        }
+        ph_ety = PT_MIXED;
+        return ph_calln("php_f_sscanf", scall, 8, ty_pzv);
     }
     // register_shutdown_function($f, ...$args): the library row pads the
     // arguments it was not given with null, so the callee could not tell
