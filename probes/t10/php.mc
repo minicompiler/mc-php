@@ -159,6 +159,7 @@ void ph_want(uptr s, i64 n, uptr msg);
 void ph_semi(uptr msg);
 uptr ph_mangle(uptr d, uptr pfx);
 i64  ph_raw(uptr bytes, i64 len);
+i64  ph_truthy(i64 n);
 i64  ph_wrap(i64 s);
 i64  ph_empty();
 i64  ph_expr_stmt_of(i64 e);
@@ -894,6 +895,24 @@ i64 ph_bool(i64 v) {
     set_nd_val(n, v);
     set_nd_type(n, TY_U8);
     return n;
+}
+
+// `if (POINTER)` -- and NOT `(u8) POINTER`, which keeps the low BYTE and is
+// false for every address that happens to end in 0x00. It cost a whole
+// afternoon: the by-value copy of a parameter (and func_num_args's counter
+// before it) was skipped whenever the arena put the zval on a 256-byte
+// boundary, which two class methods rather than one or three was enough to
+// arrange. `!!x` is mc's own 64-bit test, twice.
+i64 ph_truthy(i64 n) {
+    i64 a = node_new(N_UNARY, ph_tline, ph_tfile);
+    set_nd_op(a, ph_tok("!", 1));
+    set_nd_a(a, n);
+    set_nd_type(a, TY_U8);
+    i64 b = node_new(N_UNARY, ph_tline, ph_tfile);
+    set_nd_op(b, ph_tok("!", 1));
+    set_nd_a(b, a);
+    set_nd_type(b, TY_U8);
+    return b;
 }
 
 i64 ph_raw(uptr bytes, i64 len) {
@@ -3958,7 +3977,7 @@ i64 ph_byval(uptr d, i64 line, uptr fl) {
     set_nd_name(pr2, ph_mangle(d, "v_"));
     set_nd_type(pr2, ty_pzv);
     i64 iff = node_new(N_IF, line, fl);
-    set_nd_a(iff, ph_cast(TY_U8, pr));
+    set_nd_a(iff, ph_truthy(pr));
     set_nd_b(iff, ph_set(ph_mangle(d, "v_"), ph_c1("php_zv_val", pr2, ty_pzv)));
     return iff;
 }
@@ -4993,7 +5012,7 @@ i64 ph_nargs_prologue(uptr fl, i64 line) {
         set_nd_name(pr, ph_mangle(ld64(ph_cpn + i * 8), "v_"));
         set_nd_type(pr, ty_pzv);
         i64 iff = node_new(N_IF, line, fl);
-        set_nd_a(iff, ph_cast(TY_U8, pr));
+        set_nd_a(iff, ph_truthy(pr));                // NOT (u8): see ph_truthy
         set_nd_b(iff, ph_set(nn, ph_int(i + 1)));
         set_nd_next(tail, iff);
         tail = iff;
@@ -5160,6 +5179,15 @@ i64 ph_stmt_1() {
         ph_next();
         ph_want("(", 1, "expected ( after do-while");
         i64 c = ph_cond_checked(ph_to_bool(ph_expr(0), ph_ety), line, fl);
+        // The condition's own statements -- the unwinding check
+        // ph_cond_checked pends, an array literal, a `($n = f())` -- belong
+        // INSIDE the loop, between the body and the test, and run on every
+        // iteration. `while` and `for` take them with ph_take_pend; `do` did
+        // not, so the statement parser drained them and they landed BEFORE
+        // the loop: the check then ran once and `do { } while (t());` with a
+        // throwing t() spun for ever (probes/t10/g/64-exception-stops.php,
+        // measured: the fixture had to be killed).
+        i64 cpre = ph_take_pend();
         ph_want(")", 1, "expected ) after do-while");
         ph_semi("expected ; after do-while");
         i64 neg = node_new(N_UNARY, line, fl);
@@ -5173,6 +5201,10 @@ i64 ph_stmt_1() {
         set_nd_b(iff, brk);
         i64 t = body;
         loop { if (!nd_next(t)) break; t = nd_next(t); }
+        if (cpre) {
+            set_nd_next(t, cpre);
+            loop { if (!nd_next(t)) break; t = nd_next(t); }
+        }
         set_nd_next(t, iff);
         i64 b = node_new(N_BLOCK, line, fl);
         set_nd_a(b, body);
