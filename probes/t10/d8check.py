@@ -397,7 +397,11 @@ def main():
     for f in files:
         if f.split('/')[0] in globs:
             src = open(os.path.join(HERE, f), encoding='latin-1').read()
-            for m in re.finditer(r"(?:require|include)(?:_once)?[^;]*?['\"]([^'\"]+\.php)", src):
+            # UNCOMMENTED, like the repo-wide sweep: a `// require
+            # "inc.php"` left behind after the real include was deleted
+            # would otherwise keep the helper looking covered.
+            for m in re.finditer(r"(?:require|include)(?:_once)?[^;]*?['\"]([^'\"]+\.php)",
+                                 _uncomment(src)):
                 included.add(os.path.basename(m.group(1)))
 
     # `refusal` is a regime of its own, and not a kind of `fixture`: an

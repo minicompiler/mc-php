@@ -985,3 +985,23 @@ Three findings, all real, all in the analysis harness and its gate.
   handler reads `cmd[0]`, so a test that never started a binary went into
   the run-timeout bucket. It raises with the compiler's command now, which
   is what it was.
+
+### Round thirty-one
+
+Two findings: one real, one refuted with a measurement.
+
+- ~~The helper-coverage scan reads the RAW fixture source.~~ Correct, and it
+  is round thirty's fix applied to the other scan in the same file: a
+  `// require "inc.php"` left behind after the real include was deleted
+  would have kept the helper looking covered. It goes through `_uncomment`
+  now. Measured: with all three includes in `g/08-require.php` and both in
+  `g/72-require-dir.php` commented out -- one of them as a php BLOCK comment
+  -- the gate reports `g/inc.php: skipped by the gate and required by no
+  fixture`.
+- **A CLEAN that times out stops the candidate being compiled.** Refuted.
+  `subprocess.TimeoutExpired` is a `SubprocessError`, which the CLEAN
+  block's own `except (OSError, subprocess.SubprocessError)` catches, so
+  `_run` kills the group and the analysis carries on. Measured with a
+  `--CLEAN--` of `sleep(60)` against a 15-second budget: the pair comes back
+  **`ran True` in 16.8 s**, the candidate compiled and run, which is what
+  the grid does with it.
