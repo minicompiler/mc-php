@@ -78,8 +78,8 @@ not the compiler.
 | corpus refused | 2309 | **1929** | blocks 4 and the review rounds |
 | `tests/lang` / `Zend/tests` / `strings` | 102 / 709 / 262 | **104 / 749 / 263** | |
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
-| **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **757 of the 781 that compile** | **never ran the binary** |
-| **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
+| **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **788 of the 812 that compile** | **never ran the binary** |
+| **the arena** | **2 of 1572** | **11 of 810 that RAN** | **the denominator counted tests it never ran** |
 | **fixtures byte for byte** | **60 of 60, merged streams** | **75 of 75, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
@@ -91,14 +91,19 @@ not the compiler.
 ### What "compiled; output differs" really was
 
 `why.py` never ran the binary, so every test that COMPILED was labelled
-`(compiled; output differs)`. Running them, over a sample of 1351 `wrong`
-tests of which **781 compile** (779 run to completion, 2 time out):
+`(compiled; output differs)`. (And a php COMPILE-TIME fatal -- exit 255,
+which `mcphp.sh` passes through and the grid compares -- was collapsed into
+"does not compile" until the review of #9 caught it, which is why the block
+that does not compile fell 570 -> **539** and the block that compiles rose
+781 -> **812**: those 31 are tests the grid had been grading on their
+output all along.) Running them, over a sample of 1351 `wrong`
+tests of which **812 compile** (810 run to completion, 2 time out):
 
 | label | count | share of the 784 |
 |---|---|---|
-| the output really does differ | **757** | 96.9% |
-| crashed (a signal) | 22 | 2.8% |
-| timed out | 2 | 0.3% |
+| the output really does differ | **788** | 97.0% |
+| crashed (a signal) | 22 | 2.7% |
+| timed out | 2 | 0.2% |
 
 | **the output agrees and the exit code does not** | **0** | **0%** |
 
@@ -128,9 +133,9 @@ graded on its own expectation.
 ### What "the arena is the answer" really was
 
 `arena.py` turned every exception into `None` and divided by `len(files)`.
-Of T10's 1351-test list, **570 do not compile and 2 time out**: a denominator
+Of T10's 1351-test list, **539 do not compile and 2 time out**: a denominator
 of 1351 understates by 1.7x, and the outcome it hides is the one that most
-needs reporting. The line is `arena exhausted in 11 of 779 tests that RAN
+needs reporting. The line is `arena exhausted in 11 of 810 tests that RAN
 (1351 in the list)`, with every other outcome on its own line and an
 `assert` that nothing was dropped. The eleven are all large-string
 programs -- `explode_bug`, `wordwrap_memory_limit`, `chunk_split_variation3`,
@@ -332,7 +337,7 @@ agree.
 
 A sample of **1351** `wrong` tests -- every one under `tests/lang` and
 `ext/standard/tests/strings`, plus the first 900 of `Zend/tests` -- run
-beside php. **570 do not compile and 781 compile**, and 570 + 781 is the
+beside php. **539 do not compile and 812 compile**, and 539 + 812 is the
 sample exactly. (T10's first draft of this section said 737, which was
 `nocompile.py` counting every compiled outcome it did not have in its skip
 list; the reviewer of #9 caught it, and 568 is now the same number the arena
@@ -354,13 +359,13 @@ The block that does not compile, by the compiler's own message:
     10  a php file that does not open with <?php (leading inline html)
 ```
 
-and the 757 that compile and really do print something else, by the shape of
+and the 788 that compile and really do print something else, by the shape of
 the first differing line:
 
 ```
-   332  var_dump of a value
-   173  a php diagnostic
-   126  a blank line       (one side printed a banner the other did not:
+   338  var_dump of a value
+   181  a php diagnostic
+   143  a blank line       (one side printed a banner the other did not:
     86  other text          the program died before it, or after)
     16  a float        11  an integer        9  print_r of a container
      2  var_export of an element    1  print_r of an element
@@ -375,14 +380,14 @@ name -- property hooks (30), asymmetric visibility (31), references
 (29 + 17 + 12), generators (§ below, unchanged from T9) -- or a long tail of
 one function each.
 
-**The group worth naming is `var_dump of a value`, 332 of the 757**, and its
+**The group worth naming is `var_dump of a value`, 338 of the 788**, and its
 head says what it is: php prints a value and mc-php prints nothing, which is
 a program that stopped early rather than a value formatted wrongly. That,
 and the 22 that CRASH, is what the next probe should take first.
 
 ## D7, re-measured
 
-`probes/t10/arena.py` over the 1351-test list: **11 of the 779 that RAN**.
+`probes/t10/arena.py` over the 1351-test list: **11 of the 810 that RAN**.
 The table above says why that is not comparable with T9's "2 of 1572" as a
 rate -- T9's denominator counted 570 tests that never ran -- but the tests
 themselves are the same shape they have been since T6: eleven programs that
@@ -429,6 +434,7 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 * `lencheck` **496 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
 * `d8check` -- **81 fixture / 1 helper / 3 instrument / 1 library / 2 bench**, 88 `.php`,
+  and the repo-wide sweep over **356** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
 * the grid's tmp peak **1908 KiB over 27728 tests**, the largest of six runs;

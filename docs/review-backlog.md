@@ -400,3 +400,37 @@ Two of them are wrong, and the measurement is how that is known rather than asse
   **incorrect.** `bench10.sh` calls `probes/t10/mc-php --exe ... -o ...`, the compiler, and
   `grep -n mcphp.sh probes/t10/bench/bench10.sh` finds nothing. The bench runs: its output and
   the record it writes, `probes/t10/bench/results/2026-09-21.json`, are in the tree.
+
+### Round fifteen -- and one of them says this report was wrong
+
+- ~~`bench10.sh` took its two exit statuses with a bare `cmd > out 2> err; ae=$?`~~ under
+  `set -e`, so a workload that exits non-zero ENDS the script before the assignment and the
+  advertised exit-code and stream gate is unreachable. **Round seven reported this fixed and
+  it was fixed in `run.sh` only**; the claim was wrong and the reviewer was right. Both are
+  inside an `if` now, and so is the compile above them. Measured: the old form dies before
+  its own `echo`, the new one reaches it with `ae=1`.
+- ~~`d8check.py` walked `probes/t10` alone~~ while D8 covers every `.php` in the repository,
+  so the orphan it exists to catch could sit anywhere else -- and three did:
+  `probes/t7/bench/unwind.php`, `t8`'s and `t9`'s, byte-identical copies of T6's, referenced
+  by nothing (t7's and t8's own bench scripts run T6's, which is § 1's finding seen from the
+  file side). It walks `probes/` now, **356 `.php`**, with three enumerated pre-D8 exemptions
+  the sweep fails on if they vanish. The three copies are deleted; T6's original is untouched
+  and still reproduces. One thing the widening needed: **the checker must not read ITSELF** --
+  its own doc comment names t9's orphan, which was enough to make the sweep believe something
+  referenced it, and t9's copy stayed invisible until that line was added.
+- ~~`harness.py` collapsed exit 255 into `no-compile`~~. 255 is a php COMPILE-TIME fatal, which
+  php reports while parsing and the grid COMPARES: `mcphp.sh` passes it through deliberately.
+  It is a run now, with the compiler's two streams as the program's. Measured on
+  `g/28-compile-fatal.php`: `status ran, rc 255, wrc 255, agrees True`, where it was
+  `no-compile` before.
+- **D8 (a)'s PHPUnit half** is now an EXEMPTION in `docs/plan.md` D8 (e) with its two reasons
+  -- phpunit is not installed here and `mc-php test` does not exist -- and `run.sh` prints
+  what the gate does and does not prove, rather than leaving it looking like it proved the
+  other thing.
+- The three number findings were already fixed when the review was generated (`1967` survives
+  only in this file, describing what WAS wrong). `grep -rn 1967` over `RESULTS.md`,
+  `CLAUDE.md`, `probes/README.md` and `docs/plan.md` is empty.
+- **"Invoke the compiler instead of mcphp.sh for the D8 benchmark"** remains **incorrect**:
+  `bench10.sh:43` is `probes/t10/mc-php --exe ... -o ...`, and `grep -n mcphp.sh
+  probes/t10/bench/bench10.sh` finds nothing. The `set -e` half of the same comment WAS right
+  and is the first line above.

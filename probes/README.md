@@ -226,7 +226,7 @@ circuit. What the probe is worth is the corrected numbers.
   divided by `len(files)` while turning every failure into `None`: of the 1352-test list only
   **782 RAN**. `fixtures.sh` merged the streams with `2>&1` and compared with `$(...)`. And
   `nocompile.py`'s skip list named ONE compiled outcome of five, so the block that does not
-  compile was published as 737 and is **570** -- the reviewer of this probe's own pull request
+  compile was published as 737 and is **539** -- the reviewer of this probe's own pull request
   caught that one, in T10's first draft.
 * **Twenty-two semantics a program can observe** (§ 2), seventeen fixed and closed by a
   fixture, five closed by measurement, one recorded as a divergence with its number: short circuit and the right

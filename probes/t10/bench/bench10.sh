@@ -40,13 +40,27 @@ first=1
 
 for prog in main.php heavy.php; do
     rm -f "$tmp/bench"
-    probes/t10/mc-php --exe "probes/t10/bench/$prog" -o "$tmp/bench"
+    if ! probes/t10/mc-php --exe "probes/t10/bench/$prog" -o "$tmp/bench"; then
+        echo "bench: $prog does not compile"
+        exit 1
+    fi
     # BYTE for byte and the exit status, both: `$(...)` strips every trailing
     # newline, which is the very defect this probe fixed in the fixture gate
     # (docs/review-backlog.md section 1) and which was still here. A binary
     # with a missing or extra final newline was timed as comparable.
-    "$PHP" "probes/t10/bench/$prog" > "$tmp/a.out" 2> "$tmp/a.err"; ae=$?
-    "$tmp/bench" > "$tmp/b.out" 2> "$tmp/b.err"; be=$?
+    #
+    # And the STATUS is taken inside an `if`, because `set -e` is on: a bare
+    # `cmd > out 2> err; ae=$?` never reaches the assignment when cmd fails,
+    # it ends the script -- so the exit-code half of this gate was
+    # unreachable for any workload that exits non-zero. run.sh's D8 gate was
+    # fixed for this in round seven and THIS was reported as fixed with it
+    # and was not; the reviewer of #9 was right and the claim was wrong.
+    ae=0
+    if "$PHP" "probes/t10/bench/$prog" > "$tmp/a.out" 2> "$tmp/a.err"
+    then :; else ae=$?; fi
+    be=0
+    if "$tmp/bench" > "$tmp/b.out" 2> "$tmp/b.err"
+    then :; else be=$?; fi
     if ! cmp -s "$tmp/a.out" "$tmp/b.out" || ! cmp -s "$tmp/a.err" "$tmp/b.err" \
        || [ "$ae" != "$be" ]; then
         printf 'bench: %s -- php exit %s, mc-php exit %s, and the streams differ:\n' \

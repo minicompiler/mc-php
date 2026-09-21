@@ -203,9 +203,11 @@ fi
 # COMPILER will provide. Until it does, the method list is written by hand in
 # run.php, and probes/t10/d8check.py is what keeps that list honest: it fails
 # when the class declares a `test*` the runner does not name, or the reverse.
-printf '  (the runner is run.php: phpunit is not installed here and `mc-php test`\n'
-printf '   does not exist yet -- d8check.py checks the hand-written list against\n'
-printf '   the class, so a test method cannot be declared and never run)\n'
+printf '  NOT phpunit and NOT `mc-php test`: docs/plan.md D8 (e) is the exemption.\n'
+printf '  phpunit is not installed on this host and `mc-php test` does not exist,\n'
+printf '  so this proves the runner names every test* the class declares, that each\n'
+printf '  world RAN that many, and that the two outputs are identical -- and NOT\n'
+printf '  that WorkloadTest.php passes under the real phpunit.\n'
 case "$d8a" in *" 0 failed") ;; *) fail=1 ;; esac
 [ "$d8a" = "$d8b" ] || fail=1
 rm -f "$MCPHP_TMP/d8p.out" "$MCPHP_TMP/d8p.err" "$MCPHP_TMP/d8.out" "$MCPHP_TMP/d8.err"

@@ -189,7 +189,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     `bench/bench.sh` in t7 and t8 built and timed **t6's** compiler. `<test>.why.php`
     clobbered a sibling of that name. And `nocompile.py`'s skip list named ONE compiled
     outcome of five, so the other four were counted as tests that do not compile: that block
-    was published as 737 and is **570** -- the reviewer of this probe's own pull request
+    was published as 737 and is **539** -- the reviewer of this probe's own pull request
     caught it, in T10's first draft.
   * **Twenty-two semantics a program can observe**, seventeen fixed and closed by a fixture,
     five closed by measurement, one recorded as a divergence with its number: short circuit (`&&`, `||`, `??`,
@@ -267,7 +267,7 @@ edits mc's `src/`; a surface gap is reported to mc with a reproducer, never patc
     corpus number is worth quoting with its band -- T9's 1637 and T8's 1450 included.
   Fixtures: **75 of 75** numbered under `g/` byte for byte php's on each stream and the exit code,
   **6 of 6** under `r/` refused by name with exit 3; `lencheck` 496 / 0 wrong, `aritycheck`
-  272 / 0 wrong, `d8check` 88 `.php` all in a regime. **No new mc gap**, and no new external
+  272 / 0 wrong, `d8check` 88 `.php` in a regime and 356 under `probes/` swept for orphans. **No new mc gap**, and no new external
   name: the 38-of-21219 inline-HTML refusal T5 reported is unchanged.
 - T9 done (`probes/t9`), on **mc 1.1.0**: D6's correction built, and T8's two blocks
   worked from a UNIFORM corpus-wide sample (every ninth of `wrong.txt`, split so the

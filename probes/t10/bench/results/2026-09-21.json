@@ -5,7 +5,7 @@
   "mc": "mc 1.1.0",
   "reps": 7,
   "programs": [
-    {"program": "probes/t10/bench/main.php", "reps": 7, "php_median_s": 0.071015, "mcphp_median_s": 0.00956, "php_startup_median_s": 0.070284, "php_best_s": 0.070063, "mcphp_best_s": 0.009323, "ratio_php_over_mcphp": 7.428, "ratio_work_over_mcphp": 0.076, "answer": "13608", "bytes": 314418},
-    {"program": "probes/t10/bench/heavy.php", "reps": 7, "php_median_s": 0.072702, "mcphp_median_s": 0.051025, "php_startup_median_s": 0.070223, "php_best_s": 0.071966, "mcphp_best_s": 0.050483, "ratio_php_over_mcphp": 1.425, "ratio_work_over_mcphp": 0.049, "answer": "99450", "bytes": 314418}
+    {"program": "probes/t10/bench/main.php", "reps": 7, "php_median_s": 0.079583, "mcphp_median_s": 0.01156, "php_startup_median_s": 0.077519, "php_best_s": 0.071598, "mcphp_best_s": 0.00999, "ratio_php_over_mcphp": 6.885, "ratio_work_over_mcphp": 0.179, "answer": "13608", "bytes": 314418},
+    {"program": "probes/t10/bench/heavy.php", "reps": 7, "php_median_s": 0.079074, "mcphp_median_s": 0.053837, "php_startup_median_s": 0.074935, "php_best_s": 0.073258, "mcphp_best_s": 0.052733, "ratio_php_over_mcphp": 1.469, "ratio_work_over_mcphp": 0.077, "answer": "99450", "bytes": 314418}
   ]
 }

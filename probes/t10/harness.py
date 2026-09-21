@@ -216,6 +216,20 @@ def run_pair(phpt, tag, budget=None):
         c = subprocess.run([MCPHP, '--exe', php, '-o', binf], stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, timeout=budget)
         left = budget - (time.monotonic() - t0)
+        # 255 is a php COMPILE-TIME fatal and not a failure to compile: php
+        # reports those while parsing and exits 255, so mcphp.sh prints both
+        # of the compiler's streams and passes the code through, and the
+        # grid COMPARES it. Collapsing it into `no-compile` here counted a
+        # test the grid graded on its output as one that never ran -- and
+        # section 1 of the backlog is exactly about the two not agreeing.
+        # There is no binary, so this is the whole run.
+        if c.returncode == 255:
+            cout = c.stdout.decode('latin-1')
+            cwant = e.stdout.decode('latin-1')
+            return {'status': 'ran', 'out': cout, 'rc': 255,
+                    'err': c.stderr.decode('latin-1', 'replace'),
+                    'want': cwant, 'wrc': e.returncode,
+                    'agrees': cout == cwant and e.returncode == 255}
         if c.returncode != 0:
             return {'status': 'no-compile', 'crc': c.returncode,
                     'cerr': c.stderr.decode('latin-1', 'replace'),

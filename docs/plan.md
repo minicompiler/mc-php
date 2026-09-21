@@ -216,6 +216,29 @@ D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixt
     `probes/t10/bench/unwind.php`, copied forward from T6 and referenced by nothing, deleted
     here (T6's original is untouched and still reproduces).
 
+    WIDENED (T10, the review of #9): the checker walked `probes/t10` alone, which is narrower
+    than the rule -- D8 covers every `.php` in this repository, so an orphan in any other probe
+    passed, and one did (`probes/t9/bench/unwind.php`, while t9's own bench script runs
+    `probes/t6/bench/unwind.php`; t7's and t8's copies the same). It walks `probes/` now and a
+    file is accounted for when a fixture gate runs it, another `.php` requires it, a SCRIPT
+    names its path, a bench script names its basename in a `for prog in` list, or it is under
+    one of three enumerated pre-D8 directories -- `probes/t0`, `probes/t4` and
+    `probes/gap-lexer-ownership`, each with its reason in the script, and the sweep FAILS when
+    an exempted directory is gone or has grown a `bench/`, so the list cannot rot. 356 `.php`
+    swept; the three orphan copies of `unwind.php` are deleted, T6's original untouched.
+
+    (e) The PHPUnit half of (a) is EXEMPT while its two mechanisms do not exist, and this is
+    the exemption rather than an omission: **phpunit is not installed on this host** (the
+    check is `class_exists('PHPUnit\Framework\TestCase', false)`, which is why
+    `probes/t10/bench/shim.php` exists at all) and **`mc-php test` does not exist** -- (a)
+    names it as the mechanism the COMPILER will provide, and no probe has built it. Until one
+    does, the test methods are named by hand in `probes/t10/bench/run.php` and the gate proves
+    what it can: that the class's `test*` methods are all named by the runner
+    (`d8check.py`, statically), that php and mc-php each RUN that many, and that the two
+    outputs are byte for byte the same (`run.sh` step 10). What it does NOT prove is that
+    `WorkloadTest.php` passes under the real phpunit, and `run.sh` prints that sentence on
+    every run rather than leaving the gate looking like it did.
+
 D9. DECIDED (owner, 2026-09-15): the TYPE SYSTEM is PHP's, in full -- the manual's own list
     (`null`, `bool`, `int`, `float`, `string` and numeric strings, `array`, `object`, enums,
     resources, `callable`, `mixed`, `void`, `never`, `self`/`parent`/`static`, `?T`, unions
@@ -298,7 +321,7 @@ binary; running them shows that of 784 sampled tests that compile, **757 really 
 crash, 2 time out and 1 agrees on both. `arena.py` divided by `len(files)` while
 turning every failure into `None`: of T10's 1352-test list only **782 RAN**, so the published
 rate understated by 1.7x. `nocompile.py`'s skip list named one compiled outcome of five, so
-the block that does not compile was published as 737 and is **570** -- the reviewer of #9
+the block that does not compile was published as 737 and is **539** -- the reviewer of #9
 caught that one, in T10's own first draft. `fixtures.sh` merged the streams with `2>&1` and
 compared with `$(...)`, which strips trailing newlines. `bench/bench.sh` in t7 and t8 built and timed **t6's**
 compiler.

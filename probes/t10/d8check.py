@@ -109,6 +109,96 @@ def test_methods_are_all_run():
     return bad
 
 
+# Directories whose `.php` were written BEFORE D8 was decided (owner,
+# 2026-09-15) and are not programs: T4's are one lexical construct each, fed
+# to `--dump-tokens` by a glob in its own run.sh, and the gap probes' are the
+# six shapes the mc lexer could not own. Each is named with its reason, and
+# the sweep below FAILS when one of them is gone -- so the list cannot rot
+# into an excuse for a directory nobody looks at any more.
+PRE_D8 = {
+    'probes/t0': 'T0 predates D8: classify.php is read by breakdown.py, not run',
+    'probes/t4': 'T4 predates D8: one lexical construct per file, globbed by its own run.sh',
+    'probes/gap-lexer-ownership': 'the six shapes the mc lexer could not own, globbed by run.sh',
+}
+
+REPO = os.path.abspath(os.path.join(HERE, '..', '..'))
+
+
+def every_php():
+    out = []
+    for root, dirs, names in os.walk(os.path.join(REPO, 'probes')):
+        dirs[:] = [d for d in dirs if d != 'out']
+        out += [os.path.relpath(os.path.join(root, n), REPO)
+                for n in names if n.endswith('.php')]
+    return sorted(out)
+
+
+def repo_sweep():
+    """No `.php` under probes/ outside a regime -- the WHOLE tree, not t10.
+
+    D8 covers every `.php` in this repository and `d8check.py` walked
+    `probes/t10` alone, so the orphan it was written to catch could sit in
+    any other probe and pass: `probes/t9/bench/unwind.php` did, while t9's
+    own bench script runs `probes/t6/bench/unwind.php`. A file is accounted
+    for when it is a fixture (`<probe>/g|r/`), when another `.php` requires
+    it, when a script names its PATH, when a bench script names its
+    BASENAME in a `for prog in` list, or when it is under a PRE_D8
+    directory.
+    """
+    bad = []
+    for d, why in sorted(PRE_D8.items()):
+        if not os.path.isdir(os.path.join(REPO, d)):
+            bad.append(f'{d}: exempted as "{why}" and it is not there')
+        elif os.path.isdir(os.path.join(REPO, d, 'bench')):
+            bad.append(f'{d}: exempted as pre-D8 and it has grown a bench/')
+
+    text = ''
+    required = set()
+    for root, dirs, names in os.walk(os.path.join(REPO, 'probes')):
+        dirs[:] = [d for d in dirs if d != 'out']
+        for n in names:
+            # what RUNS a file, not what mentions it: a .md that names a
+            # path is prose, and t9's own RESULTS.md naming its orphan is
+            # exactly how the orphan stayed invisible.
+            if not n.endswith(('.sh', '.py', '.php')):
+                continue
+            f = os.path.join(root, n)
+            # and NOT this file: its own doc comment names the orphan it was
+            # written to catch, which is enough to make the sweep believe
+            # something references it. Measured -- t9's copy was invisible
+            # until this line.
+            if os.path.abspath(f) == os.path.abspath(__file__):
+                continue
+            try:
+                src = open(f, encoding='latin-1').read()
+            except OSError:
+                continue
+            text += src
+            if n.endswith('.php'):
+                for m in REQ.finditer(src):
+                    required.add(os.path.relpath(
+                        os.path.join(os.path.dirname(f), m.group(1)), REPO))
+    progs = set(re.findall(r'^for prog in (.+?); do', text, re.M))
+    basenames = {w for line in progs for w in line.split() if w.endswith('.php')}
+
+    n = 0
+    for f in every_php():
+        n += 1
+        parts = f.split('/')
+        if any(f.startswith(d + '/') for d in PRE_D8):
+            continue
+        if len(parts) >= 3 and parts[2] in ('g', 'r'):
+            continue
+        if f in required or f in text:
+            continue
+        if os.path.basename(f) in basenames:
+            continue
+        bad.append(f'{f}: no fixture gate runs it, no .php requires it, '
+                   f'no script names it')
+    print(f'  {n:4d}  .php under probes/, swept for orphans')
+    return bad
+
+
 def main():
     globs = fixture_globs()
     if globs != {'g', 'r'}:
@@ -160,6 +250,7 @@ def main():
     for k in ('fixture', 'helper', 'instrument', 'library', 'bench'):
         print(f'  {counts[k]:4d}  {k}')
     bad += test_methods_are_all_run()
+    bad += repo_sweep()
     if not counts['library'] and not counts['bench']:
         bad.append('(nothing is benched at all)')
     if bad:
