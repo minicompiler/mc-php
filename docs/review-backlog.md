@@ -924,3 +924,28 @@ a measurement, one re-posted and answered again.
   nineteen: `run.sh` ends on `T10: <green> / <total>`, and the tables above
   it are the analysis section 1 of this backlog demands, each its own
   script.
+
+### Round twenty-eight
+
+Two findings, both real, both about a gate claiming more than it ran.
+
+- ~~The `r/` loop never runs php, while `d8check` calls those files
+  fixtures.~~ Correct: D8's exemption rests on a differential in both
+  worlds and an `r/` file was only ever run under mc-php. It is not a
+  byte-for-byte pair and cannot be -- the point of the file is that mc-php
+  DECLINES it, and its runtime half may need a directory it is not run from
+  (`d1-computed-include.php` requires a sibling). So the pair is `php -l`
+  plus the named refusal: php PARSES it, mc-php refuses it by name with
+  exit 3. `d8check.py` gives `r/` a **regime of its own** -- 80 fixture, 6
+  refusal -- so the claim and the check are the same thing. Proved to have
+  teeth: a syntax error planted in `d1-eval.php` gives
+  `FAIL d1-eval.php php will not parse it: PHP Parse error`, 5 / 6.
+- ~~The orphan sweep accepts an INLINE comment or a docstring.~~ Correct, and
+  `_uncomment` only dropped whole lines. Triple-quoted blocks go first, then
+  a `#` or `//` tail that is not inside a quote. Measured: a
+  `probes/t97/inline.php` whose only mention is an inline comment at the end
+  of a command in a sibling `.sh` is reported. What text cannot tell apart
+  is a path in an ordinary string literal that nothing executes -- written
+  into the function's own comment, with the note that `required` (a parsed
+  `require`) and `benched` (a resolved bench loop) are exact answers and not
+  part of this scan.

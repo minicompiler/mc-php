@@ -414,10 +414,14 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 * `probes/t10/g/` -- **80 of 80** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
-* `probes/t10/r/` -- **6 of 6** refusals named, exit 3.
+* `probes/t10/r/` -- **6 of 6** parse under `php -l` and are refused by
+  mc-php with a named message, exit 3. That pair IS the differential for a
+  refusal fixture, and `d8check.py` gives `r/` a regime of its own for it:
+  an `r/` file is not a byte-for-byte pair, because the point of it is that
+  mc-php declines what php accepts.
 * `lencheck` **501 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
-* `d8check` -- **86 fixture / 1 helper / 3 instrument / 1 library / 2 bench**, 93 `.php`,
+* `d8check` -- **80 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 93 `.php`,
   and the repo-wide sweep over **361** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
@@ -637,3 +641,11 @@ function that reads it, and `ph_had_spread` does not leak in any order tried
 -- and the watcher's age sweep, which would have deleted a binary a slow
 compile was still writing, is five minutes and four names instead of one
 minute and everything.
+
+**Round twenty-eight** was two gates claiming more than they ran. The `r/`
+loop never invoked php at all, while `d8check` classified those files as
+`fixture` -- whose D8 exemption rests on being a differential in both
+worlds. A refusal fixture cannot be a byte-for-byte pair, so the pair is
+`php -l` plus the named refusal, and `r/` has a regime of its own now. And
+the orphan sweep's `_uncomment` dropped whole-line comments only, so an
+inline one or a docstring naming a path read as a reference.

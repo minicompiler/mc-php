@@ -52,12 +52,40 @@ INSTRUMENTS = {
 # what stops a `# probes/t9/bench/unwind.php` in prose from standing in for a
 # gate -- the second half of the same finding as the self-reference above.
 def _uncomment(src):
+    """Drop what MENTIONS a path from what RUNS one, as far as text can.
+
+    Whole-line comments were not enough: an inline `# probes/t9/x.php` at
+    the end of a command, or a python docstring naming the file it hunts,
+    reads the same to a substring search. Triple-quoted blocks go first,
+    then a `#` or `//` tail that is not inside a quote. What CANNOT be told
+    apart this way is a path in an ordinary string literal that nothing
+    executes -- the remaining hole, and the reason `required` (a parsed
+    `require`) and `benched` (a resolved bench loop) are separate, exact
+    answers rather than part of this scan.
+    """
+    src = re.sub(r'"""[\s\S]*?"""', '', src)
+    src = re.sub(r"\'\'\'[\s\S]*?\'\'\'", '', src)
     out = []
     for line in src.splitlines():
         t = line.lstrip()
         if t.startswith('#') or t.startswith('//'):
             continue
-        out.append(line)
+        keep, q = [], ''
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if q:
+                if c == '\\':
+                    keep.append(line[i:i + 2]); i += 2; continue
+                if c == q:
+                    q = ''
+            elif c in '"\'':
+                q = c
+            elif c == '#' or line[i:i + 2] == '//':
+                break
+            keep.append(c)
+            i += 1
+        out.append(''.join(keep))
     return '\n'.join(out)
 
 
@@ -368,7 +396,14 @@ def main():
             for m in re.finditer(r"(?:require|include)(?:_once)?[^;]*?['\"]([^'\"]+\.php)", src):
                 included.add(os.path.basename(m.group(1)))
 
-    counts = {'fixture': 0, 'helper': 0, 'instrument': 0, 'library': 0, 'bench': 0}
+    # `refusal` is a regime of its own, and not a kind of `fixture`: an
+    # `r/` file is NOT a byte-for-byte pair, because the point of it is
+    # that mc-php declines it by name. Its obligation is the one
+    # `fixtures.sh` enforces -- php PARSES it (`php -l`) and mc-php refuses
+    # it with a named message and exit 3 -- and calling it a fixture
+    # claimed a differential the gate does not run.
+    counts = {'fixture': 0, 'refusal': 0, 'helper': 0, 'instrument': 0,
+              'library': 0, 'bench': 0}
     bad = []
     for f in files:
         d = f.split('/')[0]
@@ -378,7 +413,7 @@ def main():
             else:
                 bad.append(f'{f}: skipped by the gate and required by no fixture')
         elif d in globs and f.count('/') == 1:
-            counts['fixture'] += 1
+            counts['refusal' if d == 'r' else 'fixture'] += 1
         elif f in INSTRUMENTS:
             counts['instrument'] += 1
         elif f in tested and f in benched:
@@ -388,7 +423,7 @@ def main():
         else:
             bad.append(f)
 
-    for k in ('fixture', 'helper', 'instrument', 'library', 'bench'):
+    for k in ('fixture', 'refusal', 'helper', 'instrument', 'library', 'bench'):
         print(f'  {counts[k]:4d}  {k}')
     bad += test_methods_are_all_run()
     bad += repo_sweep()

@@ -115,6 +115,19 @@ echo "  fixtures: $nok / $ng agree with php (stdout, stderr and the exit code)"
 nr=0; nrok=0
 for f in $P/r/*.php; do
     nr=$((nr + 1))
+    # php's OWN half of a refusal fixture. `r/` is not a byte-for-byte pair:
+    # the point of the file is that mc-php declines it BY NAME, and its
+    # runtime half may need a directory it is not run from
+    # (`d1-computed-include.php` requires a sibling). What makes it a
+    # differential is that php accepts the source as php at all -- otherwise
+    # "mc-php refuses what php accepts" is only half measured, and a typo
+    # would read as a refusal.
+    if ! "$PHP" -l "$f" > "$tmp/l.out" 2>&1; then
+        printf '  FAIL  %-26s php will not parse it: %s\n' \
+            "$(basename "$f")" "$(head -1 "$tmp/l.out")"
+        fail=1
+        continue
+    fi
     lim $P/mcphp.sh "$f" > "$tmp/r.out" 2> "$tmp/r.err"; rc=$?
     rm -f "$MCPHP_OUT" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
     if [ "$timedout" = yes ]; then rc=timeout; fi
@@ -124,5 +137,5 @@ for f in $P/r/*.php; do
         *) printf '  FAIL  %-26s exit %s: %s\n' "$(basename "$f")" "$rc" "$msg"; fail=1 ;;
     esac
 done
-echo "  refusals: $nrok / $nr named, exit 3"
+echo "  refusals: $nrok / $nr parse under php and are named by mc-php, exit 3"
 exit $fail
