@@ -1157,3 +1157,22 @@ Six findings: five stale sentences, and one refuted with four measurements.
   round twenty-seven: `$m->m(...[1..7])` on a six-parameter method prints
   php's answer, which is why the count check fires only when the ceiling is
   this compiler's own buffer.
+
+### Round forty
+
+One finding, and it is round thirty-two's fix creating the failure round
+twenty-six's fix existed to end -- the third time in this review that a fix
+moved a problem rather than removing it, and worth the entry for that alone.
+
+~~The owner marker lives in `MCPHP_TMP`, which the next run removes
+wholesale.~~ Correct: a process SIGKILLed between creating the canonical
+`.php` and writing to it lost its marker with the directory, and every
+later run then reported that test `busy` for ever. The marker needs a place
+that is neither the test directory (round thirty-two: a test that globs its
+own directory would see it) nor a swept one -- so it has a directory of its
+own, `mcphp-scratch` under the system temporary directory, which nothing
+sweeps. Measured: with the scratch left behind, its marker naming a dead
+pid, and `MCPHP_TMP` deleted underneath, the next `run_pair` is **`ran
+True`** and leaves the directory clean. A scratch with NO marker is still
+`busy`, which is right -- that is indistinguishable from a `.php` php-src
+ships.

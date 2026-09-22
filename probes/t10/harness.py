@@ -60,15 +60,25 @@ OWNER = '.mcphp-owner'
 def _owner_path(path):
     """Where the marker lives, and it is NOT beside the test.
 
-    The grid creates exactly one file next to a `.phpt` -- the `.php` it
-    compiles -- so a marker there is a file the program can see: a .phpt
-    that globs its own directory, counts entries or opens `*` would be
-    classified on the harness. It goes in MCPHP_TMP (the bounded directory,
-    swept with everything else) or the system temporary directory, named by
-    a digest of the absolute path so two workers cannot collide.
+    Two places it must NOT be. Not beside the `.phpt`: the grid creates
+    exactly one file there -- the `.php` it compiles -- so a marker is
+    something a test that globs its own directory can see, and it would be
+    classified on the harness. And not in `MCPHP_TMP` either, which was
+    round thirty-two's answer and is wrong for the opposite reason: the
+    next run's `mcphp_tmp_init` removes a dead sibling's directory whole,
+    so a process SIGKILLed between creating the `.php` and writing to it
+    lost its marker and every later run then reported that test `busy` for
+    ever -- exactly the failure the marker exists to end.
+
+    So: a directory of its own, `mcphp-scratch` under the system temporary
+    directory, which nothing sweeps, named by a digest of the absolute path
+    so two workers cannot collide. A marker is forty bytes and is removed
+    by the run that owns it or by the run that takes its scratch over.
     """
-    d = os.environ.get('MCPHP_TMP')
-    if not d or not os.path.isdir(d):
+    d = os.path.join(tempfile.gettempdir(), 'mcphp-scratch')
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
         d = tempfile.gettempdir()
     h = hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:24]
     return os.path.join(d, 'mcphp-owner.' + h)
