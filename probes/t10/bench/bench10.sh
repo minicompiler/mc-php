@@ -113,7 +113,9 @@ for prog in main.php heavy.php; do
         "$prog" "$a" "$ae"
     size=$(ls -l "$tmp/bench" | awk '{ print $5 }')
     printf '  the binary is %s bytes\n' "$size"
-    python3 probes/t10/bench/time2.py "$PHP" "$tmp/bench" "$REPS" \
+    # the same bound the comparison run above used: time2.py kills the
+    # process GROUP and fails loudly rather than letting run.sh hang
+    LIM_SECS=$LIM_SECS python3 probes/t10/bench/time2.py "$PHP" "$tmp/bench" "$REPS" \
         "probes/t10/bench/$prog" --json "$tmp/t.json"
     [ "$first" = 1 ] || printf ',\n' >> "$part"
     first=0

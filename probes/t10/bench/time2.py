@@ -9,6 +9,8 @@ not scraped out of the text above by the caller, because a bench row that is
 re-parsed from a printed line is a second place for it to be wrong (the
 first attempt did exactly that and produced invalid JSON)."""
 import json
+import os
+import signal
 import statistics
 import subprocess
 import sys
@@ -16,13 +18,56 @@ import time
 
 php, exe, reps, src = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 jsonf = sys.argv[6] if len(sys.argv) > 6 and sys.argv[5] == '--json' else None
+# The comparison run in bench10.sh goes through `lim`; this loop did not, so
+# a compiler regression that emits a non-terminating binary hung run.sh here
+# with the gate still claiming a bounded run. Same bound, same process-GROUP
+# kill: a workload that spawns is not left holding the pipe.
+BUDGET = float(os.environ.get('LIM_SECS', '') or 120)
+
+
+class _Alarm(Exception):
+    pass
+
+
+def _fired(sig, frame):
+    raise _Alarm()
+
+
+signal.signal(signal.SIGALRM, _fired)
+
+
+def timed(cmd):
+    # The bound is an ITIMER around a BLOCKING wait, and not `wait(timeout=)`:
+    # CPython polls for a timed wait with a back-off that reaches 50 ms, and
+    # this loop times processes that finish in 12 to 90 ms -- measured, the
+    # polling form reported heavy.php at 0.0880 s where the blocking one
+    # reports 0.0533 s for the same binary, which would have been recorded as
+    # a 1.04x ratio against its true 1.44x. The alarm costs nothing when it
+    # does not fire.
+    t = time.perf_counter()
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, start_new_session=True)
+    signal.setitimer(signal.ITIMER_REAL, BUDGET)
+    try:
+        rc = p.wait()
+    except _Alarm:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except OSError:
+            p.kill()
+        p.wait()
+        sys.exit('time2.py: %s did not finish in %g s' % (cmd[0], BUDGET))
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    if rc != 0:
+        sys.exit('time2.py: %s exited %d' % (cmd[0], rc))
+    return time.perf_counter() - t
+
+
 rows = {'php': [], 'mc-php': [], 'php -r (start-up)': []}
 for _ in range(reps):
     for name, cmd in (('php', [php, src]), ('mc-php', [exe]),
                       ('php -r (start-up)', [php, '-r', ''])):
-        t = time.perf_counter()
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, check=True)
-        rows[name].append(time.perf_counter() - t)
+        rows[name].append(timed(cmd))
 m = {k: statistics.median(v) for k, v in rows.items()}
 for k in ('php', 'mc-php', 'php -r (start-up)'):
     print('  %-18s median %.4f s   best %.4f s' % (k, m[k], min(rows[k])))

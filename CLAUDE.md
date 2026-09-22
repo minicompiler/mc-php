@@ -171,10 +171,13 @@ answers here).
   refused by name with exit 3; `lencheck` 97 / 0 wrong, `aritycheck` 179 / 0 wrong.
 - T10 done (`probes/t10`), on **mc 1.1.0**: the review backlog -- 59 Copilot findings across
   #1..#7 that nothing had acted on (`docs/review-backlog.md`), all three sections, plus one
-  the sections did not name and a disk that ran out. **green 1637 -> 1689**:
-  `phpt: green 1689 / wrong 14469 / refused 1929 / skip 2947 / php-fail 361 / total 21034`;
-  per directory `tests/lang` 104 (was 102), `Zend/tests` 749 (was 709),
-  `ext/standard/tests/strings` 263 (was 262). **1664 of the 1689 greens are in T0's
+  the sections did not name and a disk that ran out. **green 1637 -> 1697**:
+  `phpt: green 1697 / wrong 14481 / refused 1929 / skip 2947 / php-fail 341 / total 21054`;
+  per directory `tests/lang` 104 (was 102), `Zend/tests` 756 (was 709),
+  `ext/standard/tests/strings` 263 (was 262). The corpus figure was 1689 with
+  `Zend/tests` 749 when the review of #9 opened; the +8 is the argument-type
+  checks of round fifty-three, re-measured against the compiler the pull
+  request ends with. **1664 of the 1689 greens are in T0's
   "touched by none" set**; `refused` fell **2309 -> 1929**. The green moved only +52 because
   the work is CORRECTNESS -- a `.phpt` that was already green does not become greener for the
   compiler being right about short circuit -- and what the probe is worth is the corrected
@@ -231,7 +234,7 @@ answers here).
     spelling), and a top-level `return` returning from the generated `main`, skipping
     `php_shutdown`, `php_flush` and the exit code, so the program printed NOTHING and exited
     with a junk status (54, 82, 94, 142 and 178 on five runs of the same source). Both halves
-    run now: **6 ok / 0 failed in each**, `main.php` 6.65x, `heavy.php` 1.45x (the committed record).
+    run now: **6 ok / 0 failed in each**, `main.php` 7.03x, `heavy.php` 1.45x (the committed record).
   * **D8 over the fixtures** (backlog § 3): the plan states the exemption -- the unit D8
     governs is the PROGRAM, and a differential fixture is already a test and a stronger one --
     and `probes/t10/d8check.py` ENFORCES it, putting every `.php` in one of six regimes -- fixture, refusal, helper, instrument,

@@ -1538,3 +1538,58 @@ One finding, real, and it is the second half of round eight's own fix.
   edge, the throwing edge, a `catch` and a `finally` on the same try, a
   nested pair (inner then outer), and a plain value in a try as the
   control that never regressed.
+
+### Round fifty-five
+
+The review raised no new finding on the `finally` fix and resolved it. Of
+the four it still listed as open, two were refuted with measurements and
+two were already fixed in the rounds that raised them:
+
+- ~~Variadic arguments are silently truncated.~~ Refuted. A `maxn` of 6
+  (methods) or 5 (callable values) can only truncate if the CALLEE can see
+  the extra values, and a variadic method or closure is refused at its
+  declaration (`a php parameter: ... is not implemented yet`), so the case
+  the annotation names is unreachable. What is reachable agrees with php:
+  `$c->two(...[10,20,30,40,50,60,70])` is 30, `$c->six(...[1..7])` is 7,
+  `$k(...[3,4,5,6,7])` is 12. And a variadic FUNCTION, the one shape that
+  does see them, enforces the buffer BY NAME -- `g(...[1..9])` is 9 on
+  both sides and `g(...[1..20])` is `a spread of more than 16 values is
+  not implemented yet`, exit 255, not a quiet 16.
+- ~~Timeouts are mishandled and classified runs are unreachable.~~ Already
+  fixed, in the round that raised it. `_run` kills the process group and
+  RE-RAISES; `run_pair` classifies on `t.cmd[0]` into `php-timeout` /
+  `compile-timeout` / `run-timeout`, and the compiler-spent-the-budget case
+  raises `TimeoutExpired([MCPHP], budget)` explicitly. There is no
+  `SimpleNamespace` and no `timed_out` flag in the file.
+- ~~MCPHP_BIN leaks into snapshot runs.~~ Already fixed on the other side
+  of the boundary. `base_environment` pops all seven harness names and
+  `run_candidate` puts back only what the wrapper needs. Measured with
+  `MCPHP_BIN` exported exactly as `grid.sh` does, against a `.phpt` whose
+  `--EXPECT--` asserts all four are unset: **green 1 / wrong 0**, which
+  means the ORACLE produced that output and the CANDIDATE matched it.
+
+### Round fifty-six
+
+One finding, real, and fixing it the obvious way would have corrupted
+every number the bench records.
+
+- **The timing loop is outside the bound the gate claims.** Correct: the
+  comparison run in `bench10.sh` goes through `lim`, and `time2.py` used a
+  bare `subprocess.run` with no timeout and no process-group cleanup, so a
+  compiler regression that emits a non-terminating binary would hang
+  `run.sh` there. The first fix was `p.wait(timeout=BUDGET)` -- and it
+  moved the numbers:
+
+      old (blocking wait)   mc-php 0.0533 s   php / mc-php = 1.44x
+      new (wait with timeout) mc-php 0.0880 s   php / mc-php = 1.04x
+
+  Same binary, same interleaving, back to back. CPython polls for a timed
+  wait with a back-off that reaches 50 ms, and this loop times processes
+  that finish in 12 to 90 ms, so the bound was paying for itself out of the
+  measurement. The bound is an **ITIMER around a blocking wait** instead:
+  `signal.setitimer(ITIMER_REAL, BUDGET)`, `p.wait()`, and a handler that
+  kills the GROUP and exits naming the program. It costs nothing when it
+  does not fire -- `mc-php 0.0523 s, 1.47x` on the same three runs -- and
+  it has teeth: a workload that sleeps for ever under `LIM_SECS=3` gives
+  `time2.py: /tmp/hang.sh did not finish in 3 s`, exit 1, with no survivor
+  in the process group.

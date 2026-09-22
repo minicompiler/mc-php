@@ -135,7 +135,7 @@ not the compiler.
 | **fixtures byte for byte** | **60 of 60, merged streams** | **88 of 88, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
-| **the D8 bench** | **5.85x and 1.45x** | **6.65x and 1.45x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
+| **the D8 bench** | **5.85x and 1.45x** | **7.03x and 1.45x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
 | assert a php diagnostic line | 93 green of 4647 | **102 green of 4647** | |
 | mention `__destruct` | 14 green of 333 | **15 green of 333** | |
 | `lencheck` / `aritycheck` | 468 / 272 | **514 / 272** | |
@@ -404,17 +404,17 @@ agree.
   are byte for byte the same
 
   == main.php ==   both answer 13608   the binary is 314642 bytes
-    php 0.0770 s   mc-php 0.0116 s   php -r (start-up) 0.0757 s
-    php / mc-php = 6.65x        php WORK / mc-php = 0.11x
+    php 0.0767 s   mc-php 0.0109 s   php -r (start-up) 0.0753 s
+    php / mc-php = 7.03x        php WORK / mc-php = 0.12x
   == heavy.php ==  both answer 99450
-    php 0.0784 s   mc-php 0.0542 s   php -r (start-up) 0.0749 s
-    php / mc-php = 1.45x        php WORK / mc-php = 0.07x
+    php 0.0772 s   mc-php 0.0532 s   php -r (start-up) 0.0755 s
+    php / mc-php = 1.45x        php WORK / mc-php = 0.03x
 ```
 
 `heavy.php`'s work ratio is the one number that is not always there:
 `time2.py` writes `ratio_work_over_mcphp` only when php's median exceeds
 its own start-up, and this program's whole run and php's start-up are
-within the noise of each other -- 0.0784 s against 0.0749 s here, and the
+within the noise of each other -- 0.0772 s against 0.0755 s here, and the
 other way round (0.0754 s against 0.0772 s) in the record of the day
 before, where the line is correctly absent. A `0.00x` printed there would
 have been a number nothing measured.
@@ -770,3 +770,35 @@ finally { echo "fin\n"; } }` printed **7** where php prints **fin** then
 **7**. The check is the exceptional edge and the deferred return the
 normal one; a return expression that can throw has both.
 `g/89-return-finally.php`.
+
+**Round fifty-six** is the one where the fix had to be measured before it
+could be kept. `time2.py`'s timing loop was outside the bound the gate
+claims -- `bench10.sh` runs the comparison through `lim` and then timed
+with a bare `subprocess.run` -- so a non-terminating binary would hang
+`run.sh` there. Adding `p.wait(timeout=BUDGET)` bounds it and moves every
+number: **mc-php 0.0533 s and 1.44x became 0.0880 s and 1.04x**, same
+binary, same interleaving, back to back, because CPython polls for a timed
+wait with a back-off that reaches 50 ms and this loop times processes that
+finish in 12 to 90 ms. The bound is an ITIMER around a BLOCKING wait
+instead, with a handler that kills the process group: **0.0523 s, 1.47x**,
+and `LIM_SECS=3` against a workload that sleeps for ever gives
+`time2.py: ... did not finish in 3 s`, exit 1, no survivor.
+
+**The grid against the compiler this pull request ends with** (rounds
+forty-three, fifty-one, fifty-two, fifty-three and fifty-four all changed
+codegen or the runtime after the corpus figure in the table above was
+taken):
+
+| | published (round 42) | now (round 54) |
+|---|---|---|
+| `tests/lang` | 104 | **104** |
+| `Zend/tests` | 749 | **756** |
+| `ext/standard/tests/strings` | 263 | **263** |
+| the whole corpus, green | 1689 | **1697** |
+
+`refused` is unchanged at 1929 and `skip` at 2947; `wrong` is 14481 of
+21054 (`php-fail` 341, which is the bucket that moves with the machine and
+not with the compiler). The +7 in `Zend/tests` and the +8 over the corpus
+are the argument-type checks of round fifty-three: a test whose
+`--EXPECTF--` names php's own `TypeError` was `wrong` while mc-php ran the
+body on a filled-in 0.
