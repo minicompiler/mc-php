@@ -1389,3 +1389,18 @@ both worlds" ran under different inputs. php goes through
 bench's own comparison now -- what `fixtures.sh` has done since round
 thirty-three. Both gates re-run green: `tests: 6 ok / 0 failed` in each
 half, and the bench comparable on both programs.
+
+### Round fifty
+
+One finding, refuted with a control -- **"perl signals a process group only
+when the PID is negative"**. It is the SIGNAL that is negative
+(`perldoc -f kill`: "If SIGNAL is negative, it kills process groups instead
+of processes"), and the measurement is two runs of the same harness, a
+child that leaves a `sleep 40` behind:
+
+    kill -9, $p   ->  rc 124, "grandchild gone", alarm marker written
+    kill  9, $p   ->  "GRANDCHILD SURVIVED"
+
+The second is the control, and it is what the finding describes -- which is
+what makes the first one decisive rather than a coincidence. The comment in
+`lim.sh` now carries both, because the reading is easy to get backwards.

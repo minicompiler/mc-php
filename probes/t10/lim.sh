@@ -24,10 +24,13 @@ lim() {
              # per timeout.
              my $p = fork;
              if (!$p) { setpgrp(0, 0); exec(@ARGV) or exit 127 }
-             # `kill -9, $p` is how perl spells the process GROUP
-             # (perldoc -f kill: a negative SIGNAL kills process groups),
-             # and the child made itself the leader above. Measured: a
-             # grandchild `sleep 30` is gone after the alarm.
+             # `kill -9, $p` is how perl spells the process GROUP: it is
+             # the SIGNAL that is negative, not the pid (perldoc -f kill,
+             # "If SIGNAL is negative, it kills process groups instead of
+             # processes"), and the child made itself the leader above.
+             # Measured WITH A CONTROL, because the reading is easy to get
+             # backwards: a child that leaves a `sleep 40` behind loses it
+             # to `kill -9, $p` and KEEPS it under `kill 9, $p`.
              $SIG{ALRM} = sub { kill -9, $p; waitpid $p, 0;
                                 open my $fh, ">", $mark; close $fh; exit 124 };
              alarm $t; waitpid $p, 0;
