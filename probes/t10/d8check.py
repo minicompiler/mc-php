@@ -9,13 +9,13 @@ cannot waive the rule for itself, so the statement has to be ENFORCED and not
 written down.
 
 This is the enforcement. Every `.php` under the probe is put in exactly one
-of four regimes, each with its own obligation, and a file in none of them
+of SIX regimes, each with its own obligation, and a file in none of them
 fails the run:
 
   helper     a `g/` file another fixture `require`s and the gate does not
              run on its own -- `inc.php`. Its test is every fixture that
              includes it, and this checks that at least one does.
-  fixture    `g/*.php`, `r/*.php`. Its test is the DIFFERENTIAL gate itself
+  fixture    `g/*.php`. Its test is the DIFFERENTIAL gate itself
              (`fixtures.sh`): stdout, stderr and the exit code compared byte
              for byte against `php` on the same source. That is a stronger
              assertion than an `assertSame` -- the oracle is the reference
@@ -24,6 +24,11 @@ fails the run:
              carries no bench row because a three-line program measures
              process start-up and nothing else (T9 measured that: php pays
              ~38 ms before the first statement).
+  refusal    `r/*.php`. NOT a byte-for-byte pair, and it cannot be: the
+             point of the file is that mc-php DECLINES it. Its test is the
+             pair `fixtures.sh` runs -- php PARSES it (`php -l`) and mc-php
+             refuses it with a named message and exit 3 -- which is what
+             makes "mc-php refuses what php accepts" a measurement.
   instrument the mechanism of D8 (a) itself -- the `TestCase` shim, the test
              class, the runner that names the test methods. Testing the test
              harness with the test harness is a circle.
@@ -38,7 +43,12 @@ fails the run:
 import os, re, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REQ = re.compile(r'(?:require|include)(?:_once)?\s*\(?\s*__DIR__\s*\.\s*"/([^"]+)"')
+# BOTH quote styles: `g/72-require-dir.php` writes one of each, and the
+# single-quoted form was invisible to `reach()` and to the repo-wide
+# sweep, so a library or a bench helper required that way would have
+# been reported as an orphan.
+REQ = re.compile(r'(?:require|include)(?:_once)?\s*\(?\s*__DIR__\s*\.\s*'
+                 r'(?:"/([^"]+)"|\'/([^\']+)\')')
 
 INSTRUMENTS = {
     'bench/shim.php': 'the TestCase shim D8 (a) names (phpunit cannot run on mc-php)',
@@ -104,7 +114,8 @@ def reach(start):
         seen.add(f)
         src = open(f, encoding='latin-1').read()
         for m in REQ.finditer(src):
-            todo.append(os.path.join(os.path.dirname(f), m.group(1)))
+            todo.append(os.path.join(os.path.dirname(f),
+                                     m.group(1) or m.group(2)))
     return {rel(f) for f in seen}
 
 
@@ -323,7 +334,8 @@ def repo_sweep():
                 # would have exempted an untested file.
                 for m in REQ.finditer(_uncomment(src)):
                     required.add(os.path.relpath(
-                        os.path.join(os.path.dirname(f), m.group(1)), REPO))
+                        os.path.join(os.path.dirname(f),
+                                     m.group(1) or m.group(2)), REPO))
     text = '\n'.join(srcs.values())
     # RESOLVED paths, not bare basenames: a bench loop names `main.php` and
     # `heavy.php` relative to the directory the loop itself spells, so

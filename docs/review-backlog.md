@@ -1057,3 +1057,20 @@ Two findings.
   `sh probes/t10/run.sh > n` leaves exactly `T10: <green> / <total>` in `n`.
   Round nineteen answered the same finding by putting the number last;
   this is the stricter reading and there is no reason not to meet it.
+
+### Round thirty-six
+
+Two findings, both real, both in `d8check.py`.
+
+- ~~`REQ` only matches a DOUBLE-quoted `__DIR__` path.~~ Correct, and
+  `g/72-require-dir.php` writes one of each: the single-quoted form was
+  invisible to `reach()` and to the repo-wide sweep, so a library or a bench
+  helper required that way would have been reported as an orphan. Both
+  quote styles now. Measured with a `probes/t95/caller.php` requiring a
+  `sq-helper.php` in single quotes: **2** files reported before (the caller,
+  which really is an orphan, AND the helper), **1** after.
+- ~~The docstring says four regimes where the code enforces six, and omits
+  `refusal`.~~ Correct -- round twenty-eight added the regime and not the
+  paragraph. It is six now, with `refusal` described as what it is: not a
+  byte-for-byte pair, but php parsing the source and mc-php declining it by
+  name.
