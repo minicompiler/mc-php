@@ -1074,3 +1074,23 @@ Two findings, both real, both in `d8check.py`.
   paragraph. It is six now, with `refusal` described as what it is: not a
   byte-for-byte pair, but php parsing the source and mc-php declining it by
   name.
+
+### Round thirty-seven
+
+Three findings: two real (the same stale sentence in two files), one
+refuted.
+
+- ~~`docs/plan.md` and `probes/README.md` still describe D8 as four
+  regimes.~~ Correct, and round twenty-eight added the sixth without
+  touching either: they now name all six and say plainly that `refusal` and
+  `helper` are NOT differential fixtures.
+- **`_run` turns a timeout into a `SimpleNamespace`, so the three timeout
+  classifications are unreachable.** Refuted: that is
+  `probes/t0/phpt-run.py`'s `_run`, a different function in a different
+  file. `harness.py`'s kills the process group and **re-raises**, and
+  `run_pair`'s handler classifies it. Measured: a budget of 0.05 s gives
+  `{'status': 'compile-timeout'}`, and a `--FILE--` of `sleep(30)` against a
+  2-second budget gives `{'status': 'php-timeout'}` -- both statuses this
+  round says cannot be produced. The third, `run-timeout`, needs a program
+  php finishes and the binary does not; `while (true)` spins in php too, so
+  that one comes back `php-timeout`, correctly.

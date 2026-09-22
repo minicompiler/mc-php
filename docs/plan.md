@@ -207,11 +207,15 @@ D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixt
     before the first statement, against a whole `main.php` of 39.5 ms). (d) A probe cannot waive
     the rule for itself, so the exemption is a SCRIPT and not a paragraph:
     `probes/t10/d8check.py` (`run.sh` step 0) puts every `.php` under the probe into exactly one
-    of four regimes -- `fixture` (matched by the two globs `fixtures.sh` actually walks),
-    `instrument` (the `TestCase` shim, the test class, the runner that names the methods: the
-    mechanism of D8 (a), which cannot test itself), `library` (required BY the test class AND BY
-    a bench program, so exercised in both worlds and timed in both) and `bench` (a row in
-    `bench10.sh`, which refuses to time a program until `php` and mc-php print the same answer)
+    of SIX regimes -- `fixture` (`g/*.php`, graded byte for byte against php on stdout, stderr
+    and the exit code), `refusal` (`r/*.php`, which is NOT that pair and cannot be: the point of
+    the file is that mc-php declines it, so the pair is php PARSING it under `php -l` and
+    mc-php refusing it by name with exit 3), `helper` (a `g/` file another fixture `require`s
+    and the gate skips, whose test is every fixture that includes it), `instrument` (the
+    `TestCase` shim, the test class, the runner that names the methods: the mechanism of D8 (a),
+    which cannot test itself), `library` (required BY the test class AND BY a bench program, so
+    exercised in both worlds and timed in both) and `bench` (a row in `bench10.sh`, which
+    refuses to time a program until `php` and mc-php print the same answer)
     -- and exits non-zero naming any file in none of them. It found one on its first run:
     `probes/t10/bench/unwind.php`, copied forward from T6 and referenced by nothing, deleted
     here (T6's original is untouched and still reproduces).

@@ -242,7 +242,9 @@ circuit. What the probe is worth is the corrected numbers.
   "/x.php"` was refused as a computed path and a top-level `return` returned from the generated
   `main`, printing nothing and exiting with a junk status. Both halves run now: **6 ok / 0
   failed in each**, `main.php` 6.73x, `heavy.php` 1.41x (the committed record). `probes/t10/d8check.py` is the
-  enforcement D8 lacked: four regimes, and a `.php` in none of them fails the run.
+  enforcement D8 lacked: six regimes -- fixture, refusal, helper, instrument, library, bench,
+  each with its own obligation, and `refusal` and `helper` are NOT differential fixtures -- and
+  a `.php` in none of them fails the run.
 * **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at
   about 20000 of 21395 tests. The caller names the binary with `MCPHP_OUT` and unlinks it the
   moment the subprocess returns; each run sweeps the dead siblings at startup. **Peak 1908 KiB
