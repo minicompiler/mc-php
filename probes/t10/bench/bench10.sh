@@ -83,7 +83,8 @@ for prog in main.php heavy.php; do
     # that emits a non-terminating binary would otherwise hang `run.sh`
     # here with no output and never reach its cleanup trap. `lim` kills
     # the process GROUP and says out of band whether the alarm fired.
-    if lim "$PHP" "probes/t10/bench/$prog" > "$tmp/a.out" 2> "$tmp/a.err"
+    if lim env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP \
+        "$PHP" "probes/t10/bench/$prog" > "$tmp/a.out" 2> "$tmp/a.err"
     then :; else ae=$?; fi
     php_to=$timedout
     be=0

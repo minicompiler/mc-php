@@ -184,7 +184,12 @@ printf '\n== 10. D8: the workload tests, in both worlds ==\n'
 # `set -e` is on, so a bare command that fails ENDS the script: the status
 # has to be taken inside a conditional or the check below is unreachable.
 d8pe=0
-if lim "$PHP" probes/t10/bench/run.php > "$MCPHP_TMP/d8p.out" 2> "$MCPHP_TMP/d8p.err"
+# the SAME sanitized environment as the candidate: mcphp.sh removes the
+# harness's own variables before it execs the program, so php must not keep
+# them either or the two halves run under different inputs (the fixture
+# gate has done this since round thirty-three).
+if lim env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP \
+    "$PHP" probes/t10/bench/run.php > "$MCPHP_TMP/d8p.out" 2> "$MCPHP_TMP/d8p.err"
 then :; else d8pe=$?; fi
 d8a=$(tail -1 "$MCPHP_TMP/d8p.out")
 # how many test* methods the class DECLARES: the gate requires that many to

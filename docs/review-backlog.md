@@ -1378,3 +1378,14 @@ all three. `LIM_SECS` (120 for the bench and the D8 runner, 30 for a
 fixture) is its budget. Measured: with `bench/main.php` replaced by
 `while (true) {}` the gate says `bench: main.php timed out (php yes, mc-php
 yes)` and stops, where it used to hang.
+
+### Round forty-nine
+
+One finding, and it is the last corner of the same rule: ~~`run.sh`'s D8
+step runs php with `MCPHP_TMP` still in its environment while `mcphp.sh`
+removes it before the program~~, so the two halves of "the same test in
+both worlds" ran under different inputs. php goes through
+`env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP` in that step and in the
+bench's own comparison now -- what `fixtures.sh` has done since round
+thirty-three. Both gates re-run green: `tests: 6 ok / 0 failed` in each
+half, and the bench comparable on both programs.
