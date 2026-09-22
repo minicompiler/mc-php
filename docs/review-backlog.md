@@ -63,7 +63,7 @@ after.**
 ## 2. Language semantics that are wrong (a program can observe every one) -- DONE
 
 Every line below is closed by a FIXTURE that runs under `php` and under mc-php and is compared
-byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **88 / 88** as this pull request ends), or by
+byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **89 / 89** as this pull request ends), or by
 a measurement recorded beside it. The fixture is named at the end of each line.
 
 - ~~**`&&` and `||` do not short-circuit**~~ (#5 `php.mc:2202`). Both operands were lowered and
@@ -1646,3 +1646,34 @@ rather than in a comment.
   a real comment tail still goes. Proved to have teeth by breaking the
   branch the way the annotation describes: the gate then exits 1 with
   `AssertionError: require x` before it looks at a single file.
+
+### Round sixty
+
+Two findings and a stale piece of metadata. One is real and is the first
+LIBRARY defect the review has turned up; one is refuted by the run itself.
+
+- **`array_diff_key` answered by value.** Correct, and it was registered
+  to `php_f_array_diff`, which compares `php_zv_str` of the buckets:
+
+      array_diff_key(["a" => 1, "b" => 2], ["b" => 9])
+      php:    ["a" => 1]
+      mc-php: ["a" => 1, "b" => 2]
+
+  because 1 and 2 are not among the values of the second array. The keys
+  a stored bucket carries are already normalised -- a numeric string
+  became an integer index at insert -- so one helper answers both:
+  `php_bkt_key_in` looks a string key up by its own hash and an integer
+  one by the index, which IS the hash the table stored.
+  `php_f_array_diff_key` and `php_f_array_intersect_key` are the two
+  walks over it, and `array_intersect_key` is registered for the first
+  time (it was missing, not wrong). `g/90-array-key-ops.php` carries the
+  equal-values case both ways, integer keys, a list, a numeric string key
+  against an integer one, an empty side, and the value forms as controls.
+- ~~The bench compile passes `--exe` to `mcphp.sh` and every row aborts.~~
+  Refuted: the line runs `probes/t10/mc-php`, the compiler binary, which
+  is exactly what the annotation asks for -- `mcphp.sh` is not on it. The
+  bench ran to completion on the commit that introduced the bound and on
+  this one: `both answer 13608 (exit 0, both streams byte for byte)`,
+  `both answer 99450`, and `recorded: probes/t10/bench/results/2026-09-22.json`.
+- **The pull request title still advertised `green 1637 -> 1689`.**
+  Corrected to the measured result, `1637 -> 1697`.

@@ -140,10 +140,10 @@ not the compiler.
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **757 of the 781 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
-| **fixtures byte for byte** | **60 of 60, merged streams** | **88 of 88, each stream and the exit code** | **`2>&1` and `$(...)`** |
+| **fixtures byte for byte** | **60 of 60, merged streams** | **89 of 89, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
-| **the D8 bench** | **5.85x and 1.45x** | **6.80x and 1.44x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
+| **the D8 bench** | **5.85x and 1.45x** | **6.54x and 1.43x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
 | assert a php diagnostic line | 93 green of 4647 | **102 green of 4647** | |
 | mention `__destruct` | 14 green of 333 | **15 green of 333** | |
 | `lencheck` / `aritycheck` | 468 / 272 | **514 / 272** | |
@@ -411,20 +411,20 @@ agree.
   6 test* methods declared; php ran 6, mc-php ran 6, and the two outputs
   are byte for byte the same
 
-  == main.php ==   both answer 13608   the binary is 314642 bytes
-    php 0.0761 s   mc-php 0.0112 s   php -r (start-up) 0.0749 s
-    php / mc-php = 6.80x        php WORK / mc-php = 0.11x
+  == main.php ==   both answer 13608   the binary is 314754 bytes
+    php 0.0757 s   mc-php 0.0116 s   php -r (start-up) 0.0761 s
+    php / mc-php = 6.54x
   == heavy.php ==  both answer 99450
-    php 0.0770 s   mc-php 0.0534 s   php -r (start-up) 0.0759 s
-    php / mc-php = 1.44x        php WORK / mc-php = 0.02x
+    php 0.0774 s   mc-php 0.0542 s   php -r (start-up) 0.0745 s
+    php / mc-php = 1.43x        php WORK / mc-php = 0.06x
 ```
 
-`heavy.php`'s work ratio is the one number that is not always there:
-`time2.py` writes `ratio_work_over_mcphp` only when php's median exceeds
-its own start-up, and this program's whole run and php's start-up are
-within the noise of each other -- 0.0770 s against 0.0759 s here, and the
-other way round (0.0754 s against 0.0772 s) in the record of the day
-before, where the line is correctly absent. A `0.00x` printed there would
+The work ratio is the one number that is not always there: `time2.py`
+writes `ratio_work_over_mcphp` only when php's median exceeds its own
+start-up, and for these two programs the whole run and the start-up are
+within the noise of each other -- `heavy.php` 0.0774 s against 0.0745 s
+here, `main.php` 0.0757 s against 0.0761 s, so on this run the line is
+present for one and correctly absent for the other. A `0.00x` printed there would
 have been a number nothing measured.
 
 **Those numbers are read out of the committed record**,
@@ -452,16 +452,16 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **88 of 88** numbered fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **89 of 89** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** parse under `php -l` and are refused by
   mc-php with a named message, exit 3. That pair IS the differential for a
   refusal fixture, and `d8check.py` gives `r/` a regime of its own for it:
   an `r/` file is not a byte-for-byte pair, because the point of it is that
   mc-php declines what php accepts.
-* `lencheck` **514 literal lengths, 0 wrong**; `aritycheck` **272 library
+* `lencheck` **514 literal lengths, 0 wrong**; `aritycheck` **273 library
   rows, 0 wrong**.
-* `d8check` -- **88 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 101 `.php`,
+* `d8check` -- **89 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 102 `.php`,
   and the repo-wide sweep over **366** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).

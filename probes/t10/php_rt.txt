@@ -6283,6 +6283,66 @@ uptr php_f_array_column(uptr a, uptr col, uptr idx) {
     return r;
 }
 
+// `array_diff_key` is a different function from `array_diff`, and wiring it
+// to the same helper answered by VALUE: `array_diff_key(["a"=>1], ["b"=>1])`
+// kept nothing where php keeps `a`, because the two 1s compare equal. The key
+// a stored bucket carries is already normalised -- a numeric string became an
+// integer index at insert -- so a string key is looked up by its own hash and
+// an integer one by the index, which IS the hash the table stored.
+i64 php_bkt_key_in(uptr other, uptr bk) {
+    if (php_zv_type(other) != IS_ARRAY) return 0;
+    uptr g = ld64(other);
+    uptr k = ld64(bk + 24);
+    if (k) {
+        if (php_ht_find(g, php_str_hash(k), k)) return 1;
+        return 0;
+    }
+    if (php_ht_find(g, ld64(bk + 16), 0)) return 1;
+    return 0;
+}
+
+uptr php_f_array_diff_key(uptr a, uptr b) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr bk = php_ht_bkt(h, i);
+        if (ld8(bk + 8) != IS_UNDEF) {
+            if (!php_bkt_key_in(b, bk)) {
+                uptr k = ld64(bk + 24);
+                if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), bk);
+                if (!k) php_zv_cpv(php_arr_islot(r, ld64(bk + 16)), bk);
+            }
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+uptr php_f_array_intersect_key(uptr a, uptr b) {
+    uptr r = php_arr_new(8);
+    if (php_zv_type(a) != IS_ARRAY) return r;
+    uptr h = ld64(a);
+    i64 used = php_ht_used(h);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr bk = php_ht_bkt(h, i);
+        if (ld8(bk + 8) != IS_UNDEF) {
+            if (php_bkt_key_in(b, bk)) {
+                uptr k = ld64(bk + 24);
+                if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), bk);
+                if (!k) php_zv_cpv(php_arr_islot(r, ld64(bk + 16)), bk);
+            }
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
 uptr php_f_array_diff(uptr a, uptr b) {
     uptr r = php_arr_new(8);
     if (php_zv_type(a) != IS_ARRAY) return r;

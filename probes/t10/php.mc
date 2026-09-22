@@ -7523,8 +7523,9 @@ void ph_lib_init() {
     ph_lib("array_push", "php_f_array_push", 2, 4, PT_INT);
     ph_lib("array_column", "php_f_array_column", 2, 3, PT_ARR);
     ph_lib("array_diff", "php_f_array_diff", 2, 2, PT_ARR);
-    ph_lib("array_diff_key", "php_f_array_diff", 2, 2, PT_ARR);
+    ph_lib("array_diff_key", "php_f_array_diff_key", 2, 2, PT_ARR);
     ph_lib("array_intersect", "php_f_array_intersect", 2, 2, PT_ARR);
+    ph_lib("array_intersect_key", "php_f_array_intersect_key", 2, 2, PT_ARR);
     ph_lib("array_pad", "php_f_array_pad", 3, 3, PT_ARR);
     ph_lib("array_chunk", "php_f_array_chunk", 2, 3, PT_ARR);
     ph_lib("current", "php_f_current", 1, 1, PT_MIXED);
