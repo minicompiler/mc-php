@@ -40,8 +40,13 @@ mcphp_tmp_init() {
         # compared: same pid AND same start time is the real owner, a
         # different start time is a recycled pid.
         if kill -0 "$_pid" 2>/dev/null; then
-            _was=$(cat "$_d/owner" 2>/dev/null)
-            _now=$(ps -o lstart= -p "$_pid" 2>/dev/null)
+            # `|| :` on BOTH: this file is sourced under `set -e`, and a
+            # command substitution that fails takes the assignment's status
+            # with it -- `cat` of a missing `owner`, or a `ps` for an owner
+            # that exited between the `kill -0` and here, aborted the whole
+            # probe at startup instead of leaving the directory alone.
+            _was=$(cat "$_d/owner" 2>/dev/null || :)
+            _now=$(ps -o lstart= -p "$_pid" 2>/dev/null || :)
             if [ -n "$_was" ] && [ -n "$_now" ] && [ "$_was" != "$_now" ]; then
                 rm -rf "$_d"
             fi

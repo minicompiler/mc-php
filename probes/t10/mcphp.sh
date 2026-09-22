@@ -71,7 +71,7 @@ rm -f "$err" "$out"
 # runs without it, so a .phpt that reads getenv('MCPHP_OUT') or enumerates
 # its environment would see two different environments and be classified on
 # the harness rather than on itself.
-unset MCPHP_OUT
+unset MCPHP_OUT MCPHP_BIN MCPHP_TMP
 # EXEC, so this shell BECOMES the program: python's subprocess timeout kills
 # the process it spawned, and a program that loops for ever must be that same
 # process. Without the exec the timeout killed the shell and left the binary

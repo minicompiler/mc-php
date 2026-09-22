@@ -242,6 +242,14 @@ def base_environment(php, srcdir):
     env['TEST_PHP_EXECUTABLE'] = php_abs
     env['TEST_PHP_EXECUTABLE_ESCAPED'] = shlex.quote(php_abs)
     env['TEST_PHP_SRCDIR'] = srcdir
+    # the HARNESS's own variables are not the test's. `probes/t10/grid.sh`
+    # exports MCPHP_BIN so its snapshot compiler is used, and this copies
+    # os.environ into the environment of BOTH the oracle and the candidate
+    # -- so an environment-sensitive .phpt saw the measurement apparatus.
+    # `run_candidate` puts back the ones the WRAPPER needs, and the wrapper
+    # unsets them before it execs the program.
+    for k in ('MCPHP_BIN', 'MCPHP_OUT', 'MCPHP_TMP', 'T10_JOBS'):
+        env.pop(k, None)
     for k in ('SSH_CLIENT', 'SSH_AUTH_SOCK', 'SSH_TTY', 'SSH_CONNECTION'):
         env[k] = 'deleted'
     return env
@@ -319,6 +327,12 @@ def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     # MCPHP_OUT is honoured by probes/t10/mcphp.sh and ignored by the frozen
     # earlier probes, which still fall back to their own MCPHP_TMP.
     env = dict(env)
+    # what the WRAPPER needs, scrubbed from the base environment above and
+    # given back here alone: mcphp.sh removes them before the exec, so the
+    # program still never sees one.
+    for k in ('MCPHP_BIN', 'MCPHP_TMP'):
+        if k in os.environ:
+            env[k] = os.environ[k]
     fd, out = tempfile.mkstemp(prefix='mcphp-out.', suffix='.bin',
                                dir=os.environ.get('MCPHP_TMP') or None)
     os.close(fd)

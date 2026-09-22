@@ -1278,3 +1278,27 @@ Three findings, all real, all measured both ways.
   `green` test for test (`comm`: 0 lost, 0 gained) and differ in `php-fail`
   and `total` because the tree was cleaned of the pre-CLEAN harness's
   leftovers and 20 tests came back out of `php-fail`.
+
+### Round forty-five
+
+Three findings, all real.
+
+- ~~The owner probes abort the run under `set -e`.~~ Correct, and it is the
+  kind of defect that only fires on the unhappy path: `tmp.sh` is sourced
+  under `set -e`, and a command substitution that fails takes the
+  assignment's status with it -- a `cat` of a missing `owner`, or a `ps`
+  for an owner that exited between the `kill -0` and the read, ended the
+  whole probe at startup. `|| :` on both.
+- ~~`grid.sh` exports `MCPHP_BIN` and `phpt-run.py` copies `os.environ` into
+  BOTH environments.~~ Correct, and it is round forty-four's finding in the
+  grid rather than in the analysis harness. `base_environment` scrubs the
+  four harness names, `run_candidate` puts back the two the WRAPPER needs,
+  and `mcphp.sh` unsets all three before the `exec` -- so the oracle never
+  had them and the program never has them. Measured with a `.phpt` that
+  prints the three and expects `bool(false)` three times: **`php-fail`**
+  before (php's own output disagreed with the test's expectation, because
+  the variables really were set) and **green** after.
+  `g/82-env-symmetry.php` grew to all three and `fixtures.sh` runs php
+  under `env -u` for each.
+- ~~The description's gate counts are stale.~~ 84 fixtures, `d8check` 97 in a
+  regime and 365 swept, `lencheck` 504.

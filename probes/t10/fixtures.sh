@@ -86,10 +86,11 @@ for f in $P/g/*.php; do
     # d8check.py puts it in a regime of its own.
     case $(basename "$f") in inc.php) continue ;; esac
     ng=$((ng + 1))
-    # php runs WITHOUT MCPHP_OUT: it is exported for mcphp.sh's benefit and
-    # mcphp.sh unsets it before the program runs, so leaving it here gave
-    # the two worlds different environments for the same fixture.
-    lim env -u MCPHP_OUT "$PHP" "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?; pto=$timedout
+    # php runs without ANY of the harness's own variables: they are
+    # exported for mcphp.sh's benefit and mcphp.sh unsets all three before
+    # the program runs, so leaving them here gave the two worlds different
+    # environments for the same fixture.
+    lim env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP "$PHP" "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?; pto=$timedout
     lim $P/mcphp.sh "$f" > "$tmp/m.out" 2> "$tmp/m.err"; me=$?; mto=$timedout
     rm -f "$MCPHP_OUT" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
     # A fixture that HANGS in both worlds leaves both streams empty and both
@@ -125,7 +126,7 @@ for f in $P/r/*.php; do
     # differential is that php accepts the source as php at all -- otherwise
     # "mc-php refuses what php accepts" is only half measured, and a typo
     # would read as a refusal.
-    if ! env -u MCPHP_OUT "$PHP" -l "$f" > "$tmp/l.out" 2>&1; then
+    if ! env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP "$PHP" -l "$f" > "$tmp/l.out" 2>&1; then
         printf '  FAIL  %-26s php will not parse it: %s\n' \
             "$(basename "$f")" "$(head -1 "$tmp/l.out")"
         fail=1
