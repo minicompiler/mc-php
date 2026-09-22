@@ -143,7 +143,7 @@ not the compiler.
 | **fixtures byte for byte** | **60 of 60, merged streams** | **88 of 88, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
-| **the D8 bench** | **5.85x and 1.45x** | **7.03x and 1.45x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
+| **the D8 bench** | **5.85x and 1.45x** | **6.80x and 1.44x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
 | assert a php diagnostic line | 93 green of 4647 | **102 green of 4647** | |
 | mention `__destruct` | 14 green of 333 | **15 green of 333** | |
 | `lencheck` / `aritycheck` | 468 / 272 | **514 / 272** | |
@@ -412,17 +412,17 @@ agree.
   are byte for byte the same
 
   == main.php ==   both answer 13608   the binary is 314642 bytes
-    php 0.0767 s   mc-php 0.0109 s   php -r (start-up) 0.0753 s
-    php / mc-php = 7.03x        php WORK / mc-php = 0.12x
+    php 0.0761 s   mc-php 0.0112 s   php -r (start-up) 0.0749 s
+    php / mc-php = 6.80x        php WORK / mc-php = 0.11x
   == heavy.php ==  both answer 99450
-    php 0.0772 s   mc-php 0.0532 s   php -r (start-up) 0.0755 s
-    php / mc-php = 1.45x        php WORK / mc-php = 0.03x
+    php 0.0770 s   mc-php 0.0534 s   php -r (start-up) 0.0759 s
+    php / mc-php = 1.44x        php WORK / mc-php = 0.02x
 ```
 
 `heavy.php`'s work ratio is the one number that is not always there:
 `time2.py` writes `ratio_work_over_mcphp` only when php's median exceeds
 its own start-up, and this program's whole run and php's start-up are
-within the noise of each other -- 0.0772 s against 0.0755 s here, and the
+within the noise of each other -- 0.0770 s against 0.0759 s here, and the
 other way round (0.0754 s against 0.0772 s) in the record of the day
 before, where the line is correctly absent. A `0.00x` printed there would
 have been a number nothing measured.

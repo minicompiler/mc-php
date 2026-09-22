@@ -1612,3 +1612,21 @@ direction, which is why it is worth recording.
   pull request ends with", `docs/plan.md`'s T10 paragraph, and the pull
   request's own description. Every earlier run keeps its numbers and is
   labelled with its round, which is what makes the band readable.
+
+### Round fifty-eight
+
+Three findings, all real, and the first is the half of round fifty-six
+that the fix did not cover.
+
+- **The workload's COMPILE is unbounded.** `bench10.sh` runs the
+  comparison and (since round fifty-six) the timing through `lim`, but
+  built each workload with a bare `probes/t10/mc-php --exe`. A compiler
+  regression that does not terminate hangs `run.sh` there, before the
+  bounded gate or the cleanup trap can run. One word: `lim` in front of
+  it, with the same `LIM_SECS` the rest of the script uses.
+- **`probes/README.md` published the round-twenty-seven corpus figure.**
+  The file round fifty-seven did not sweep. It now carries the
+  measurement against the compiler this pull request ends with -- 1697,
+  `Zend/tests` 756 -- like `RESULTS.md`, `docs/plan.md` and `CLAUDE.md`.
+- **The same file said the run compiles 85 fixtures where the section
+  below it says 88.** Corrected; `fixtures.sh` reports 88 / 88.

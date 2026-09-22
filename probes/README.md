@@ -203,11 +203,11 @@ and printed the wrong thing**. T7 builds the first and takes the second apart.
 
 ## T10 -- the review backlog: the measurements that lie, the semantics that are wrong
 
-**green 1637 -> 1689.**
-`phpt: green 1689 / wrong 14469 / refused 1929 / skip 2947 / php-fail 361 / total 21034`
-over the whole corpus; per directory `tests/lang` **104** (was 102), `Zend/tests` **749**
-(was 709), `ext/standard/tests/strings` **263** (was 262). **1664 of the 1689 greens are in
-T0's "touched by none" set**, and `refused` fell **2309 -> 1929** -- one block, because
+**green 1637 -> 1697.**
+`phpt: green 1697 / wrong 14481 / refused 1929 / skip 2947 / php-fail 341 / total 21054`
+over the whole corpus; per directory `tests/lang` **104** (was 102), `Zend/tests` **756**
+(was 709), `ext/standard/tests/strings` **263** (was 262). **1664 of the 1689 greens were in
+T0's "touched by none" set** when that share was measured, and `refused` fell **2309 -> 1929** -- one block, because
 `require __DIR__ . "/x.php"` and a top-level `return` were refusals and are not any more.
 
 The green moved only +52, and that is the expected shape: this is CORRECTNESS work, and a
@@ -279,7 +279,7 @@ the standing rule of `docs/review-backlog.md` § 3, applied to T10. They are lis
 fix in § 4 of that file; six needed code, including the `nocompile.py` correction above and a
 top-level `return` inside a `try`/`finally` that took the exit and jumped over the finally.
 
-`sh probes/t10/run.sh` (about 90 minutes: 85 fixtures, 6 refusals, four grids, the breakdown
+`sh probes/t10/run.sh` (about 90 minutes: 88 fixtures, 6 refusals, four grids, the breakdown
 and the five tables). Details: `probes/t10/RESULTS.md`.
 
 ## T9 -- func_get_args, the two blocks T8 inverted, and the generator decision

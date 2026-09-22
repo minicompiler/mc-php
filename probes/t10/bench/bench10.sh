@@ -63,7 +63,10 @@ first=1
 
 for prog in main.php heavy.php; do
     rm -f "$tmp/bench"
-    if ! probes/t10/mc-php --exe "probes/t10/bench/$prog" -o "$tmp/bench"; then
+    # BOUNDED like the two runs below it: a compiler regression that does not
+    # TERMINATE would otherwise hang run.sh here, before the bounded gate or
+    # the cleanup trap could run
+    if ! lim probes/t10/mc-php --exe "probes/t10/bench/$prog" -o "$tmp/bench"; then
         echo "bench: $prog does not compile"
         exit 1
     fi
