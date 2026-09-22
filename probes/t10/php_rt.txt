@@ -8852,10 +8852,21 @@ uptr php_ref_bind(uptr cell, uptr cur) {
 // a 20-element array lost four values.
 void php_unpack_check(uptr z, i64 cap) {
     if (php_zv_type(z) == IS_OBJECT) {
-        // php iterates a Traversable here. mc-php does not, and the message
-        // above would have called a legal spread a type error -- so it is a
-        // named limit of this compiler, like the slot count below.
-        php_die("mc-php: a spread of a Traversable is not implemented yet\n", 57);
+        // php iterates a TRAVERSABLE here and raises a TypeError for any
+        // other object. Dying for both was wrong twice: the TypeError is
+        // CATCHABLE and a `try` around the call should see it, and the
+        // limit is only real for the objects this compiler cannot
+        // iterate.
+        if (php_instanceof(z, php_str_new("Traversable", 11))
+            || php_instanceof(z, php_str_new("Iterator", 8))
+            || php_instanceof(z, php_str_new("IteratorAggregate", 17))) {
+            php_die("mc-php: a spread of a Traversable is not implemented yet\n", 57);
+        }
+        uptr mo = php_str_new("Only arrays and Traversables can be unpacked, ", 46);
+        mo = php_str_concat(mo, php_f_get_debug_type(z));
+        mo = php_str_concat(mo, php_str_new(" given", 6));
+        php_throw_str(php_str_new("TypeError", 9), mo);
+        return;
     }
     if (php_zv_type(z) != IS_ARRAY) {
         uptr m = php_str_new("Only arrays and Traversables can be unpacked, ", 46);

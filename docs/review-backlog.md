@@ -1430,3 +1430,32 @@ them.
   a value the test's own `--ENV--` set, which the oracle kept.
   `setdefault`, so the test's wins. Measured: a `.phpt` whose `--ENV--`
   sets `MCPHP_OUT` is **green through T9's wrapper and through T10's**.
+
+### Round fifty-two
+
+Two findings: one real, one refuted by the gate's own output.
+
+- ~~`f(...$object)` dies with exit 255 for every object.~~ Correct, and it
+  was wrong twice: php raises a **catchable** `TypeError` for a
+  non-Traversable object, so a `try` around the call should see it, and
+  the named limit is only real for the objects this compiler cannot
+  iterate. An object that is not `Traversable`/`Iterator`/
+  `IteratorAggregate` now raises php's own message and the program carries
+  on -- byte for byte, `TypeError: Only arrays and Traversables can be
+  unpacked, C given` then `after` -- and a real `Iterator` still gets
+  `mc-php: a spread of a Traversable is not implemented yet`, exit 255.
+  `g/78-spread-and-types.php` carries the catchable case.
+- **`_uncomment` drops quoted characters, so `included` and `benched` are
+  empty.** Refuted. The loop appends every character it does not break on,
+  including inside a quote -- the escape branch appends the PAIR and
+  continues, which is the only early path. Three lines through it:
+
+      require __DIR__ . "/workload.php";  // a comment
+        ->  require __DIR__ . "/workload.php";
+      require 'inc.php';          ->  require 'inc.php';
+      for prog in main.php heavy.php; do  ->  unchanged
+
+  And the gate itself is the proof: `d8: 98 .php, every one in a regime` --
+  with `g/inc.php` counted as the `helper` (which needs `included`) and the
+  two bench programs as `bench` (which needs `benched`). Were either empty
+  the run would fail naming all three.

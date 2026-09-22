@@ -19,3 +19,7 @@ function caller() { return early(2, "3"); }
 function early(int $a, string $b) { return $a . $b; }
 echo caller(), "\n";
 try { early([], "x"); } catch (\Throwable $e) { echo get_class($e), "\n"; }
+// an object that is not Traversable is a CATCHABLE TypeError, not a limit
+class NotIterable {}
+try { echo f(...new NotIterable()), "\n"; } catch (\Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+echo "still running\n";
