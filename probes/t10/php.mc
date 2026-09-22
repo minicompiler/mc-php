@@ -1507,7 +1507,9 @@ i64  ph_fret[PH_MAXFN];
 i64  ph_fnp[PH_MAXFN];
 i64  ph_fpt[PH_MAXFN * PH_MAXP];
 i64  ph_fpd[PH_MAXFN * PH_MAXP];        // the default value node, 0 = none
+uptr ph_fpn[PH_MAXFN * PH_MAXP];        // the bare parameter name, for a message
 i64  ph_fvar[PH_MAXFN];                 // 1 when the last parameter is ...$rest
+i64  ph_fvpc[PH_MAXFN];                 // the DECLARED element type of ...$rest
 i64  ph_fpr[PH_MAXFN];                  // bit i: parameter i is `&$x`
 i64  ph_frr[PH_MAXFN];                  // 1 when declared `function &f()`
 i64  ph_nfn;
@@ -1567,6 +1569,7 @@ i64 ph_fwd_reg(uptr n) {
     st64(ph_fret + fi * 8, PT_MIXED);
     st64(ph_fnp + fi * 8, ld64(ph_dnp + di * 8));
     st64(ph_fvar + fi * 8, ld64(ph_dvar + di * 8));
+    st64(ph_fvpc + fi * 8, 0);
     st64(ph_fpr + fi * 8, ld64(ph_dpr + di * 8));
     st64(ph_frr + fi * 8, 0);
     st64(ph_ffwd + fi * 8, 1);
@@ -1575,6 +1578,7 @@ i64 ph_fwd_reg(uptr n) {
         if (j >= ld64(ph_dnp + di * 8)) break;
         st64(ph_fpt + (fi * PH_MAXP + j) * 8, PT_MIXED);
         st64(ph_fpd + (fi * PH_MAXP + j) * 8, 0);
+        st64(ph_fpn + (fi * PH_MAXP + j) * 8, "");
         j = j + 1;
     }
     return fi;
@@ -3982,6 +3986,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     i64 head = 0;
     i64 tail = 0;
     i64 i = 0;
+    i64 coerced = 0;
     loop {
         if (i >= np) break;
         i64 want = ld64(ph_fpt + (fi * PH_MAXP + i) * 8);
@@ -3994,6 +3999,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             i64 mk = ph_set(rn, ph_c1("php_arr_new", ph_int(8), ty_parr));
             i64 mt = mk;
             i64 j = i;
+            i64 vpc = ld64(ph_fvpc + fi * 8);
             loop {
                 if (j >= na) break;
                 i64 ar = node_new(N_IDENT, line, fl);
@@ -4001,10 +4007,29 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                 set_nd_type(ar, ty_parr);
                 uptr pushfn = "php_arr_push";
                 if (spread) pushfn = "php_arr_push_opt";
-                i64 ps = ph_stmt_of(ph_c2(pushfn, ar, ph_to_mixed(ph_a(av, j), ph_aty(av, j)), TY_VOID));
+                i64 el = ph_to_mixed(ph_a(av, j), ph_aty(av, j));
+                if (vpc) {
+                    u8 vcb[64];
+                    st64(vcb, el);
+                    st64(vcb + 8, ph_int(vpc));
+                    st64(vcb + 16, ph_strlit("", 0));
+                    st64(vcb + 24, ph_strlit(name, cstrlen(name)));
+                    st64(vcb + 32, ph_int(j + 1));
+                    st64(vcb + 40, ph_strlit("", 0));
+                    el = ph_calln("php_param_coerce", vcb, 6, ty_pzv);
+                }
+                i64 ps = ph_stmt_of(ph_c2(pushfn, ar, el, TY_VOID));
                 set_nd_next(mt, ps);
                 mt = ps;
                 j = j + 1;
+            }
+            // a refused element leaves the body unreached: without this the
+            // pushes after it store nulls and the function still runs
+            if (vpc && na > i) {
+                i64 vck = ph_check(line, fl);
+                set_nd_next(mt, vck);
+                mt = vck;
+                ph_can_throw = 1;
             }
             ph_pending_stmt(mk);
             v = node_new(N_IDENT, line, fl);
@@ -4021,6 +4046,33 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (!v) {
             i64 have = ph_aty(av, i);
             v = ph_a(av, i);
+            // A parameter that KEPT its declared primitive is handed a native
+            // int/float/string, so the type is gone at the ABI boundary and
+            // the callee cannot check it -- `f(int $a)` with `f([])` ran the
+            // body on a 0 where php raises a TypeError. The caller is the only
+            // side that still has the zval, so the check is here, and only
+            // when the argument IS a zval: a static int needs none.
+            i64 cw = 0;
+            if (have != want) {
+                if (want == PT_INT)    cw = 1;
+                if (want == PT_FLOAT)  cw = 2;
+                if (want == PT_STRING) cw = 3;
+                if (want == PT_BOOL)   cw = 4;
+            }
+            if (cw) {
+                uptr pn = ld64(ph_fpn + (fi * PH_MAXP + i) * 8);
+                u8 acb[64];
+                st64(acb, ph_to_mixed(v, have));
+                st64(acb + 8, ph_int(cw));
+                st64(acb + 16, ph_strlit("", 0));
+                st64(acb + 24, ph_strlit(name, cstrlen(name)));
+                st64(acb + 32, ph_int(i + 1));
+                st64(acb + 40, ph_strlit(pn, cstrlen(pn)));
+                v = ph_tref(ph_temp(ph_calln("php_param_coerce", acb, 6, ty_pzv),
+                                    ty_pzv, "phc_"));
+                have = PT_MIXED;
+                coerced = 1;
+            }
             if (want == PT_INT)    v = ph_to_int(v, have);
             if (want == PT_FLOAT)  v = ph_to_float(v, have);
             if (want == PT_STRING) v = ph_to_str(v, have);
@@ -4033,6 +4085,10 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         tail = v;
         i = i + 1;
     }
+    // ONE check for the whole argument list: php_param_coerce is a no-op once
+    // something is pending, so the FIRST refusal is the one that stands, and
+    // this runs before the call, so the body is not reached with a filled-in 0
+    if (coerced) ph_pending_stmt(ph_check(line, fl));
     ph_can_throw = 1;
     i64 c = node_new(N_CALL, line, fl);
     set_nd_name(c, ph_mangle(name, "f_"));
@@ -7169,6 +7225,7 @@ i64 ph_function() {
     st64(ph_fret + fi * 8, PT_MIXED);
     st64(ph_fnp + fi * 8, 0);
     st64(ph_fvar + fi * 8, 0);
+    st64(ph_fvpc + fi * 8, 0);
     st64(ph_fpr + fi * 8, 0);
     st64(ph_frr + fi * 8, retref);
 
@@ -7230,6 +7287,7 @@ i64 ph_function() {
         if (np < PH_MAXCP) st64(ph_cpn + np * 8, d);
         if (pt != PT_MIXED) ph_cpzv = 0;
         st64(ph_fpt + (fi * PH_MAXP + np) * 8, pt);
+        st64(ph_fpn + (fi * PH_MAXP + np) * 8, d + 1);
         st64(ph_fpd + (fi * PH_MAXP + np) * 8, dflt);
         np = np + 1;
         i64 pn = param_new(ph_mcty(pt), ph_mangle(d, "v_"));
@@ -7283,7 +7341,17 @@ i64 ph_function() {
             if (!pret) pre = iff;
             pret = iff;
         }
-        if (variadic) { st64(ph_fvar + fi * 8, 1); break; }
+        if (variadic) {
+            st64(ph_fvar + fi * 8, 1);
+            // `int ...$xs` is an array of ints to the callee, so the declared
+            // type is erased above. php still checks it, per ARGUMENT, at the
+            // call -- and only the CALLER has the arguments, so the element
+            // type travels here and the packing loop coerces with it. A
+            // by-reference variadic is left alone: coercing there would write
+            // a new zval where the caller's own cell has to stay.
+            if (!byref) st64(ph_fvpc + fi * 8, pcw);
+            break;
+        }
         if (!ph_accept(",", 1)) break;
     }
     ph_want(")", 1, "expected ) in a php function");

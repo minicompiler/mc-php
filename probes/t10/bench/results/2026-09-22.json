@@ -1,0 +1,14 @@
+{
+  "date": "2026-09-22",
+  "host": "Darwin 25.6.0 arm64",
+  "php": "8.5.10",
+  "opcache": "loaded-off-cli",
+  "jit": "disable",
+  "jit_buffer": "64M",
+  "mc": "mc 1.1.0",
+  "reps": 7,
+  "programs": [
+    {"program": "probes/t10/bench/main.php", "reps": 7, "php_median_s": 0.07696, "mcphp_median_s": 0.011568, "php_startup_median_s": 0.07574, "php_best_s": 0.075005, "mcphp_best_s": 0.011282, "ratio_php_over_mcphp": 6.653, "ratio_work_over_mcphp": 0.106, "answer": "13608", "bytes": 314642},
+    {"program": "probes/t10/bench/heavy.php", "reps": 7, "php_median_s": 0.078426, "mcphp_median_s": 0.054241, "php_startup_median_s": 0.074856, "php_best_s": 0.072512, "mcphp_best_s": 0.050697, "ratio_php_over_mcphp": 1.446, "ratio_work_over_mcphp": 0.066, "answer": "99450", "bytes": 314642}
+  ]
+}

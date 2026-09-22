@@ -88,7 +88,11 @@ for prog in main.php heavy.php; do
     then :; else ae=$?; fi
     php_to=$timedout
     be=0
-    if lim "$tmp/bench" > "$tmp/b.out" 2> "$tmp/b.err"
+    # the SAME environment php was given: the three harness names are the
+    # candidate's own channel, and a workload that reads getenv() would
+    # otherwise see them on one side of the comparison only
+    if lim env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP \
+        "$tmp/bench" > "$tmp/b.out" 2> "$tmp/b.err"
     then :; else be=$?; fi
     if [ "$php_to" = yes ] || [ "$timedout" = yes ]; then
         printf 'bench: %s timed out (php %s, mc-php %s)\n' \

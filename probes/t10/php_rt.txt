@@ -4957,9 +4957,15 @@ uptr php_param_err(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname)
     m = php_str_concat(m, fn);
     m = php_str_concat(m, php_str_new("(): Argument #", 14));
     m = php_str_concat(m, php_itos(argno));
-    m = php_str_concat(m, php_str_new(" ($", 3));
-    m = php_str_concat(m, argname);
-    m = php_str_concat(m, php_str_new(") must be of type ", 18));
+    // php names the parameter -- `Argument #1 ($x)` -- except on a variadic,
+    // where the argument has no parameter of its own. An empty name is how
+    // the caller says so.
+    if (php_strlen(argname)) {
+        m = php_str_concat(m, php_str_new(" ($", 3));
+        m = php_str_concat(m, argname);
+        m = php_str_concat(m, php_str_new(")", 1));
+    }
+    m = php_str_concat(m, php_str_new(" must be of type ", 17));
     m = php_str_concat(m, php_pc_name(want));
     m = php_str_concat(m, php_str_new(", ", 2));
     m = php_str_concat(m, php_f_get_debug_type(z));
@@ -4973,6 +4979,10 @@ uptr php_param_err(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname)
 
 uptr php_param_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) {
     if (!z) return z;                          // not passed: the default fills it
+    // a whole argument list is checked before its call, with ONE check after
+    // it: once something is pending the rest must not overwrite it, because
+    // php reports the FIRST argument it refused
+    if (ph_exc) return z;
     i64 t = php_zv_type(z);
     if (want == PC_ARRAY) {
         if (t == IS_ARRAY) return z;

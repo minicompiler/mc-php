@@ -132,13 +132,13 @@ not the compiler.
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **757 of the 781 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
-| **fixtures byte for byte** | **60 of 60, merged streams** | **85 of 85, each stream and the exit code** | **`2>&1` and `$(...)`** |
+| **fixtures byte for byte** | **60 of 60, merged streams** | **87 of 87, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
-| **the D8 bench** | **5.85x and 1.45x** | **6.73x and 1.41x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
+| **the D8 bench** | **5.85x and 1.45x** | **6.65x and 1.45x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
 | assert a php diagnostic line | 93 green of 4647 | **102 green of 4647** | |
 | mention `__destruct` | 14 green of 333 | **15 green of 333** | |
-| `lencheck` / `aritycheck` | 468 / 272 | **504 / 272** | |
+| `lencheck` / `aritycheck` | 468 / 272 | **514 / 272** | |
 
 ### What "compiled; output differs" really was
 
@@ -403,28 +403,28 @@ agree.
   6 test* methods declared; php ran 6, mc-php ran 6, and the two outputs
   are byte for byte the same
 
-  == main.php ==   both answer 13608   the binary is 314594 bytes
-    php 0.0774 s   mc-php 0.0115 s   php -r (start-up) 0.0764 s
-    php / mc-php = 6.73x        php WORK / mc-php = 0.09x
+  == main.php ==   both answer 13608   the binary is 314642 bytes
+    php 0.0770 s   mc-php 0.0116 s   php -r (start-up) 0.0757 s
+    php / mc-php = 6.65x        php WORK / mc-php = 0.11x
   == heavy.php ==  both answer 99450
-    php 0.0754 s   mc-php 0.0534 s   php -r (start-up) 0.0772 s
-    php / mc-php = 1.41x
+    php 0.0784 s   mc-php 0.0542 s   php -r (start-up) 0.0749 s
+    php / mc-php = 1.45x        php WORK / mc-php = 0.07x
 ```
 
-`heavy.php` has **no work ratio in the record and none is printed**:
+`heavy.php`'s work ratio is the one number that is not always there:
 `time2.py` writes `ratio_work_over_mcphp` only when php's median exceeds
-its own start-up, and on this run php's start-up median (0.0772 s) is
-LARGER than its whole `heavy.php` (0.0754 s) -- the two are within the
-noise of each other, which is the honest reading of a program whose work
-takes less time than starting the interpreter that runs it. A `0.00x`
-printed there would have been a number nothing measured.
+its own start-up, and this program's whole run and php's start-up are
+within the noise of each other -- 0.0784 s against 0.0749 s here, and the
+other way round (0.0754 s against 0.0772 s) in the record of the day
+before, where the line is correctly absent. A `0.00x` printed there would
+have been a number nothing measured.
 
-**Those four numbers are read out of the committed record**,
-`probes/t10/bench/results/2026-09-21.json`, which D8 (b) asks for and which
+**Those numbers are read out of the committed record**,
+`probes/t10/bench/results/2026-09-22.json`, which D8 (b) asks for and which
 `bench10.sh` writes on every run (`time2.py` writes the object itself, so
 nothing re-parses a printed line). The reviewer of #9 caught the report
 quoting a LATER run than the one committed -- 7.43x and 1.42x against the
-record's 6.73x and 1.41x -- and that is why the record exists: a bench
+record's 6.73x and 1.41x of the day before -- and that is why the record exists: a bench
 number in prose has nowhere to be checked against. The machine was loaded
 when this one was taken (php's own start-up is 77 ms here against 38 ms in
 T9's), which is exactly the kind of thing a dated record makes visible. The
@@ -444,16 +444,16 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **85 of 85** numbered fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **87 of 87** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** parse under `php -l` and are refused by
   mc-php with a named message, exit 3. That pair IS the differential for a
   refusal fixture, and `d8check.py` gives `r/` a regime of its own for it:
   an `r/` file is not a byte-for-byte pair, because the point of it is that
   mc-php declines what php accepts.
-* `lencheck` **504 literal lengths, 0 wrong**; `aritycheck` **272 library
+* `lencheck` **514 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
-* `d8check` -- **85 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 98 `.php`,
+* `d8check` -- **87 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 100 `.php`,
   and the repo-wide sweep over **366** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
@@ -743,3 +743,19 @@ the body appended to it on every call and `$f()` twice answered 4 then 5
 where php answers 3 both times. `php_zv_val` at the capture AND at the
 per-call bind, with a by-reference `use (&$x)` exempt from each.
 `g/86-closure-capture.php`.
+
+**Round fifty-three** found the fourth, and the filed finding was the
+narrow half of it. A typed variadic erased its element type
+(`if (variadic) pt = PT_ARR;` -- right for the callee, where `$xs` IS an
+array), so `f(int ...$xs)` with `f(1, [], 3)` reached the body and died on
+`Unsupported operand types` where php refuses the ARGUMENT. Covering that
+showed the wider one: a parameter that KEPT its declared primitive was
+never checked either, because it is handed a native i64 and the type is
+gone at the ABI boundary -- `function m(int $a)` answered **0** for both
+`m([])` and `m("abc")`. Round nineteen's prologue coercion could not see
+these: it runs on the parameters that LOST their type and therefore arrive
+as a zval. The caller is the only side that still has one, so both checks
+are there now, with `php_param_coerce` a no-op once something is pending
+and ONE `php_check` per argument list -- which is what makes the FIRST
+refused argument the one reported, before the body runs.
+`g/87-variadic-typed.php` and `g/88-param-typed.php`.

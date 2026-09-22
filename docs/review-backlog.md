@@ -63,7 +63,7 @@ after.**
 ## 2. Language semantics that are wrong (a program can observe every one) -- DONE
 
 Every line below is closed by a FIXTURE that runs under `php` and under mc-php and is compared
-byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **85 / 85** as this pull request ends), or by
+byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **87 / 87** as this pull request ends), or by
 a measurement recorded beside it. The fixture is named at the end of each line.
 
 - ~~**`&&` and `||` do not short-circuit**~~ (#5 `php.mc:2202`). Both operands were lowered and
@@ -1459,3 +1459,57 @@ Two findings: one real, one refuted by the gate's own output.
   with `g/inc.php` counted as the `helper` (which needs `included`) and the
   two bench programs as `bench` (which needs `benched`). Were either empty
   the run would fail naming all three.
+
+### Round fifty-three
+
+Two findings, both real, and the first one turned out to be the narrow
+case of a wider hole.
+
+- **A typed variadic erases its element type, so `f(int ...$xs)` accepts
+  anything.** Correct. `if (variadic) pt = PT_ARR;` is right for the
+  CALLEE -- `$xs` is an array -- but php still checks every argument at
+  the call, by its position in the call and with no parameter name in the
+  message. Measured before:
+
+      php:    TypeError: f(): Argument #2 must be of type int, array given
+      mc-php: TypeError: Unsupported operand types: int + array
+      php:    TypeError: g(): Argument #2 must be of type string, array given
+      mc-php: Warning: Array to string conversion ... Array
+
+  The declared element type now travels in `ph_fvpc` and the packing loop
+  coerces each argument with it, with one `php_check` after the loop so a
+  refused element does not reach the body. `php_param_err` omits the
+  ` ($name)` when the name is empty, which is how the caller says "this
+  argument has no parameter of its own". A by-reference variadic is left
+  alone: coercing there would write a new zval where the caller's own cell
+  has to stay. `g/87-variadic-typed.php`, twelve calls.
+- **A parameter that KEPT its declared primitive was never checked at
+  all.** Found while covering the first one, and wider than it. The
+  prologue coercion round nineteen added applies only to the parameters
+  that LOST their type (a default, a forward call), because those are the
+  ones that arrive as a zval; a plain `int $a` is handed a native i64, so
+  the type is gone at the ABI boundary and no callee-side check is
+  possible. Measured before:
+
+      function m(int $a) { return $a; }
+      php:    m(): Argument #1 ($a) must be of type int, array given
+      mc-php: 0
+      php:    m(): Argument #1 ($a) must be of type int, string given   // "abc"
+      mc-php: 0
+
+  The caller is the only side that still has the zval, so the check is
+  there: when the argument's type is not already the declared one it goes
+  through `php_param_coerce`, and `php_param_coerce` returns its argument
+  unchanged once something is pending, so ONE `php_check` for the whole
+  argument list reports the FIRST argument php would refuse, before the
+  call. An argument that already has the declared type is passed straight
+  through and costs nothing. `g/88-param-typed.php` carries the four
+  primitives, both orders of two bad arguments, and the proof that the
+  body does not run.
+- **The bench runs the compiled workload with the harness environment
+  still set, where php's half is sanitized.** Correct, and the fix is the
+  `env -u` the php half already had. Nothing in the two workloads reads
+  `getenv()`, so no recorded number moved for this reason; the ratios in
+  this round's record are `main.php` **6.65x** and `heavy.php` **1.45x**
+  against the previous record's 6.73x and 1.41x, which is the run-to-run
+  spread the record exists to show.
