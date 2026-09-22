@@ -124,7 +124,7 @@ not the compiler.
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **757 of the 781 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
-| **fixtures byte for byte** | **60 of 60, merged streams** | **81 of 81, each stream and the exit code** | **`2>&1` and `$(...)`** |
+| **fixtures byte for byte** | **60 of 60, merged streams** | **83 of 83, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
 | **the D8 bench** | **5.85x and 1.45x** | **6.73x and 1.41x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
@@ -436,7 +436,7 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **81 of 81** numbered fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **83 of 83** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** parse under `php -l` and are refused by
   mc-php with a named message, exit 3. That pair IS the differential for a
@@ -445,8 +445,8 @@ running and `bench10.sh` refusing to time a pair that does not agree.
   mc-php declines what php accepts.
 * `lencheck` **501 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
-* `d8check` -- **81 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 94 `.php`,
-  and the repo-wide sweep over **362** `.php` under `probes/`,
+* `d8check` -- **83 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 96 `.php`,
+  and the repo-wide sweep over **364** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
 * the grid's tmp peak **1908 KiB over 27728 tests** on the round-nineteen run
@@ -697,3 +697,12 @@ gate's business. And `heavy.php`'s `php WORK / mc-php` was printed as
 only when php's median exceeds its own start-up, and here the start-up
 median (0.0772 s) is larger than the whole program (0.0754 s). The line is
 gone and the reason is beside it.
+
+**Round forty-two** filed nothing and named a real defect in its summary
+line, as round twenty-four did: a top-level `return` whose expression
+carries pending statements lost all but the first of them, because
+`ph_expr_stmt_of` returns the chain with the expression statement at its
+END and the check was attached to its HEAD. `return f() && g();` ran f()
+and not g(), and `try { return f() && boom(); } catch` never reached the
+catch. `ph_tail` instead of `set_nd_next`;
+`g/83-toplevel-return-chain.php` and `g/84-toplevel-return-throw.php`.

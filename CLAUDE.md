@@ -284,9 +284,9 @@ answers here).
     the fifth (round ten's sscanf fix).
     **A per-block move smaller than a dozen tests should be read on the directories**, and the
     corpus number is worth quoting with its band -- T9's 1637 and T8's 1450 included.
-  Fixtures: **81 of 81** numbered under `g/` byte for byte php's on each stream and the exit code,
+  Fixtures: **83 of 83** numbered under `g/` byte for byte php's on each stream and the exit code,
   **6 of 6** under `r/` refused by name with exit 3; `lencheck` 501 / 0 wrong, `aritycheck`
-  272 / 0 wrong, `d8check` 94 `.php` in a regime and 362 under `probes/` swept for orphans. **No new mc gap**, and no new external
+  272 / 0 wrong, `d8check` 96 `.php` in a regime and 364 under `probes/` swept for orphans. **No new mc gap**, and no new external
   name: the 38-of-21219 inline-HTML refusal T5 reported is unchanged.
 - T9 done (`probes/t9`), on **mc 1.1.0**: D6's correction built, and T8's two blocks
   worked from a UNIFORM corpus-wide sample (every ninth of `wrong.txt`, split so the

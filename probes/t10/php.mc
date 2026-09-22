@@ -5291,7 +5291,14 @@ i64 ph_stmt_1() {
             // throwing t() caught the exception and STILL ended the script,
             // where php carries on after the try -- the return never
             // happened.
-            if (tlthrow) set_nd_next(tlv, ph_check(tlline, tlfile));
+            // ph_tail and NOT set_nd_next: `ph_expr_stmt_of` returns the
+            // PENDING CHAIN with the expression statement at its end (it
+            // calls ph_wrap), so writing the head's `next` threw away
+            // everything after the first pending statement. `return f() &&
+            // g();` at the top level ran f() and not g(), and
+            // `try { return f() && boom(); } catch` lost the check with the
+            // rest of the chain and never reached the catch.
+            if (tlthrow) ph_tail(tlv, ph_check(tlline, tlfile));
             if (!str_eq(ph_absfile(tlfile), ph_entry))
                 ph_todo(tlfile, tlline, "a top-level return in an included file");
             // Inside a try that has a `finally`, php runs the finally FIRST.

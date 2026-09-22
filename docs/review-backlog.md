@@ -63,7 +63,7 @@ after.**
 ## 2. Language semantics that are wrong (a program can observe every one) -- DONE
 
 Every line below is closed by a FIXTURE that runs under `php` and under mc-php and is compared
-byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **81 / 81** as this pull request ends), or by
+byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **83 / 83** as this pull request ends), or by
 a measurement recorded beside it. The fixture is named at the end of each line.
 
 - ~~**`&&` and `||` do not short-circuit**~~ (#5 `php.mc:2202`). Both operands were lowered and
@@ -1191,3 +1191,30 @@ always has its owner in it, and `mv` onto a name that does not exist is the
 atomic step. Measured: the published directory lists `owner peak` and no
 staging directory is left behind. (The staging name ends in `.new`, which
 the sweep's own `case $_pid in *[!0-9]*) continue` already skips.)
+
+### Round forty-two
+
+No finding was FILED this round -- the three open threads are the repeats
+already answered -- but the review's own summary line named a real defect,
+as round twenty-four's did: "the top-level return implementation overwrites
+pending statement chains when inserting an exception check, causing valid
+return expressions to skip side effects." It is exactly right, and it is
+two bugs.
+
+`ph_expr_stmt_of` calls `ph_wrap`, so it returns the PENDING CHAIN with the
+expression statement at its end -- the head is the first pending statement,
+not the expression. Writing that head's `next` threw away everything after
+it. Measured, both before and after:
+
+* `return f() && g() && ($x = 3);` at the top level printed `before f`
+  where php prints `before f g`: the short circuit's own statements were
+  gone.
+* `try { return f() && boom(); } catch (...)` printed `f` and exited 0
+  where php prints `f caught after`: the check went with the rest of the
+  chain, so nothing unwound and the catch never ran.
+
+The fix is `ph_tail` instead of `set_nd_next` -- the helper two lines away,
+which the `php_exit` on the next line already used.
+`g/83-toplevel-return-chain.php` (a five-term chain with three side
+effects) and `g/84-toplevel-return-throw.php` (the `&&` and the ternary,
+both caught) are byte for byte php's.
