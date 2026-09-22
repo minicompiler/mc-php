@@ -198,7 +198,13 @@ answers here).
     clobbered a sibling of that name. And `nocompile.py`'s skip list named ONE compiled
     outcome of five, so the other four were counted as tests that do not compile: that block
     was published as 737 and is **539** -- the reviewer of this probe's own pull request
-    caught it, in T10's first draft. Seventeen review rounds in all: the last one raised
+    caught it, in T10's first draft. **Sixty-one review rounds in all**, ending with one that
+    raised nothing and left nothing open; six of them found a SEMANTIC defect in the compiler
+    (a spread argument that throws, a by-reference coercion storing its own failure, a closure
+    capture sharing the outer array, an object spread that was fatal instead of catchable, a
+    declared argument type that was never checked, and a throwing `return` that jumped over its
+    `finally`) and one found the first LIBRARY defect (`array_diff_key` answering by value).
+    Round seventeen raised
     fourteen findings in code that had not changed since the round before, thirteen of them
     real (a spread argument that throws had no compute-then-check boundary, so
     `f(...boom())` ran the CALLEE'S BODY with the exception pending; `class_exists(..., false)`

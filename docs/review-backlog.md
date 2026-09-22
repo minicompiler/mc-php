@@ -1698,3 +1698,38 @@ One finding real, one refuted by php itself.
   record.** Correct: the record says 6.545x and 1.428x. Every place that
   quotes a bench ratio now reads it from the record in the tree --
   `RESULTS.md`, `docs/plan.md`, `CLAUDE.md` and `probes/README.md`.
+
+### Round sixty-two -- the review closes
+
+The review of round sixty-one landed with **Findings: None** and nothing
+open, which is where this loop was told to stop.
+
+Sixty-one rounds. What they were worth, counted rather than claimed:
+
+* **Seven defects in the product.** Six semantic, in the compiler -- a
+  spread argument that throws ran the callee's body with the exception
+  pending; `php_param_coerce_ref` stored its own failure into the
+  caller's variable; `use ($a)` shared the array with the outer variable
+  and then appended to it on every call; an object spread was fatal where
+  php's TypeError is catchable; a declared argument type was never
+  checked, neither on a typed variadic nor on a parameter that KEPT its
+  primitive; and a throwing `return` jumped over its `finally`. One in
+  the library: `array_diff_key` answered by value, and
+  `array_intersect_key` was missing.
+* **Nine defects in the measurement apparatus**, which is the half that
+  makes a number worth quoting: the timeout classifications, the private
+  environment channel and its three successors, the owner marker, the
+  `_run` process group, the bench's three unbounded phases (compile,
+  comparison, timing) and the timing bound that paid for itself out of
+  the measurement.
+* **Five published numbers corrected**, and the corpus figure
+  re-measured against the compiler the pull request ends with: **1689 ->
+  1697**, `Zend/tests` **749 -> 756**, the other two directories
+  unmoved.
+* **Eleven annotations refuted**, each with a measurement in the reply
+  rather than a silent dismissal, and one of them -- `_uncomment` --
+  answered a third time by putting seven assertions in the file so the
+  claim is falsifiable where it lives.
+
+Fourteen fixtures were added over the loop (`g/77` through `g/90`), and
+the gate ends at **89 / 89** on stdout, stderr and the exit code.
