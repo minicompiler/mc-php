@@ -107,7 +107,16 @@ def _stale_scratch(path):
         with open(_owner_path(path)) as f:
             pid, _, st = f.read().partition('\n')
     except OSError:
-        return False
+        # No marker. A `.php` php-src SHIPS beside a test always has
+        # content; an EMPTY one is this tool's own `O_CREAT|O_EXCL` with
+        # nothing written after it -- the window between creating the
+        # sibling and writing its marker, which a SIGKILL there leaves
+        # behind and which would otherwise make every later run call that
+        # test `busy` for ever.
+        try:
+            return os.path.getsize(path) == 0
+        except OSError:
+            return False
     try:
         os.kill(int(pid), 0)
     except (ValueError, ProcessLookupError):
@@ -218,6 +227,10 @@ def sections(phpt):
     return sec
 
 
+# What the harness itself uses and no test may see.
+HARNESS_ENV = ('MCPHP_BIN', 'MCPHP_OUT', 'MCPHP_TMP', 'T10_JOBS')
+
+
 def _extras(sec, testdir):
     """(argv, stdin, env-additions, extra ini) exactly as the grid builds them."""
     args = shlex.split(sec.get('ARGS', '').strip()) if sec.get('ARGS', '').strip() else []
@@ -227,6 +240,15 @@ def _extras(sec, testdir):
     # without it (probes/t0/phpt-run.py's own note), and this tool exists to
     # reproduce that grid's verdict.
     env = _grid.base_environment(PHP, _SRCDIR)
+    # the harness's OWN variables are not the test's business. `run.sh`
+    # invokes these tools as `MCPHP_BIN=... python3 why.py`, and
+    # `base_environment` copies os.environ, so the analysis-only compiler
+    # path reached php AND the program -- while the grid exports none of
+    # them and `mcphp.sh` removes MCPHP_OUT before the exec (round
+    # thirty-three, from the other end). A test that reads one would be
+    # classified for an environment the grid never had.
+    for _k in HARNESS_ENV:
+        env.pop(_k, None)
     env['REDIRECT_STATUS'] = '1'
     for line in sec.get('ENV', '').splitlines():
         line = line.strip()

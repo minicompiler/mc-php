@@ -1247,3 +1247,34 @@ One consequence is recorded rather than fixed: with the flag no longer
 leaking, **mc-php refuses extra arguments to a user function** (`u(7, 8, 9)`)
 where php ignores them. That refusal is not new -- what was new was its
 being conditional on an unrelated earlier call.
+
+### Round forty-four
+
+Three findings, all real, all measured both ways.
+
+- ~~The scratch sibling is created before its marker.~~ Correct, and round
+  forty only made the marker outlive the SWEEP: a SIGKILL between the
+  `O_CREAT|O_EXCL` and the marker write leaves a `.php` with none, and
+  `_stale_scratch` then treated it like a file php-src ships -- every later
+  run `busy`, the sample silently smaller. Writing the marker first is not
+  the answer (it would claim a REAL shipped file). The window has its own
+  signature instead: a scratch this tool created and did not fill is
+  **EMPTY**, and a `.php` php-src ships never is. Measured: an empty
+  sibling with no marker is `busy` before and **`ran True`** after, and a
+  non-empty one with no marker is `busy` in both -- which is right, that is
+  a real file.
+- ~~`MCPHP_BIN` and the rest leak into the test's environment.~~ Correct, and
+  it is round thirty-three's finding from the other end: `run.sh` invokes
+  these tools as `MCPHP_BIN=... python3 why.py` and `base_environment`
+  copies `os.environ`, so the analysis-only compiler path reached php AND
+  the program. Measured with a `.phpt` that prints the three:
+  `bool(false) | string(4) "/tmp" | string(1) "6"` before,
+  `bool(false) | bool(false) | bool(false)` after, and the oracle says the
+  same three now.
+- ~~`RESULTS.md` publishes two incompatible whole-corpus results.~~ Correct
+  in the sense that mattered: both were there and neither was labelled
+  authoritative. The headline table is **the** published measurement and
+  says so now; every later run in the file is a re-run, they agree on
+  `green` test for test (`comm`: 0 lost, 0 gained) and differ in `php-fail`
+  and `total` because the tree was cleaned of the pre-CLEAN harness's
+  leftovers and 20 tests came back out of `php-fail`.

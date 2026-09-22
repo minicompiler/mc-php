@@ -28,6 +28,14 @@ measured a binary that was being rebuilt underneath it.
 | `ext/standard/tests/strings` | **263** | 310 | 107 | 54 | 0 | 734 | 262 |
 | the whole corpus | **1689** | 14469 | 1929 | 2947 | 361 | 21034 | 1637 |
 
+**This table is the published measurement** and every later run in this file
+is a re-run of it, labelled as one. They agree on `green` -- test for test,
+`comm` gives 0 lost and 0 gained -- and differ in `php-fail` and therefore
+in `total`, because the source tree was cleaned of the leftovers the
+pre-CLEAN harness had made (round eighteen) and 20 tests whose ORACLE had
+been failing on a stale file came back. Where a number is quoted anywhere
+else, it is this row.
+
 Re-run four times more, same snapshot discipline, `T10_JOBS=6`. The LAST of
 them, against the compiler this pull request ends with (round twenty-seven's
 `max`/`min` chunking on top of everything above), is the one to read:
