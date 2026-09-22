@@ -1677,3 +1677,24 @@ LIBRARY defect the review has turned up; one is refuted by the run itself.
   `both answer 99450`, and `recorded: probes/t10/bench/results/2026-09-22.json`.
 - **The pull request title still advertised `green 1637 -> 1689`.**
   Corrected to the measured result, `1637 -> 1697`.
+
+### Round sixty-one
+
+One finding real, one refuted by php itself.
+
+- ~~`array_push($a)` must raise ArgumentCountError.~~ Refuted: php has
+  accepted a lone array since 7.3, and 8.5.10 on this machine agrees with
+  mc-php byte for byte --
+
+      $a = [1, 2];
+      var_dump(array_push($a));     php: int(2)   mc-php: int(2)
+      var_dump($a);                 php and mc-php: array(2) { [0]=> int(1) [1]=> int(2) }
+
+  both exit 0, both streams identical. The `na < 1` guard is the right
+  bound and the library row's `min` is the one that would have been
+  wrong; the special case exists because a pushed value may legitimately
+  BE null, which the three-slot row cannot tell from "not passed".
+- **`probes/README.md` cited the day-before ratios as the committed
+  record.** Correct: the record says 6.545x and 1.428x. Every place that
+  quotes a bench ratio now reads it from the record in the tree --
+  `RESULTS.md`, `docs/plan.md`, `CLAUDE.md` and `probes/README.md`.

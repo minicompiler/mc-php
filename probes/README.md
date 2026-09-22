@@ -242,7 +242,7 @@ circuit. What the probe is worth is the corrected numbers.
   `run.sh` step 10 piped both halves to `tail -1` with nothing behind them. `require __DIR__ .
   "/x.php"` was refused as a computed path and a top-level `return` returned from the generated
   `main`, printing nothing and exiting with a junk status. Both halves run now: **6 ok / 0
-  failed in each**, `main.php` 6.73x, `heavy.php` 1.41x (the committed record). `probes/t10/d8check.py` is the
+  failed in each**, `main.php` 6.54x, `heavy.php` 1.43x (the committed record). `probes/t10/d8check.py` is the
   enforcement D8 lacked: six regimes -- fixture, refusal, helper, instrument, library, bench,
   each with its own obligation, and `refusal` and `helper` are NOT differential fixtures -- and
   a `.php` in none of them fails the run.
