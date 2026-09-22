@@ -391,7 +391,34 @@ def repo_sweep():
     return bad
 
 
+def _check_uncomment():
+    """What `_uncomment` keeps, asserted rather than argued.
+
+    The reviewer of #9 read the quote branch as dropping the characters it
+    is inside, which would empty `included` and `benched` and make the two
+    obligations that need them unenforceable. It keeps them: the branch
+    appends like every other, and the only early path is the escape, which
+    appends the PAIR. These are the lines the scan actually meets.
+    """
+    def one(src):
+        return _uncomment(src).strip()
+
+    assert one('require __DIR__ . "/workload.php";  // a comment') == \
+        'require __DIR__ . "/workload.php";', one('require x  // c')
+    assert one("require 'inc.php';") == "require 'inc.php';"
+    assert one('for prog in main.php heavy.php; do') == \
+        'for prog in main.php heavy.php; do'
+    # a `#` and a `//` INSIDE a quote are content, not a comment
+    assert one('x = "a # b"') == 'x = "a # b"'
+    assert one("u = 'http://h/p.php'") == "u = 'http://h/p.php'"
+    # the escape branch appends the pair and does not end the quote
+    assert one('x = "a \\" # b"') == 'x = "a \\" # b"'
+    # and a real tail still goes
+    assert one('run x.php   # probes/t9/x.php') == 'run x.php'
+
+
 def main():
+    _check_uncomment()
     globs = fixture_globs()
     if globs != {'g', 'r'}:
         sys.exit(f'd8check: fixtures.sh walks {sorted(globs)}, expected g and r')

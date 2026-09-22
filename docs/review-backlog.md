@@ -1630,3 +1630,19 @@ that the fix did not cover.
   `Zend/tests` 756 -- like `RESULTS.md`, `docs/plan.md` and `CLAUDE.md`.
 - **The same file said the run compiles 85 fixtures where the section
   below it says 88.** Corrected; `fixtures.sh` reports 88 / 88.
+
+### Round fifty-nine
+
+The last annotation, answered a third time and this time in the file
+rather than in a comment.
+
+- ~~`_uncomment` drops quoted characters.~~ Refuted in round fifty-two
+  with three lines through the loop and in round fifty-five with the
+  gate's own output, and raised again. Prose is the wrong medium for it,
+  so `d8check.py` now carries `_check_uncomment()` -- seven assertions
+  over exactly the lines this scan meets, run at the head of `main()`,
+  costing microseconds. The quote branch keeps its characters, the escape
+  branch keeps the PAIR, a `#` and a `//` inside a quote are content, and
+  a real comment tail still goes. Proved to have teeth by breaking the
+  branch the way the annotation describes: the gate then exits 1 with
+  `AssertionError: require x` before it looks at a single file.
