@@ -234,7 +234,8 @@ answers here).
     run now: **6 ok / 0 failed in each**, `main.php` 6.73x, `heavy.php` 1.41x (the committed record).
   * **D8 over the fixtures** (backlog § 3): the plan states the exemption -- the unit D8
     governs is the PROGRAM, and a differential fixture is already a test and a stronger one --
-    and `probes/t10/d8check.py` ENFORCES it, putting every `.php` in one of four regimes and
+    and `probes/t10/d8check.py` ENFORCES it, putting every `.php` in one of six regimes -- fixture, refusal, helper, instrument,
+    library, bench, and `refusal` and `helper` are NOT differential fixtures -- and
     failing on a file in none. It found `bench/unwind.php`, copied forward twice and referenced
     by nothing.
   * **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at

@@ -335,9 +335,12 @@ measured php paying ~38 ms before the first statement, against a whole
 
 A probe cannot waive a rule for itself, so the exemption is D8 (d):
 `probes/t10/d8check.py`, step 0 of `run.sh`. Every `.php` under the probe
-goes into exactly one of four regimes -- `fixture` (matched by the two globs
-`fixtures.sh` ACTUALLY walks, read out of the script, so a third directory
-cannot be added silently), `instrument` (the `TestCase` shim, the test class,
+goes into exactly one of SIX regimes -- `fixture` (`g/*.php`, matched by the
+globs `fixtures.sh` ACTUALLY walks, read out of the script, so a third
+directory cannot be added silently), `refusal` (`r/*.php`, whose pair is
+`php -l` plus the named refusal and NOT a byte-for-byte comparison),
+`helper` (a `g/` file another fixture requires and the gate skips, whose
+test is every fixture that includes it), `instrument` (the `TestCase` shim, the test class,
 the runner that names the methods: the mechanism of D8 (a), which cannot test
 itself), `library` (required BY the test class AND BY a bench program) and
 `bench` (a row in `bench10.sh`, which refuses to time a program until php and
@@ -397,8 +400,16 @@ agree.
     php / mc-php = 6.73x        php WORK / mc-php = 0.09x
   == heavy.php ==  both answer 99450
     php 0.0754 s   mc-php 0.0534 s   php -r (start-up) 0.0772 s
-    php / mc-php = 1.41x        php WORK / mc-php = 0.00x
+    php / mc-php = 1.41x
 ```
+
+`heavy.php` has **no work ratio in the record and none is printed**:
+`time2.py` writes `ratio_work_over_mcphp` only when php's median exceeds
+its own start-up, and on this run php's start-up median (0.0772 s) is
+LARGER than its whole `heavy.php` (0.0754 s) -- the two are within the
+noise of each other, which is the honest reading of a program whose work
+takes less time than starting the interpreter that runs it. A `0.00x`
+printed there would have been a number nothing measured.
 
 **Those four numbers are read out of the committed record**,
 `probes/t10/bench/results/2026-09-21.json`, which D8 (b) asks for and which
@@ -673,3 +684,16 @@ because no binary is produced. It has a label of its own now, and
 `arena.py` and `diffgroup.py` already drew the same line. **812 compile
 becomes 781 plus 31**, `788 differ` becomes **757**, and the clustering
 becomes **332 / 173 / 126 / 86**.
+
+**Round thirty-nine** was five stale sentences and one measurement.
+`d8check.py` has enforced six regimes since round twenty-eight and four
+documents still said four -- `CLAUDE.md`, `run.sh`'s own header,
+`RESULTS.md` here, and `docs/plan.md` and `probes/README.md` two rounds
+earlier. `run.sh`'s header also said the harness compares stderr: it does
+not, and it should not -- the grid grades the output through the test's own
+`EXPECT`/`EXPECTF` matcher and the exit code, and stderr is the FIXTURE
+gate's business. And `heavy.php`'s `php WORK / mc-php` was printed as
+`0.00x` where the committed record HAS no such field: `time2.py` writes it
+only when php's median exceeds its own start-up, and here the start-up
+median (0.0772 s) is larger than the whole program (0.0754 s). The line is
+gone and the reason is beside it.

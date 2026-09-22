@@ -1125,3 +1125,35 @@ it:
 
 All 31 of the compile-time fatals are in the `output differs` half, which
 is why 757 + 31 = 788 exactly.
+
+### Round thirty-nine
+
+Six findings: five stale sentences, and one refuted with four measurements.
+
+- ~~Four documents still say D8 has four regimes~~ (`CLAUDE.md`, `run.sh`'s
+  header, `RESULTS.md`; `docs/plan.md` and `probes/README.md` were the
+  round before). Six, everywhere, with `refusal` and `helper` named as not
+  being differential fixtures.
+- ~~`run.sh`'s header says the harness compares stderr.~~ It does not, and
+  it should not: the grid grades the output through the test's own
+  `EXPECT`/`EXPECTF` matcher and the exit code. stderr is the FIXTURE
+  gate's business -- a different thing, with its own three-way comparison.
+- ~~`php WORK / mc-php = 0.00x` for `heavy.php` is not in the record.~~
+  Correct: `time2.py` writes `ratio_work_over_mcphp` only when php's median
+  exceeds its own start-up, and on this run the start-up median (0.0772 s)
+  is LARGER than the whole of `heavy.php` (0.0754 s) -- they are within each
+  other's noise, which is the honest reading of a program whose work costs
+  less than starting the interpreter. The line is gone and the reason is
+  printed beside the numbers.
+- **A spread longer than a method's or a callable's slots is silently
+  truncated.** Refuted, four ways, and every road the finding names is
+  already a NAMED refusal: a variadic closure is
+  `a variadic parameter in a closure is not implemented yet`, a variadic
+  method is `a variadic parameter ...$args is not implemented yet`, a
+  method with seven parameters is `more than six parameters in a method is
+  not implemented yet`, and `$callable(...$a)` does not parse
+  (`expected ; after echo: (`). What is left is a spread of MORE values
+  than a non-variadic callee declares, and php IGNORES those -- measured in
+  round twenty-seven: `$m->m(...[1..7])` on a six-parameter method prints
+  php's answer, which is why the count check fires only when the ceiling is
+  this compiler's own buffer.

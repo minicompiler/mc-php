@@ -9,12 +9,16 @@
 #   1. the measurements that LIE -- four tools reported numbers they had not
 #      measured, so they chose what every block since T5 worked on. Fixed
 #      first, in probes/t10/harness.py, which is now the one definition of
-#      "these two agree" (stdout, stderr and the exit code).
+#      "these two agree": the output through the grid's own matcher (its
+#      EXPECT/EXPECTF/EXPECTREGEX, normalized) and the same exit code, which
+#      is the pair probes/t0/phpt-run.py grades on. stderr is compared by
+#      the FIXTURE gate, which is a different thing; the grid ignores it.
 #   2. the semantics a program can OBSERVE -- short circuit, parameters by
 #      value, finally, a pending exception, visibility, hoisting, typed
 #      parameters, `?->` and thirteen one-line answers.
 #   3. D8 over the fixtures: probes/t10/d8check.py puts every .php in this
-#      probe into one of four regimes and fails on a file in none of them.
+#      probe into one of six regimes -- fixture, refusal, helper, instrument,
+#      library, bench -- and fails on a file in none of them.
 #
 # Four grid runs, then the tables that choose the next block:
 #   (a) tests/lang   (b) Zend/tests   (c) ext/standard/tests/strings
