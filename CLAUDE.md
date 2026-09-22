@@ -182,9 +182,10 @@ answers here).
   * **Four tools reported numbers they had never measured**, and they are what chose every
     block since T5. They are one tool now, `probes/t10/harness.py`: stdout byte for byte AND
     the same exit code, which is the pair the grid itself grades on. `why.py` labelled a test
-    `(compiled; output differs)` WITHOUT running the binary -- of 812 sampled tests that
-    compile, **788 really differ**, 22 crash, 2 time out and none agrees on both. The
-    clustering of the 788 is worth the sample: **338 are `var_dump of a value`** and its head
+    `(compiled; output differs)` WITHOUT running the binary -- of 781 sampled tests that
+    compile, **757 really differ**, 22 crash, 2 time out and none agrees on both (31 more are
+    a php COMPILE-TIME fatal: no binary, and the grid grades the pair on the text both sides
+    print). The clustering of the 757 is worth the sample: **332 are `var_dump of a value`** and its head
     is `php 'int(N)' / mc ''` -- php printed a value and mc-php printed nothing, a program
     that stopped early rather than a value formatted wrongly.
     `arena.py` divided by `len(files)` while turning every failure into `None`: of the

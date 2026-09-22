@@ -195,7 +195,7 @@ The standing rule above, applied to this pull request. Twelve inline findings, e
   **It costs T10 its own headline.** The first version of this pull request reported
   **143 tests (18.2%) that print exactly what php prints and exit with a different code** and
   recommended them as the next probe's first block. With php actually running there are
-  **zero**: of the 812 sampled tests that compile, **788 really differ**, 22 crash, 2 time out
+  **zero**: of the 781 sampled tests that compile, **757 really differ**, 22 crash, 2 time out
   and none agrees. Section 1 of this backlog was worked, and in working it T10 published a new
   number of the same kind -- which is the argument for the rule at the end of § 3, and for one
   more: **a differential tool has to be checked against a case whose answer is known.**
@@ -257,7 +257,8 @@ The standing rule above, applied to this pull request. Twelve inline findings, e
 **None of the five harness fixes moved a number**: 570 that do not compile, 757 / 23 / 2 / 1 of
 the 784 that compile, 11 of 782 on the arena, 332 / 173 / 126 / 86 in the clustering. (Those are
 the round-six numbers; rounds fifteen and sixteen moved four of them again -- the final sample is
-539 / 812 with 788 / 22 / 2 / 0, 11 of 810 on the arena and 338 / 181 / 143 / 86.) They make
+539 / 781 with 757 / 22 / 2 / 0, 31 a php compile-time fatal, 11 of 779 on the arena and
+332 / 173 / 126 / 86.) They make
 the method right, and the answers were already right -- which is worth knowing, and is the
 opposite of what the `run_pair` abspath defect did.
 
@@ -1094,3 +1095,33 @@ refuted.
   round says cannot be produced. The third, `run-timeout`, needs a program
   php finishes and the binary does not; `while (true)` spins in php too, so
   that one comes back `php-timeout`, correctly.
+
+### Round thirty-eight
+
+One finding, and it **moves the headline table** -- the fifth published
+number this review has corrected, and by the same distinction as round
+twenty-five from the other side.
+
+~~`why.py` labels a php COMPILE-TIME fatal `(compiled; ...)`.~~ Correct. It
+is neither of the two blocks it has been in: not "does not compile" (the
+review of #9 took it out of there, 570 -> 539) and not "compiles" either,
+because **no binary is produced** -- the grid grades the pair on the text
+php and mc-php both print, and `mcphp.sh` passes 255 through. `arena.py`
+drew this line in round twenty-five and `diffgroup.py`'s input filter
+already excluded them by accident of its pattern; `why.py` now gives them a
+label of their own and the two consumers agree with it by construction.
+
+Re-measured end to end, and every number in this file's headline moves with
+it:
+
+| | before | after |
+|---|---|---|
+| compile | 812 | **781** |
+| a php compile-time fatal | -- | **31** |
+| the output really differs | 788 | **757** |
+| crash / timeout / agree | 22 / 2 / 0 | 22 / 2 / 0 |
+| do not compile | 539 | 539 |
+| clustering | 338 / 181 / 143 / 86 | **332 / 173 / 126 / 86** |
+
+All 31 of the compile-time fatals are in the `output differs` half, which
+is why 757 + 31 = 788 exactly.

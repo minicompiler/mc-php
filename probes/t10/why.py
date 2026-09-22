@@ -12,6 +12,10 @@ php, and compares stdout AND the exit code -- which is what the grid grades --
 so the label is one of
 
     (compiled; output differs)          it ran and disagreed
+    (a php compile-time fatal; ...)     php rejects the program at COMPILE
+                                        time and mc-php passes 255 through:
+                                        the grid grades the pair on its
+                                        output, but no binary was produced
     (compiled; agrees on this harness)  it ran and agreed: the .phpt's own
                                         expectation, not the program, is what
                                         the grid graded wrong
@@ -54,17 +58,25 @@ def why(path):
         return path, '(php timed out)'
     if s != 'ran':
         return path, f"({r.get('error', s)})"
+    # a php COMPILE-TIME fatal: the grid grades this pair on its output --
+    # `mcphp.sh` prints both of the compiler's streams and passes 255
+    # through -- but NO BINARY was produced, so calling it `compiled`
+    # put it in the same block as a program that ran and sent it to
+    # diffgroup.py as one. It is a third outcome and gets a third label.
+    # (arena.py drew the same line in round twenty-five, from the
+    # denominator's side.)
+    fat = 'a php compile-time fatal' if r.get('compile_fatal') else 'compiled'
     if r['agrees']:
-        return path, '(compiled; agrees on this harness)'
+        return path, f'({fat}; agrees on this harness)'
     if r['rc'] < 0:
-        return path, f"(compiled; crashed: signal {-r['rc']})"
+        return path, f"({fat}; crashed: signal {-r['rc']})"
     # the grid's OWN question, which is "does the output satisfy the TEST'S
     # expectation" and not "is it php's bytes": an EXPECTF whose pattern
     # accepts the candidate is the same output to the grid, so anything
     # narrower sent an exit-code-only mismatch to the output-differs group
     if harness.agrees(r.get('sec'), r['out'], r['want'], r['rc'], r['rc']):
-        return path, f"(compiled; same output, exit {r['rc']} where php exits {r['wrc']})"
-    return path, '(compiled; output differs)'
+        return path, f"({fat}; same output, exit {r['rc']} where php exits {r['wrc']})"
+    return path, f'({fat}; output differs)'
 
 
 def main():

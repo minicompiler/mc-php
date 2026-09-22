@@ -122,7 +122,7 @@ not the compiler.
 | corpus refused | 2309 | **1929** | blocks 4 and the review rounds |
 | `tests/lang` / `Zend/tests` / `strings` | 102 / 709 / 262 | **104 / 749 / 263** | |
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
-| **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **788 of the 812 that compile** | **never ran the binary** |
+| **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **757 of the 781 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
 | **fixtures byte for byte** | **60 of 60, merged streams** | **81 of 81, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
@@ -135,19 +135,25 @@ not the compiler.
 ### What "compiled; output differs" really was
 
 `why.py` never ran the binary, so every test that COMPILED was labelled
-`(compiled; output differs)`. (And a php COMPILE-TIME fatal -- exit 255,
-which `mcphp.sh` passes through and the grid compares -- was collapsed into
-"does not compile" until the review of #9 caught it, which is why the block
-that does not compile fell 570 -> **539** and the block that compiles rose
-781 -> **812**: those 31 are tests the grid had been grading on their
-output all along.) Running them, over a sample of 1351 `wrong`
-tests of which **812 compile** (810 run to completion, 2 time out):
+`(compiled; output differs)`. A php COMPILE-TIME fatal -- exit 255, which
+`mcphp.sh` passes through and the grid compares -- went through two
+corrections of its own: it was collapsed into "does not compile" until the
+review of #9 caught it (the block fell 570 -> **539**), and then it was
+counted as a test that COMPILED until round thirty-eight of that review
+caught THAT. It is neither. No binary is produced, and the grid still
+grades the pair on the text both sides print, so it is a third outcome with
+a label of its own -- and `arena.py` (round twenty-five) and
+`diffgroup.py`'s input filter both already draw the same line.
 
-| label | count | share of the 812 |
+Running them, over a sample of 1351 `wrong` tests of which **781 compile**
+(779 run to completion, 2 time out), **31 are a php compile-time fatal** and
+539 do not compile:
+
+| label | count | share of the 781 |
 |---|---|---|
-| the output really does differ | **788** | 97.0% |
-| crashed (a signal) | 22 | 2.7% |
-| timed out | 2 | 0.2% |
+| the output really does differ | **757** | 96.9% |
+| crashed (a signal) | 22 | 2.8% |
+| timed out | 2 | 0.3% |
 
 | **the output agrees and the exit code does not** | **0** | **0%** |
 
@@ -171,7 +177,7 @@ part: **a differential tool has to be checked against a case whose answer is
 known**, and neither T10's first draft nor any probe before it did that for
 `run_pair`. What survives is the shape of the correction rather than its
 size -- the label `(compiled; output differs)` covered four outcomes and
-covers one now, and 24 of the 812 are a crash, a timeout or a test the grid
+covers one now, and 24 of the 781 are a crash, a timeout or a test the grid
 graded on its own expectation.
 
 ### What "the arena is the answer" really was
@@ -658,3 +664,12 @@ worlds. A refusal fixture cannot be a byte-for-byte pair, so the pair is
 `php -l` plus the named refusal, and `r/` has a regime of its own now. And
 the orphan sweep's `_uncomment` dropped whole-line comments only, so an
 inline one or a docstring naming a path read as a reference.
+
+**Round thirty-eight** moved the headline table for the fifth time, by the
+distinction round twenty-five drew from the other side: a php COMPILE-TIME
+fatal is neither of the two blocks it had been in. Not "does not compile" --
+the review took it out of there at 570 -> 539 -- and not "compiles" either,
+because no binary is produced. It has a label of its own now, and
+`arena.py` and `diffgroup.py` already drew the same line. **812 compile
+becomes 781 plus 31**, `788 differ` becomes **757**, and the clustering
+becomes **332 / 173 / 126 / 86**.

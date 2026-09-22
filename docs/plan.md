@@ -322,7 +322,7 @@ right about short circuit. What the probe is actually worth is the corrected num
 
 **Four tools had been reporting numbers they never measured**, and they are what chose every
 block since T5. `why.py` labelled a test `(compiled; output differs)` WITHOUT running the
-binary; running them shows that of 812 sampled tests that compile, **788 really differ**, 22
+binary; running them shows that of 781 sampled tests that compile, **757 really differ**, 22
 crash, 2 time out and none agrees on both. `arena.py` divided by `len(files)` while
 turning every failure into `None`: of T10's 1352-test list only **782 RAN**, so the published
 rate understated by 1.7x. `nocompile.py`'s skip list named one compiled outcome of five, so
