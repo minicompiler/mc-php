@@ -124,13 +124,13 @@ not the compiler.
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **757 of the 781 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
-| **fixtures byte for byte** | **60 of 60, merged streams** | **83 of 83, each stream and the exit code** | **`2>&1` and `$(...)`** |
+| **fixtures byte for byte** | **60 of 60, merged streams** | **84 of 84, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
 | **the D8 bench** | **5.85x and 1.45x** | **6.73x and 1.41x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
 | assert a php diagnostic line | 93 green of 4647 | **102 green of 4647** | |
 | mention `__destruct` | 14 green of 333 | **15 green of 333** | |
-| `lencheck` / `aritycheck` | 468 / 272 | **501 / 272** | |
+| `lencheck` / `aritycheck` | 468 / 272 | **504 / 272** | |
 
 ### What "compiled; output differs" really was
 
@@ -436,17 +436,17 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **83 of 83** numbered fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **84 of 84** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** parse under `php -l` and are refused by
   mc-php with a named message, exit 3. That pair IS the differential for a
   refusal fixture, and `d8check.py` gives `r/` a regime of its own for it:
   an `r/` file is not a byte-for-byte pair, because the point of it is that
   mc-php declines what php accepts.
-* `lencheck` **501 literal lengths, 0 wrong**; `aritycheck` **272 library
+* `lencheck` **504 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
-* `d8check` -- **83 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 96 `.php`,
-  and the repo-wide sweep over **364** `.php` under `probes/`,
+* `d8check` -- **84 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 97 `.php`,
+  and the repo-wide sweep over **365** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
 * the grid's tmp peak **1908 KiB over 27728 tests** on the round-nineteen run
@@ -523,6 +523,13 @@ Two things worth writing down for the next probe, neither of them mc's:
   and cannot see the array's length, so an unbounded variadic path needs a
   call convention the fixed `MAXPARAMS` frame does not have -- a block for a
   later probe, and until then the limit says so instead of losing values.
+* **mc-php refuses extra arguments to a user function where php ignores
+  them**: `function u($a) {}` called `u(7, 8, 9)` is `the wrong number of
+  arguments for: u`, and php prints 7. Exposed by round forty-three's
+  spread-flag fix rather than caused by it -- before that the refusal
+  depended on whether ANY earlier call in the file carried a `...`, which
+  is the worst of both answers. Refusing by name is this compiler's
+  preferred failure, so it is recorded rather than changed.
 * `intdiv(PHP_INT_MIN, -1)` answers `-9223372036854775808` where php throws
   `ArithmeticError`, and a throwable's `getFile()` is the path as WRITTEN
   where php's is the path it RESOLVED (visible only under a symlinked
@@ -706,3 +713,15 @@ END and the check was attached to its HEAD. `return f() && g();` ran f()
 and not g(), and `try { return f() && boom(); } catch` never reached the
 catch. `ph_tail` instead of `set_nd_next`;
 `g/83-toplevel-return-chain.php` and `g/84-toplevel-return-throw.php`.
+
+**Round forty-three** filed nothing again and its summary line named two
+more real defects. `ph_had_spread` WAS sticky -- round twenty-seven
+refuted it "for every order tried" and the order it had not tried is a
+user function with too many arguments: `u(7, 8, 9)` on a one-parameter
+function is refused on its own and compiled silently after a `v(...[1,2])`
+earlier in the file. The flag is now this call's own answer, re-established
+after every argument because a nested call writes the same global. And
+`max(5)` said `must be of type array, given value is not an array` where
+php says `..., int given`, with `min` reporting itself as `max`; both are
+built from `php_f_get_debug_type` and the direction now.
+`g/85-spread-state.php`.

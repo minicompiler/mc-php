@@ -2927,7 +2927,15 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
     i64 mask = ph_argref;
     ph_argref = 0;
     i64 n = 0;
-    i64 sspread = ph_had_spread;
+    // THIS call's own answer, and nothing else. It used to be a save of the
+    // enclosing value and a restore of it when this call had no spread,
+    // which made the flag STICKY: once any call in the unit carried a `...`
+    // every later one read 1. Measured -- `u(7, 8, 9)` on a one-parameter
+    // function is `the wrong number of arguments for: u` on its own and
+    // compiled silently after a `v(...[1,2])` earlier in the file. `mine`
+    // is re-established after every argument, because a NESTED call's
+    // ph_read_args writes the same global.
+    i64 mine = 0;
     ph_had_spread = 0;
     ph_want("(", 1, "expected ( in a php call");
     loop {
@@ -2979,7 +2987,8 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
                 n = n + 1;
                 k = k + 1;
             }
-            ph_had_spread = 1;
+            mine = 1;
+            ph_had_spread = mine;
             if (ph_accept(",", 1)) continue;
             break;
         }
@@ -3010,11 +3019,12 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
         st64(buf + n * 24 + 8, t);
         st64(buf + n * 24 + 16, lb);
         n = n + 1;
+        ph_had_spread = mine;          // an argument may have been a call
         if (!ph_accept(",", 1)) break;
     }
     ph_want(")", 1, "expected ) in a php call");
     st64(pn, n);
-    if (!ph_had_spread) ph_had_spread = sspread;
+    ph_had_spread = mine;
     return buf;
 }
 

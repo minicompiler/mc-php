@@ -63,7 +63,7 @@ after.**
 ## 2. Language semantics that are wrong (a program can observe every one) -- DONE
 
 Every line below is closed by a FIXTURE that runs under `php` and under mc-php and is compared
-byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **83 / 83** as this pull request ends), or by
+byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **84 / 84** as this pull request ends), or by
 a measurement recorded beside it. The fixture is named at the end of each line.
 
 - ~~**`&&` and `||` do not short-circuit**~~ (#5 `php.mc:2202`). Both operands were lowered and
@@ -1218,3 +1218,32 @@ which the `php_exit` on the next line already used.
 `g/83-toplevel-return-chain.php` (a five-term chain with three side
 effects) and `g/84-toplevel-return-throw.php` (the `&&` and the ternary,
 both caught) are byte for byte php's.
+
+### Round forty-three
+
+Nothing filed, and the summary line named two more real defects -- the
+second round running, and the second time the prose was worth more than the
+list.
+
+- ~~"spread-state leakage".~~ Correct, and round twenty-seven's refutation
+  was wrong: it said "for every order tried", and the order it had not
+  tried is a USER function with too many arguments. `function u($a)` called
+  `u(7, 8, 9)` is `the wrong number of arguments for: u` on its own and
+  **compiled silently** after a `v(...[1,2])` earlier in the file, because
+  `ph_read_args` restored the enclosing value whenever a call had no spread
+  and any `...` in the unit therefore made every later call read 1. The
+  flag is now this call's own answer (`mine`), re-established after every
+  argument -- a nested call's `ph_read_args` writes the same global -- and
+  assigned unconditionally at return, so nothing is inherited.
+  `g/85-spread-state.php` carries the two-argument `max` after a spread, a
+  nested call inside a spreading call, and the plain call after both.
+- ~~"incorrect max/min error names".~~ Correct: `max(5)` said
+  `must be of type array, given value is not an array` where php says
+  `..., int given`, and `min` reported itself as **`max`**. Both are built
+  from `php_f_get_debug_type` and the direction now, and the fixture
+  asserts the two messages byte for byte.
+
+One consequence is recorded rather than fixed: with the flag no longer
+leaking, **mc-php refuses extra arguments to a user function** (`u(7, 8, 9)`)
+where php ignores them. That refusal is not new -- what was new was its
+being conditional on an unrelated earlier call.

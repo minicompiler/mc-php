@@ -8907,8 +8907,14 @@ uptr php_maxmin(i64 want, i64 n, uptr a0, uptr a1, uptr a2, uptr a3, uptr a4,
     uptr best = 0;
     if (n == 1) {
         if (php_zv_type(a0) != IS_ARRAY) {
-            php_throw_str(php_str_new("TypeError", 9),
-                php_str_new("max(): Argument #1 ($value) must be of type array, given value is not an array", 78));
+            // php names the TYPE it was given -- `..., int given` -- and
+            // the direction, so `min` does not report itself as `max`.
+            uptr mm = php_str_new("max", 3);
+            if (want < 0) mm = php_str_new("min", 3);
+            mm = php_str_concat(mm, php_str_new("(): Argument #1 ($value) must be of type array, ", 48));
+            mm = php_str_concat(mm, php_f_get_debug_type(a0));
+            mm = php_str_concat(mm, php_str_new(" given", 6));
+            php_throw_str(php_str_new("TypeError", 9), mm);
             return php_znull();
         }
         uptr h = ld64(a0);
