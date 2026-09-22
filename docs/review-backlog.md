@@ -1351,3 +1351,30 @@ that sets `MCPHP_BIN` are both **green** through the grid (`2 / 2`); the
 wrapper on the grid's road with public == private prints `bool(false)` and
 with the test's value prints `bool(true)`; and T9's own frozen wrapper
 compiles and runs a test green with `MCPHP_BIN` pointing at T10's snapshot.
+
+### Round forty-eight
+
+Three findings, all real.
+
+- ~~`MCPHP__OUT` reaches a legacy wrapper's program.~~ Correct, and the
+  mirror of the round before: T5..T9's wrappers do not remove the private
+  name, so injecting it for them put it in the candidate's environment and
+  not in the oracle's. The channel is offered only to a wrapper that
+  implements it -- `'MCPHP__OUT' in <the wrapper's source>`, cached -- and
+  a wrapper that does not gets the public `MCPHP_OUT` it has always read.
+  Measured with a `.phpt` that expects both private names to be
+  `bool(false)`: **green through T10's wrapper and green through T9's**.
+- ~~The bench runs its binaries with no timeout.~~ Correct, and it is the
+  one gate in this probe that was not bounded: a compiler regression that
+  emitted a non-terminating binary would have hung the 90-minute run with
+  no output and never reached its cleanup trap.
+- ~~`run.sh`'s D8 runner is invoked directly, unbounded.~~ Same, in the step
+  before it.
+
+Both are fixed at the root rather than twice: `lim` -- the perl alarm that
+kills the process GROUP and reports out of band, which `fixtures.sh` has
+had since round twenty -- moved into `probes/t10/lim.sh` and is sourced by
+all three. `LIM_SECS` (120 for the bench and the D8 runner, 30 for a
+fixture) is its budget. Measured: with `bench/main.php` replaced by
+`while (true) {}` the gate says `bench: main.php timed out (php yes, mc-php
+yes)` and stops, where it used to hang.

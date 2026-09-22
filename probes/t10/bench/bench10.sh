@@ -25,6 +25,10 @@ trap 'rm -rf "$tmp"' EXIT
 
 # D8 (b) wants a COMMITTED, DATED record and not a line that scrolls past,
 # so the run writes one; `--no-record` is for a scratch run.
+# the shared bounded runner (probes/t10/lim.sh), which needs $tmp
+. "$(dirname -- "$0")/../lim.sh"
+LIM_SECS=${LIM_SECS:-120}
+
 stamp=$(date -u +%Y-%m-%d)
 rec=probes/t10/bench/results/$stamp.json
 [ "${1:-}" = "--no-record" ] && rec=$tmp/scratch.json
@@ -75,11 +79,21 @@ for prog in main.php heavy.php; do
     # fixed for this in round seven and THIS was reported as fixed with it
     # and was not; the reviewer of #9 was right and the claim was wrong.
     ae=0
-    if "$PHP" "probes/t10/bench/$prog" > "$tmp/a.out" 2> "$tmp/a.err"
+    # BOUNDED, like every other gate in this probe: a compiler regression
+    # that emits a non-terminating binary would otherwise hang `run.sh`
+    # here with no output and never reach its cleanup trap. `lim` kills
+    # the process GROUP and says out of band whether the alarm fired.
+    if lim "$PHP" "probes/t10/bench/$prog" > "$tmp/a.out" 2> "$tmp/a.err"
     then :; else ae=$?; fi
+    php_to=$timedout
     be=0
-    if "$tmp/bench" > "$tmp/b.out" 2> "$tmp/b.err"
+    if lim "$tmp/bench" > "$tmp/b.out" 2> "$tmp/b.err"
     then :; else be=$?; fi
+    if [ "$php_to" = yes ] || [ "$timedout" = yes ]; then
+        printf 'bench: %s timed out (php %s, mc-php %s)\n' \
+            "$prog" "$php_to" "$timedout"
+        exit 1
+    fi
     if ! cmp -s "$tmp/a.out" "$tmp/b.out" || ! cmp -s "$tmp/a.err" "$tmp/b.err" \
        || [ "$ae" != "$be" ]; then
         printf 'bench: %s -- php exit %s, mc-php exit %s, and the streams differ:\n' \

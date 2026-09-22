@@ -312,6 +312,20 @@ def run_php(php_exe, php_file, ini, args, stdin, env, timeout, cwd):
     return _run(cmd, stdin, env, timeout, cwd)
 
 
+_PRIVATE_SEEN = {}
+
+
+def _implements_private(path):
+    """Does this wrapper speak the MCPHP__* protocol (and unset it)?"""
+    if path not in _PRIVATE_SEEN:
+        try:
+            with open(path, encoding='latin-1') as f:
+                _PRIVATE_SEEN[path] = 'MCPHP__OUT' in f.read()
+        except OSError:
+            _PRIVATE_SEEN[path] = False
+    return _PRIVATE_SEEN[path]
+
+
 def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     cmd = shlex.split(candidate) + [php_file]
     if args:
@@ -328,6 +342,12 @@ def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     # MCPHP_OUT is honoured by probes/t10/mcphp.sh and ignored by the frozen
     # earlier probes, which still fall back to their own MCPHP_TMP.
     env = dict(env)
+    # The private channel goes ONLY to a wrapper that removes it before it
+    # execs the program. probes/t5..t9's are frozen and read the public
+    # names alone, so injecting MCPHP__OUT there would leave it in the
+    # candidate's environment and not in the oracle's -- the asymmetry the
+    # private names exist to end.
+    private = _implements_private(cmd[0])
     # what the WRAPPER needs, on PRIVATE names. The public ones are a
     # test's to set -- a `.phpt` whose --ENV-- names MCPHP_BIN would have
     # had its value overwritten here and kept by the oracle, which is the
@@ -336,7 +356,8 @@ def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     # left them.
     for k in ('BIN', 'TMP'):
         if 'MCPHP_' + k in os.environ:
-            env['MCPHP__' + k] = os.environ['MCPHP_' + k]
+            if private:
+                env['MCPHP__' + k] = os.environ['MCPHP_' + k]
             # and the PUBLIC name too, unless the test's own --ENV-- set
             # it: probes/t5..t9's frozen wrappers read only the public
             # names, so re-running an earlier probe against a snapshot
@@ -352,7 +373,7 @@ def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     # inode -- mc's M12 note). probes/t10/harness.py's tmpbin() unlinks for
     # the same reason.
     os.unlink(out)
-    env['MCPHP__OUT'] = out
+    env['MCPHP__OUT' if private else 'MCPHP_OUT'] = out
     try:
         return _run(cmd, stdin, env, timeout, cwd)
     finally:

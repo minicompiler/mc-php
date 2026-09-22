@@ -63,6 +63,11 @@ fail=0
 # probes/t10/tmp.sh, which is the one definition and carries the measurement.
 . "$here/tmp.sh"
 mcphp_tmp_init mcphp-t10
+# the shared bounded runner: every gate in this probe goes through it, so a
+# non-terminating binary cannot hang a 90-minute run with no output.
+tmp=$MCPHP_TMP
+. "$here/lim.sh"
+LIM_SECS=${LIM_SECS:-120}
 mcphp_tmp_watch
 # The cleanup is the EXIT trap and the signal traps EXIT: a handler that
 # only cleans up RETURNS, so an interrupted run carried on with its
@@ -179,7 +184,7 @@ printf '\n== 10. D8: the workload tests, in both worlds ==\n'
 # `set -e` is on, so a bare command that fails ENDS the script: the status
 # has to be taken inside a conditional or the check below is unreachable.
 d8pe=0
-if "$PHP" probes/t10/bench/run.php > "$MCPHP_TMP/d8p.out" 2> "$MCPHP_TMP/d8p.err"
+if lim "$PHP" probes/t10/bench/run.php > "$MCPHP_TMP/d8p.out" 2> "$MCPHP_TMP/d8p.err"
 then :; else d8pe=$?; fi
 d8a=$(tail -1 "$MCPHP_TMP/d8p.out")
 # how many test* methods the class DECLARES: the gate requires that many to
@@ -197,9 +202,10 @@ fi
 # to stderr, print the expected summary, and pass -- while the php half
 # beside it was rejecting exactly that.
 d8me=0
-if MCPHP_OUT=$MCPHP_TMP/d8.bin probes/t10/mcphp.sh probes/t10/bench/run.php \
+if MCPHP_OUT=$MCPHP_TMP/d8.bin lim probes/t10/mcphp.sh probes/t10/bench/run.php \
     > "$MCPHP_TMP/d8.out" 2> "$MCPHP_TMP/d8.err"
 then :; else d8me=$?; fi
+[ "$timedout" = yes ] && { printf '  mc-php timed out\n'; fail=1; }
 d8b=$(tail -1 "$MCPHP_TMP/d8.out")
 [ "$d8me" = 0 ] || { printf '  mc-php exited %s\n' "$d8me"; fail=1; }
 if [ -s "$MCPHP_TMP/d8.err" ]; then
