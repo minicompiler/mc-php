@@ -248,7 +248,8 @@ def base_environment(php, srcdir):
     # -- so an environment-sensitive .phpt saw the measurement apparatus.
     # `run_candidate` puts back the ones the WRAPPER needs, and the wrapper
     # unsets them before it execs the program.
-    for k in ('MCPHP_BIN', 'MCPHP_OUT', 'MCPHP_TMP', 'T10_JOBS'):
+    for k in ('MCPHP_BIN', 'MCPHP_OUT', 'MCPHP_TMP', 'T10_JOBS',
+              'MCPHP__BIN', 'MCPHP__OUT', 'MCPHP__TMP'):
         env.pop(k, None)
     for k in ('SSH_CLIENT', 'SSH_AUTH_SOCK', 'SSH_TTY', 'SSH_CONNECTION'):
         env[k] = 'deleted'
@@ -327,12 +328,15 @@ def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     # MCPHP_OUT is honoured by probes/t10/mcphp.sh and ignored by the frozen
     # earlier probes, which still fall back to their own MCPHP_TMP.
     env = dict(env)
-    # what the WRAPPER needs, scrubbed from the base environment above and
-    # given back here alone: mcphp.sh removes them before the exec, so the
-    # program still never sees one.
-    for k in ('MCPHP_BIN', 'MCPHP_TMP'):
-        if k in os.environ:
-            env[k] = os.environ[k]
+    # what the WRAPPER needs, on PRIVATE names. The public ones are a
+    # test's to set -- a `.phpt` whose --ENV-- names MCPHP_BIN would have
+    # had its value overwritten here and kept by the oracle, which is the
+    # asymmetry this runner exists to avoid -- so the channel to mcphp.sh
+    # is `MCPHP__*` and the public names are left exactly as the section
+    # left them.
+    for k in ('BIN', 'TMP'):
+        if 'MCPHP_' + k in os.environ:
+            env['MCPHP__' + k] = os.environ['MCPHP_' + k]
     fd, out = tempfile.mkstemp(prefix='mcphp-out.', suffix='.bin',
                                dir=os.environ.get('MCPHP_TMP') or None)
     os.close(fd)
@@ -341,7 +345,7 @@ def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     # inode -- mc's M12 note). probes/t10/harness.py's tmpbin() unlinks for
     # the same reason.
     os.unlink(out)
-    env['MCPHP_OUT'] = out
+    env['MCPHP__OUT'] = out
     try:
         return _run(cmd, stdin, env, timeout, cwd)
     finally:

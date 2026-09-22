@@ -18,7 +18,10 @@
 # this repository's.
 set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-MCPHP=${MCPHP_BIN:-$here/mc-php}
+# the PRIVATE name first: probes/t0/phpt-run.py talks to this wrapper on
+# MCPHP__* so that a .phpt's own --ENV-- may use the public names, and a
+# standalone caller (fixtures.sh, run.sh, bench10.sh) still sets those.
+MCPHP=${MCPHP__BIN:-${MCPHP_BIN:-$here/mc-php}}
 [ -x "$MCPHP" ] || { echo "mcphp.sh: no $MCPHP -- run probes/t10/run.sh" >&2; exit 2; }
 
 src=$1
@@ -31,10 +34,11 @@ shift
 # until its sweeper collects them, which at 37 tests/s is about 3000 binaries
 # (6 GB) live at once -- that is what filled the boot volume at 20000 of
 # 21395 tests. The fallback is kept so a direct call still works.
-if [ -n "${MCPHP_OUT:-}" ]; then
-    tmp=$MCPHP_OUT
+_out=${MCPHP__OUT:-${MCPHP_OUT:-}}
+if [ -n "$_out" ]; then
+    tmp=$_out
 else
-    dir=${MCPHP_TMP:-${TMPDIR:-/tmp}}
+    dir=${MCPHP__TMP:-${MCPHP_TMP:-${TMPDIR:-/tmp}}}
     tmp=$dir/mcphp.$$.$(basename "$src" .php)
 fi
 err=$tmp.err
@@ -71,7 +75,14 @@ rm -f "$err" "$out"
 # runs without it, so a .phpt that reads getenv('MCPHP_OUT') or enumerates
 # its environment would see two different environments and be classified on
 # the harness rather than on itself.
-unset MCPHP_OUT MCPHP_BIN MCPHP_TMP
+if [ -n "${MCPHP__OUT:-}${MCPHP__BIN:-}${MCPHP__TMP:-}" ]; then
+    # the GRID drove this wrapper on the private names, so the public ones
+    # are whatever the test's own --ENV-- put there and the oracle kept:
+    # removing them would be the same asymmetry the other way round.
+    unset MCPHP__OUT MCPHP__BIN MCPHP__TMP
+else
+    unset MCPHP_OUT MCPHP_BIN MCPHP_TMP
+fi
 # EXEC, so this shell BECOMES the program: python's subprocess timeout kills
 # the process it spawned, and a program that loops for ever must be that same
 # process. Without the exec the timeout killed the shell and left the binary

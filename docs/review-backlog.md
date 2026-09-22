@@ -1302,3 +1302,33 @@ Three findings, all real.
   under `env -u` for each.
 - ~~The description's gate counts are stale.~~ 84 fixtures, `d8check` 97 in a
   regime and 365 swept, `lencheck` 504.
+
+### Round forty-six
+
+Two findings, both real, and the first is the previous round's fix read
+from the other side -- the fourth time in this review that a fix moved a
+problem.
+
+- ~~`run_candidate` overwrites an `MCPHP_BIN` a test's `--ENV--` set.~~
+  Correct: round forty-five scrubbed the harness names and then put two of
+  them back by name, so a `.phpt` that deliberately sets one had its value
+  replaced for the candidate and kept by the oracle. The wrapper's channel
+  is PRIVATE now -- `MCPHP__BIN`, `MCPHP__OUT`, `MCPHP__TMP` -- and the
+  public names are left exactly as the section left them; `mcphp.sh` reads
+  the private one first and falls back to the public for a standalone
+  caller (`fixtures.sh`, `run.sh`, `bench10.sh`). The `unset` before the
+  exec is conditional for the same reason: on the grid's road it removes
+  the private names and leaves the test's own, and standalone it removes
+  the public ones, which are the harness's. Measured, four ways: a `.phpt`
+  whose `--ENV--` sets `MCPHP_BIN` is **green** through the grid (both
+  sides print `string(15) "set-by-the-test"` and `bool(false)` for
+  `MCPHP_TMP`), the wrapper on the private channel passes the test's value
+  through, the wrapper standalone does not, and `g/82-env-symmetry.php`
+  still holds at 84 / 84.
+- ~~The orphan sweep accepts a path named in a printing statement.~~
+  Correct. The scan really carries only THREE files -- `probes/t10/bench/run.php`,
+  `probes/t9/bench/run.php` and T6's `unwind.php`, measured by deleting the
+  fallback and counting what is flagged -- and all three are arguments of a
+  COMMAND. A line that prints is dropped now (`echo`, `printf`, `print`,
+  `print(`), and a `probes/t94/logged.php` whose only mention is
+  `echo "see probes/t94/logged.php"` is reported where it used to pass.

@@ -81,6 +81,13 @@ def _uncomment(src):
         t = line.lstrip()
         if t.startswith('#') or t.startswith('//'):
             continue
+        # a line that PRINTS a path does not run it. `echo "see
+        # probes/x/y.php"` reads to a substring search exactly like
+        # `"$PHP" probes/x/y.php`, and the three files this scan really
+        # carries (`probes/t*/bench/run.php` and T6's `unwind.php`) are all
+        # arguments of a command, never of an echo.
+        if re.match(r'(echo|printf|print)\b|print\s*\(', t):
+            continue
         keep, q = [], ''
         i = 0
         while i < len(line):
