@@ -30,7 +30,7 @@ mcphp_tmp_init() {
     for _d in "$_base/$_pfx".*; do
         [ -d "$_d" ] || continue
         _pid=${_d##*.}
-        case $_pid in ''|*[!0-9]*) continue ;; esac
+        case $_pid in ''|*[!0-9]*) continue ;; esac   # `.new` lands here
         # A dead pid: collect it. A LIVE one: only when it is not the
         # process that made this directory. A pid is recycled, so `kill -0`
         # alone would keep an orphan for ever -- but an AGE test is worse,
@@ -51,9 +51,18 @@ mcphp_tmp_init() {
     done
     MCPHP_TMP=$_base/$_pfx.$$
     export MCPHP_TMP
-    mkdir -p "$MCPHP_TMP"
-    : > "$MCPHP_TMP/peak"
-    ps -o lstart= -p $$ > "$MCPHP_TMP/owner" 2>/dev/null || : > "$MCPHP_TMP/owner"
+    # BUILT under a staging name and MOVED into place, so a directory that
+    # exists always has its `owner` in it. Created first and filled after,
+    # a SIGKILL in between left an owner-less directory, and the sweep
+    # above -- which keeps a live pid's -- would have kept it for ever once
+    # that pid was recycled: the disk leak this whole function exists to
+    # stop. `mv` onto a name that does not exist is the atomic step.
+    rm -rf "$MCPHP_TMP" "$MCPHP_TMP.new"
+    mkdir -p "$MCPHP_TMP.new"
+    : > "$MCPHP_TMP.new/peak"
+    ps -o lstart= -p $$ > "$MCPHP_TMP.new/owner" 2>/dev/null \
+        || : > "$MCPHP_TMP.new/owner"
+    mv "$MCPHP_TMP.new" "$MCPHP_TMP"
 }
 
 # Sample the directory and keep the maximum, so "bounded by the job count" is

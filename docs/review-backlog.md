@@ -1176,3 +1176,18 @@ pid, and `MCPHP_TMP` deleted underneath, the next `run_pair` is **`ran
 True`** and leaves the directory clean. A scratch with NO marker is still
 `busy`, which is right -- that is indistinguishable from a `.php` php-src
 ships.
+
+### Round forty-one
+
+One finding, and it is the same race one level out.
+
+~~The temporary directory is visible before `owner` is written.~~ Correct:
+`mkdir` then fill meant a SIGKILL in between left an owner-less directory,
+and the startup sweep -- which KEEPS a live pid's -- would have kept it for
+ever once that pid was recycled, which is the disk leak the sweep exists to
+stop. The directory is built under a staging name (`<dir>.new`), gets its
+`peak` and its `owner`, and is `mv`ed into place: a directory that exists
+always has its owner in it, and `mv` onto a name that does not exist is the
+atomic step. Measured: the published directory lists `owner peak` and no
+staging directory is left behind. (The staging name ends in `.new`, which
+the sweep's own `case $_pid in *[!0-9]*) continue` already skips.)
