@@ -313,10 +313,12 @@ Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
 
 T10 is done (2026-09-21, macos/aarch64; `probes/t10/RESULTS.md`), on **mc 1.1.0**: the review
 backlog, all three sections (`docs/review-backlog.md`).
-`phpt: green 1689 / wrong 14469 / refused 1929 / skip 2947 / php-fail 361 / total 21034`, against T9's
-`green 1637`; per directory `tests/lang` **104**, `Zend/tests` **749**,
+`phpt: green 1697 / wrong 14481 / refused 1929 / skip 2947 / php-fail 341 / total 21054`, against T9's
+`green 1637`; per directory `tests/lang` **104**, `Zend/tests` **756**,
 `ext/standard/tests/strings` **263**; **1664 of the 1689 greens are in T0's "touched by
-none" set**. `refused` fell **2309 -> 1929**. The green moved only +52 because the work was
+none" set** (that share was measured on the round-forty-two run of 1689; the +8 since is
+round fifty-three's argument-type checks, re-measured against the compiler the pull request
+ends with). `refused` fell **2309 -> 1929**. The green moved only +52 because the work was
 CORRECTNESS: a `.phpt` that was already green does not become greener for the compiler being
 right about short circuit. What the probe is actually worth is the corrected numbers.
 

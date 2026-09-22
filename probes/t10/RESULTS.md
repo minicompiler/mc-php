@@ -19,17 +19,22 @@ against a SNAPSHOT of the compiler (`probes/t10/grid.sh`,
 `probes/t10/fixtures.sh`), which is T7's own note: the first baseline there
 measured a binary that was being rebuilt underneath it.
 
-## Answer: green 1637 -> 1689
+## Answer: green 1637 -> 1697
 
 | grid | green | wrong | refused | skip | php-fail | total | T9's green |
 |---|---|---|---|---|---|---|---|
 | `tests/lang` | **104** | 141 | 36 | 12 | 1 | 293 | 102 |
-| `Zend/tests` | **749** | 3754 | 691 | 112 | 6 | 5306 | 709 |
+| `Zend/tests` | **756** | 3747 | 691 | 112 | 6 | 5306 | 709 |
 | `ext/standard/tests/strings` | **263** | 310 | 107 | 54 | 0 | 734 | 262 |
-| the whole corpus | **1689** | 14469 | 1929 | 2947 | 361 | 21034 | 1637 |
+| the whole corpus | **1697** | 14481 | 1929 | 2947 | 341 | 21054 | 1637 |
 
-**This table is the published measurement** and every later run in this file
-is a re-run of it, labelled as one. They agree on `green` -- test for test,
+**This table is the published measurement**, taken against the compiler this
+pull request ends with (round fifty-four), and every run quoted later in this
+file is an EARLIER one, labelled with its round. It was 1689 with
+`Zend/tests` at 749 when the review of #9 opened, and the +8 is round
+fifty-three's argument-type checks: a test whose `--EXPECTF--` names php's
+own `TypeError` was `wrong` while mc-php ran the body on a filled-in 0.
+The earlier runs agree on `green` among themselves -- test for test,
 `comm` gives 0 lost and 0 gained -- and differ in `php-fail` and therefore
 in `total`, because the source tree was cleaned of the leftovers the
 pre-CLEAN harness had made (round eighteen) and 20 tests whose ORACLE had
@@ -37,12 +42,15 @@ been failing on a stale file came back. Where a number is quoted anywhere
 else, it is this row.
 
 Re-run four times more, same snapshot discipline, `T10_JOBS=6`. The LAST of
-them, against the compiler this pull request ends with (round twenty-seven's
-`max`/`min` chunking on top of everything above), is the one to read:
-**green 1689 / wrong 14489 / refused 1929 / skip 2947 / php-fail 341 / total
-21054**, directories **104 / 749 / 263**, and the green set is **test for
-test the published one** -- `comm` gives 0 lost and 0 gained. Peak 1896 KiB
-over the 21395 tests, `df -h /` unchanged by the grid.
+them, against the compiler of round twenty-seven (`max`/`min` chunking on top
+of everything above): **green 1689 / wrong 14489 / refused 1929 / skip 2947 /
+php-fail 341 / total 21054**, directories **104 / 749 / 263**, and the green
+set is **test for test the published one** -- `comm` gives 0 lost and 0
+gained. Peak 1896 KiB over the 21395 tests, `df -h /` unchanged by the grid.
+Rounds forty-three, fifty-one, fifty-two, fifty-three and fifty-four changed
+codegen or the runtime AFTER this run, and the figure for the compiler this
+pull request ends with is the table at the end of this file: **1697**, with
+`Zend/tests` at **756**.
 
 After the round-twenty compiler change (`php_param_coerce_ref`, the Traversable limit
 and the slot check scoped to this compiler's own buffer) the corpus is
@@ -784,21 +792,11 @@ instead, with a handler that kills the process group: **0.0523 s, 1.47x**,
 and `LIM_SECS=3` against a workload that sleeps for ever gives
 `time2.py: ... did not finish in 3 s`, exit 1, no survivor.
 
-**The grid against the compiler this pull request ends with** (rounds
-forty-three, fifty-one, fifty-two, fifty-three and fifty-four all changed
-codegen or the runtime after the corpus figure in the table above was
-taken):
-
-| | published (round 42) | now (round 54) |
-|---|---|---|
-| `tests/lang` | 104 | **104** |
-| `Zend/tests` | 749 | **756** |
-| `ext/standard/tests/strings` | 263 | **263** |
-| the whole corpus, green | 1689 | **1697** |
-
-`refused` is unchanged at 1929 and `skip` at 2947; `wrong` is 14481 of
-21054 (`php-fail` 341, which is the bucket that moves with the machine and
-not with the compiler). The +7 in `Zend/tests` and the +8 over the corpus
-are the argument-type checks of round fifty-three: a test whose
-`--EXPECTF--` names php's own `TypeError` was `wrong` while mc-php ran the
-body on a filled-in 0.
+**The grid was re-run here against the compiler this pull request ends
+with**, because rounds forty-three, fifty-one, fifty-two, fifty-three and
+fifty-four all changed codegen or the runtime after the earlier corpus
+figure was taken. It is the table at the top of this file: `tests/lang`
+**104** (unchanged), `Zend/tests` 749 -> **756**,
+`ext/standard/tests/strings` **263** (unchanged), the whole corpus
+1689 -> **1697** green of 21054, with `refused` unchanged at 1929 and
+`skip` at 2947. `df -h /` identical before and after all four runs.

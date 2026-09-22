@@ -1593,3 +1593,22 @@ every number the bench records.
   it has teeth: a workload that sleeps for ever under `LIM_SECS=3` gives
   `time2.py: /tmp/hang.sh did not finish in 3 s`, exit 1, with no survivor
   in the process group.
+
+### Round fifty-seven
+
+One finding, real as a consistency complaint and backwards in its
+direction, which is why it is worth recording.
+
+- **The decision table reports a different corpus figure from the rest of
+  the tree.** Correct, and the annotation asks for the wrong half to
+  move: it reads 1689/749/21034 as "the authoritative published numbers"
+  and 1697/756/21054 as "an intermediate run". It is the other way round.
+  The 1689 run was taken at round twenty-seven; rounds forty-three,
+  fifty-one, fifty-two, fifty-three and fifty-four changed codegen or the
+  runtime after it, and 1697 is the measurement against the compiler this
+  pull request ends with. So the STALE places moved: `RESULTS.md`'s
+  headline table and its section title, the two narratives that still
+  called a round-twenty and a round-twenty-seven run "the compiler this
+  pull request ends with", `docs/plan.md`'s T10 paragraph, and the pull
+  request's own description. Every earlier run keeps its numbers and is
+  labelled with its round, which is what makes the band readable.
