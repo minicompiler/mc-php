@@ -28,8 +28,15 @@ measured a binary that was being rebuilt underneath it.
 | `ext/standard/tests/strings` | **263** | 310 | 107 | 54 | 0 | 734 | 262 |
 | the whole corpus | **1689** | 14469 | 1929 | 2947 | 361 | 21034 | 1637 |
 
-Re-run three times more, same snapshot discipline, `T10_JOBS=6`. After the
-round-twenty compiler change (`php_param_coerce_ref`, the Traversable limit
+Re-run four times more, same snapshot discipline, `T10_JOBS=6`. The LAST of
+them, against the compiler this pull request ends with (round twenty-seven's
+`max`/`min` chunking on top of everything above), is the one to read:
+**green 1689 / wrong 14489 / refused 1929 / skip 2947 / php-fail 341 / total
+21054**, directories **104 / 749 / 263**, and the green set is **test for
+test the published one** -- `comm` gives 0 lost and 0 gained. Peak 1896 KiB
+over the 21395 tests, `df -h /` unchanged by the grid.
+
+After the round-twenty compiler change (`php_param_coerce_ref`, the Traversable limit
 and the slot check scoped to this compiler's own buffer) the corpus is
 **green 1689 / wrong 14489 / refused 1929 / skip 2947 / php-fail 341 / total
 21054** with the directories identical again -- and the green set is
