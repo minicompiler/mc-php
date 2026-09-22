@@ -63,7 +63,7 @@ after.**
 ## 2. Language semantics that are wrong (a program can observe every one) -- DONE
 
 Every line below is closed by a FIXTURE that runs under `php` and under mc-php and is compared
-byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **84 / 84** as this pull request ends), or by
+byte for byte on stdout, stderr AND the exit code (`probes/t10/fixtures.sh`, **85 / 85** as this pull request ends), or by
 a measurement recorded beside it. The fixture is named at the end of each line.
 
 - ~~**`&&` and `||` do not short-circuit**~~ (#5 `php.mc:2202`). Both operands were lowered and
@@ -1404,3 +1404,29 @@ child that leaves a `sleep 40` behind:
 The second is the control, and it is what the finding describes -- which is
 what makes the first one decisive rather than a coincidence. The comment in
 `lim.sh` now carries both, because the reading is easy to get backwards.
+
+### Round fifty-one
+
+Two findings, both real, and the first is a SEMANTIC one -- the third the
+review has found in the compiler since the summary lines started carrying
+them.
+
+- ~~A by-value closure capture shares the array with the outer variable.~~
+  Correct, and it is two bugs: `php_arr_set` stores the zval header and an
+  array's header holds the hash. Measured --
+  `$a = [1,2]; $f = function () use ($a) { $a[] = 3; return count($a); };`
+  printed `3` and left the OUTER `$a` with **three** elements where php
+  leaves two. Fixing the capture exposed the second: the use array holds
+  ONE zval and the body appended to it on every call, so `$f()` twice
+  answered **4 then 5** where php answers **3 both times** -- php binds the
+  value once and each CALL starts from it. `php_zv_val` (the deep copy a
+  by-value PARAMETER already takes) at both points, and a by-reference
+  `use (&$x)` is exempt from each. `g/86-closure-capture.php` carries the
+  outer array, a nested array, a scalar, a by-reference use that still
+  writes through, and the two calls.
+- ~~The harness overwrites a test-provided `MCPHP_OUT` for a legacy
+  wrapper.~~ Correct: the private channel is opt-in since round forty-eight,
+  so a frozen wrapper gets the public name -- and that assignment replaced
+  a value the test's own `--ENV--` set, which the oracle kept.
+  `setdefault`, so the test's wins. Measured: a `.phpt` whose `--ENV--`
+  sets `MCPHP_OUT` is **green through T9's wrapper and through T10's**.

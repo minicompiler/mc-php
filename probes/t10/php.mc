@@ -6197,8 +6197,17 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         i64 ar = node_new(N_IDENT, line, fl);
         set_nd_name(ar, an);
         set_nd_type(ar, ty_parr);
+        // BY VALUE means by value: `php_arr_set` copies the zval header
+        // and an ARRAY's header holds the hash, so the closure and the
+        // outer variable shared it -- `$a = [1,2]; $f = function() use
+        // ($a) { $a[] = 3; ...}` left the OUTER array with three elements
+        // where php leaves it with two. `php_zv_val` is the same deep copy
+        // a by-value parameter already takes (ph_byval), and a
+        // by-reference `use (&$x)` must NOT take it.
+        i64 cap = ph_to_mixed(vr, vt);
+        if (!ld64(urefs + ui * 8)) cap = ph_c1("php_zv_val", cap, ty_pzv);
         i64 st2 = ph_stmt_of(ph_c3("php_arr_set", ar, ph_to_mixed(ph_strlit(un2 + 1, cstrlen(un2 + 1)), PT_STRING),
-                                   ph_to_mixed(vr, vt), TY_VOID));
+                                   cap, TY_VOID));
         set_nd_next(mt, st2);
         mt = st2;
         ui = ui + 1;
@@ -6284,6 +6293,13 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
             get = ph_cast(ty_pzv, ph_c1("php_zv_long", get, TY_I64));
             ph_set_ref(un3);
         }
+        // and a copy PER CALL, not just per capture: the use array holds
+        // ONE zval and the body would otherwise append to it every time --
+        // `$f()` twice on a captured `[1,2]` answered 4 then 5 where php
+        // answers 3 both times, because php binds the value once and each
+        // CALL starts from it. A by-reference use must alias, so it is
+        // exempt.
+        if (!ld64(urefs + ui2 * 8)) get = ph_c1("php_zv_val", get, ty_pzv);
         i64 asg = ph_set(ph_mangle(un3, "v_"), get);
         if (pret) set_nd_next(pret, asg);
         if (!pret) pre = asg;

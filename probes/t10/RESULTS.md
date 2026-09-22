@@ -132,7 +132,7 @@ not the compiler.
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **757 of the 781 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
-| **fixtures byte for byte** | **60 of 60, merged streams** | **84 of 84, each stream and the exit code** | **`2>&1` and `$(...)`** |
+| **fixtures byte for byte** | **60 of 60, merged streams** | **85 of 85, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
 | **the D8 bench** | **5.85x and 1.45x** | **6.73x and 1.41x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
@@ -444,7 +444,7 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **84 of 84** numbered fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **85 of 85** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** parse under `php -l` and are refused by
   mc-php with a named message, exit 3. That pair IS the differential for a
@@ -453,8 +453,8 @@ running and `bench10.sh` refusing to time a pair that does not agree.
   mc-php declines what php accepts.
 * `lencheck` **504 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
-* `d8check` -- **84 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 97 `.php`,
-  and the repo-wide sweep over **365** `.php` under `probes/`,
+* `d8check` -- **85 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 98 `.php`,
+  and the repo-wide sweep over **366** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
 * the grid's tmp peak **1908 KiB over 27728 tests** on the round-nineteen run
@@ -733,3 +733,13 @@ after every argument because a nested call writes the same global. And
 php says `..., int given`, with `min` reporting itself as `max`; both are
 built from `php_f_get_debug_type` and the direction now.
 `g/85-spread-state.php`.
+
+**Round fifty-one** found the third semantic defect the review has turned
+up in the compiler, and again in a summary line rather than a filed
+finding: `use ($a)` shared the array with the outer variable
+(`php_arr_set` stores the zval header, and an array's header holds the
+hash), and fixing that exposed a second -- the use array holds ONE zval, so
+the body appended to it on every call and `$f()` twice answered 4 then 5
+where php answers 3 both times. `php_zv_val` at the capture AND at the
+per-call bind, with a by-reference `use (&$x)` exempt from each.
+`g/86-closure-capture.php`.

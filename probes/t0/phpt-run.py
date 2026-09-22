@@ -373,7 +373,15 @@ def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     # inode -- mc's M12 note). probes/t10/harness.py's tmpbin() unlinks for
     # the same reason.
     os.unlink(out)
-    env['MCPHP__OUT' if private else 'MCPHP_OUT'] = out
+    if private:
+        env['MCPHP__OUT'] = out
+    else:
+        # a frozen wrapper reads the public name and does not remove it, so
+        # a test's own --ENV-- value must win here too: the oracle keeps it,
+        # and overwriting it would both change the candidate's environment
+        # and let the harness path be written by a test that asked for
+        # another. `unlink` below ignores a path nothing wrote.
+        env.setdefault('MCPHP_OUT', out)
     try:
         return _run(cmd, stdin, env, timeout, cwd)
     finally:
