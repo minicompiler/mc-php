@@ -1513,3 +1513,28 @@ case of a wider hole.
   this round's record are `main.php` **6.65x** and `heavy.php` **1.45x**
   against the previous record's 6.73x and 1.41x, which is the run-to-run
   spread the record exists to show.
+
+### Round fifty-four
+
+One finding, real, and it is the second half of round eight's own fix.
+
+- **A `return` whose expression can throw jumps over the `finally`.** T8
+  put the unwinding check BETWEEN computing the value and returning it,
+  which was right, but it emitted a direct `N_RETURN` after the check and
+  so bypassed the deferred-return path below it -- the flag and the break
+  that a try with a `finally` beside it reads. Measured before:
+
+      function f() { try { return g(); } finally { echo "fin\n"; } }
+      php:    fin / 7
+      mc-php: 7
+
+  The two halves were never alternatives: the check is about the
+  EXCEPTIONAL edge and the deferred return about the NORMAL one, and a
+  return expression that can throw has both. The value goes to a temporary
+  and the check after it as before; what follows is whatever leaving the
+  function means at that point, which is the flag and the break inside a
+  try and an `N_RETURN` everywhere else. `ph_prefix_stmts` already existed
+  for exactly this join. `g/89-return-finally.php` carries the normal
+  edge, the throwing edge, a `catch` and a `finally` on the same try, a
+  nested pair (inner then outer), and a plain value in a try as the
+  control that never regressed.

@@ -5409,16 +5409,15 @@ i64 ph_stmt_1() {
         // follow. After the return nothing runs, so `return f();` inside a
         // try left the exception pending and the catch beside it never saw
         // it (measured with a ValueError a library row raises).
+        i64 rck = 0;
         if (rthrow) {
+            // the value FIRST, then the check, then whatever leaving this
+            // function means here -- which is not always a `return`: inside a
+            // try with a finally beside it, it is the flag and the break
+            // below, and a direct return there would jump over the finally
             i64 tmp = ph_temp(e, ph_mcty(ph_fn_ret), "phrt_");
-            i64 ck = ph_check(line, fl);
-            i64 r2 = node_new(N_RETURN, line, fl);
-            set_nd_a(r2, ph_tref(tmp));
-            i64 h = ph_wrap(ck);
-            i64 t2 = h;
-            loop { if (!nd_next(t2)) break; t2 = nd_next(t2); }
-            set_nd_next(t2, r2);
-            return h;
+            rck = ph_check(line, fl);
+            e = ph_tref(tmp);
         }
         if (ph_in_try && ph_frf) {
             // the value and the flag, then out to the try's own loop: the
@@ -5429,11 +5428,11 @@ i64 ph_stmt_1() {
             set_nd_val(bo, ph_ls_try());
             set_nd_next(sv, sf);
             set_nd_next(sf, bo);
-            return ph_wrap(sv);
+            return ph_wrap(ph_prefix_stmts(rck, sv));
         }
         i64 r = node_new(N_RETURN, line, fl);
         set_nd_a(r, e);
-        return ph_wrap(r);
+        return ph_wrap(ph_prefix_stmts(rck, r));
     }
     if (ph_is("if")) return ph_if(fl, line);
     if (ph_is("while")) {
