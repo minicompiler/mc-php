@@ -1332,3 +1332,22 @@ problem.
   COMMAND. A line that prints is dropped now (`echo`, `printf`, `print`,
   `print(`), and a `probes/t94/logged.php` whose only mention is
   `echo "see probes/t94/logged.php"` is reported where it used to pass.
+
+### Round forty-seven
+
+One finding, and it is the shared file biting back: ~~scrubbing the public
+names from every candidate environment breaks T5..T9~~, whose frozen
+wrappers read `MCPHP_BIN` and `MCPHP_TMP` and nothing else, so re-running
+an earlier probe against a snapshot would have fallen back to its own local
+binary. `probes/t0/phpt-run.py` is shared by every probe and may not be
+made T10-only.
+
+Both names go into the candidate's environment again -- with
+`setdefault`, so a test's own `--ENV--` still wins -- and
+`probes/t10/mcphp.sh` removes a public name **whose value is the private
+one**: that one is the grid's, and one that differs is the test's, which
+the oracle kept. Four measurements: a `.phpt` with no `--ENV--` and one
+that sets `MCPHP_BIN` are both **green** through the grid (`2 / 2`); the
+wrapper on the grid's road with public == private prints `bool(false)` and
+with the test's value prints `bool(true)`; and T9's own frozen wrapper
+compiles and runs a test green with `MCPHP_BIN` pointing at T10's snapshot.

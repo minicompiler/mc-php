@@ -337,6 +337,13 @@ def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     for k in ('BIN', 'TMP'):
         if 'MCPHP_' + k in os.environ:
             env['MCPHP__' + k] = os.environ['MCPHP_' + k]
+            # and the PUBLIC name too, unless the test's own --ENV-- set
+            # it: probes/t5..t9's frozen wrappers read only the public
+            # names, so re-running an earlier probe against a snapshot
+            # needs them. probes/t10/mcphp.sh removes a public name whose
+            # value is the private one -- the grid's, not the test's --
+            # before it execs, so the program still sees neither.
+            env.setdefault('MCPHP_' + k, os.environ['MCPHP_' + k])
     fd, out = tempfile.mkstemp(prefix='mcphp-out.', suffix='.bin',
                                dir=os.environ.get('MCPHP_TMP') or None)
     os.close(fd)

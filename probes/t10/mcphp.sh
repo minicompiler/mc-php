@@ -76,9 +76,15 @@ rm -f "$err" "$out"
 # its environment would see two different environments and be classified on
 # the harness rather than on itself.
 if [ -n "${MCPHP__OUT:-}${MCPHP__BIN:-}${MCPHP__TMP:-}" ]; then
-    # the GRID drove this wrapper on the private names, so the public ones
-    # are whatever the test's own --ENV-- put there and the oracle kept:
-    # removing them would be the same asymmetry the other way round.
+    # The GRID drove this wrapper on the private names. It also sets the
+    # PUBLIC ones, because probes/t5..t9's frozen wrappers read only those
+    # -- so a public name whose value IS the private one is the grid's and
+    # goes, and one that differs is the test's own --ENV-- value, which the
+    # oracle kept and which removing would be the same asymmetry the other
+    # way round.
+    [ "${MCPHP_OUT:-}" = "${MCPHP__OUT:-}" ] && unset MCPHP_OUT
+    [ "${MCPHP_BIN:-}" = "${MCPHP__BIN:-}" ] && unset MCPHP_BIN
+    [ "${MCPHP_TMP:-}" = "${MCPHP__TMP:-}" ] && unset MCPHP_TMP
     unset MCPHP__OUT MCPHP__BIN MCPHP__TMP
 else
     unset MCPHP_OUT MCPHP_BIN MCPHP_TMP
