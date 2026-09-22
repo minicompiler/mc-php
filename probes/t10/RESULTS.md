@@ -132,7 +132,7 @@ not the compiler.
 | greens in T0's "touched by none" | 1626 of 1637 | **1664 of 1689** | |
 | **the sampled `wrong` tests that "compile and differ"** | **327 of 718** | **757 of the 781 that compile** | **never ran the binary** |
 | **the arena** | **2 of 1572** | **11 of 779 that RAN** | **the denominator counted tests it never ran** |
-| **fixtures byte for byte** | **60 of 60, merged streams** | **87 of 87, each stream and the exit code** | **`2>&1` and `$(...)`** |
+| **fixtures byte for byte** | **60 of 60, merged streams** | **88 of 88, each stream and the exit code** | **`2>&1` and `$(...)`** |
 | refusals named, exit 3 | 6 of 6 | 6 of 6 | |
 | **the D8 tests, "in BOTH worlds"** | **6 ok / 0 failed** | **6 ok / 0 failed, both halves** | **php's half alone** |
 | **the D8 bench** | **5.85x and 1.45x** | **6.65x and 1.45x**, from the committed dated record | **T9's own compiler refuses its own `main.php`** |
@@ -444,7 +444,7 @@ running and `bench10.sh` refusing to time a pair that does not agree.
 
 ## Invariants
 
-* `probes/t10/g/` -- **87 of 87** numbered fixtures byte for byte php's, on stdout,
+* `probes/t10/g/` -- **88 of 88** numbered fixtures byte for byte php's, on stdout,
   stderr and the exit code, each stream graded separately.
 * `probes/t10/r/` -- **6 of 6** parse under `php -l` and are refused by
   mc-php with a named message, exit 3. That pair IS the differential for a
@@ -453,7 +453,7 @@ running and `bench10.sh` refusing to time a pair that does not agree.
   mc-php declines what php accepts.
 * `lencheck` **514 literal lengths, 0 wrong**; `aritycheck` **272 library
   rows, 0 wrong**.
-* `d8check` -- **87 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 100 `.php`,
+* `d8check` -- **88 fixture / 6 refusal / 1 helper / 3 instrument / 1 library / 2 bench**, 101 `.php`,
   and the repo-wide sweep over **366** `.php` under `probes/`,
   every one in a regime with its obligation, and every `test*` the class
   declares named by the runner (6 of 6).
@@ -759,3 +759,14 @@ are there now, with `php_param_coerce` a no-op once something is pending
 and ONE `php_check` per argument list -- which is what makes the FIRST
 refused argument the one reported, before the body runs.
 `g/87-variadic-typed.php` and `g/88-param-typed.php`.
+
+**Round fifty-four** found the fifth, and it is the second half of T8's
+own fix rather than a new one. T8 put the unwinding check BETWEEN
+computing a return's value and returning it -- right, and measured -- but
+the branch that does it emits a direct `N_RETURN` after the check, so it
+jumps over the deferred return below it: the flag and the break that a try
+with a `finally` beside it reads. `function f() { try { return g(); }
+finally { echo "fin\n"; } }` printed **7** where php prints **fin** then
+**7**. The check is the exceptional edge and the deferred return the
+normal one; a return expression that can throw has both.
+`g/89-return-finally.php`.
