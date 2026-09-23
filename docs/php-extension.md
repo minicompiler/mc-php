@@ -1,0 +1,188 @@
+# The extension back end
+
+**A `.php` source compiled into a native PHP extension**: no C, no `phpize`, no autotools, no
+php development headers. This page is what is IMPLEMENTED; [`docs/mcphp-toml.md`](mcphp-toml.md)
+is the full schema of the project file and [`docs/php-abi.md`](php-abi.md) is every Zend number
+this rests on, with what it was measured against.
+
+## The whole road
+
+```sh
+mc-php build examples/hello --config examples/hello/mcphp.toml
+php -d extension=examples/hello/build/hello.so -r 'echo hello_addone(41), "\n";'   # 42
+```
+
+There is no flag and there will not be one. The switch is the project file, exactly as
+`docs/mcphp-toml.md` says: **an `[extension]` table means an extension, and no `[extension]`
+table means the program road, unchanged.** `mc-php --exe x.php -o x` sees no project file at all
+and is what it always was.
+
+## What a source may say today
+
+Plain functions, with **declared scalar parameters and a declared scalar return**:
+
+| | parameter | return |
+|---|---|---|
+| `int` | yes | yes |
+| `string` | yes | yes |
+| `float` | yes | yes |
+| `bool` | yes | yes |
+| `void` | — | yes |
+
+Everything else is a **named refusal at the declaration's own position**, never a silent
+lowering -- because a silent one would publish a signature php does not have:
+
+```
+hello.php:7: mc-php: an exported parameter whose type is not a declared scalar: f is not implemented yet
+hello.php:7: mc-php: a variadic parameter in an exported function: f
+hello.php:7: mc-php: a by-reference return in an exported function: f
+hello.php:7: mc-php: an exported function whose return type is not a declared scalar: f
+hello.php:3: mc-php: a namespace in an extension source
+```
+
+A parameter with a **default** and an **untyped** parameter are both `mixed` by
+`docs/plan.md` D4 (c), so both land on the first of those. A `namespace` is refused rather than
+flattened: flattening costs a program nothing (T9) but would make the module publish `f` where
+the source says `aw\f`, and `docs/mcphp-toml.md` promises the module obeys the source's own
+namespace.
+
+The body is the whole language. Classes, closures, `match`, exceptions, the 272-row library --
+everything the program road compiles compiles here; it is the SIGNATURE that is narrow, because
+the signature is what crosses the boundary.
+
+## What the compiler emits
+
+For `function hello_addone(int $n): int { return $n + 1; }`:
+
+```
+void x_h_hello_addone(uptr ex, uptr rv) {            // the Zend handler
+    phx_enter();
+    if (phx_arity(ex, 1, "hello_addone")) {
+        if (phx_chk(ex, 0, 0, "hello_addone", "n")) {
+            phx_ret_int(rv, f_hello_addone(phx_i(ex, 0)));
+        }
+    }
+    phx_leave();
+}
+
+uptr get_module() {
+    phx_fn("hello_addone", &x_h_hello_addone, 1, 0);
+    phx_arg("n", 0);
+    return phx_module("hello", "0.1.0", 20250925, "API20250925,NTS", 0, 0,
+                      &mc_php_minit, 0);
+}
+```
+
+and `main` becomes **`mc_php_minit`**, the module's `MINIT`, so the source's top-level statement
+stream -- `php_bootstrap`, the class entries, a `declare`, a `require` -- runs when php loads the
+module. `src/ext.mc` is the emitter, [`lib/php_ext.mc`](../lib/php_ext.mc) is everything it calls,
+and the emitter knows no Zend offset at all.
+
+## What `declare(strict_types=1)` means here
+
+The type check is **php's strict rule, always**: the zval's tag must be the declared one, plus
+`int` where a `float` is declared, which is the one widening strict mode allows. There is no weak
+mode and no coercion.
+
+That is a divergence and it is the honest one to take. An extension's function is an INTERNAL
+function, and for a real C extension what decides weak-or-strict is the `declare(strict_types=1)`
+of the file that CALLS it, resolved inside ZPP. mc-php generates its own check, so it cannot see
+the caller's declaration. A caller under `strict_types=1` gets exactly php's behaviour; a caller
+without it gets a `TypeError` where php would have coerced. Write `declare(strict_types=1)` in
+the caller and the two agree.
+
+## What a wrong call says
+
+php's own words, measured against an extension of the same signatures built the ordinary C way
+([`tests/ext/refx.c`](../tests/ext/refx.c)), and they are **not** a userland function's:
+
+```
+TypeError: hello_addone(): Argument #1 ($n) must be of type int, string given
+ArgumentCountError: hello_addone() expects exactly 1 argument, 0 given
+ArgumentCountError: hello_addone() expects exactly 1 argument, 2 given
+TypeError: hello_addone(): Argument #1 ($n) must be of type int, stdClass given
+```
+
+No `called in FILE on line N` tail, and an EXTRA argument is an error rather than being ignored --
+both of which php does differently for a userland function, which is why
+[`examples/hello/errors.php`](../examples/hello/errors.php) is graded against a recorded
+expectation and not against the interpreted source.
+
+## What differs from the interpreted source, and it is written down
+
+[`examples/hello/check.php`](../examples/hello/check.php) is run twice on every gate -- once with
+the module loaded, once with the source `require`d -- and the two must print the same bytes on
+each stream and exit the same. These are the places where they would not:
+
+* **Output buffering.** The runtime writes what a php function `echo`s straight to fd 1; php's
+  own `ob_start()` never sees it. Measured on 2026-09-23: with `ob_start(); echo "A";
+  hello_say("B"); $x = ob_get_clean();` the interpreted run captures `A[B]` and the module's `[B]`
+  is already on the terminal. Ordinary output is in php's own order because the CLI SAPI does not
+  buffer. **The fix is named**: `php_output_write` is exported, and routing `php_flush`'s one
+  `write(1, ...)` through a sink the extension road sets is the whole of it -- it touches the
+  runtime's hot path, so it belongs to a step of its own with its own bench row.
+* **An exception the body throws** crosses as its own class when php has one of that name --
+  every built-in does, so `throw new InvalidArgumentException(...)` arrives as itself. A class
+  the SOURCE declares is not in the engine's class table (the back end registers no class yet),
+  and the fallback is a plain `Exception` whose message names it.
+* **Destructors and `register_shutdown_function`** do not run. A program ends and D7's arena is
+  released; a module does not end, and `module_shutdown_func` is 0 on purpose -- running
+  `php_shutdown`'s destructors into a stdout the SAPI is tearing down would be worse than not.
+* **The type check is strict always**, as above.
+
+## The memory
+
+`docs/plan.md` D7 is unchanged: one 48 MiB arena per PROCESS, never freed. That is a program's
+model and a module lives longer than a program, so a long-running php that calls an mc-php
+extension in a loop will exhaust it. Nothing here bounds it; it is the first thing a request
+lifecycle (`RINIT`/`RSHUTDOWN`) would answer, and it is not built.
+
+## Two extensions in one process
+
+Both would define `php_alloc`, `ph_heap`, `php_bootstrap` and every other runtime symbol, and the
+namespace a php extension is loaded into is FLAT -- the first one loaded wins, in silence. The
+example's link line exports everything, which is what makes the two collide.
+`docs/mcphp-toml.md` § The symbol prefix is the design that answers it;
+[`reference/extA.mc`](../reference/extA.mc) and [`reference/extB.mc`](../reference/extB.mc)
+are the measurement it rests on. Neither is implemented, and until one is, **load one mc-php
+extension per process**. The cheap half of the fix is a linker argument and nothing else --
+`-exported_symbols_list` naming only `_get_module` on macOS, a version script on Linux -- and it
+is not taken here because the schema's answer is the prefix and picking the other one by accident
+would be worse than saying so.
+
+## The project file
+
+What `mc-php build` reads today, of the schema in [`docs/mcphp-toml.md`](mcphp-toml.md):
+
+| key | |
+|---|---|
+| `extension.name` | required. Its presence is the switch |
+| `extension.version` | default `"0.0.0"` |
+| `php.api` | required -- `php -i` line `PHP API` |
+| `php.build_id` | required -- `PHP Extension Build` |
+| `php.thread_safety` | required -- `Thread Safety` |
+| `php.debug` | required -- `Debug Build` |
+
+and mc's own `[project]`, `[linker]`, `[target]` and `[include]` carry the rest, because
+`mc-php build` IS `mc build` and mc's driver ignores a table it does not know. What is in the
+schema and **not** implemented: `extension.prefix` (nothing but `get_module` needs a name, see
+above), `extension.entry`/`sources`/`out` (mc's `[project]` says those), `[[extension.deps]]`,
+`[libs]`/`[externs]`/`[linker]` per OS -- mc's `[linker]` is flat, so a second host is a second
+file, which is how this repository already spells its own cross-builds -- and `php.bin`, which is
+a NAMED refusal:
+
+```
+mcphp.toml:1: mc-php: [php].bin is not implemented: state php.api, php.build_id,
+php.thread_safety and php.debug (php -i prints all four)
+```
+
+Reading the four out of a php binary means spawning one and parsing its output, which belongs to
+the driver and not to a Tier 3 module. Stating them is also what makes a cross-build need no php
+on the machine.
+
+## The gate
+
+[`tests/ext.sh`](../tests/ext.sh), inside `tests/run.sh` and inside `tests/linux.sh`. Six steps,
+each a comparison against something php produced; its own header says what each one measures.
+Green on **macos/arm64**, **linux/aarch64** and **linux/x86_64**, each against a php 8.5.10 of
+that host's own.

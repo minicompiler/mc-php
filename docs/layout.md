@@ -6,12 +6,16 @@ src/*.mc             the compiler -- one mc Tier 3 module, 17 files, plus one en
                      per host it can be built for
 lib/php_rt.mc        the runtime, #embed'ed into the compiler and pushed into every
                      program it compiles
+lib/php_ext.mc       the EXTENSION runtime, pushed only on that road: the module
+                     entry, the function table, the conversions across the boundary
 lib/rt_host_*.mc     the runtime's system layer, one file per host, #embed'ed beside
                      it and pushed ahead of it
 tests/               the fixtures, the .phpt grid driver and the gates
-examples/            (empty; the extension road is what will fill it)
+examples/            one directory per PHP extension mc-php compiles
 docs/                the plan, the decisions, this
 probes/              the measurement record, T0..T10. FROZEN.
+reference/           the second record: the extension road built BY HAND in mc, before
+                     the compiler could produce it. Not mc-php output.
 php-src/             php's own source, cloned, not committed (the .phpt corpus is the oracle)
 ```
 
@@ -44,6 +48,7 @@ mc is single pass, so `src/php.mc` includes the parts in order and the order is 
 | `closure.mc` | 263 | closures, arrow functions, `use (&$x)` |
 | `class.mc` | 787 | classes, interfaces, traits, enums; members; a method body |
 | `decl.mc` | 533 | the top-level declarations, and php's hoisting of a global function |
+| `ext.mc` | 303 | the EXTENSION back end: one handler per exported function, then `get_module`. It knows no Zend offset -- `lib/php_ext.mc` does |
 | `program.mc` | 418 | the one registration, the byte scan that runs before the first token, `#embed` of the runtime, and `user_init` |
 
 ## `lib/php_rt.mc` -- the runtime
@@ -53,6 +58,14 @@ into the compiler and pushed into every program with `p_push_source`. It impleme
 lowering table (`string` is a `zend_string`-shaped handle, binary-safe and never
 encoding-validated; `float` is `<float>`'s `f64`; `array` is php's ordered hash) over one arena
 that is never freed (D7).
+
+### `lib/php_ext.mc` -- the extension runtime
+
+Pushed into the unit only when the project file has an `[extension]` table: everything in it
+names a symbol that exists inside a running php and nowhere else, and an `mc --exe` binary with
+an undefined symbol loads and then dies in dyld. It is the ONE place a Zend offset is written
+down; [`docs/php-abi.md`](php-abi.md) is the record and `tests/ext/abi.c` is the oracle that
+checks it against the installed headers on every run that has them.
 
 ### `lib/rt_host_*.mc` -- the runtime's system layer, one file per host
 

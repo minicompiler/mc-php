@@ -2,8 +2,11 @@
 #
 # NOT the .phpt grid. The grid is 21395 tests, takes about half an hour and
 # needs php-src cloned; it is the number this project answers with, measured by
-# hand and recorded in the README with its date. What runs here is the five
-# gates that catch a regression in minutes: see tests/run.sh.
+# hand and recorded in the README with its date. What runs here is the gates
+# that catch a regression in minutes: see tests/run.sh, which since the
+# extension branch also runs tests/ext.sh -- a .php compiled into a .so, loaded
+# by the runner's own php, and compared with what that php gives for the same
+# source interpreted.
 #
 # Three legs, one per host that has been RUN: macOS arm64 builds and grades
 # itself; the two Linux compilers are CROSS-BUILT on the same macOS runner and
@@ -72,7 +75,17 @@ jobs:
         run: |
           mc --version
           php --version | head -1
+          # The four values examples/hello/mcphp.toml states. tests/ext.sh
+          # compares them against this php and names the file if they differ:
+          # a module header that disagrees with its target is refused by the
+          # loader with `Unable to initialize module` and nothing else.
           php -i | grep -E '^(PHP API|PHP Extension Build|Thread Safety|Debug Build) '
+          # For tests/ext.sh step 1 (the layout gate against the installed php
+          # headers) and step 5 (the C reference behind errors.expect). Both
+          # self-skip where they are absent -- the COMPILER needs neither, and
+          # that is the claim, so the runner is where they are checked.
+          php-config --includes || echo "  no php-config: the layout gate will skip"
+          cc --version | head -1 || echo "  no cc: the layout gate will skip"
 
       - name: Build
         run: mc build
@@ -131,7 +144,9 @@ jobs:
   # every fixture with the cross-built binary inside a container that has php
   # 8.5 of its own, and compares both streams and the exit code -- the same
   # gate the macOS leg runs, on the host the binary is for. A `file` output is
-  # not a proof and this job is what replaces one.
+  # not a proof and this job is what replaces one. Since the extension branch
+  # it also builds examples/hello into a .so with ld.lld and loads it there,
+  # which is the only place the ELF half of the extension road is executed.
   linux:
     name: The fixture gate (linux/${{ matrix.arch }})
     needs: [check]
@@ -153,8 +168,11 @@ jobs:
           name: mc-php-linux
           path: build
 
-      - name: It loads, it compiles, and the fixtures agree with php
+      - name: It loads, it compiles, the fixtures agree, and the extension loads
         run: |
           set -eu
           chmod +x build/mc-php-linux-*
+          # tests/linux.sh ends with tests/ext.sh: the .so is built by the
+          # cross-built compiler and loaded by the php IN THE CONTAINER, so
+          # the module header is graded against the php it is for.
           sh tests/linux.sh ${{ matrix.arch }}
