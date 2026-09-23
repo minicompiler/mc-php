@@ -18,7 +18,7 @@ This is a **proof of concept**, and what exists is the front end.
 **What works.** The compiler reads PHP 8.5 and produces a native binary, on **macOS arm64,
 linux/aarch64 and linux/x86_64** -- one binary per host, each of which was run on a host of its
 own architecture and graded there against that host's own `php`. Over php-src's whole `.phpt`
-corpus -- 21395 tests -- it agrees with `php` on **1704**, byte for byte on stdout and on the
+corpus -- 21395 tests -- it agrees with `php` on **1705**, byte for byte on stdout and on the
 exit code. Classes, interfaces, traits, enums, closures, exceptions, references, `match`,
 heredocs, late static binding, `printf`, a 272-row library, `ext/json` written in mc: all of it
 is in, and each of it is measured rather than claimed.
@@ -32,7 +32,7 @@ is in, and each of it is measured rather than claimed.
 | Windows | **not built.** macOS arm64, linux/aarch64 and linux/x86_64 are built, run and graded; Windows is not, and [Install](#install) says exactly what it is missing. |
 | generators | `yield` is not built. 252 of the 13623 disagreeing tests use it; the decision and its cost are in `docs/plan.md` D6. |
 | `eval` and reflection | refused **by design**, by name, with exit 3 -- `docs/plan.md` D1 and D6. A refusal is an answer, not a failure. |
-| most of the corpus | 14449 tests still disagree and 1929 are refused by design. The number below is the whole claim; nothing here rounds it up. |
+| most of the corpus | 14468 tests still disagree and 1929 are refused by design. The number below is the whole claim; nothing here rounds it up. |
 
 ---
 
@@ -247,19 +247,21 @@ at tag `php-8.5.10`. Every number here was re-measured on this tree; none is quo
 
 | the `.phpt` grid | green | of | php-fail |
 |---|---|---|---|
-| the whole corpus | **1693** | 21018 | 377 |
+| the whole corpus | **1705** | 21049 | 346 |
 | `Zend/tests` | 756 | 5306 | 6 |
 | `tests/lang` | 104 | 293 | 1 |
 | `ext/standard/tests/strings` | 263 | 734 | 0 |
 
-**The corpus row carries a band and the three directory rows do not.** The same binary run three
-times over the whole corpus has given 1692 / 21018, 1704 / 21050 and 1693 / 21018, and the
-difference is php's own: every test that changed outcome was `php-fail` in one of the runs -- php
-itself did not produce an answer, so the pair could not be graded. The three directory rows came
-out identical on all of them, down to their `wrong`/`refused`/`skip` columns, and across the
-hosts branch they are identical **test for test**: all fifteen of their five sets `cmp` equal
-against the pre-branch compiler. **A block worth fewer than a few dozen tests should be read on
-the directories, never on the corpus.**
+**The corpus row carries a band and the three directory rows do not.** Runs over the whole corpus
+have given 1692 / 21018, 1704 / 21050, 1693 / 21018 and 1705 / 21049, and the difference is php's
+own: every test that changed outcome was `php-fail` in one of the runs -- php itself did not
+produce an answer, so the pair could not be graded. Between the last two, which are the SAME tree
+twice, **0 tests stopped being green and 12 started**, and all 12 were `php-fail` in the other
+run; every one is a `dir/` or `file/` test. The three directory rows came out identical on all of
+them, down to their `wrong`/`refused`/`skip` columns, and across the hosts branch they are
+identical **test for test**: all fifteen of their five sets `cmp` equal against the pre-branch
+compiler. **A block worth fewer than a few dozen tests should be read on the directories, never
+on the corpus.**
 
 That band is measured, not assumed, and the measurement is worth stating because it is what makes
 a one-test change readable at all. Running only the **1271** corpus tests that mention
