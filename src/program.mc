@@ -39,21 +39,15 @@ void ph_program() {
     // no program -- phx_leave is the flush plus the bridge that turns a
     // pending php throwable into a Zend one, the same pair every handler
     // uses.
-    i64 fin = node_new(N_EXPRSTMT, line, fl);
-    i64 fin1 = node_new(N_EXPRSTMT, line, fl);
-    i64 fin2 = node_new(N_EXPRSTMT, line, fl);
-    if (ph_ext) {
-        set_nd_a(fin, ph_call("phx_leave", 0, 0, 0, 0, 0, TY_VOID));
-        set_nd_a(fin1, ph_call("phx_leave", 0, 0, 0, 0, 0, TY_VOID));
-        set_nd_a(fin2, ph_call("phx_leave", 0, 0, 0, 0, 0, TY_VOID));
-    }
+    i64 fin = ph_stmt_of(ph_call("phx_leave", 0, 0, 0, 0, 0, TY_VOID));
+    i64 fin2 = fin;
     if (!ph_ext) {
-        set_nd_a(fin, ph_call("php_uncaught", 0, 0, 0, 0, 0, TY_VOID));
-        set_nd_a(fin1, ph_call("php_shutdown", 0, 0, 0, 0, 0, TY_VOID));
-        set_nd_a(fin2, ph_call("php_flush", 0, 0, 0, 0, 0, TY_VOID));
+        fin = ph_stmt_of(ph_call("php_uncaught", 0, 0, 0, 0, 0, TY_VOID));
+        i64 fin1 = ph_stmt_of(ph_call("php_shutdown", 0, 0, 0, 0, 0, TY_VOID));
+        fin2 = ph_stmt_of(ph_call("php_flush", 0, 0, 0, 0, 0, TY_VOID));
+        set_nd_next(fin, fin1);
+        set_nd_next(fin1, fin2);
     }
-    set_nd_next(fin, fin1);
-    set_nd_next(fin1, fin2);
     if (ph_main_tail) set_nd_next(ph_main_tail, fin);
     if (!ph_main_tail) ph_main_head = fin;
     i64 r = node_new(N_RETURN, line, fl);
