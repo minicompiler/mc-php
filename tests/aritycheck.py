@@ -17,7 +17,12 @@ ROW = re.compile(r'ph_lib\("([^"]+)",\s*"([^"]+)",\s*(\d+),\s*(\d+),')
 
 
 def main():
-    rt = open(os.path.join(ROOT, 'lib/php_rt.mc')).read()
+    # The runtime is every .mc under lib/, not one file: since the hosts
+    # branch its system layer is one file per host (lib/rt_host_*.mc) and a
+    # function a row names may be in one of them.
+    rt = ''.join(open(os.path.join(ROOT, 'lib', f)).read()
+                 for f in sorted(os.listdir(os.path.join(ROOT, 'lib')))
+                 if f.endswith('.mc'))
     mc = ''.join(open(os.path.join(ROOT, 'src', f)).read()
                  for f in sorted(os.listdir(os.path.join(ROOT, 'src')))
                  if f.endswith('.mc'))

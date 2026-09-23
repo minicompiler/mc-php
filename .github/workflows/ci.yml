@@ -102,10 +102,3 @@ jobs:
 
       - name: The fast gates
         run: sh tests/run.sh
-
-      - name: The carve is byte-neutral
-        # Asserts that src/*.mc still rebuilds probes/t10/php.mc byte for byte.
-        # It dies with the first commit that changes what the compiler does --
-        # delete the script and this step together, and say so in the pull
-        # request. Until then it is the cheapest proof the split moved nothing.
-        run: sh tests/carve.sh

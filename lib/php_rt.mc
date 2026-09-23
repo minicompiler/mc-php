@@ -18,7 +18,14 @@
 //             named at the refusal, not silently coerced)
 //
 // D7 is the memory model: one arena, never freed, released by exit.
-#include <sys>
+//
+// The system layer is NOT here. `#include <sys>` is libSystem's, and a runtime
+// that names it writes macOS programs and nothing else; since the hosts branch
+// it is one file per host under lib/rt_host_*.mc, pushed ahead of this one by
+// src/program.mc. Everything below may call open/read/write/close/exit/creat,
+// stat/lseek/access/getenv/unlink/rename/mkdir/rmdir/getpid/getcwd/chdir/
+// chmod/putenv/unsetenv, the O_ and S_IF flags, and php_stat_mode and
+// php_stat_size -- and the host layer is what answers all of it.
 
 // ---- the arena (D7) --------------------------------------------------------
 #define PH_ARENA 50331648
@@ -6732,28 +6739,10 @@ uptr php_zv_iter(uptr z) {
 // a module may declare itself. A php `resource` is a zval of type
 // IS_RESOURCE whose value is an index into one table -- php's own resource
 // ids are small integers too, and `var_dump` prints exactly that.
-extern i64 stat(uptr path, uptr buf);
-extern i64 lseek(i64 fd, i64 off, i64 whence);
-extern i64 access(uptr path, i64 mode);
-extern uptr getenv(uptr name);
-extern i64 unlink(uptr path);
-extern i64 rename(uptr from, uptr to);
-extern i64 mkdir(uptr path, i64 mode);
-extern i64 rmdir(uptr path);
-extern i64 getpid();
-extern uptr getcwd(uptr buf, i64 n);
-extern i64 chdir(uptr path);
-extern i64 chmod(uptr path, i64 mode);
-extern i64 putenv(uptr kv);
-extern i64 unsetenv(uptr name);
-
-// macOS sys/fcntl.h; O_RDONLY/O_WRONLY/O_CREAT/O_TRUNC come from <sys>
-#define O_RDWR    2
-#define O_APPEND  8
-#define O_EXCL    0x800
-#define S_IFMT    0xf000
-#define S_IFREG   0x8000
-#define S_IFDIR   0x4000
+//
+// The eleven calls and the six flags this section used to declare are the host
+// layer's now (lib/rt_host_macos.mc, lib/rt_host_linux.mc): their numbers are
+// per-system and their names are not.
 
 #define PH_MAXFH 64
 i64  ph_fh_fd[PH_MAXFH];
@@ -6786,17 +6775,9 @@ i64 php_fh_new(i64 fd, uptr name, i64 own) {
 
 i64 php_file_exists_c(uptr p) { if (access(p, 0) == 0) return 1; return 0; }
 
-i64 php_stat_mode(uptr p) {
-    u8 sb[160];
-    if (stat(p, sb) != 0) return 0 - 1;
-    return ld16(sb + 4);
-}
-
-i64 php_stat_size(uptr p) {
-    u8 sb[160];
-    if (stat(p, sb) != 0) return 0 - 1;
-    return ld64(sb + 96);
-}
+// php_stat_mode and php_stat_size are the host layer's: `struct stat` has a
+// different shape on every one of them, and on Linux a different one per
+// architecture (lib/rt_host_linux_aarch64.mc).
 
 // a zend_string holding a NUL-terminated copy, for the libc calls
 uptr php_cpath(uptr z) {
@@ -7210,10 +7191,18 @@ u8 php_f_restore_exception_handler() {
     return 1;
 }
 
-// setlocale(category, ...locales): this runtime is byte-oriented (D10) and
-// the only locale it has is "C", which is what php answers for a query and
-// for a request it can satisfy; anything else is false, as php gives for a
-// locale the system does not have.
+// setlocale(category, ...locales): this runtime is byte-oriented (D10) and the
+// only locale it HAS is "C", which is what it answers for a query and for a
+// request it can satisfy. What it does with a name it does not have is the
+// HOST LIBC's answer and it asks for it: macOS and glibc return NULL for an
+// unknown locale, musl accepts any name and hands it back, and php calls the
+// same function -- so a table here would be right on one host and wrong on the
+// next. It was macOS's answer hard-coded until the hosts branch, and
+// tests/g/58-sscanf.php is what caught it: `setlocale(LC_ALL,
+// "nonexistent_xx")` is false under macOS php and the string under Alpine's.
+//
+// The category number reaches libc unchanged, which is why php's LC_* are the
+// host's numbers too (src/consts.mc, ph_lc_bsd and ph_lc_gnu).
 // sscanf($str, $format): php's own C-like scanner. With no extra arguments
 // it answers an array of the conversions; a directive that finds nothing
 // yields null, and a literal that does not match stops the scan.
@@ -7418,11 +7407,22 @@ uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5,
     return php_zlong(k);
 }
 
+uptr php_locale_now(uptr cz, uptr c) {
+    uptr r = setlocale(php_zv_long(cz), 0);
+    if (!r) return php_zstr(c);
+    return php_zstr(php_str_new(r, php_cstrlen(r)));
+}
+
 uptr php_f_setlocale(uptr cz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     uptr c = php_str_new("C", 1);
-    if (!a1) return php_zstr(c);
-    if (php_zv_type(a1) == IS_NULL) return php_zstr(c);
-    if (php_zv_type(a1) == IS_LONG) { if (ld64(a1) == 0) return php_zstr(c); }
+    // A QUERY -- setlocale($cat), setlocale($cat, null), setlocale($cat, 0) --
+    // is "what is set now", and what is set now is the host's answer: the call
+    // above may have set something this runtime does not implement but the
+    // host's libc accepted, and php reports that. Answering "C" here made the
+    // query disagree with php on musl after exactly such a call.
+    if (!a1) return php_locale_now(cz, c);
+    if (php_zv_type(a1) == IS_NULL) return php_locale_now(cz, c);
+    if (php_zv_type(a1) == IS_LONG) { if (ld64(a1) == 0) return php_locale_now(cz, c); }
     i64 k = 0;
     loop {
         if (k >= 5) break;
@@ -7443,6 +7443,8 @@ uptr php_f_setlocale(uptr cz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
                 uptr e = php_zv_str(php_it_val(h, i));
                 if (php_str_eq(e, c)) return php_zstr(c);
                 if (php_strlen(e) == 0) return php_zstr(c);
+                uptr ra = setlocale(php_zv_long(cz), e + ZS_HDR);
+                if (ra) return php_zstr(php_str_new(ra, php_cstrlen(ra)));
                 i = php_it_next(h, i + 1);
             }
             k = k + 1;
@@ -7451,6 +7453,8 @@ uptr php_f_setlocale(uptr cz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
         uptr e = php_zv_str(v);
         if (php_str_eq(e, c)) return php_zstr(c);
         if (php_strlen(e) == 0) return php_zstr(c);
+        uptr r = setlocale(php_zv_long(cz), e + ZS_HDR);
+        if (r) return php_zstr(php_str_new(r, php_cstrlen(r)));
         k = k + 1;
     }
     return php_zbool(0);

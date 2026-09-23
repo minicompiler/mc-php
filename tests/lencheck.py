@@ -13,7 +13,9 @@ import os, re, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SRC = [os.path.join('src', f) for f in sorted(os.listdir(os.path.join(ROOT, 'src')))
-       if f.endswith('.mc')] + ['lib/php_rt.mc']
+       if f.endswith('.mc')] + sorted(
+           os.path.join('lib', f) for f in os.listdir(os.path.join(ROOT, 'lib'))
+           if f.endswith('.mc'))
 LIT = r'"((?:[^"\\]|\\.)*)"'
 PATS = [
     (re.compile(r'(php_die|php_write)\(' + LIT + r',\s*(\d+)\)'), 1, 2, None),
@@ -25,6 +27,13 @@ PATS = [
     (re.compile(r'php_str_new\(' + LIT + r',\s*(\d+)\)'), 0, 1, None),
     (re.compile(r'php_mput\(' + LIT + r',\s*(\d+)\)'), 0, 1, None),
     (re.compile(r'p_cat\([^,"]+,\s*' + LIT + r',\s*(\d+),\s*(\d+)\)'), 0, 2, 1),
+    # hosts: ph_pre's third column is the LENGTH when the kind is 1 (string),
+    # and it was 0 on two rows -- DIRECTORY_SEPARATOR and PATH_SEPARATOR both
+    # compiled to the empty string, every probe since they were added
+    # (issue #11). The length is written as the row's THIRD field and the
+    # literal as its fourth, so the pair is reversed against every other
+    # pattern here: the number comes first.
+    (re.compile(r'ph_pre\("[^"]*",\s*1,\s*(\d+),\s*' + LIT + r'\)'), 1, 0, None),
 ]
 
 

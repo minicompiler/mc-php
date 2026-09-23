@@ -399,6 +399,47 @@ i64 ph_dollar_expr() {
 
 #embed ph_rt "../lib/php_rt.mc"
 
+// The runtime's own system layer, one file per host: what a PROGRAM this
+// compiler writes calls, which is not what the compiler calls. All four are
+// embedded and one is pushed, chosen by host_os()/host_arch() -- there is no
+// conditional compilation in this language, and a binary that carries four
+// small files and picks one is smaller and far easier to prove than four
+// compilers that each carry one.
+//
+// The choice is the HOST's because mc's default target is the host's
+// (mc's M37): `mc-php --exe x.php` writes a binary for the machine it is
+// running on, so the runtime's calls have to be that machine's.
+#embed ph_rt_macos   "../lib/rt_host_macos.mc"
+#embed ph_rt_linux   "../lib/rt_host_linux.mc"
+#embed ph_rt_lin_a64 "../lib/rt_host_linux_aarch64.mc"
+#embed ph_rt_lin_x64 "../lib/rt_host_linux_x86_64.mc"
+
+// A push puts its source ON TOP of the lexer's stack, so the LAST push is the
+// FIRST thing parsed (mc's p_push_source has #include's semantics). The
+// runtime goes first here and is therefore lexed last, after the host layer it
+// depends on.
+void ph_push_rt_host() {
+    uptr os = host_os();
+    if (str_eq(os, "macos")) {
+        p_push_source("php runtime host", ph_rt_macos, ph_rt_macos_size);
+        return;
+    }
+    if (str_eq(os, "linux")) {
+        p_push_source("php runtime host", ph_rt_linux, ph_rt_linux_size);
+        uptr a = host_arch();
+        if (str_eq(a, "aarch64")) {
+            p_push_source("php runtime host arch", ph_rt_lin_a64, ph_rt_lin_a64_size);
+            return;
+        }
+        if (str_eq(a, "x86_64")) {
+            p_push_source("php runtime host arch", ph_rt_lin_x64, ph_rt_lin_x64_size);
+            return;
+        }
+        err_at2("mc-php", 1, "mc-php: no runtime host layer for this linux architecture", a);
+    }
+    err_at2("mc-php", 1, "mc-php: no runtime host layer for this host", os);
+}
+
 void user_init() {
     float_init();
     machine_arm64_float_init();
@@ -415,4 +456,5 @@ void user_init() {
     syntax("<?php", &ph_program);
     syntax("<?=", &ph_program);                   // a file may open with it
     p_push_source("php runtime", ph_rt, ph_rt_size);
+    ph_push_rt_host();
 }
