@@ -77,6 +77,25 @@ jobs:
       - name: Build
         run: mc build
 
+      - name: Stage mc's library tree beside the compiler
+        run: |
+          set -eu
+          # build/mc-php is a DIFFERENT binary from mc, and it is a compiler:
+          # when it compiles a .php it pushes lib/php_rt.mc, whose first line is
+          # `#include <sys>` -- mc's libSystem layer. Since mc's M52 that is a
+          # LIBRARY name, and a library name is resolved out of a tree, not out
+          # of the blob. mc finds its own tree beside its own binary; mc-php has
+          # to find one beside build/mc-php (or in $HOME/.mc/libs, which a fresh
+          # runner does not have).
+          #
+          # So the tree that came in the mc tarball is staged next to it. This is
+          # the same thing `mc build` does for itself when a project has a
+          # [compiler] section (mc's M52 step D); this project's product is a
+          # [project], so it is placed here.
+          mkdir -p build
+          cp -R "$RUNNER_TEMP/mc/lib" build/lib
+          ls -d build/lib/mc/*
+
       - name: The fast gates
         run: sh tests/run.sh
 

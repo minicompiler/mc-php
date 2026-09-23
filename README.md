@@ -75,14 +75,29 @@ no leg of this repository has run on either host yet.
 
 ```sh
 mc build                      # -> build/mc-php
-```
-
-That is the whole of it. `mc.toml` is the project file and there is no makefile: the same rule
-the compiler is being built to offer, applied to itself.
-
-```sh
 build/mc-php --exe hello.php -o hello && ./hello
 ```
+
+`mc.toml` is the project file and there is no makefile: the same rule the compiler is being built
+to offer, applied to itself.
+
+### One thing about mc's library tree
+
+`build/mc-php` is a **different binary from `mc`**, and it is itself a compiler: when it compiles
+a `.php` it pushes `lib/php_rt.mc`, whose first line is `#include <sys>` -- mc's libSystem layer.
+Since mc's M52 that is a *library* name, resolved out of a **tree**, not out of the compiler's
+own blob. `mc` finds its tree beside `mc`; `mc-php` needs one it can reach.
+
+If you installed mc with `mc install`, `$HOME/.mc/libs/mc/v<version>/` is that tree and there is
+nothing to do. If you just untarred a release, put its `lib/` next to the binary you built:
+
+```sh
+cp -R /path/to/mc-1.1.0-macos-arm64/lib build/lib
+```
+
+Without it the compiler builds fine and then refuses every program with
+`#include <sys>: not in this compiler and mc 1.1.0's library tree was not found: run mc install`,
+which is mc telling you exactly this.
 
 ## Test
 
