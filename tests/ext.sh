@@ -51,12 +51,21 @@ trap 'exit 130' INT
 say() { printf '  %s\n' "$*"; }
 bad() { printf '  FAIL %s\n' "$*"; fail=1; }
 
+# The two steps below need a C compiler and php-config, and the COMPILER needs
+# neither -- that is the claim of this repository, so they SKIP with the reason
+# printed rather than failing. A gate's oracle is not a dependency of the thing
+# it grades (probes/t3 made the same call for the same reason).
+have_cc() {
+    command -v php-config >/dev/null 2>&1 || return 1
+    command -v "$CC" >/dev/null 2>&1 || return 1
+    return 0
+}
+
 # --- 1. the layout gate ----------------------------------------------------
-if command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1 \
-   && "$CC" -o "$tmp/abi" tests/ext/abi.c $(php-config --includes) 2>"$tmp/cc.err"
+if have_cc && "$CC" -o "$tmp/abi" tests/ext/abi.c $(php-config --includes) 2>"$tmp/cc.err"
 then
     "$tmp/abi" > "$tmp/abi.txt"
-    n=0; b=0
+    n=0
     while read -r name val; do
         mine=$(sed -n "s/^#define  *$name  *\([0-9][0-9]*\).*/\1/p" lib/php_ext.mc | head -1)
         [ -n "$mine" ] || { bad "layout: lib/php_ext.mc has no $name"; continue; }
@@ -118,12 +127,16 @@ cmp -s "$tmp/n.err" "$tmp/i.err" || { ok=0; bad "check.php: stderr differs"
 [ "$ok" = 1 ] && say "check.php: $(wc -l < "$tmp/n.out" | tr -d ' ') lines, byte for byte php's own, exit $nrc"
 
 # --- 5. the wrong call, against a reference extension ----------------------
-if command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1 \
-   && "$CC" -shared -fPIC -o "$tmp/refx.so" tests/ext/refx.c $(php-config --includes) \
-        2>"$tmp/refx.err" \
-   || { command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1 \
-        && "$CC" -bundle -undefined dynamic_lookup -o "$tmp/refx.so" tests/ext/refx.c \
-             $(php-config --includes) 2>>"$tmp/refx.err"; }
+# A bundle is what an extension IS on macOS, and `-shared` is what makes one
+# everywhere else; try them in that order rather than switching on the host.
+build_ref() {
+    have_cc || return 1
+    inc=$(php-config --includes)
+    "$CC" -bundle -undefined dynamic_lookup -o "$tmp/refx.so" tests/ext/refx.c $inc \
+        2>"$tmp/refx.err" && return 0
+    "$CC" -shared -fPIC -o "$tmp/refx.so" tests/ext/refx.c $inc 2>>"$tmp/refx.err"
+}
+if build_ref
 then
     "$PHP" -d extension="$tmp/refx.so" "$EX/errors.php" > "$tmp/r.out" 2>&1
     if cmp -s "$tmp/r.out" "$EX/errors.expect"; then
