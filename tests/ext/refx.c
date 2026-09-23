@@ -39,6 +39,8 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_sum, 0, 3, IS_LONG, 0)
     ZEND_ARG_TYPE_INFO(0, b, IS_LONG, 0)
     ZEND_ARG_TYPE_INFO(0, c, IS_LONG, 0)
 ZEND_END_ARG_INFO()
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_zero, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_pos, 0, 1, IS_LONG, 0)
     ZEND_ARG_TYPE_INFO(0, n, IS_LONG, 0)
 ZEND_END_ARG_INFO()
@@ -75,6 +77,10 @@ PHP_FUNCTION(hello_sum) {
     ZEND_PARSE_PARAMETERS_END();
     RETURN_LONG(a + b + c);
 }
+PHP_FUNCTION(hello_zero) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_STR(zend_string_init("no arguments at all", 19, 0));
+}
 PHP_FUNCTION(hello_pos) {
     zend_long n;
     ZEND_PARSE_PARAMETERS_START(1, 1) Z_PARAM_LONG(n) ZEND_PARSE_PARAMETERS_END();
@@ -92,6 +98,7 @@ static const zend_function_entry refx_functions[] = {
     PHP_FE(hello_not,    ai_not)
     PHP_FE(hello_say,    ai_say)
     PHP_FE(hello_sum,    ai_sum)
+    PHP_FE(hello_zero,   ai_zero)
     PHP_FE(hello_pos,    ai_pos)
     PHP_FE_END
 };

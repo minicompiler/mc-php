@@ -26,6 +26,7 @@ var_dump(hello_not(true), hello_not(false));
 var_dump(hello_sum(1, 2, 3));
 var_dump(hello_sum(-1, 0, 1));
 var_dump(hello_pos(3));
+var_dump(hello_zero());
 
 echo "A\n";
 hello_say("B");
@@ -35,6 +36,9 @@ var_dump(hello_say("D"));                // a void function answers null
 try { hello_pos(-1); } catch (Throwable $e) {
     echo get_class($e), ": ", $e->getMessage(), "\n";
 }
+
+$z = new ReflectionFunction('hello_zero');
+echo $z->getNumberOfParameters(), " ", $z->getReturnType(), "\n";
 
 $r = new ReflectionFunction('hello_sum');
 echo $r->getNumberOfParameters(), " ",

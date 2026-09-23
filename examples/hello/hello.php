@@ -19,6 +19,8 @@ function hello_say(string $s): void { echo "[$s]\n"; }
 
 function hello_sum(int $a, int $b, int $c): int { return $a + $b + $c; }
 
+function hello_zero(): string { return "no arguments at all"; }
+
 function hello_pos(int $n): int {
     if ($n < 0) throw new InvalidArgumentException("negative: $n");
     return $n;

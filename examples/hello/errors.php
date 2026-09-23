@@ -23,6 +23,7 @@ foreach ([
     fn() => hello_half("2.5"),
     fn() => hello_sum(1, 2),
     fn() => hello_sum(1, 2, 3, 4),
+    fn() => hello_zero("x"),          // the plural of "expects exactly 0 arguments"
 ] as $f) {
     try { var_dump($f()); }
     catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }

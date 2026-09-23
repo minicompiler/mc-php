@@ -11,3 +11,4 @@ TypeError: hello_not(): Argument #1 ($b) must be of type bool, int given
 TypeError: hello_half(): Argument #1 ($x) must be of type float, string given
 ArgumentCountError: hello_sum() expects exactly 3 arguments, 2 given
 ArgumentCountError: hello_sum() expects exactly 3 arguments, 4 given
+ArgumentCountError: hello_zero() expects exactly 0 arguments, 1 given

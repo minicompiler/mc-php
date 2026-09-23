@@ -260,6 +260,8 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     calls against `errors.expect` (re-measured from `tests/ext/refx.c` wherever it can be built),
     and the seven refusals. **Green on macos/arm64, linux/aarch64 and linux/x86_64**, each
     against a php 8.5.10 of that host's own, and inside `tests/run.sh` and `tests/linux.sh`.
+    The macOS leg runs all six (the runner has `php-config` and `cc`); the Linux legs run four
+    and say which two they skipped and why.
   * `examples/` is no longer empty and `d8check.py` gained the SEVENTH regime, `extension`, with
     teeth: an example `tests/ext.sh` does not build is in no regime. `reference/` is a second
     RECORD beside `probes/` -- the extension road written by hand in mc, its README saying so in
@@ -277,9 +279,18 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     with `toml_get`/`toml_int`, which come free inside `<mc/core_build>` and are **not** in
     `tests/golden/surface.txt`. Nothing is asked for in code -- the names exist and behave --
     only that the family mc's own `docs/reference/toml.md` describes be named in the freeze.
-  * The fast gates are unchanged before and after: `test` 90/90 fixtures, 6/6 refusals,
-    `d8check` 103 `.php` in a regime, `lencheck`, `aritycheck`, D8 (a) 6 ok / 0 failed in both
-    worlds, D8 (b) `main.php` 6.80x and `heavy.php` 1.44x.
+  * **The program road does not move, and it is proved twice.** 96 of the 96 `.php` under
+    `tests/g/`, `tests/r/` and `tests/bench/` compile to **byte-identical objects** under a
+    `main` compiler and this one (the 97th is `28-compile-fatal.php`, which both refuse with the
+    same text). And the three graded directories come out at T10's recorded numbers **to the
+    test**: `tests/lang` **104**, `Zend/tests` **756**, `ext/standard/tests/strings` **263**,
+    measured against a SNAPSHOT of the compiler (T7's rule). The fast gates are green before and
+    after: `test` 90/90 fixtures, 6/6 refusals, `d8check` 103 `.php` in a regime, `lencheck`
+    554/0 (it caught a wrong byte count in `php_ext.mc` before the commit did), `aritycheck`,
+    D8 (a) 6 ok / 0 failed in both worlds, D8 (b) `main.php` 6.80x and `heavy.php` 1.44x.
+  * Cost: **314 lines of `src/ext.mc` (220 of them neither comment nor blank) and 379 of
+    `lib/php_ext.mc` (253)**; the front end moved **+22 lines across six files**, every one of
+    them guarded by `ph_ext`.
 - T10 done (`probes/t10`), on **mc 1.1.0**: the review backlog -- 59 Copilot findings across
   #1..#7 that nothing had acted on (`docs/review-backlog.md`), all three sections, plus one
   the sections did not name and a disk that ran out. **green 1637 -> 1697**:
