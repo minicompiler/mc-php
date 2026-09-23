@@ -23,6 +23,18 @@ try { echo 1 % 0; } catch (DivisionByZeroError $e) { echo $e->getMessage(), " @"
 $z = 0;
 try { echo 1 % $z; } catch (DivisionByZeroError $e) { echo $e->getMessage(), " @", $e->getLine(), "\n"; }
 
+// PHP_INT_MIN by -1, the one quotient an i64 cannot hold: php answers 0 for
+// the remainder, a float for the division and an ArithmeticError for intdiv,
+// and an x86-64 `idiv` answers SIGFPE for all three.
+$mn = PHP_INT_MIN;
+$m1 = -1;
+echo $mn % $m1, "\n";
+echo $mn / $m1, "\n";
+echo PHP_INT_MIN / -1, "\n";
+try { echo intdiv(PHP_INT_MIN, -1), "\n"; }
+catch (ArithmeticError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+echo intdiv(PHP_INT_MIN, 2), " ", intdiv(-7, 2), " ", intdiv(7, -2), "\n";
+
 // a compound assignment takes the same road
 $k = 17;
 $k %= 5;

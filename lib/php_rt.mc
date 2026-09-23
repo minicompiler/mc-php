@@ -1406,6 +1406,10 @@ uptr php_zv_div(uptr a, uptr b) {
     i64 y = php_zv_long(b);
     if (y == 0) { php_throw_str(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16)); return php_znull(); }
     i64 x = php_zv_long(a);
+    // PHP_INT_MIN / -1 is exact in arithmetic and not representable as an
+    // i64, so php answers the float; the `x % y` below is itself the #DE on
+    // x86-64 and has to be jumped over, not just its result corrected.
+    if (x == -9223372036854775807 - 1 && y == -1) return php_zdouble(9223372036854775808.0);
     if (x % y == 0) return php_zlong(php_div_i(x, y));
     return php_zdouble((f64) x / (f64) y);
 }
@@ -2070,6 +2074,13 @@ uptr php_explode(uptr sep, uptr s) {
 
 i64 php_intdiv(i64 a, i64 b) {
     if (b == 0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16)); return 0; }
+    // php's own message, and php's own class: the quotient is not an integer,
+    // which is a throw and not a trap
+    if (a == -9223372036854775807 - 1 && b == -1) {
+        php_throw_cls(php_str_new("ArithmeticError", 15),
+                      php_str_new("Division of PHP_INT_MIN by -1 is not an integer", 47));
+        return 0;
+    }
     return a / b;
 }
 i64 php_abs_i(i64 v) { if (v < 0) return 0 - v; return v; }
@@ -2080,10 +2091,22 @@ f64 php_max_f(f64 a, f64 b) { if (a >= b) return a; return b; }
 f64 php_min_f(f64 a, f64 b) { if (a <= b) return a; return b; }
 i64 php_mod(i64 a, i64 b) {
     if (b == 0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Modulo by zero", 14)); return 0; }
+    // `x % -1` is 0 for every x, and this is not a shortcut: on x86-64 `idiv`
+    // raises #DE for PHP_INT_MIN / -1 because the quotient is not
+    // representable, so `a / b` below killed the process with SIGFPE where
+    // php answers 0. AArch64's sdiv wraps instead and said 0 all along, which
+    // is why it took a cross-host fixture to find.
+    if (b == -1) return 0;
     return a - (a / b) * b;
 }
 i64 php_div_i(i64 a, i64 b) {
     if (b == 0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16)); return 0; }
+    // the same #DE as php_mod: the one quotient an i64 cannot hold. Its
+    // caller has already established that the division is exact, so this is
+    // unreachable from php_zv_div -- which sends the pair to the float road
+    // before it gets here -- and the guard is what makes that a guarantee
+    // rather than a reading of the caller.
+    if (a == -9223372036854775807 - 1 && b == -1) return a;
     return a / b;
 }
 f64 php_pow_f(f64 a, i64 e) {
