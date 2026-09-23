@@ -57,3 +57,17 @@ try {
 } catch (RuntimeException $e) {
     echo $e->getMessage(), " @", $e->getLine(), "\n";
 }
+
+// 8. a raise from a `for` CONDITION whose initializer and step are silent:
+//    each part is checked on its own mark, and the for still has to announce
+//    its own line or the warning names the statement above it (the reviewer
+//    of #16). A warning, and a caught error asked for its line.
+$v = 1;
+for ($w = 0; $w < 1 + $undef8; $w = $w + 1) { echo "never\n"; }
+echo "\n";
+$v = 2;
+try {
+    for ($w = 0; $w < intdiv(10, 0); $w = $w + 1) { echo "never\n"; }
+} catch (DivisionByZeroError $e) {
+    echo "intdiv @", $e->getLine(), "\n";
+}

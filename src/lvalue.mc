@@ -1084,6 +1084,7 @@ i64 ph_stmt_1() {
         // with the exception pending (tests/g/94-for-init-throws.php, found
         // by the reviewer of #16).
         i64 fsave = ph_can_throw;
+        i64 fany = 0;       // any part can raise: the for announces its line
         ph_can_throw = 0;
         // ph_stmt() consumes the initializer's own `;`, so the separator is
         // consumed here only when there is no initializer -- consuming it
@@ -1097,12 +1098,14 @@ i64 ph_stmt_1() {
             loop { if (!nd_next(it)) break; it = nd_next(it); }
             set_nd_next(it, ph_check(line, fl));
         }
+        fany = fany | ph_can_throw;
         ph_can_throw = 0;
         i64 c = ph_bool(1);
         if (!ph_at(";", 1)) c = ph_cond_checked(ph_to_bool(ph_expr(0), ph_ety), line, fl);
         // the CONDITION's own statements run every iteration, not once
         i64 cpre2 = ph_take_pend();
         ph_want(";", 1, "expected ; in for");
+        fany = fany | ph_can_throw;
         ph_can_throw = 0;
         i64 step = 0;
         if (!ph_at(")", 1)) {
@@ -1118,7 +1121,11 @@ i64 ph_stmt_1() {
             set_nd_next(pt, ph_check(line, fl));
             step = ph_blk(step);
         }
-        ph_can_throw = ph_can_throw | fsave;
+        // Each part's own check is placed above; what goes up is whether ANY
+        // part can raise, so the statement still announces its position and a
+        // diagnostic from the condition names the for's line and not the
+        // previous statement's (found by the reviewer of #16).
+        ph_can_throw = fany | ph_can_throw | fsave;
         ph_want(")", 1, "expected ) after for");
         i64 fopre = ph_take_pend();
         i64 alt = ph_accept(":", 1);
