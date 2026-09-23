@@ -36,4 +36,5 @@
 #include "closure.mc"
 #include "class.mc"
 #include "decl.mc"
+#include "ext.mc"
 #include "program.mc"

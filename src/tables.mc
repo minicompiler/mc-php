@@ -54,6 +54,10 @@ i64  ph_fvpc[PH_MAXFN];                 // the DECLARED element type of ...$rest
 i64  ph_fpr[PH_MAXFN];                  // bit i: parameter i is `&$x`
 i64  ph_frr[PH_MAXFN];                  // 1 when declared `function &f()`
 i64  ph_nfn;
+// the row ph_function() last defined, so ph_program can hand a TOP-LEVEL
+// declaration to the extension back end (a `function` nested in another one
+// is php's to register when the outer runs, and is not exported)
+i64  ph_last_fn;
 
 i64 ph_fn_find0(uptr n) {
     i64 i = 0;

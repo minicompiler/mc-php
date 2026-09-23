@@ -21,7 +21,9 @@ void ph_program() {
     loop {
         if (ph_tid == T_EOF) break;
         if (ph_is("function")) {
-            top_add(ph_function());
+            i64 fn = ph_function();
+            top_add(fn);
+            ph_ext_export(ph_last_fn, nd_file(fn), nd_line(fn));
             continue;
         }
         i64 s = ph_stmt_checked();
@@ -30,14 +32,26 @@ void ph_program() {
         ph_main_tail = s;
         loop { if (!nd_next(ph_main_tail)) break; ph_main_tail = nd_next(ph_main_tail); }
     }
+    // The tail, and it is the one place the two roads differ before the end.
+    // A PROGRAM ends: an uncaught throwable is fatal, every surviving
+    // __destruct runs (D7 has no refcount, so the end of the program is the
+    // honest point) and the output buffer is emptied. A module's MINIT ends
+    // no program -- phx_leave is the flush plus the bridge that turns a
+    // pending php throwable into a Zend one, the same pair every handler
+    // uses.
     i64 fin = node_new(N_EXPRSTMT, line, fl);
-    set_nd_a(fin, ph_call("php_uncaught", 0, 0, 0, 0, 0, TY_VOID));
-    // D7 has no refcount, so the honest destructor point is the end of the
-    // program: php runs every surviving __destruct there too.
     i64 fin1 = node_new(N_EXPRSTMT, line, fl);
-    set_nd_a(fin1, ph_call("php_shutdown", 0, 0, 0, 0, 0, TY_VOID));
     i64 fin2 = node_new(N_EXPRSTMT, line, fl);
-    set_nd_a(fin2, ph_call("php_flush", 0, 0, 0, 0, 0, TY_VOID));
+    if (ph_ext) {
+        set_nd_a(fin, ph_call("phx_leave", 0, 0, 0, 0, 0, TY_VOID));
+        set_nd_a(fin1, ph_call("phx_leave", 0, 0, 0, 0, 0, TY_VOID));
+        set_nd_a(fin2, ph_call("phx_leave", 0, 0, 0, 0, 0, TY_VOID));
+    }
+    if (!ph_ext) {
+        set_nd_a(fin, ph_call("php_uncaught", 0, 0, 0, 0, 0, TY_VOID));
+        set_nd_a(fin1, ph_call("php_shutdown", 0, 0, 0, 0, 0, TY_VOID));
+        set_nd_a(fin2, ph_call("php_flush", 0, 0, 0, 0, 0, TY_VOID));
+    }
     set_nd_next(fin, fin1);
     set_nd_next(fin1, fin2);
     if (ph_main_tail) set_nd_next(ph_main_tail, fin);
@@ -77,7 +91,19 @@ void ph_program() {
     set_nd_name(f, "main");
     set_nd_type(f, TY_I64);
     set_nd_b(f, b);
+    // The extension road: the same statement stream becomes the module's
+    // MINIT -- php_bootstrap, the class entries, a top-level `declare` or
+    // `require` run when php loads the module -- and the handlers and
+    // get_module go beside it. `main` does not exist in a .so.
+    if (ph_ext) {
+        set_nd_name(f, "mc_php_minit");
+        i64 m0 = param_new(TY_I64, "mtype");
+        i64 m1 = param_new(TY_I64, "mnum");
+        set_nd_next(m0, m1);
+        set_nd_a(f, m0);
+    }
     top_add(f);
+    if (ph_ext) ph_ext_emit(fl, line);
 }
 
 // A .php the core lexer would meet before `<?php` is a named refusal, not a
@@ -456,6 +482,7 @@ void ph_push_rt_host() {
 }
 
 void user_init() {
+    ph_ext_config();
     float_init();
     machine_arm64_float_init();
     machine_x86_64_float_init();
@@ -470,6 +497,13 @@ void user_init() {
     on_source(&ph_on_source);
     syntax("<?php", &ph_program);
     syntax("<?=", &ph_program);                   // a file may open with it
+    // The extension runtime names _emalloc, zend_type_error and two more
+    // that exist inside a running php and nowhere else, so it is pushed only
+    // on the road where they resolve. FIRST, so it is parsed LAST of the
+    // three: a push is a stack, and php_ext.mc reads the runtime's own
+    // globals (ph_exc) -- a call binds after the whole unit is parsed, a
+    // GLOBAL has to be declared before the line that names it.
+    if (ph_ext) p_push_source("php extension runtime", ph_ext_rt, ph_ext_rt_size);
     p_push_source("php runtime", ph_rt, ph_rt_size);
     ph_push_rt_host();
 }

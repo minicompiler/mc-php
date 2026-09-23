@@ -38,6 +38,7 @@ i64 ph_function() {
         fi = ph_nfn;
         ph_nfn = ph_nfn + 1;
     }
+    ph_last_fn = fi;
     st64(ph_fname + fi * 8, name);
     st64(ph_fret + fi * 8, PT_MIXED);
     st64(ph_fnp + fi * 8, 0);
