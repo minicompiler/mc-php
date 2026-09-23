@@ -125,7 +125,17 @@ jobs:
             case "$v" in
               *[!0-9.]* | *..* | .* | *. ) echo "::error::base tag $base is not X.Y.Z"; exit 1 ;;
             esac
-            x=${v%%.*}; rest=${v#*.}; y=${rest%%.*}; z=${rest#*.}
+            x=${v%%.*}; rest=${v#*.}
+            # TWO dots, checked before the split. Without this `v1.2` leaves
+            # `rest` as the whole remainder, so y and z both become `2` and the
+            # patch bump answers a version that was never anybody's -- 1.2.3 for
+            # a base of 1.2, and 1.1.2 for a base of 1. A malformed base has no
+            # successor and is rejected, not guessed at.
+            case "$rest" in
+              *.*) : ;;
+              *) echo "::error::base tag $base is not X.Y.Z"; exit 1 ;;
+            esac
+            y=${rest%%.*}; z=${rest#*.}
             case "$z" in *.*) echo "::error::base tag $base is not X.Y.Z"; exit 1 ;; esac
             case "$BUMP" in
               major) x=$((x + 1)); y=0; z=0 ;;

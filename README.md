@@ -90,7 +90,7 @@ build/mc-php --exe hello.php -o hello && ./hello
 sh tests/run.sh               # the fast gates, about three minutes
 ```
 
-Five gates, and they are what CI runs on every push:
+Seven gates, and they are what CI runs on every push:
 
 | gate | what it asserts |
 |---|---|
@@ -99,6 +99,11 @@ Five gates, and they are what CI runs on every push:
 | `aritycheck` | every library row's callee exists in the runtime with that many parameters |
 | fixtures | `tests/g/*.php` byte for byte what `php` prints, on **both** streams and the exit code |
 | refusals | `tests/r/*.php` parse under `php` and are refused **by name** by mc-php, exit 3 |
+| D8 (a) | the workload's `TestCase` **run** in both worlds -- every declared `test*` executed in each, both exiting 0, and the two outputs identical |
+| D8 (b) | `tests/bench/bench10.sh`, which refuses to time `main.php` and `heavy.php` unless the two worlds agree on both streams and the exit code |
+
+The last two are there because `d8check` is a **static** classifier: it proves every `.php` is
+reachable from a gate, not that one ever ran. A broken workload test passes it.
 
 The `.phpt` grid is the number this project answers with and it is **not** a per-commit gate --
 21395 tests, about forty minutes, and it needs php-src:

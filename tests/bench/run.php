@@ -51,3 +51,11 @@ foreach ($names as $n) {
     }
 }
 echo "tests: ", $ok, " ok / ", $bad, " failed\n";
+
+// A runner that PRINTS a failure and exits 0 is invisible to any caller that
+// checks the status, and both of this file's callers do. The success path is
+// left exactly as it was -- falling off the end, so php_shutdown and php_flush
+// still run in the mc-php world -- and only the failure path is new.
+if ($bad > 0) {
+    exit(1);
+}
