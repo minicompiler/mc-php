@@ -70,19 +70,34 @@ echo "== D8 (a): the workload's tests, RUN in both worlds =="
 # invoked. This does, and it is the probe's own step 10 carved across.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+# The SAME bounded runner the fixture gate and the bench use. Without it this
+# was the only unbounded gate in the repository: a compiler regression that
+# emits a non-terminating binary, or a run.php that hangs, would wait for ever
+# and never reach the cleanup. `lim` kills the process GROUP -- tests/mcphp.sh
+# starts the compiler as a child -- and says out of band whether the alarm
+# fired, because a program may legitimately exit(124). (Found by the reviewer
+# of #10, second round.)
+. tests/lim.sh
+LIM_SECS=${LIM_SECS:-120}
 want=$(grep -c 'function[[:space:]][[:space:]]*test' tests/bench/WorkloadTest.php)
 # The SAME sanitized environment on both sides: tests/mcphp.sh removes the
 # harness's own three variables before it execs the program, so php must not
 # keep them either or the two halves run under different inputs.
 pe=0
-if env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP \
+if lim env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP \
     ${PHP:-php} tests/bench/run.php > "$tmp/p.out" 2> "$tmp/p.err"
 then :; else pe=$?; fi
+pto=$timedout
 me=0
 if MCPHP_OUT=$tmp/d8.bin MCPHP_BIN=$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN") \
-    sh tests/mcphp.sh tests/bench/run.php > "$tmp/m.out" 2> "$tmp/m.err"
+    lim sh tests/mcphp.sh tests/bench/run.php > "$tmp/m.out" 2> "$tmp/m.err"
 then :; else me=$?; fi
-rm -f "$tmp/d8.bin"
+rm -f "$tmp/d8.bin" "$tmp/d8.bin.out" "$tmp/d8.bin.err"
+# The ALARM says so, not the exit code: a program may legitimately exit(124),
+# and reading the code as the alarm would call a real 124 a hang and a hang in
+# both worlds an agreement.
+[ "$pto" != yes ]      || { echo "  php timed out"; fail=1; }
+[ "$timedout" != yes ] || { echo "  mc-php timed out"; fail=1; }
 pok=$(grep -c '^ok ' "$tmp/p.out" || true)
 mok=$(grep -c '^ok ' "$tmp/m.out" || true)
 printf '  php     %s\n  mc-php  %s\n' "$(tail -1 "$tmp/p.out")" "$(tail -1 "$tmp/m.out")"
