@@ -217,21 +217,46 @@ def project_sweep():
     this adds is the part `main()` cannot see: a `.php` that is in the
     repository and NOT under `tests/` -- an `examples/` program, a fixture
     dropped at the root -- has no regime at all and no gate runs it.
+
+    There is one such place, and it is the SEVENTH regime: `extension`. An
+    `examples/<name>/` directory is a PHP extension's source, and its
+    obligation is `tests/ext.sh` -- which builds it into a `.so`, loads it
+    under `php` and compares its answers with php's own, on both streams and
+    the exit code. That is a differential and a stronger one than a bench
+    row, which is the same exemption `docs/plan.md` D8 already gives a
+    fixture. What is checked here is that the gate NAMES the directory: an
+    example the script does not build is in no regime again.
     """
     bad = []
     n = 0
+    ext = open(os.path.join(HERE, 'ext.sh'), encoding='latin-1').read()
     for root, dirs, names in os.walk(REPO):
+        # `reference/` is excluded for the reason `probes/` is: it is a
+        # RECORD of what was measured by hand, in mc, before the compiler
+        # could produce it -- not something this project ships and not
+        # something any gate compiles. reference/README.md says so in its
+        # first line, and the day mc-php emits one of those files it moves
+        # to examples/ and picks up the extension regime with it.
         dirs[:] = [d for d in dirs
-                   if d not in ('probes', 'build', 'php-src', '.git')]
+                   if d not in ('probes', 'build', 'php-src', '.git',
+                                'reference')]
         for f in names:
             if not f.endswith('.php'):
                 continue
             rp = os.path.relpath(os.path.join(root, f), REPO)
             n += 1
-            if rp.split('/')[0] != 'tests':
+            top = rp.split('/')
+            if top[0] == 'tests':
+                continue
+            if top[0] == 'examples' and len(top) == 3 and f'examples/{top[1]}' in ext:
+                continue
+            if top[0] == 'examples':
+                bad.append(f'{rp}: under examples/ but tests/ext.sh does not '
+                           f'build examples/{top[1]} (docs/plan.md D8)')
+            else:
                 bad.append(f'{rp}: outside tests/, so no regime and no gate '
                            f'runs it (docs/plan.md D8)')
-    print(f'  {n:4d}  .php in the project (probes/ excluded: it has its own)')
+    print(f'  {n:4d}  .php in the project (probes/ and reference/ excluded: both are records)')
     return bad
 
 

@@ -1,0 +1,52 @@
+# hello -- a PHP extension, described by a file.
+#
+#     mc-php build examples/hello --config examples/hello/mcphp.toml
+#
+# and build/hello.so is what `php -d extension=...` loads. No make, no cmake,
+# no phpize, no ./configure, no php development headers -- the four numbers in
+# [php] are everything this compiler knows about the php it is targeting, and
+# `php -i` prints all four.
+#
+# The keys under [project], [linker] and [target] are mc's own and mc's driver
+# reads them (docs/reference/toml.md in THAT repository). The two tables below
+# them are mc-php's, and mc ignores what it does not know -- which is what lets
+# one file drive the whole road with no second parser.
+#
+# docs/mcphp-toml.md is the full schema. What is implemented today is
+# [extension].name, [extension].version and the four [php] values; the rest of
+# that page is still the design.
+
+[project]
+entry = "hello.php"
+out = "build/hello.so"
+kind = "exe"
+
+# The escape hatch, and on macOS it is the only road: mc writes a Mach-O
+# EXECUTABLE by itself and php loads a BUNDLE, which is a different file type.
+# probes/t2 and probes/t3 use the same line for the same reason.
+[linker]
+cmd = "ld"
+args = ["-bundle", "-undefined", "dynamic_lookup",
+        "-arch", "arm64", "-platform_version", "macos", "13.0", "13.0",
+        "-syslibroot", "{sdk}", "-lSystem",
+        "-o", "{out}", "{obj}"]
+
+[extension]
+name = "hello"
+version = "0.1.0"
+
+# Read off the target php with `php -i`, and nothing else about it is
+# consulted. Stating them rather than pointing at a binary is what makes a
+# cross-build need no php on the machine; it is also what makes this file go
+# stale when the target php's minor moves, which tests/ext.sh checks on every
+# run and names.
+#
+#     PHP API             => 20250925        api
+#     PHP Extension Build => API20250925,NTS build_id
+#     Thread Safety       => disabled        thread_safety = false
+#     Debug Build         => no              debug = false
+[php]
+api = 20250925
+build_id = "API20250925,NTS"
+thread_safety = false
+debug = false

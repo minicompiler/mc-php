@@ -1,18 +1,35 @@
 # examples
 
-Empty on purpose, for now.
+A PHP extension, one directory each: a `.php` source, an `mcphp.toml` beside it, and
+`mc-php build` producing a `.so` that `php -d extension=...` loads. The schema is
+[`docs/mcphp-toml.md`](../docs/mcphp-toml.md); what is implemented of it today is
+[`docs/php-extension.md`](../docs/php-extension.md).
 
-The examples this directory is for are **PHP extensions**: a `.php` source, an `mcphp.toml`
-beside it, and `mc-php build` producing a `.so` that `php -d extension=...` loads. The schema is
-written down in [`docs/mcphp-toml.md`](../docs/mcphp-toml.md) and the reader that acts on it does
-not exist yet, so an example here would be a file nothing can build.
+| | |
+|---|---|
+| [`hello/`](hello) | seven functions with declared scalar parameters and a declared scalar return -- `int`, `string`, `float`, `bool`, `void`, three arguments, and one that throws |
 
-The programs that DO run today are not examples, they are gates, and they live where their
-obligation is:
+## The regime
+
+`docs/plan.md` D8 is why a `.php` cannot land here without an obligation, and
+[`tests/d8check.py`](../tests/d8check.py) enforces it: a `.php` outside `tests/` is in no regime
+and fails the gate, **unless** it is under `examples/<name>/` and
+[`tests/ext.sh`](../tests/ext.sh) names that directory. That is the seventh regime, `extension`,
+and its obligation is a differential:
+
+* the source is built into a `.so`, and `php` loads it;
+* `check.php` runs twice -- once with the module loaded, once with the source `require`d -- and
+  the two must print the same bytes on **each** stream and exit the same;
+* `errors.php` is graded against `errors.expect`, which [`tests/ext/refx.c`](../tests/ext/refx.c)
+  measures from an extension of the same signatures built the ordinary C way. It cannot be a
+  differential against the interpreted source: an extension's function is an *internal*
+  function, and php does not report a bad call to one the way it reports a bad call to a
+  userland one.
+
+That is a stronger obligation than a bench row, which is the same exemption D8 already gives a
+fixture.
+
+The programs that are not extensions are gates and live where their obligation is:
 
 * [`tests/g/`](../tests/g) -- 89 differential fixtures, each byte for byte what `php` prints
 * [`tests/bench/`](../tests/bench) -- the D8 workload, run under `php` and as an mc-php binary
-
-`docs/plan.md` D8 is why a `.php` cannot land here without a test in both worlds and a bench row,
-and `tests/d8check.py` is what enforces it: a `.php` outside `tests/` is in no regime and fails
-the gate. When the first example lands, it brings its regime with it.
