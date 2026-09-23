@@ -7,6 +7,19 @@ freeze is additive, so a later minor keeps every name 1.0.0 published -- and eac
 the version it measured on (T5 onward on **mc 1.1.0**, which is what `mc --version`
 answers here).
 
+## What this is for
+
+**A compiler that turns PHP source into a native PHP extension** (`.so`/`.dll`): no C, no
+`phpize`, no autotools, no php development headers. The front end is the PHP grammar taught to
+mc, in `src/`. The back end emits `get_module()`, a `zend_module_entry`, the
+`zend_function_entry` tables and the handlers; it is proven by hand in `probes/t1`..`t3` and is
+**not written yet**.
+
+The earlier line -- PHP to a standalone binary -- is closed. Its front end is what survives and
+it is what `src/` is.
+
+## The rules
+
 - A `.php` file is PHP: it must run under `php` unchanged. No dialect. mc-php accepts a SUBSET:
   no `eval`/interpreter (D1) and static variable types (D4); a refusal is a named compile error.
 - The oracle is php-src's `.phpt` corpus under `php` and under the mc-php build; every claim
@@ -15,8 +28,42 @@ answers here).
 - Every probe under `probes/` prints one number and exits 0 only when it measured it.
 - Every `.php` written here has PHPUnit tests run under `php` AND under `mc-php test` (D8), and a
   row in `bench/` timing `php` against the mc-php binary. No PHP lands without both.
+  `tests/d8check.py` enforces it: a `.php` in no regime fails the gate.
 - One agent at a time; measurements before design; a decision in `docs/plan.md` § 3 is taken only
   by the probe that decides it.
+
+## A project file, not a command line
+
+Exactly as `mc.toml` is to mc, an extension is described by a FILE and `mc-php build` does the
+whole road from it: read the file, read the target php, compile, link, write the artefact. **No
+make, no cmake, no long command lines, nothing the user has to remember twice.** The schema is
+`docs/mcphp-toml.md`; it is decided and **not implemented**.
+
+The repository's own build follows the same rule: `mc build` for the compiler, shell only for the
+test grid. There is no makefile here and there should not be one.
+
+The schema stays inside the TOML subset `src/toml.mc` already parses, because that parser comes
+free inside `<mc/core_build>` -- no inline tables, no literal strings, no nesting.
+
+## `src/` is the compiler; `probes/` is the record
+
+```
+mc.toml        mc build -> build/mc-php
+src/*.mc       the compiler, 15 files, included in ORDER (mc is single pass)
+lib/php_rt.mc  the runtime, #embed'ed and pushed into every program
+tests/         the fixtures, the grid driver and the five fast gates
+docs/          the plan, the decisions, the mcphp.toml schema
+probes/        T0..T10. FROZEN.
+```
+
+**Nothing under `probes/` is ever edited.** A probe's value is that it still answers the number
+it published; a probe that gets fixed has stopped being a record. `src/`, `lib/` and `tests/`
+were carved out of `probes/t10/`, which keeps its own copies and still runs. A change goes to
+`src/` and never to the probe.
+
+`tests/carve.sh` is that carve's own proof and has a short life by design: it builds both and
+compares the two binaries byte for byte, and it is deleted by the first commit that changes what
+the compiler does.
 
 ## State
 - 2026-09-15: repository created; plan and test grid written; no probe run yet.

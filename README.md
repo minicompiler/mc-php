@@ -1,22 +1,181 @@
 # mc-php
 
-PHP 8.5, compiled to a native binary by a compiler taught to [mc](https://github.com/minicompiler/mc).
+**A compiler that turns PHP source into a native PHP extension -- no C, no `phpize`, no
+autotools, no php development headers.** The front end is PHP 8.5 taught to
+[mc](https://github.com/minicompiler/mc) as one Tier 3 module; the back end emits `get_module()`,
+a `zend_module_entry` and the `zend_function_entry` tables that php loads.
 
-The rule that makes the project meaningful: **a `.php` source is PHP**. It runs under `php` and it
-compiles with `mc-php`, and the two must agree -- the oracle is php-src's own `.phpt` corpus, run
-under both. No dialect, no annotations, no "mc-php mode".
+The rule that makes it meaningful: **a `.php` source is PHP**. It runs under `php` and it compiles
+with `mc-php`, and the two must agree -- the oracle is php-src's own `.phpt` corpus, run under
+both. No dialect, no annotations, no "mc-php mode".
 
-What a compiled program is: one binary (no `php`, no `.ini`, no `url/file.php`, no CGI/FCGI). The
-web shape is a server the runtime provides (SAPI is ours). Multithreading, async and anything PHP
-does not offer today come AFTER everything PHP already provides works.
+---
 
-Status: **proof of concept**. `docs/plan.md` is the plan and the test grid; `probes/` holds the
-measurements, in order: T1..T4 decided the design before any of the compiler existed, T5 built
-the first compiler and runtime, and T6..T10 worked the wrong-reason table down. The compiler is
-`probes/t10/php.mc` (the module mc is taught) plus `probes/t10/php_rt.txt` (the runtime), and
-the number it answers with is the phpt grid's green/total.
+## The state today, honestly
 
-Consumer of mc's 1.0 frozen surface (`docs/reference/hooks.md` § 8 there): nothing here edits
-mc's `src/`; a gap in mc's surface is reported to mc, never worked around here. Built with
-whatever 1.x is installed -- the freeze is additive, so a later minor keeps every name 1.0.0
-published -- and each probe records the version it measured on (mc 1.1.0 for T10).
+This is a **proof of concept**, and what exists is the front end.
+
+**What works.** The compiler reads PHP 8.5 and produces a native macOS arm64 binary. Over
+php-src's whole `.phpt` corpus -- 21395 tests -- it agrees with `php` on **1697**, byte for byte
+on stdout and on the exit code. Classes, interfaces, traits, enums, closures, exceptions,
+references, `match`, heredocs, late static binding, `printf`, a 273-row library, `ext/json`
+written in mc: all of it is in, and each of it is measured rather than claimed.
+
+**What does not work yet.**
+
+| | |
+|---|---|
+| **the extension back end** | **not written.** This repository compiles a PHP *program* to a binary today. `get_module()` and the module entry are proven by hand outside it (`probes/t1`..`t3`) and are the next step. |
+| `mcphp.toml` | the project file is **designed and documented, not implemented** -- see [docs/mcphp-toml.md](docs/mcphp-toml.md). Today the compiler is driven as `mc-php --exe FILE.php -o BIN`. |
+| hosts other than macOS arm64 | `lib/php_rt.mc` includes `<sys>`, mc's libSystem layer, so a program it writes is a macOS program. Nothing here has been run on Linux or Windows. |
+| generators | `yield` is not built. 252 of the 13623 disagreeing tests use it; the decision and its cost are in `docs/plan.md` D6. |
+| `eval` and reflection | refused **by design**, by name, with exit 3 -- `docs/plan.md` D1 and D6. A refusal is an answer, not a failure. |
+| 19698 of the 21395 tests | still disagree or are refused. The number below is the whole claim; nothing here rounds it up. |
+
+---
+
+## What you need
+
+Nothing that compiles C. That absence is the product, so it is stated rather than left to be
+noticed: **no php header file is opened on any row, and `php-config`, `phpize` and the php
+development package are on no row at all.** The only thing read out of php is four values from
+`php -i`, and even those can be written into the project file so a cross-build needs no php on
+the machine.
+
+### To build the compiler and run the tests (today)
+
+| | what | why |
+|---|---|---|
+| every OS | **mc 1.1.0 or newer** -- [a release](https://github.com/minicompiler/mc/releases), untarred, `mc` on `PATH` | `p_skip_to` and `syntax_expr("$")` landed in 1.1.0 and PHP's byte stream cannot be owned without them (`probes/t4`) |
+| every OS | **php 8.5**, any build | only for the TESTS: every fixture is compared byte for byte against what `php` prints |
+| every OS | **python3** | the `.phpt` grid runner and three source gates |
+| for the grid only | **php-src at tag `php-8.5.10`**, cloned at the repository root | it is the oracle corpus, 21395 tests, and it is not committed |
+
+### What the extension road needs (the road being built)
+
+One row per operating system, each naming the exact command that provides it.
+
+| OS | what | provided by | note |
+|---|---|---|---|
+| **every** | mc 1.1.0+ | [a published mc release](https://github.com/minicompiler/mc/releases) | measured here |
+| **every** | a `php` of the **target** build, *or* four values written into `mcphp.toml` | any php 8.5 install | only `PHP API`, `PHP Extension Build`, `Thread Safety` and `Debug Build` are read -- they are `zend_module_entry`'s `zend_api`, `build_id`, `zts` and `zend_debug`, and nothing else about php is consulted. **Cross-build: state the four and no php is needed.** |
+| **macOS** | `ld`, and `xcrun --show-sdk-path` | `xcode-select --install` (the Xcode command line tools) | the link is `ld -bundle -undefined dynamic_lookup` |
+| **Linux** | a linker that does `-shared -Bsymbolic` | `apt install lld` / `dnf install lld` -- `ld.lld` is what was measured | `-Bsymbolic` is **not optional**: mc takes the address of its own functions with `adrp`/`add`, and in a shared object a default-visibility symbol is preemptible, so the link is refused without it |
+| **Windows** | `lld-link` and `llvm-dlltool` | one LLVM install ([releases](https://github.com/llvm/llvm-project/releases), or `brew install llvm` when cross-building) | there is no flat namespace there, so every `zend_*` comes from an import library -- and an import library is only a list of names, so a two-line `.def` plus `llvm-dlltool` replaces the whole development pack. **No Windows SDK, no php devel pack.** |
+
+Provenance, because a dependency list is worth what its measurement is worth: the mc and php rows
+and the macOS tools were verified on this host (macOS 26 / arm64, PHP 8.5.10 Homebrew NTS, mc
+1.1.0) on 2026-09-22, and the four-value mapping was checked against `php-src/Zend/zend_modules.h`
+at tag `php-8.5.10`. The Linux and Windows link lines are the owner's measurements, recorded here;
+no leg of this repository has run on either host yet.
+
+---
+
+## Build
+
+```sh
+mc build                      # -> build/mc-php
+```
+
+That is the whole of it. `mc.toml` is the project file and there is no makefile: the same rule
+the compiler is being built to offer, applied to itself.
+
+```sh
+build/mc-php --exe hello.php -o hello && ./hello
+```
+
+## Test
+
+```sh
+sh tests/run.sh               # the fast gates, about three minutes
+```
+
+Five gates, and they are what CI runs on every push:
+
+| gate | what it asserts |
+|---|---|
+| `d8check` | every `.php` in the project is in a regime with an obligation (`docs/plan.md` D8) |
+| `lencheck` | every hand-counted string length in `src/` and `lib/` is right |
+| `aritycheck` | every library row's callee exists in the runtime with that many parameters |
+| fixtures | `tests/g/*.php` byte for byte what `php` prints, on **both** streams and the exit code |
+| refusals | `tests/r/*.php` parse under `php` and are refused **by name** by mc-php, exit 3 |
+
+The `.phpt` grid is the number this project answers with and it is **not** a per-commit gate --
+21395 tests, about forty minutes, and it needs php-src:
+
+```sh
+git clone --depth 1 --branch php-8.5.10 https://github.com/php/php-src php-src
+sh tests/grid.sh build/mc-php build/grid all
+```
+
+---
+
+## The numbers
+
+Measured **2026-09-22**, on macOS 26 / arm64, PHP 8.5.10 (Homebrew, NTS), mc 1.1.0, php-src at
+tag `php-8.5.10`. Every number here was re-run on this tree after the restructure and is
+identical to what `probes/t10` published.
+
+| the `.phpt` grid | green | of |
+|---|---|---|
+| the whole corpus | **1697** | 21054 |
+| `Zend/tests` | 756 | 5306 |
+| `tests/lang` | 104 | 293 |
+| `ext/standard/tests/strings` | 263 | 734 |
+
+The corpus row carries a **band**: two runs of the same binary gave 1676 and 1688 before T10's
+work, and all twelve of the difference were filesystem tests that `chdir()` into a shared working
+directory while six of them run at once. The three directory rows do not move. A block worth
+fewer than a dozen tests should be read on the directories, not on the corpus.
+
+| the gates | |
+|---|---|
+| fixtures | **89 / 89** agree with `php` |
+| refusals | **6 / 6** refused by name, exit 3 |
+| `lencheck` | 514 literal lengths, 0 wrong |
+| `aritycheck` | 273 library rows, 0 wrong |
+| `d8check` | 102 `.php`, every one in a regime |
+| peak scratch disk, full grid | **2152 KiB** -- bounded by the job count, not the corpus |
+
+Against `php` on a real workload (`tests/bench/`, seven interleaved repetitions): mc-php wins the
+whole program **6.54x** on `main.php` and **1.43x** on `heavy.php`, because php pays about 38 ms
+of start-up -- and **loses the work**, by 8x to 23x. `docs/plan.md` D7 names the cause: every
+value is arena-allocated and never freed, an array copies eagerly, a string is immutable.
+
+---
+
+## The layout
+
+```
+mc.toml              the mc project:  mc build -> build/mc-php
+src/*.mc             the compiler -- one mc Tier 3 module, 15 files
+lib/php_rt.mc        the runtime, #embed'ed into the compiler and pushed into every program
+tests/               the fixtures, the .phpt grid driver and the gates
+examples/            empty until the extension road can build one
+docs/                the plan, the decisions, the mcphp.toml schema
+probes/              the measurement record, T0..T10 -- FROZEN, never edited
+php-src/             php's own source, cloned, not committed
+```
+
+[docs/layout.md](docs/layout.md) has a line for each `src/` file and the one rule about `probes/`.
+
+`src/` and `lib/` were carved out of `probes/t10/`, which keeps its own copies so it still
+reproduces the number it published. `tests/carve.sh` proves the carve moved nothing, by building
+both and comparing the two binaries byte for byte.
+
+---
+
+## Where the design is written down
+
+| | |
+|---|---|
+| [docs/plan.md](docs/plan.md) | **read this first.** The plan, the decisions D1..D10, the test grid, and the open mc gaps |
+| [docs/mcphp-toml.md](docs/mcphp-toml.md) | the `mcphp.toml` project file: the schema, decided, not implemented |
+| [docs/layout.md](docs/layout.md) | what is in each directory |
+| [probes/README.md](probes/README.md) | the index of the measurements, T0..T10, each with its own `RESULTS.md` |
+| [CLAUDE.md](CLAUDE.md) | the operating rules |
+
+mc-php is a **consumer** of mc's 1.0 frozen surface (`docs/reference/hooks.md` § 8 there). Nothing
+here edits mc's `src/`; a gap in mc's surface is reported to mc with a reproducer, never worked
+around. Two such gaps were found and both were closed in mc 1.1.0; their reproducers are kept
+under `probes/gap-*`.
