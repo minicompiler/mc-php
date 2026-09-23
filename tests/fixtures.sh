@@ -19,6 +19,27 @@ root=$(CDPATH= cd -- "$here/.." && pwd)
 cd "$root"
 PHP=${PHP:-php}
 P=tests
+# HOW php is run here, and it is this repository's choice and not the
+# machine's. A bare `php` reads the host's php.ini: a host whose
+# display_errors is Off prints no warning where mc-php prints one, and ten
+# fixtures "failed" on a CI runner for exactly that (2026-09-23).
+#
+# These four are the configuration mc-php IMPLEMENTS. It has no php.ini of its
+# own, so its diagnostic channel is one fixed behaviour, and each of these was
+# MEASURED against it rather than assumed:
+#
+#   display_errors=1      the diagnostic on stdout
+#   log_errors=1          and the `PHP Warning:` copy on stderr. With 0 php
+#                         stops writing it and mc-php does not, and this gate
+#                         compares BOTH streams
+#   html_errors=0         plain text
+#   error_reporting=E_ALL which on php 8.5 is 30719 and INCLUDES E_DEPRECATED
+#                         -- `E_ALL & ~E_DEPRECATED` is 22527 and made php drop
+#                         a str_getcsv() deprecation that mc-php emits
+#
+# The GRID is a different thing and uses probes/t0/phpt-run.py's DEFAULT_INI,
+# which sets log_errors=0 -- correct there, because the grid ignores stderr.
+PHPINI="-d display_errors=1 -d log_errors=1 -d html_errors=0 -d error_reporting=E_ALL"
 BIN=${BIN:-build/mc-php}
 # A measurement takes a SNAPSHOT of the compiler (T7's note): an edit during
 # the run cannot then corrupt it.
@@ -59,7 +80,7 @@ for f in $P/g/*.php; do
     # exported for mcphp.sh's benefit and mcphp.sh unsets all three before
     # the program runs, so leaving them here gave the two worlds different
     # environments for the same fixture.
-    lim env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP "$PHP" "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?; pto=$timedout
+    lim env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP "$PHP" $PHPINI "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?; pto=$timedout
     lim $P/mcphp.sh "$f" > "$tmp/m.out" 2> "$tmp/m.err"; me=$?; mto=$timedout
     rm -f "$MCPHP_OUT" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
     # A fixture that HANGS in both worlds leaves both streams empty and both
@@ -95,7 +116,7 @@ for f in $P/r/*.php; do
     # differential is that php accepts the source as php at all -- otherwise
     # "mc-php refuses what php accepts" is only half measured, and a typo
     # would read as a refusal.
-    if ! env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP "$PHP" -l "$f" > "$tmp/l.out" 2>&1; then
+    if ! env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP "$PHP" $PHPINI -l "$f" > "$tmp/l.out" 2>&1; then
         printf '  FAIL  %-26s php will not parse it: %s\n' \
             "$(basename "$f")" "$(head -1 "$tmp/l.out")"
         fail=1
