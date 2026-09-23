@@ -159,7 +159,18 @@ i64 ph_inline_html(uptr fl, i64 line) {
 // function RETURNED, inside the same statement, reports the line that callee
 // last set. A statement whose warning comes before any user call -- which is
 // nearly all of them -- is exact.
-// realpath is <mc/host>'s own extern (src/host_macos.mc) -- not redeclared
+// realpath(3) is in libSystem and in musl and glibc alike, but only ONE of
+// mc's host layers declares it -- src/host_macos.mc does and src/host_linux.mc
+// does not -- so borrowing the host's declaration made this compiler buildable
+// on macOS and nowhere else (`src/stmt.mc:184: call to unknown function`, the
+// first thing the linux/aarch64 cross-build said).
+//
+// It cannot be declared here for every host: a second `extern` of a name the
+// host layer already declared is `function declared twice`, which is what the
+// macOS build answered when it was. So it is the entry's, like the host layer
+// itself -- src/host_extra_linux.mc declares it and the Linux entries include
+// that, and the macOS entry includes nothing because mc's macOS host already
+// has it.
 #define PH_MAXFL 64
 uptr ph_flsrc[PH_MAXFL];
 uptr ph_flabs[PH_MAXFL];
