@@ -1,13 +1,16 @@
 <?php
-// A `for` whose INITIALIZER throws must not run the condition or the body.
+// A `for` whose INITIALIZER throws must not run the condition or the body,
+// and the same for each of its other two parts.
 //
-// The initializer is lowered with ph_stmt(), which prepends a position and
-// appends no check -- so what stops the body is ph_cond_checked, and it fires
-// because ph_stmt() restores `raises | save`: the initializer's mark reaches
-// the condition, the condition becomes a temporary, and the check goes between
-// computing it and branching on it, inside the loop head and before the body.
-// A `for` with no condition at all is the one shape that would skip it, and it
-// is refused outright ("expected ; in for"), so it cannot reach here.
+// Each part is checked on its own mark (src/lvalue.mc, the `for` lowering):
+// the initializer gets an explicit check right after it, the condition gets
+// ph_cond_checked's (between computing it and branching on it), and the step
+// gets one right after it, wrapped in a block. None relies on another, so an
+// empty condition -- `for (;;)`, or `for ($i = f();; ...)`, whose condition
+// is ph_bool(1) -- still stops the body when the initializer throws (case 8).
+// Case 9 is the parse this file also found: after a non-empty initializer the
+// empty condition's `;` used to be consumed as the initializer's own, and
+// `for ($i = 0;; $i = $i + 1)` was refused with "expected ; in for".
 declare(strict_types=1);
 
 function boom(string $where): int { echo "boom($where) ran\n"; throw new RuntimeException($where); }
@@ -56,3 +59,18 @@ try {
 } catch (RuntimeException $e) { echo "caught ", $e->getMessage(), "\n"; }
 
 echo "done\n";
+
+// 8. the initializer throws and the condition is EMPTY: nothing but the
+//    initializer's own check stands between it and the body
+try {
+    for ($q = boom("init-nocond");; $q = $q + 1) { echo "BODY\n"; break; }
+} catch (RuntimeException $e) { echo "caught ", $e->getMessage(), "\n"; }
+
+// 9. an initializer, an empty condition and a step; and the fully empty form
+for ($r = 0;; $r = $r + 1) { echo "r $r\n"; if ($r > 1) break; }
+for (;;) { echo "forever once\n"; break; }
+
+// 10. the step throws with the condition empty
+try {
+    for ($s = 0;; $s = boom("step-nocond")) { echo "body $s\n"; }
+} catch (RuntimeException $e) { echo "caught ", $e->getMessage(), "\n"; }

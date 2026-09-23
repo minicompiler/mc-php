@@ -1085,15 +1085,19 @@ i64 ph_stmt_1() {
         // by the reviewer of #16).
         i64 fsave = ph_can_throw;
         ph_can_throw = 0;
+        // ph_stmt() consumes the initializer's own `;`, so the separator is
+        // consumed here only when there is no initializer -- consuming it
+        // after one ate the EMPTY condition's `;` and refused valid php:
+        // `for ($i = 0;; $i++)` said "expected ; in for".
         i64 init = ph_empty();
-        if (!ph_at(";", 1)) init = ph_stmt();
+        if (ph_at(";", 1)) ph_next();
+        else init = ph_stmt();
         if (ph_can_throw) {
             i64 it = init;
             loop { if (!nd_next(it)) break; it = nd_next(it); }
             set_nd_next(it, ph_check(line, fl));
         }
         ph_can_throw = 0;
-        if (ph_at(";", 1)) ph_next();
         i64 c = ph_bool(1);
         if (!ph_at(";", 1)) c = ph_cond_checked(ph_to_bool(ph_expr(0), ph_ety), line, fl);
         // the CONDITION's own statements run every iteration, not once
