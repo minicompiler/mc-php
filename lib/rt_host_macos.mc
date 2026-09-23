@@ -10,7 +10,7 @@
 // never by a conditional, because there is no such thing in this language.
 //
 // Everything here was IN lib/php_rt.mc until the hosts branch: the
-// `#include <sys>` at the top and the eleven declarations plus the flags that
+// `#include <sys>` at the top and the fourteen declarations plus the flags that
 // sat above the stream table. Nothing about it changed for macOS -- the same
 // calls, the same numbers, the same two struct stat offsets -- which is what
 // makes the macOS grid and the macOS gates the regression proof for the split.

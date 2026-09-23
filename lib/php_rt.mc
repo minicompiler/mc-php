@@ -6740,7 +6740,7 @@ uptr php_zv_iter(uptr z) {
 // IS_RESOURCE whose value is an index into one table -- php's own resource
 // ids are small integers too, and `var_dump` prints exactly that.
 //
-// The eleven calls and the six flags this section used to declare are the host
+// The fourteen calls and the six flags this section used to declare are the host
 // layer's now (lib/rt_host_macos.mc, lib/rt_host_linux.mc): their numbers are
 // per-system and their names are not.
 

@@ -58,7 +58,7 @@ that is never freed (D7).
 
 The runtime is about the programs mc-php WRITES, and what those programs call the system with is
 not what the compiler calls it with. Until the hosts branch `lib/php_rt.mc` opened with
-`#include <sys>` -- mc's libSystem layer -- and declared eleven more libSystem names and six
+`#include <sys>` -- mc's libSystem layer -- and declared fourteen more libSystem names and six
 macOS `fcntl.h` numbers further down, so every program it wrote was a macOS program and nothing
 else. Those declarations are now one file per host, chosen at run time by `src/program.mc` from
 `host_os()`/`host_arch()` and pushed AHEAD of the runtime (a push puts its source on top of the
