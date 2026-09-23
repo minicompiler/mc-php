@@ -209,6 +209,27 @@ i64 ph_posstmt(uptr fl, i64 line) {
     return s;
 }
 
+// is `s` already a php_pos for this file and this line? An outer statement
+// whose first inner lowering is itself a statement at the same line -- a
+// `for`'s init is the one in the corpus -- announced the same position twice
+// in a row, the second call overwriting what the first had just written.
+i64 ph_is_pos_at(i64 s, uptr fl, i64 line) {
+    // through a block, because the first statement of a block runs whenever
+    // the block does; NOT through a loop or an if, whose body may not run.
+    loop {
+        if (nd_kind(s) != N_BLOCK) break;
+        if (!nd_a(s)) return 0;
+        s = nd_a(s);
+    }
+    if (nd_kind(s) != N_EXPRSTMT) return 0;
+    if (nd_line(s) != line) return 0;
+    if (!str_eq(nd_file(s), fl)) return 0;
+    i64 c = nd_a(s);
+    if (!c) return 0;
+    if (nd_kind(c) != N_CALL) return 0;
+    return str_eq(nd_name(c), "php_pos");
+}
+
 // A CONDITION that can throw has to be checked before the branch is taken:
 // `if (throws()) { a(); } else { b(); }` must run neither arm, and the check
 // appended after the whole statement (ph_stmt_checked) is too late -- the

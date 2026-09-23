@@ -577,6 +577,7 @@ i64 ph_stmt() {
     uptr fl = ph_tfile;
     i64 s = ph_stmt_1();
     if (nd_kind(s) == N_BLOCK && !nd_a(s) && !nd_next(s)) return s;
+    if (ph_is_pos_at(s, fl, line)) return s;
     i64 p = ph_posstmt(fl, line);
     set_nd_next(p, s);
     return p;
