@@ -36,11 +36,17 @@ python3 tests/aritycheck.py || fail=1
 
 echo ""
 echo "== the compiler =="
-if [ ! -x "$BIN" ]; then
-    # mc --exe must not overwrite a signed executable at the same inode: the
-    # kernel kills the next run with SIGKILL (mc's M12 note). `mc build`
-    # unlinks it first, which is one more reason the build is mc.toml's.
+# ALWAYS, unless the caller named a binary of its own. Building only when the
+# file is missing tests a stale compiler after every edit to src/, which is
+# the one failure a gate must not have. It costs about two seconds.
+#
+# `mc build` unlinks the output first, which it has to: mc --exe over a signed
+# executable at the same inode makes the kernel SIGKILL its next run (mc's M12
+# note). One more reason the build belongs to mc.toml and not to a shell line.
+if [ "$BIN" = "build/mc-php" ]; then
     "$MC" build || fail=1
+else
+    echo "  BIN was given: $BIN (not rebuilding)"
 fi
 [ -x "$BIN" ] || { echo "  no $BIN"; exit 1; }
 ls -l "$BIN" | awk '{ printf "  %s  %s bytes\n", "'"$BIN"'", $5 }'

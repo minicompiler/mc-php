@@ -22,7 +22,8 @@ compiler, shell only for the test grid.
 
 ## Why this subset of TOML
 
-`mc-php` is an mc program, and `src/toml.mc` comes free inside `<mc/core_build>`. Using it costs
+`mc-php` is an mc program, and mc's own TOML parser -- `src/toml.mc` in THAT repository, not
+this one -- comes free inside `<mc/core_build>`. Using it costs
 nothing; inventing syntax around it would cost a parser. So the schema below stays inside what mc
 already parses, which is exactly ([mc's `docs/reference/toml.md`](https://github.com/minicompiler/mc/blob/main/docs/reference/toml.md) § The TOML subset):
 

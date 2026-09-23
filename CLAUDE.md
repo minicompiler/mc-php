@@ -42,8 +42,8 @@ make, no cmake, no long command lines, nothing the user has to remember twice.**
 The repository's own build follows the same rule: `mc build` for the compiler, shell only for the
 test grid. There is no makefile here and there should not be one.
 
-The schema stays inside the TOML subset `src/toml.mc` already parses, because that parser comes
-free inside `<mc/core_build>` -- no inline tables, no literal strings, no nesting.
+The schema stays inside the TOML subset mc's own parser already reads (it comes free inside
+`<mc/core_build>`) -- no inline tables, no literal strings, no nesting.
 
 ## `src/` is the compiler; `probes/` is the record
 

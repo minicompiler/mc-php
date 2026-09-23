@@ -16,7 +16,7 @@ both. No dialect, no annotations, no "mc-php mode".
 This is a **proof of concept**, and what exists is the front end.
 
 **What works.** The compiler reads PHP 8.5 and produces a native macOS arm64 binary. Over
-php-src's whole `.phpt` corpus -- 21395 tests -- it agrees with `php` on **1697**, byte for byte
+php-src's whole `.phpt` corpus -- 21395 tests -- it agrees with `php` on **1704**, byte for byte
 on stdout and on the exit code. Classes, interfaces, traits, enums, closures, exceptions,
 references, `match`, heredocs, late static binding, `printf`, a 273-row library, `ext/json`
 written in mc: all of it is in, and each of it is measured rather than claimed.
@@ -30,7 +30,7 @@ written in mc: all of it is in, and each of it is measured rather than claimed.
 | hosts other than macOS arm64 | `lib/php_rt.mc` includes `<sys>`, mc's libSystem layer, so a program it writes is a macOS program. Nothing here has been run on Linux or Windows. |
 | generators | `yield` is not built. 252 of the 13623 disagreeing tests use it; the decision and its cost are in `docs/plan.md` D6. |
 | `eval` and reflection | refused **by design**, by name, with exit 3 -- `docs/plan.md` D1 and D6. A refusal is an answer, not a failure. |
-| 19698 of the 21395 tests | still disagree or are refused. The number below is the whole claim; nothing here rounds it up. |
+| most of the corpus | 14470 tests still disagree and 1929 are refused by design. The number below is the whole claim; nothing here rounds it up. |
 
 ---
 
@@ -112,21 +112,25 @@ sh tests/grid.sh build/mc-php build/grid all
 
 ## The numbers
 
-Measured **2026-09-22**, on macOS 26 / arm64, PHP 8.5.10 (Homebrew, NTS), mc 1.1.0, php-src at
-tag `php-8.5.10`. Every number here was re-run on this tree after the restructure and is
-identical to what `probes/t10` published.
+Measured **2026-09-22/23**, on macOS 26 / arm64, PHP 8.5.10 (Homebrew, NTS), mc 1.1.0, php-src
+at tag `php-8.5.10`. Every number here was re-measured on this tree; none is quoted from
+`probes/t10`.
 
-| the `.phpt` grid | green | of |
-|---|---|---|
-| the whole corpus | **1697** | 21054 |
-| `Zend/tests` | 756 | 5306 |
-| `tests/lang` | 104 | 293 |
-| `ext/standard/tests/strings` | 263 | 734 |
+| the `.phpt` grid | green | of | php-fail |
+|---|---|---|---|
+| the whole corpus | **1704** | 21050 | 345 |
+| `Zend/tests` | 756 | 5306 | 6 |
+| `tests/lang` | 104 | 293 | 1 |
+| `ext/standard/tests/strings` | 263 | 734 | 0 |
 
-The corpus row carries a **band**: two runs of the same binary gave 1676 and 1688 before T10's
-work, and all twelve of the difference were filesystem tests that `chdir()` into a shared working
-directory while six of them run at once. The three directory rows do not move. A block worth
-fewer than a dozen tests should be read on the directories, not on the corpus.
+**The corpus row carries a band and the three directory rows do not.** The same binary run twice
+over the whole corpus gave 1692 / 21018 and 1704 / 21050, and the difference is php's own: of the
+33 tests that changed outcome, all 33 were `php-fail` in one of the two runs -- php itself did
+not produce an answer, so the pair could not be graded. Nothing regressed in either direction
+(the `refused` and `skip` sets are identical to the test, and not one test that was green stopped
+being green). The three directory rows came out identical on both runs, down to their
+`wrong`/`refused`/`skip` columns. **A block worth fewer than a few dozen tests should be read on
+the directories, never on the corpus.**
 
 | the gates | |
 |---|---|
@@ -135,12 +139,13 @@ fewer than a dozen tests should be read on the directories, not on the corpus.
 | `lencheck` | 514 literal lengths, 0 wrong |
 | `aritycheck` | 273 library rows, 0 wrong |
 | `d8check` | 102 `.php`, every one in a regime |
-| peak scratch disk, full grid | **2152 KiB** -- bounded by the job count, not the corpus |
+| peak scratch disk, full grid | **3836 KiB** -- bounded by the job count, not the corpus (identical on both runs of 21395 tests) |
 
-Against `php` on a real workload (`tests/bench/`, seven interleaved repetitions): mc-php wins the
-whole program **6.54x** on `main.php` and **1.43x** on `heavy.php`, because php pays about 38 ms
-of start-up -- and **loses the work**, by 8x to 23x. `docs/plan.md` D7 names the cause: every
-value is arena-allocated and never freed, an array copies eagerly, a string is immutable.
+Against `php` on a real workload (`tests/bench/`, seven interleaved repetitions, recorded in
+`tests/bench/results/`): mc-php wins the whole program **7.13x** on `main.php` and **1.45x** on
+`heavy.php`, because php pays about 38 ms of start-up -- and **loses the work**, 10x on the first
+and 25x on the second. `docs/plan.md` D7 names the cause: every value is arena-allocated and
+never freed, an array copies eagerly, a string is immutable.
 
 ---
 
