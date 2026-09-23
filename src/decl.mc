@@ -239,6 +239,11 @@ i64 ph_function() {
     }
     ph_hoist_head = hh;
     ph_hoist_tail = ht;
+    // AFTER the body: a `function` nested in it went through here too and
+    // left ph_last_fn pointing at ITS row, so ph_program would export the
+    // nested declaration and lose this one. Measured: `function outer() {
+    // function nested() {} }` published `nested` and not `outer`.
+    ph_last_fn = fi;
     ph_scope_restore(save);
     ph_ncp = scp;
     ph_cpzv = scz;

@@ -876,14 +876,18 @@ In the order the measurements put them, each with the number that says why:
    exhausts the 48 MiB arena at `f(30)`. The `if` form of the same function does not. On the
    PROGRAM road too, measured with `mc-php --exe` -- so it is a front-end finding and not the
    back end's.
-3. **The arena has no request lifecycle.** D7 is one arena per PROCESS, never freed; a module
+3. **A declared scalar RETURN is not checked.** `function f(): int { return "x"; }` answers
+   `int(0)` where php throws a `TypeError` -- on the PROGRAM road too, so it is D4/D9's return
+   coercion and not the back end's. It matters more here, because the extension road's headline
+   claim is byte-for-byte agreement with the interpreted source. Found by the reviewer of #15.
+4. **The arena has no request lifecycle.** D7 is one arena per PROCESS, never freed; a module
    outlives a request. `RINIT`/`RSHUTDOWN` is where that is answered.
-4. **Output buffering.** The runtime writes to fd 1 and php's `ob_start()` never sees it.
+5. **Output buffering.** The runtime writes to fd 1 and php's `ob_start()` never sees it.
    `php_output_write` is exported and routing `php_flush`'s one write through a sink the
    extension road sets is the whole fix -- it touches the runtime's hot path, so it is a step
    with its own bench row.
-5. **Two mc-php extensions in one process** share every runtime symbol, and the first loaded
+6. **Two mc-php extensions in one process** share every runtime symbol, and the first loaded
    wins in silence. `docs/mcphp-toml.md` § The symbol prefix is the design;
    `reference/extA.mc`/`extB.mc` is the measurement.
-6. Then the signature: `mixed`, `array`, an object, a class the module declares, a namespace,
+7. Then the signature: `mixed`, `array`, an object, a class the module declares, a namespace,
    defaults, variadics, by-reference. Each is a named refusal today.

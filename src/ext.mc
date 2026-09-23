@@ -66,9 +66,29 @@ i64 ph_ext_bool(uptr path, uptr what) {
 // which belongs to the driver and not to a Tier 3 module -- so the four are
 // stated, which is also what makes a cross-build need no php on the machine
 // (docs/mcphp-toml.md § [php]).
+// Is there an [extension] table at all? toml_get answers for a KEY and the
+// switch is the TABLE, so the two questions are asked separately: a file with
+// `[extension]` and a misspelt `name` must be an error and not a silent
+// program build. mc's flat (path, value) table is walked the way [libs] and
+// [externs] are walked in mc's own driver.
+i64 ph_ext_has_table() {
+    i64 n = toml_entries();
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        uptr p = toml_path_at(i);
+        if (ld8(p) == 101 && ld8(p + 1) == 120 && ld8(p + 2) == 116) {   // "ext"
+            if (str_eq(xstrdup(p, 10), "extension.")) return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 void ph_ext_config() {
     uptr name = toml_get("extension.name");
-    if (!name) return;                          // the program road
+    if (!name && !ph_ext_has_table()) return;   // the program road
+    if (!name) err_at2("mcphp.toml", 1, "mc-php: this extension needs it", "extension.name");
     ph_ext = 1;
     ph_ext_name = name;
     ph_ext_ver = toml_get("extension.version");

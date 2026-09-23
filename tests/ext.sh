@@ -93,8 +93,13 @@ say "php: api $api, build $bid, zts $zts, debug $dbg -- and $cfg says so"
 # --- 3. the build ----------------------------------------------------------
 out=$tmp/hello.so
 rm -f "$out"
+# The artefact named by [project].out, which is relative to the CONFIG's
+# directory -- removed before the build and not only after, or a build that
+# fails is graded on the .so an earlier run left there (found by the reviewer
+# of #15). mc's own driver unlinks its output for a different reason (the
+# cached-signature SIGKILL); this is the gate not trusting that.
+rm -f "$EX/build/hello.so"
 if "$BIN" build "$EX" --config "$cfg" > "$tmp/build.out" 2>&1; then
-    # the artefact is named by [project].out, which is relative to the config
     cp "$EX/build/hello.so" "$out" 2>/dev/null || bad "no $EX/build/hello.so"
 else
     bad "mc-php build:"; sed 's/^/      /' "$tmp/build.out"
@@ -161,13 +166,30 @@ fi
 # here would publish a signature php does not have.
 sed 's|^entry = .*|entry = "r.php"|; s|^out = .*|out = "build/r.so"|' "$cfg" > "$tmp/r.toml"
 nref=0
+# A refusal is three things and the gate checks all three: the build FAILS,
+# the last line names the reason, and it carries the classification. This
+# repository distinguishes two (docs/plan.md): `is refused by design` with
+# exit 3 is a DESIGN answer, and `is not implemented yet` with exit 1 is a
+# construct that has not been built. These eight are the second kind -- the
+# schema promises them -- so that is what is required, and a message alone is
+# not enough (found by the reviewer of #15: a compile error that happened to
+# contain the phrase passed).
 refuse() {
     nref=$((nref + 1))
     printf '<?php\ndeclare(strict_types=1);\n%s\n' "$1" > "$tmp/r.php"
-    got=$("$BIN" build "$tmp" --config "$tmp/r.toml" 2>&1 | tail -1)
+    rm -f "$tmp/build/r.so"
+    # NOT `got=$(... | tail -1); rc=$?` -- that reads tail's status, which is
+    # always 0, and every refusal then reported "it BUILT".
+    "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/r.out" 2>&1; rc=$?
+    got=$(tail -1 "$tmp/r.out")
+    if [ "$rc" = 0 ]; then bad "refusal: $1"; echo "      it BUILT (exit 0)"; return; fi
     case $got in
         *"$2"*) ;;
-        *) bad "refusal: $1"; printf '      want ...%s...\n      got  %s\n' "$2" "$got" ;;
+        *) bad "refusal: $1"; printf '      want ...%s...\n      got  %s\n' "$2" "$got"; return ;;
+    esac
+    case $got in
+        *"is not implemented yet"*) ;;
+        *) bad "refusal: $1"; printf '      unclassified: %s\n' "$got" ;;
     esac
 }
 refuse 'function f(mixed $x): int { return 1; }'     'parameter whose type is not a declared scalar'
@@ -185,6 +207,36 @@ refuse 'function a(int $n): int { return b($n); }
 function b(int $n): int { return $n; }' 'called before it is declared'
 rm -rf "$tmp/build"
 say "refusals: $nref signatures outside the scope, each declined by name"
+
+# --- 7. the two the reviewer of #15 found, each reproduced before it was fixed
+# (a) a `function` NESTED in an exported one used to steal the export row, so
+#     the module published the nested declaration and lost the outer one.
+#     php declares a nested function only when the outer RUNS, so the module
+#     must publish the outer and not the nested.
+printf '<?php\ndeclare(strict_types=1);\nfunction outer(int $n): int { function nested(int $m): int { return $m * 3; } return nested($n) + 1; }\n' > "$tmp/r.php"
+rm -f "$tmp/build/r.so"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/n.build" 2>&1; then
+    got=$("$PHP" -d extension="$tmp/build/r.so" \
+        -r 'printf("%d%d%d", function_exists("outer"), function_exists("nested"), outer(7));' 2>&1)
+    [ "$got" = "1022" ] || bad "a nested function: want 1022 (outer yes, nested no, outer(7)=22), got $got"
+else
+    bad "a nested function: it would not build"; sed 's/^/      /' "$tmp/n.build"
+fi
+
+# (b) an [extension] table whose `name` is missing or misspelt used to fall
+#     through to the PROGRAM road in silence and write an executable.
+sed 's/^name = /nmae = /' "$tmp/r.toml" > "$tmp/noname.toml"
+rm -f "$tmp/build/r.so"
+"$BIN" build "$tmp" --config "$tmp/noname.toml" > "$tmp/nn.out" 2>&1; rc=$?
+got=$(tail -1 "$tmp/nn.out")
+case "$rc:$got" in
+    0:*) bad "a nameless [extension]: it built anyway" ;;
+    *"extension.name"*) ;;
+    *) bad "a nameless [extension]: want ...extension.name..., got $got" ;;
+esac
+[ ! -f "$tmp/build/r.so" ] || bad "a nameless [extension]: it wrote an artefact"
+rm -rf "$tmp/build"
+say "the two of review #15: a nested function, and a nameless [extension]"
 
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }
 echo "  ext: the extension road is green"

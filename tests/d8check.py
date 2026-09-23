@@ -229,7 +229,13 @@ def project_sweep():
     """
     bad = []
     n = 0
-    ext = open(os.path.join(HERE, 'ext.sh'), encoding='latin-1').read()
+    # The EXACT `EX=examples/<name>` assignments the gate builds, not a
+    # substring of the script: `examples/hell` is a substring of
+    # `examples/hello`, so an unbuilt directory beside a built one would
+    # have passed (found by the reviewer of #15, and reproduced).
+    ext = set(re.findall(r'^EX=examples/([A-Za-z0-9_.-]+)\s*$',
+                         open(os.path.join(HERE, 'ext.sh'),
+                              encoding='latin-1').read(), re.M))
     for root, dirs, names in os.walk(REPO):
         # `reference/` is excluded for the reason `probes/` is: it is a
         # RECORD of what was measured by hand, in mc, before the compiler
@@ -248,7 +254,7 @@ def project_sweep():
             top = rp.split('/')
             if top[0] == 'tests':
                 continue
-            if top[0] == 'examples' and len(top) == 3 and f'examples/{top[1]}' in ext:
+            if top[0] == 'examples' and len(top) == 3 and top[1] in ext:
                 continue
             if top[0] == 'examples':
                 bad.append(f'{rp}: under examples/ but tests/ext.sh does not '

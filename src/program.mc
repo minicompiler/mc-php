@@ -39,8 +39,12 @@ void ph_program() {
     // no program -- phx_leave is the flush plus the bridge that turns a
     // pending php throwable into a Zend one, the same pair every handler
     // uses.
-    i64 fin = ph_stmt_of(ph_call("phx_leave", 0, 0, 0, 0, 0, TY_VOID));
-    i64 fin2 = fin;
+    i64 fin = 0;
+    i64 fin2 = 0;
+    if (ph_ext) {
+        fin = ph_stmt_of(ph_call("phx_leave", 0, 0, 0, 0, 0, TY_VOID));
+        fin2 = fin;
+    }
     if (!ph_ext) {
         fin = ph_stmt_of(ph_call("php_uncaught", 0, 0, 0, 0, 0, TY_VOID));
         i64 fin1 = ph_stmt_of(ph_call("php_shutdown", 0, 0, 0, 0, 0, TY_VOID));
