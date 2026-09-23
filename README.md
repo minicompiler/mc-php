@@ -48,7 +48,9 @@ per host.
 | Linux x86_64 | `mc-php-$V-linux-x86_64.tar.gz` | the same, on `ubuntu-24.04` |
 
 ```sh
-V=0.1.0
+# the newest tag, so this block does not go stale with the next release
+V=$(curl -fsSL https://api.github.com/repos/minicompiler/mc-php/releases/latest \
+     | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
 A=mc-php-$V-macos-arm64          # or mc-php-$V-linux-arm64, mc-php-$V-linux-x86_64
 BASE=https://github.com/minicompiler/mc-php/releases/download/v$V
 curl -fsSLO $BASE/$A.tar.gz
