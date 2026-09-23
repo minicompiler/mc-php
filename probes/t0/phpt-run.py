@@ -55,13 +55,14 @@ and removed afterward. php-src/ is entirely gitignored, so this never
 touches anything committed.
 """
 import argparse
-import os
+import os, signal
 import random
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -69,6 +70,10 @@ from types import SimpleNamespace
 #    it builds before spawning any test; see php-src/run-tests.php around the
 #    definition of $ini_overwrites). date.timezone=UTC and precision=14 are
 #    what make float/date output reproducible across hosts.
+# one budget for the candidate's COMPILE AND RUN together, and the same
+# for php: probes/t10/harness.py reads it so the two cannot drift
+DEFAULT_TIMEOUT = 15.0
+
 DEFAULT_INI = [
     'output_handler=',
     'open_basedir=',
@@ -223,16 +228,68 @@ def resolve_sections(sections, testdir):
     return None
 
 
-def _run(cmd, stdin, env, timeout, cwd):
+def base_environment(php, srcdir):
+    """The environment php-src's own run-tests.php injects into every test.
+
+    Some .phpt (Zend/tests/exit/exit_values.phpt and its kind) spawn a nested
+    `php` through getenv('TEST_PHP_EXECUTABLE...') and silently do nothing
+    useful without it. It is a function so that probes/t10/harness.py can
+    reuse it: a tool that explains this grid's verdict has to run the test in
+    this grid's environment, and building a second copy is how the two drift.
+    """
+    php_abs = shutil.which(php) or os.path.abspath(php)
+    env = dict(os.environ)
+    env['TEST_PHP_EXECUTABLE'] = php_abs
+    env['TEST_PHP_EXECUTABLE_ESCAPED'] = shlex.quote(php_abs)
+    env['TEST_PHP_SRCDIR'] = srcdir
+    # the HARNESS's own variables are not the test's. `probes/t10/grid.sh`
+    # exports MCPHP_BIN so its snapshot compiler is used, and this copies
+    # os.environ into the environment of BOTH the oracle and the candidate
+    # -- so an environment-sensitive .phpt saw the measurement apparatus.
+    # `run_candidate` puts back the ones the WRAPPER needs, and the wrapper
+    # unsets them before it execs the program.
+    for k in ('MCPHP_BIN', 'MCPHP_OUT', 'MCPHP_TMP', 'T10_JOBS',
+              'MCPHP__BIN', 'MCPHP__OUT', 'MCPHP__TMP'):
+        env.pop(k, None)
+    for k in ('SSH_CLIENT', 'SSH_AUTH_SOCK', 'SSH_TTY', 'SSH_CONNECTION'):
+        env[k] = 'deleted'
+    return env
+
+
+def _killpg(p):
+    """The process GROUP, falling back to the process itself."""
     try:
-        p = subprocess.run(
-            cmd,
-            input=(stdin.encode('latin-1') if stdin is not None else b''),
+        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            p.kill()
+        except OSError:
+            pass
+
+
+def _run(cmd, stdin, env, timeout, cwd):
+    # start_new_session, and on a timeout the whole GROUP. The candidate is a
+    # shell wrapper that compiles and then execs; `subprocess.run`'s timeout
+    # SIGKILLs the wrapper alone, so the compiler it had started survived,
+    # kept writing the binary and outlived the directory the caller then
+    # removed -- the orphan the temporary-space bound exists to prevent, and
+    # a SIGKILL runs no trap the wrapper could install.
+    try:
+        p = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            env=env, cwd=cwd, timeout=timeout,
+            env=env, cwd=cwd, start_new_session=True,
         )
+        try:
+            out, _ = p.communicate(
+                input=(stdin.encode('latin-1') if stdin is not None else b''),
+                timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _killpg(p)
+            p.communicate()
+            raise
         return SimpleNamespace(returncode=p.returncode,
-                                stdout=p.stdout.decode('latin-1'),
+                                stdout=out.decode('latin-1'),
                                 timed_out=False)
     except subprocess.TimeoutExpired:
         return SimpleNamespace(returncode=-1, stdout='', timed_out=True)
@@ -255,11 +312,84 @@ def run_php(php_exe, php_file, ini, args, stdin, env, timeout, cwd):
     return _run(cmd, stdin, env, timeout, cwd)
 
 
+_PRIVATE_SEEN = {}
+
+
+def _implements_private(path):
+    """Does this wrapper speak the MCPHP__* protocol (and unset it)?"""
+    if path not in _PRIVATE_SEEN:
+        try:
+            with open(path, encoding='latin-1') as f:
+                _PRIVATE_SEEN[path] = 'MCPHP__OUT' in f.read()
+        except OSError:
+            _PRIVATE_SEEN[path] = False
+    return _PRIVATE_SEEN[path]
+
+
 def run_candidate(candidate, php_file, args, stdin, env, timeout, cwd):
     cmd = shlex.split(candidate) + [php_file]
     if args:
         cmd += shlex.split(args)
-    return _run(cmd, stdin, env, timeout, cwd)
+    # The candidate compiles the test and EXECs the binary, so it cannot
+    # delete it (probes/t*/mcphp.sh's own note: without the exec, the timeout
+    # below kills the shell and leaves the program spinning). THIS process is
+    # the one that waits for it, so this is where the file is named and
+    # unlinked. Without that the binaries -- about 2 MB each -- accumulate for
+    # the whole run: a full-corpus grid filled a 460 GiB boot volume at about
+    # 20000 of 21395 tests. With it the peak is the job count times 2 MB,
+    # whatever the size of the corpus.
+    #
+    # MCPHP_OUT is honoured by probes/t10/mcphp.sh and ignored by the frozen
+    # earlier probes, which still fall back to their own MCPHP_TMP.
+    env = dict(env)
+    # The private channel goes ONLY to a wrapper that removes it before it
+    # execs the program. probes/t5..t9's are frozen and read the public
+    # names alone, so injecting MCPHP__OUT there would leave it in the
+    # candidate's environment and not in the oracle's -- the asymmetry the
+    # private names exist to end.
+    private = _implements_private(cmd[0])
+    # what the WRAPPER needs, on PRIVATE names. The public ones are a
+    # test's to set -- a `.phpt` whose --ENV-- names MCPHP_BIN would have
+    # had its value overwritten here and kept by the oracle, which is the
+    # asymmetry this runner exists to avoid -- so the channel to mcphp.sh
+    # is `MCPHP__*` and the public names are left exactly as the section
+    # left them.
+    for k in ('BIN', 'TMP'):
+        if 'MCPHP_' + k in os.environ:
+            if private:
+                env['MCPHP__' + k] = os.environ['MCPHP_' + k]
+            # and the PUBLIC name too, unless the test's own --ENV-- set
+            # it: probes/t5..t9's frozen wrappers read only the public
+            # names, so re-running an earlier probe against a snapshot
+            # needs them. probes/t10/mcphp.sh removes a public name whose
+            # value is the private one -- the grid's, not the test's --
+            # before it execs, so the program still sees neither.
+            env.setdefault('MCPHP_' + k, os.environ['MCPHP_' + k])
+    fd, out = tempfile.mkstemp(prefix='mcphp-out.', suffix='.bin',
+                               dir=os.environ.get('MCPHP_TMP') or None)
+    os.close(fd)
+    # mkstemp RESERVES the name by creating the file; the compiler wants the
+    # path free (and macOS kills a re-signed executable written at the same
+    # inode -- mc's M12 note). probes/t10/harness.py's tmpbin() unlinks for
+    # the same reason.
+    os.unlink(out)
+    if private:
+        env['MCPHP__OUT'] = out
+    else:
+        # a frozen wrapper reads the public name and does not remove it, so
+        # a test's own --ENV-- value must win here too: the oracle keeps it,
+        # and overwriting it would both change the candidate's environment
+        # and let the harness path be written by a test that asked for
+        # another. `unlink` below ignores a path nothing wrote.
+        env.setdefault('MCPHP_OUT', out)
+    try:
+        return _run(cmd, stdin, env, timeout, cwd)
+    finally:
+        for p in (out, out + '.err', out + '.out'):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 def e_all(php_exe):
@@ -421,7 +551,7 @@ def main():
                      os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mcphp-stub.sh')))
     ap.add_argument('--refuse-code', type=int, default=3)
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
-    ap.add_argument('--timeout', type=float, default=15.0)
+    ap.add_argument('--timeout', type=float, default=DEFAULT_TIMEOUT)
     ap.add_argument('--sample', type=int, default=0,
                      help='random sample of N files instead of the whole list (seed 0)')
     ap.add_argument('--srcdir', default=None,
@@ -455,17 +585,7 @@ def main():
 
     exts_loaded = load_extensions(args.php)
 
-    # the handful of env vars php-src's own run-tests.php injects into every
-    # test's environment; some .phpt (e.g. Zend/tests/exit/exit_values.phpt)
-    # spawn a nested `php` themselves via getenv('TEST_PHP_EXECUTABLE...')
-    # and silently do nothing useful without it.
-    php_abs = shutil.which(args.php) or os.path.abspath(args.php)
-    base_env = dict(os.environ)
-    base_env['TEST_PHP_EXECUTABLE'] = php_abs
-    base_env['TEST_PHP_EXECUTABLE_ESCAPED'] = shlex.quote(php_abs)
-    base_env['TEST_PHP_SRCDIR'] = srcdir
-    for k in ('SSH_CLIENT', 'SSH_AUTH_SOCK', 'SSH_TTY', 'SSH_CONNECTION'):
-        base_env[k] = 'deleted'
+    base_env = base_environment(args.php, srcdir)
 
     buckets = {'green': [], 'wrong': [], 'refused': [], 'skip': [], 'php-fail': []}
 

@@ -1,0 +1,20 @@
+<?php
+ob_start();
+echo "one";
+$a = ob_get_contents();
+echo "two";
+$b = ob_get_clean();
+var_dump($a, $b, ob_get_level());
+ob_start();
+echo "x";
+ob_start();
+echo "y";
+var_dump(ob_get_level());
+$in = ob_get_clean();
+ob_end_flush();
+var_dump($in);
+var_dump(ob_get_clean());
+ob_start();
+echo "z";
+ob_end_clean();
+echo "end\n";

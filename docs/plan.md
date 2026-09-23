@@ -194,6 +194,56 @@ D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixt
     from memory. Nothing written in PHP lands without its test in both worlds and its row in the
     bench table.
 
+    AMENDED (T10, `docs/review-backlog.md` section 3): the rule covers the `.php` under
+    `probes/*/g` and `probes/*/r` too, and until T10 they carried neither a PHPUnit class nor a
+    bench row. They are EXEMPT, with the reason and the enforcement both written down, because
+    the unit D8 governs is the PROGRAM and a differential fixture is not one -- it is already a
+    test, and a stronger one. (c) A fixture's test is the differential gate itself
+    (`probes/t10/fixtures.sh`): its stdout, its stderr and its exit code are compared BYTE FOR
+    BYTE against `php` on the same source, so its oracle is the reference implementation and not
+    a value someone typed into an `assertSame`, and it runs in both worlds by construction --
+    which is what D8 (a) asks a test to prove. It carries no bench row because a three-line
+    program measures process start-up and nothing else (T9 measured it: `php` pays about 38 ms
+    before the first statement, against a whole `main.php` of 39.5 ms). (d) A probe cannot waive
+    the rule for itself, so the exemption is a SCRIPT and not a paragraph:
+    `probes/t10/d8check.py` (`run.sh` step 0) puts every `.php` under the probe into exactly one
+    of SIX regimes -- `fixture` (`g/*.php`, graded byte for byte against php on stdout, stderr
+    and the exit code), `refusal` (`r/*.php`, which is NOT that pair and cannot be: the point of
+    the file is that mc-php declines it, so the pair is php PARSING it under `php -l` and
+    mc-php refusing it by name with exit 3), `helper` (a `g/` file another fixture `require`s
+    and the gate skips, whose test is every fixture that includes it), `instrument` (the
+    `TestCase` shim, the test class, the runner that names the methods: the mechanism of D8 (a),
+    which cannot test itself), `library` (required BY the test class AND BY a bench program, so
+    exercised in both worlds and timed in both) and `bench` (a row in `bench10.sh`, which
+    refuses to time a program until `php` and mc-php print the same answer)
+    -- and exits non-zero naming any file in none of them. It found one on its first run:
+    `probes/t10/bench/unwind.php`, copied forward from T6 and referenced by nothing, deleted
+    here (T6's original is untouched and still reproduces).
+
+    WIDENED (T10, the review of #9): the checker walked `probes/t10` alone, which is narrower
+    than the rule -- D8 covers every `.php` in this repository, so an orphan in any other probe
+    passed, and one did (`probes/t9/bench/unwind.php`, while t9's own bench script runs
+    `probes/t6/bench/unwind.php`; t7's and t8's copies the same). It walks `probes/` now and a
+    file is accounted for when a fixture gate runs it, another `.php` requires it, a SCRIPT
+    names its path, a bench script names its basename in a `for prog in` list, or it is under
+    one of three enumerated pre-D8 directories -- `probes/t0`, `probes/t4` and
+    `probes/gap-lexer-ownership`, each with its reason in the script, and the sweep FAILS when
+    an exempted directory is gone or has grown a `bench/`, so the list cannot rot. 366 `.php`
+    swept; the three orphan copies of `unwind.php` are deleted, T6's original untouched.
+
+    (e) The PHPUnit half of (a) is EXEMPT while its two mechanisms do not exist, and this is
+    the exemption rather than an omission: **phpunit is not installed on this host** (the
+    check is `class_exists('PHPUnit\Framework\TestCase')`, which is why
+    `probes/t10/bench/shim.php` exists at all -- with the DEFAULT autoload, so a host
+    that has phpunit behind an autoloader gets the real `TestCase` and not the shim) and **`mc-php test` does not exist** -- (a)
+    names it as the mechanism the COMPILER will provide, and no probe has built it. Until one
+    does, the test methods are named by hand in `probes/t10/bench/run.php` and the gate proves
+    what it can: that the class's `test*` methods are all named by the runner
+    (`d8check.py`, statically), that php and mc-php each RUN that many, and that the two
+    outputs are byte for byte the same (`run.sh` step 10). What it does NOT prove is that
+    `WorkloadTest.php` passes under the real phpunit, and `run.sh` prints that sentence on
+    every run rather than leaving the gate looking like it did.
+
 D9. DECIDED (owner, 2026-09-15): the TYPE SYSTEM is PHP's, in full -- the manual's own list
     (`null`, `bool`, `int`, `float`, `string` and numeric strings, `array`, `object`, enums,
     resources, `callable`, `mixed`, `void`, `never`, `self`/`parent`/`static`, `?T`, unions
@@ -254,11 +304,73 @@ D3. Web shape. The runtime ships an HTTP server (the `mc-forkka` fork-per-connec
 | T7 | php's diagnostics, and the tests that compile and print the wrong thing | the diagnostic channel built (position, text, streams, exit codes) and T6's `(compiled; output differs)` block clustered by `probes/t7/diffgroup.py` and worked in descending order | green/total -- **phpt: green 1218 / wrong 13968 / refused 2917 / skip 2947 / php-fail 345 / total 21050** (`probes/t7`); per directory `tests/lang` 82, `Zend/tests` 539, `ext/standard/tests/strings` 194 |
 
 | T9 | func_get_args, the two blocks T8 inverted, and the generator decision | D6's correction built; the `(compiled; output differs)` and `(does not compile)` blocks re-clustered over a UNIFORM corpus-wide sample and worked in descending value; D8's first non-fixture `.php` with its tests in both worlds and its bench | green/total -- **phpt: green 1637 / wrong 14140 / refused 2309 / skip 2947 / php-fail 362 / total 21033** (`probes/t9`); per directory `tests/lang` 102, `Zend/tests` 709, `ext/standard/tests/strings` 262 |
+| T10 | the review backlog (59 Copilot findings across #1..#7) | `docs/review-backlog.md` worked in its own order: the four tools that reported numbers they had not measured, the twenty-two semantics a program can observe, D8 over the fixtures -- and, found by running out of disk, the grid's unbounded tmp | green/total -- **phpt: green 1697 / wrong 14481 / refused 1929 / skip 2947 / php-fail 341 / total 21054** (`probes/t10`); per directory `tests/lang` 104, `Zend/tests` 756, `ext/standard/tests/strings` 263; fixtures 89/89 on each stream and the exit code; `refused` 2309 -> 1929; the grid's tmp peak 1908 KiB over 27728 tests, 2152 KiB on the round-seventeen re-run of the same 27728 |
 
 | T8 | the block that does not compile, and the names it asks for | T7's `(does not compile)` block grouped by `probes/t8/nocompile.py` and worked in descending order; the 288 missing names worked in descending frequency | green/total -- **phpt: green 1450 / wrong 13607 / refused 3026 / skip 2947 / php-fail 365 / total 21030** (`probes/t8`); per directory `tests/lang` 93, `Zend/tests` 635, `ext/standard/tests/strings` 223 |
 
 Gate for the compiler proper: T2 + T3 decide `.so` reuse (D2b); T4 decides that the grammar fits
 Tier 3 with no mc change. Nothing in this grid touches mc's `src/`.
+
+T10 is done (2026-09-21, macos/aarch64; `probes/t10/RESULTS.md`), on **mc 1.1.0**: the review
+backlog, all three sections (`docs/review-backlog.md`).
+`phpt: green 1697 / wrong 14481 / refused 1929 / skip 2947 / php-fail 341 / total 21054`, against T9's
+`green 1637`; per directory `tests/lang` **104**, `Zend/tests` **756**,
+`ext/standard/tests/strings` **263**; **1664 of the 1689 greens are in T0's "touched by
+none" set** (that share was measured on the round-forty-two run of 1689; the +8 since is
+round fifty-three's argument-type checks, re-measured against the compiler the pull request
+ends with). `refused` fell **2309 -> 1929**. The green moved only +52 because the work was
+CORRECTNESS: a `.phpt` that was already green does not become greener for the compiler being
+right about short circuit. What the probe is actually worth is the corrected numbers.
+
+**Four tools had been reporting numbers they never measured**, and they are what chose every
+block since T5. `why.py` labelled a test `(compiled; output differs)` WITHOUT running the
+binary; running them shows that of 781 sampled tests that compile, **757 really differ**, 22
+crash, 2 time out and none agrees on both. `arena.py` divided by `len(files)` while
+turning every failure into `None`: of T10's 1352-test list only **782 RAN**, so the published
+rate understated by 1.7x. `nocompile.py`'s skip list named one compiled outcome of five, so
+the block that does not compile was published as 737 and is **539** -- the reviewer of #9
+caught that one, in T10's own first draft. `fixtures.sh` merged the streams with `2>&1` and
+compared with `$(...)`, which strips trailing newlines. `bench/bench.sh` in t7 and t8 built and timed **t6's**
+compiler.
+
+**D8's mc-php half had never run, under any probe.** `run.sh`'s step 10 piped both halves to
+`tail -1` with nothing behind them, so "6 ok / 0 failed in BOTH worlds" and the two bench ratios
+were php's side alone -- and T9's own compiler refuses T9's own `bench/main.php`. Two compiler
+defects were behind it, both now closed by a fixture: `require __DIR__ . "/x.php"` was refused
+as a computed path (it is not: both halves are compile-time literals, and it is php-src's own
+spelling), and a top-level `return` returned from the generated `main`, skipping `php_shutdown`,
+`php_flush` and the exit code -- the program printed nothing and exited with a junk status (54,
+82, 94, 142 and 178 on five runs of the same source). Both halves run now: **6 ok / 0 failed in
+each**, `main.php` 6.54x and `heavy.php` 1.43x (the committed record).
+
+**And the grid itself has a band.** The backlog says the grid is what is NOT in question; nobody
+had run it twice. Two runs of the SAME BINARY over the whole corpus give **green 1676 and 1688 (an earlier binary)**,
+the smaller set a strict SUBSET of the larger, and all twelve of the difference are FILESYSTEM
+tests -- 9 under `ext/standard/tests/file`, 3 under `ext/standard/tests/dir` -- which `chdir()`
+and write files in a shared working directory while six of them run at once. The three directory
+numbers do not move: 104 / 749 / 262 came out identical on four separate runs across three compilers, and
+263 on the fifth (round ten's sscanf fix). **A per-block move smaller than a dozen tests should be read on the
+directories**, and the corpus number is worth quoting with its band -- which no probe has done,
+T9's 1637 and T8's 1450 included.
+
+**And T10 published a number of the same kind while removing them.** Its first version reported
+**143 tests (18.2%) that print exactly what php prints and exit with a different code** and named
+them the next probe's first block. The reviewer of #9 found that `harness.py` imported the grid's
+`DEFAULT_INI` without the `-d` prefixes or the `{E_ALL}` substitution, and chasing that found the
+cause: `run_pair` handed php a RELATIVE path while running it with `cwd` set to the test's own
+directory, so php answered `Could not open input file` for every test in the sample while the
+candidate ran anyway. With php actually running there are **zero** such tests. One more rule
+follows from it: **a differential tool has to be checked against a case whose answer is known.**
+
+**And the grid had no bound on its disk.** A full-corpus run filled a 460 GiB boot volume at
+about 20000 of 21395 tests: `mcphp.sh` EXECs the binary it compiled and cannot delete it, the
+sweeper collected a file only once its mtime was a minute old, and the directory carried the pid
+so a killed run's was never collected by anyone. The caller -- the process that WAITS -- names
+the binary with `MCPHP_OUT` and unlinks it the moment the subprocess returns, and each run sweeps
+the dead siblings at startup. **Measured over the same 27728 tests (three directories and the corpus): peak 1908 KiB on the
+round-sixteen run and 2152 KiB on the round-seventeen re-run, against 1860 KiB over 6333 tests --
+so the cost is bounded by the job count and not by the corpus; `df -h /` identical before and
+after every one of them.**
 
 T9 is done (2026-09-20, macos/aarch64; `probes/t9/RESULTS.md`), on **mc 1.1.0**:
 D6's correction built, and T8's two blocks worked from a UNIFORM corpus-wide

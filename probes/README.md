@@ -201,6 +201,87 @@ and printed the wrong thing**. T7 builds the first and takes the second apart.
 
 `sh probes/t7/run.sh`. Details: `probes/t7/RESULTS.md`.
 
+## T10 -- the review backlog: the measurements that lie, the semantics that are wrong
+
+**green 1637 -> 1697.**
+`phpt: green 1697 / wrong 14481 / refused 1929 / skip 2947 / php-fail 341 / total 21054`
+over the whole corpus; per directory `tests/lang` **104** (was 102), `Zend/tests` **756**
+(was 709), `ext/standard/tests/strings` **263** (was 262). **1664 of the 1689 greens were in
+T0's "touched by none" set** when that share was measured, and `refused` fell **2309 -> 1929** -- one block, because
+`require __DIR__ . "/x.php"` and a top-level `return` were refusals and are not any more.
+
+The green moved only +52, and that is the expected shape: this is CORRECTNESS work, and a
+`.phpt` that was already green does not become greener for the compiler being right about short
+circuit. What the probe is worth is the corrected numbers.
+
+* **Four tools reported numbers they had never measured** (`docs/review-backlog.md` § 1), and
+  they are what chose every block since T5. `probes/t10/harness.py` is the single definition of
+  "these two agree" now -- stdout byte for byte AND the same exit code, which is the pair
+  `probes/t0/phpt-run.py` itself grades on. `why.py` labelled a test
+  `(compiled; output differs)` **without ever running the binary**: of 781 sampled tests that
+  compile, **757 really differ**, 22 crash, 2 time out and none agrees on both (31 more are a
+  php COMPILE-TIME fatal, which is neither). The clustering of the 757 is what the sample is
+  for: **332 are `var_dump of a value`**, and its head is
+  `php 'int(N)' / mc ''` -- php printed a value and mc-php printed nothing, a program that
+  stopped early rather than a value formatted wrongly. `arena.py`
+  divided by `len(files)` while turning every failure into `None`: of the 1352-test list only
+  **782 RAN**. `fixtures.sh` merged the streams with `2>&1` and compared with `$(...)`. And
+  `nocompile.py`'s skip list named ONE compiled outcome of five, so the block that does not
+  compile was published as 737 and is **539** -- the reviewer of this probe's own pull request
+  caught that one, in T10's first draft.
+* **Twenty-two semantics a program can observe** (§ 2), seventeen fixed and closed by a
+  fixture, five closed by measurement, one recorded as a divergence with its number: short circuit and the right
+  operand's own pending statements, parameters BY VALUE in the callee's prologue, `finally` on
+  a `return`, a pending exception stopping a CONDITION, visibility, hoisting, typed method
+  parameters, `?->`, and thirteen one-liners.
+* **`ph_cast(TY_U8, <pointer>)` keeps the low byte**, so `if ((u8) p)` is false for every
+  address ending in `0x00`. It silently skipped the by-value copy and, since T9,
+  `func_num_args`'s counter -- with no diagnostic and no reproducible failure, because it moves
+  with the size of the program. `ph_truthy` (`!!x`) replaces both.
+* **D8's mc-php half had never run, under any probe** (§ 3, and one the section did not name).
+  `run.sh` step 10 piped both halves to `tail -1` with nothing behind them. `require __DIR__ .
+  "/x.php"` was refused as a computed path and a top-level `return` returned from the generated
+  `main`, printing nothing and exiting with a junk status. Both halves run now: **6 ok / 0
+  failed in each**, `main.php` 6.54x, `heavy.php` 1.43x (the committed record). `probes/t10/d8check.py` is the
+  enforcement D8 lacked: six regimes -- fixture, refusal, helper, instrument, library, bench,
+  each with its own obligation, and `refusal` and `helper` are NOT differential fixtures -- and
+  a `.php` in none of them fails the run.
+* **The grid had no bound on its disk** and a full-corpus run filled a 460 GiB boot volume at
+  about 20000 of 21395 tests. The caller names the binary with `MCPHP_OUT` and unlinks it the
+  moment the subprocess returns; each run sweeps the dead siblings at startup. **Peak 1908 KiB
+  over a run of 27728 tests, 2152 KiB over the round-seventeen re-run of the same 27728 and
+  1860 KiB over one
+  of 6333: bounded by the job count and not the corpus.**
+
+**And the grid itself has a band, which no probe had measured.** Two runs of the SAME BINARY
+over the whole corpus give **green 1676 and 1688 (an earlier binary)**, the smaller a strict subset of the larger,
+and all twelve of the difference are FILESYSTEM tests (9 under `ext/standard/tests/file`, 3
+under `ext/standard/tests/dir`) that `chdir()` and write files in a shared working directory
+while six run at once. The three directory numbers do not move -- 104 / 749 / 262 on four separate
+runs across three compilers, 263 on the fifth -- so a per-block move smaller than a dozen tests should be
+read there.
+
+**The second review round cost T10 its own headline.** `harness.py` handed php a RELATIVE path
+while running it with `cwd` set to the test's own directory, so php answered `Could not open
+input file` for every test in the sample while the candidate ran anyway. The first version of
+this probe reported **143 tests (18.2%) that print exactly what php prints and exit with a
+different code** and named them the next block; with php actually running there are **zero** --
+of the 781 that compile, **757 really differ**, 22 crash, 2 time out, none agrees. The review
+of #9 ran to **seventeen rounds and 59 findings**; the last of them found a spread argument
+that throws running the callee's body before unwinding (`g/77-spread-throw.php`), and one
+claim -- that macOS `find` has no `-maxdepth` -- refuted by one command. T10 worked
+section 1 of the backlog and published a new number of the same kind in the doing, which is the
+argument for one more rule: a differential tool has to be checked against a case whose answer is
+known.
+
+**The reviewer of T10's own pull request (#9) left twelve findings and every one was real** --
+the standing rule of `docs/review-backlog.md` § 3, applied to T10. They are listed with their
+fix in § 4 of that file; six needed code, including the `nocompile.py` correction above and a
+top-level `return` inside a `try`/`finally` that took the exit and jumped over the finally.
+
+`sh probes/t10/run.sh` (about 90 minutes: 89 fixtures, 6 refusals, four grids, the breakdown
+and the five tables). Details: `probes/t10/RESULTS.md`.
+
 ## T9 -- func_get_args, the two blocks T8 inverted, and the generator decision
 
 `phpt: green 1637 / wrong 14140 / refused 2309 / skip 2947 / php-fail 362 / total 21033`
