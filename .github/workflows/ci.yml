@@ -1,0 +1,111 @@
+# CI -- the fast gates on every push and every pull request.
+#
+# NOT the .phpt grid. The grid is 21395 tests, takes about half an hour and
+# needs php-src cloned; it is the number this project answers with, measured by
+# hand and recorded in the README with its date. What runs here is the five
+# gates that catch a regression in minutes: see tests/run.sh.
+#
+# macOS arm64 and nothing else, on purpose. Every number this repository
+# publishes was measured on that host, and the runtime (lib/php_rt.mc) includes
+# <sys>, which is mc's libSystem layer -- so a program mc-php compiles is a
+# macOS program today. A Linux or Windows leg would be measuring something
+# nobody has measured yet.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The toolchain is a PUBLISHED mc release, never mc built from source: this
+  # repository is a CONSUMER of mc's 1.0 frozen surface and it should break the
+  # way a consumer breaks. mc.toml's [package].mc says 1.1.0 is the floor;
+  # this is what is actually installed.
+  MC_VERSION: "1.1.0"
+  # 8.5 because the oracle is php-src at tag php-8.5.10 and every fixture is
+  # BYTE FOR BYTE what php prints. The minor is pinned; the patch is not, so a
+  # diagnostic reworded in an 8.5.x can fail a fixture -- that is the gate
+  # working, and the fix is to re-measure, never to loosen the comparison.
+  PHP_VERSION: "8.5"
+
+jobs:
+  check:
+    name: The fast gates (macos/arm64)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install mc ${{ env.MC_VERSION }}
+        run: |
+          set -eu
+          asset="mc-$MC_VERSION-macos-arm64.tar.gz"
+          base="https://github.com/minicompiler/mc/releases/download/v$MC_VERSION"
+          curl -fsSL -o "$RUNNER_TEMP/$asset"        "$base/$asset"
+          curl -fsSL -o "$RUNNER_TEMP/$asset.sha256" "$base/$asset.sha256"
+          # the release publishes the digest beside the archive; unpack only
+          # after it matches, which is mc's own rule for its own installs
+          ( cd "$RUNNER_TEMP" && shasum -a 256 -c "$asset.sha256" )
+          mkdir -p "$RUNNER_TEMP/mc"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/mc" --strip-components=1
+          # the binary AND the lib/mc/v<ver>/ tree beside it: since mc's M52
+          # the standard library is a tree next to the executable, not a blob
+          # inside it, and `mc` finds it by its own path
+          echo "$RUNNER_TEMP/mc" >> "$GITHUB_PATH"
+
+      - name: Install PHP ${{ env.PHP_VERSION }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          coverage: none
+
+      - name: Versions
+        run: |
+          mc --version
+          php --version | head -1
+          php -i | grep -E '^(PHP API|PHP Extension Build|Thread Safety|Debug Build) '
+
+      - name: Build
+        run: mc build
+
+      - name: Install mc's library tree where any mc-php can find it
+        run: |
+          set -eu
+          # build/mc-php is a DIFFERENT binary from mc, and it is a compiler:
+          # compiling a .php pushes lib/php_rt.mc, whose first line is
+          # `#include <sys>` -- mc's libSystem layer. Since mc's M52 that is a
+          # LIBRARY name, resolved out of a TREE and not out of the blob, and mc
+          # looks in three places: $HOME/.mc/libs, then lib/mc/v<ver>/ beside the
+          # binary, then one directory up.
+          #
+          # $HOME/.mc/libs and not beside the binary, on purpose. tests/
+          # fixtures.sh takes a SNAPSHOT of the compiler into a temporary
+          # directory before it grades anything -- so an edit during a run cannot
+          # corrupt it -- and the snapshot has no tree beside it. The HOME root
+          # is the one that survives being copied, which is why it is the one
+          # `mc install` writes.
+          #
+          # The tree comes out of the tarball already downloaded and verified,
+          # so this needs no network and no registry.
+          mkdir -p "$HOME/.mc/libs"
+          cp -R "$RUNNER_TEMP/mc/lib/mc" "$HOME/.mc/libs/mc"
+          ls -d "$HOME/.mc/libs/mc/"*
+
+      - name: The fast gates
+        run: sh tests/run.sh
+
+      - name: The carve is byte-neutral
+        # Asserts that src/*.mc still rebuilds probes/t10/php.mc byte for byte.
+        # It dies with the first commit that changes what the compiler does --
+        # delete the script and this step together, and say so in the pull
+        # request. Until then it is the cheapest proof the split moved nothing.
+        run: sh tests/carve.sh

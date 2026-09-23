@@ -1,0 +1,188 @@
+# Autotag -- every merged pull request becomes a version.
+#
+# The shape is mc's (its .github/workflows/autotag.yml and docs/ci.md
+# § Versioning): the bump comes from a LABEL on the merged pull request, the
+# tag is annotated with the pull request's title, and release.yml is started
+# explicitly -- a tag pushed with GITHUB_TOKEN does not start another workflow,
+# and workflow_dispatch is one of the two documented exceptions.
+#
+#   release:skip    merged, no tag, no release
+#   release:major   X+1.0.0
+#   release:minor   X.Y+1.0
+#   (none)          X.Y.Z+1
+name: Autotag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write        # push the tag
+  actions: write         # start release.yml
+  pull-requests: read    # find the pull request this commit came from
+
+# One at a time and never cancelled: two merges landing together must produce
+# two tags, in order, not one tag and one lost release.
+concurrency:
+  group: autotag
+  cancel-in-progress: false
+
+env:
+  # Used exactly once, for the first release: with no v* tag there is nothing
+  # to bump, so this is what is cut, as written. After that the tags are the
+  # only source of truth -- there is no VERSION file.
+  SEED_VERSION: "0.1.0"
+
+jobs:
+  autotag:
+    name: Tag the merged pull request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # every tag: the base is the newest v* reachable
+
+      - name: Find the pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          # The API first: it is the one that answers for a SQUASH merge, where
+          # the commit on main is new and has no parent inside the pull request.
+          num=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+                  --jq '[.[] | select(.merged_at != null) | .number] | max // empty' \
+                2>/dev/null || true)
+          [ "$num" != "null" ] || num=""
+
+          # Then the commit subject, for the rare case the association has not
+          # been indexed yet. Both merge shapes, though this repository squashes.
+          if [ -z "$num" ]; then
+            subject=$(git log -1 --format=%s "$SHA")
+            case "$subject" in
+              'Merge pull request #'*) rest="${subject#Merge pull request #}"; num="${rest%% *}" ;;
+              *' (#'*')')              rest="${subject##* (#}"; num="${rest%)}" ;;
+            esac
+            case "$num" in '' | *[!0-9]*) num="" ;; esac
+          fi
+
+          if [ -z "$num" ]; then
+            echo "::notice::this push to main is not a pull-request merge -- no tag, no release"
+            echo "skip=direct-push" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # CONFIRMED merged, so a hand-written subject that happens to say
+          # `(#12)` cannot cut a release for an unrelated pull request.
+          state=$(gh pr view "$num" --json state --jq .state 2>/dev/null || echo "")
+          if [ "$state" != "MERGED" ]; then
+            echo "::notice::pull request #$num is '${state:-unknown}', not MERGED -- no tag"
+            echo "skip=not-merged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "number=$num" >> "$GITHUB_OUTPUT"
+
+      - name: Read the labels and the title
+        id: bump
+        if: steps.pr.outputs.skip == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM: ${{ steps.pr.outputs.number }}
+        run: |
+          set -eu
+          labels=$(gh pr view "$NUM" --json labels --jq '.labels[].name')
+          # The title is UNTRUSTED text: it goes into a file and is never
+          # interpolated into a script.
+          gh pr view "$NUM" --json title --jq '.title' > "$RUNNER_TEMP/pr-title.txt"
+          has() { printf '%s\n' "$labels" | grep -Fxq "$1"; }
+          if   has 'release:skip';  then bump="skip"
+          elif has 'release:major'; then bump="major"
+          elif has 'release:minor'; then bump="minor"
+          else                           bump="patch"
+          fi
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+          echo "pull request #$NUM: bump=$bump"
+          [ "$bump" != skip ] || echo "::notice::#$NUM carries release:skip -- merged, no tag"
+
+      - name: Compute the next version
+        id: version
+        if: steps.pr.outputs.skip == '' && steps.bump.outputs.bump != 'skip'
+        env:
+          BUMP: ${{ steps.bump.outputs.bump }}
+        run: |
+          set -eu
+          base=$(git tag -l 'v*' --merged HEAD --sort=-v:refname | head -n 1 || true)
+          if [ -z "$base" ]; then
+            version="$SEED_VERSION"
+            echo "no v* tag is reachable: the first release is $version, unbumped"
+          else
+            v=${base#v}
+            # X.Y.Z only. A pre-release is rejected rather than guessed at:
+            # `0.2.0-rc1` has no single successor.
+            case "$v" in
+              *[!0-9.]* | *..* | .* | *. ) echo "::error::base tag $base is not X.Y.Z"; exit 1 ;;
+            esac
+            x=${v%%.*}; rest=${v#*.}
+            # TWO dots, checked before the split. Without this `v1.2` leaves
+            # `rest` as the whole remainder, so y and z both become `2` and the
+            # patch bump answers a version that was never anybody's -- 1.2.3 for
+            # a base of 1.2, and 1.1.2 for a base of 1. A malformed base has no
+            # successor and is rejected, not guessed at.
+            case "$rest" in
+              *.*) : ;;
+              *) echo "::error::base tag $base is not X.Y.Z"; exit 1 ;;
+            esac
+            y=${rest%%.*}; z=${rest#*.}
+            case "$z" in *.*) echo "::error::base tag $base is not X.Y.Z"; exit 1 ;; esac
+            case "$BUMP" in
+              major) x=$((x + 1)); y=0; z=0 ;;
+              minor) y=$((y + 1)); z=0 ;;
+              patch) z=$((z + 1)) ;;
+            esac
+            version="$x.$y.$z"
+            echo "base tag: $base, bump: $BUMP, next: $version"
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" > /dev/null; then
+            echo "::error::the tag v$version already exists -- refusing to move it"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push the annotated tag
+        id: tag
+        if: steps.pr.outputs.skip == '' && steps.bump.outputs.bump != 'skip'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NUM: ${{ steps.pr.outputs.number }}
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          {
+            echo "mc-php v$VERSION"
+            echo
+            printf '#%s %s\n' "$NUM" "$(cat "$RUNNER_TEMP/pr-title.txt")"
+            echo
+            echo "$SERVER/$REPO/pull/$NUM"
+          } > "$RUNNER_TEMP/annotation.txt"
+          git tag -a "v$VERSION" -F "$RUNNER_TEMP/annotation.txt"
+          git push origin "refs/tags/v$VERSION"
+          echo "pushed refs/tags/v$VERSION"
+
+      - name: Start release.yml for the new tag
+        if: steps.pr.outputs.skip == '' && steps.bump.outputs.bump != 'skip'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          # the tag's own ref, so the release is built from the workflow
+          # definition that was tagged
+          gh workflow run release.yml --ref "v$VERSION" -f tag="v$VERSION"
+          echo "dispatched release.yml for v$VERSION"
