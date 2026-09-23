@@ -89,11 +89,17 @@ Since mc's M52 that is a *library* name, resolved out of a **tree**, not out of 
 own blob. `mc` finds its tree beside `mc`; `mc-php` needs one it can reach.
 
 If you installed mc with `mc install`, `$HOME/.mc/libs/mc/v<version>/` is that tree and there is
-nothing to do. If you just untarred a release, put its `lib/` next to the binary you built:
+nothing to do. If you just untarred a release, put the `lib/mc` it carries there:
 
 ```sh
-cp -R /path/to/mc-1.1.0-macos-arm64/lib build/lib
+mkdir -p ~/.mc/libs
+cp -R /path/to/mc-1.1.0-macos-arm64/lib/mc ~/.mc/libs/mc
 ```
+
+Copying it beside the binary instead (`cp -R .../lib build/lib`) works too, for a binary that
+stays put -- but `tests/fixtures.sh` grades a **snapshot** of the compiler in a temporary
+directory, and a snapshot has no tree beside it. The `$HOME` root is the one that survives being
+copied, which is why it is the one `mc install` writes and the one CI installs.
 
 Without it the compiler builds fine and then refuses every program with
 `#include <sys>: not in this compiler and mc 1.1.0's library tree was not found: run mc install`,

@@ -77,24 +77,28 @@ jobs:
       - name: Build
         run: mc build
 
-      - name: Stage mc's library tree beside the compiler
+      - name: Install mc's library tree where any mc-php can find it
         run: |
           set -eu
           # build/mc-php is a DIFFERENT binary from mc, and it is a compiler:
-          # when it compiles a .php it pushes lib/php_rt.mc, whose first line is
+          # compiling a .php pushes lib/php_rt.mc, whose first line is
           # `#include <sys>` -- mc's libSystem layer. Since mc's M52 that is a
-          # LIBRARY name, and a library name is resolved out of a tree, not out
-          # of the blob. mc finds its own tree beside its own binary; mc-php has
-          # to find one beside build/mc-php (or in $HOME/.mc/libs, which a fresh
-          # runner does not have).
+          # LIBRARY name, resolved out of a TREE and not out of the blob, and mc
+          # looks in three places: $HOME/.mc/libs, then lib/mc/v<ver>/ beside the
+          # binary, then one directory up.
           #
-          # So the tree that came in the mc tarball is staged next to it. This is
-          # the same thing `mc build` does for itself when a project has a
-          # [compiler] section (mc's M52 step D); this project's product is a
-          # [project], so it is placed here.
-          mkdir -p build
-          cp -R "$RUNNER_TEMP/mc/lib" build/lib
-          ls -d build/lib/mc/*
+          # $HOME/.mc/libs and not beside the binary, on purpose. tests/
+          # fixtures.sh takes a SNAPSHOT of the compiler into a temporary
+          # directory before it grades anything -- so an edit during a run cannot
+          # corrupt it -- and the snapshot has no tree beside it. The HOME root
+          # is the one that survives being copied, which is why it is the one
+          # `mc install` writes.
+          #
+          # The tree comes out of the tarball already downloaded and verified,
+          # so this needs no network and no registry.
+          mkdir -p "$HOME/.mc/libs"
+          cp -R "$RUNNER_TEMP/mc/lib/mc" "$HOME/.mc/libs/mc"
+          ls -d "$HOME/.mc/libs/mc/"*
 
       - name: The fast gates
         run: sh tests/run.sh
