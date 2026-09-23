@@ -134,28 +134,37 @@ run on Linux since the hosts branch -- see [Install](#install) and `tests/linux.
 ## Build
 
 ```sh
-mc build                      # -> build/mc-php   (for the host you are on)
+mc build                      # macOS -> build/mc-php
 build/mc-php --exe hello.php -o hello && ./hello
 ```
 
 `mc.toml` is the project file and there is no makefile: the same rule the compiler is being built
 to offer, applied to itself.
 
-### Building for another host
+### On Linux, and for any other host
 
-`#include <mc/host>` in `src/mc-php.mc` resolves to the host file of the compiler **doing the
-build**, which is right for a native build and wrong for a cross one: through it a macOS layer
-went into a Linux binary, which linked and then would not load (`Error relocating ./mcphp:
-_NSGetEnviron: symbol not found`). So each cross target has an entry that names its own layer,
-and a config beside it:
+There is one entry per host and `mc build` picks none of them for you.
 
 ```sh
 mc build src --config src/mc-php.linux-aarch64.toml   # -> build/mc-php-linux-arm64
 mc build src --config src/mc-php.linux-x86_64.toml    # -> build/mc-php-linux-x86_64
 ```
 
-Neither needs a linker or a sysroot: `os = "linux"` has a direct-executable backend since mc's
-M42, so mc writes the dynamic ELF64 itself. Both cross-build from any host, macOS included.
+Those two are the **cross-build** road from any host *and* the **native** road on Linux: a
+`[target]` equal to the host is an ordinary build. Neither needs a linker or a sysroot --
+`os = "linux"` has a direct-executable backend since mc's M42, so mc writes the dynamic ELF64
+itself.
+
+`mc build` with no config is `src/mc-php.mc`, whose `#include <mc/host>` resolves to the host
+layer of the compiler **doing the build**. That is right natively and wrong for a cross build --
+through it a macOS layer went into a Linux binary, which linked and then would not load
+(`Error relocating ./mcphp: _NSGetEnviron: symbol not found`) -- and it is also not enough on
+Linux even natively: `src/stmt.mc` calls `realpath(3)` and only mc's **macOS** host layer
+declares it, so `mc build` there is `src/stmt.mc:195: call to unknown function`. Measured with mc
+1.1.0 natively on linux/aarch64, both ways: the config builds, the bare `mc build` does not. The
+declaration cannot simply be added for every host, because a second `extern` of a name the host
+layer already has is `function declared twice`; it is `src/host_extra_linux.mc`, which the two
+Linux entries include.
 
 ### One thing about mc's library tree
 

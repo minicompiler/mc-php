@@ -11,4 +11,11 @@
 // declared twice`, so this cannot simply be declared in src/ for every host.
 // It is per-entry, exactly like the host layer it completes, and there is no
 // macOS twin because the macOS host layer already has the one name in it.
+//
+// The consequence, measured natively with mc 1.1.0 on linux/aarch64 rather
+// than reasoned about: `mc build` -- which is src/mc-php.mc, the `<mc/host>`
+// entry -- fails there with `src/stmt.mc:195: call to unknown function`, and
+// `mc build src --config src/mc-php.linux-aarch64.toml` succeeds. So the
+// per-host config is the NATIVE road on Linux as well as the cross one, and
+// mc.toml, src/mc-php.mc and the README all say so.
 extern uptr realpath(uptr path, uptr resolved);

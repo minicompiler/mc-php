@@ -7191,15 +7191,20 @@ u8 php_f_restore_exception_handler() {
     return 1;
 }
 
-// setlocale(category, ...locales): this runtime is byte-oriented (D10) and the
-// only locale it HAS is "C", which is what it answers for a query and for a
-// request it can satisfy. What it does with a name it does not have is the
-// HOST LIBC's answer and it asks for it: macOS and glibc return NULL for an
-// unknown locale, musl accepts any name and hands it back, and php calls the
-// same function -- so a table here would be right on one host and wrong on the
-// next. It was macOS's answer hard-coded until the hosts branch, and
-// tests/g/58-sscanf.php is what caught it: `setlocale(LC_ALL,
-// "nonexistent_xx")` is false under macOS php and the string under Alpine's.
+// setlocale(category, ...locales): EVERY request and every query goes to the
+// host's setlocale(3), which is the same function php calls, so the two agree
+// on every host by construction rather than by a table here.
+//
+// It was macOS's answer hard-coded until the hosts branch -- "C" for "C" and
+// for "", false for anything else -- and that is wrong three ways, each
+// measured: musl ACCEPTS an unknown name and hands it back where macOS and
+// glibc answer NULL (tests/g/58-sscanf.php, which is what caught it); `""`
+// means "take the environment" and php answers what LANG says, not "C"; and a
+// "C" that never reaches libc does not RESET it, so after an accepted
+// non-C locale the next query reported the old one where php reports "C".
+//
+// This runtime is still byte-oriented (D10) and implements no locale of its
+// own: what changes is only what it reports, which is what php reports.
 //
 // The category number reaches libc unchanged, which is why php's LC_* are the
 // host's numbers too (src/consts.mc, ph_lc_bsd and ph_lc_gnu).
@@ -7440,20 +7445,14 @@ uptr php_f_setlocale(uptr cz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
             i64 i = php_it_next(h, 0);
             loop {
                 if (i < 0) break;
-                uptr e = php_zv_str(php_it_val(h, i));
-                if (php_str_eq(e, c)) return php_zstr(c);
-                if (php_strlen(e) == 0) return php_zstr(c);
-                uptr ra = setlocale(php_zv_long(cz), e + ZS_HDR);
+                uptr ra = setlocale(php_zv_long(cz), php_zv_str(php_it_val(h, i)) + ZS_HDR);
                 if (ra) return php_zstr(php_str_new(ra, php_cstrlen(ra)));
                 i = php_it_next(h, i + 1);
             }
             k = k + 1;
             continue;
         }
-        uptr e = php_zv_str(v);
-        if (php_str_eq(e, c)) return php_zstr(c);
-        if (php_strlen(e) == 0) return php_zstr(c);
-        uptr r = setlocale(php_zv_long(cz), e + ZS_HDR);
+        uptr r = setlocale(php_zv_long(cz), php_zv_str(v) + ZS_HDR);
         if (r) return php_zstr(php_str_new(r, php_cstrlen(r)));
         k = k + 1;
     }

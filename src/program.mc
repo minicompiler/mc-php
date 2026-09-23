@@ -415,9 +415,24 @@ i64 ph_dollar_expr() {
 #embed ph_rt_lin_x64 "../lib/rt_host_linux_x86_64.mc"
 
 // A push puts its source ON TOP of the lexer's stack, so the LAST push is the
-// FIRST thing parsed (mc's p_push_source has #include's semantics). The
-// runtime goes first here and is therefore lexed last, after the host layer it
-// depends on.
+// FIRST thing parsed (mc's p_push_source has #include's semantics, and it was
+// measured with a control before anything rested on it: two embedded sources,
+// one defining a `#define` the other uses, compile in one order and answer
+// `unknown name` in the other).
+//
+// What that order is FOR is the `#define`s, and only those. php_rt.mc uses
+// O_RDONLY, O_CREAT, S_IFDIR and the rest, and a `#define` must be parsed
+// before its use -- so the runtime is pushed first and therefore lexed LAST,
+// after a host layer that has them.
+//
+// A CALL needs no such order: mc binds one after the whole unit is parsed
+// (which is why mc's own src/host_linux.mc may name mem_eq). So the two Linux
+// halves may go in either order -- rt_host_linux_aarch64.mc calls stat() and
+// rt_host_linux.mc declares it, and that is fine whichever is parsed first.
+// tests/linux.sh is what says so rather than this comment: its smoke case
+// calls is_dir, is_file and filesize, all three of which reach php_stat_mode
+// and php_stat_size and therefore stat(), and it is green on both
+// architectures.
 void ph_push_rt_host() {
     uptr os = host_os();
     if (str_eq(os, "macos")) {
