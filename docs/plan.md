@@ -798,9 +798,35 @@ and `exit`, which a module may declare `extern` itself -- that is how a php COMP
 `Fatal error:` reaches stdout with exit 255 from inside the compiler. `php.mc` now calls **53**
 names from outside itself: 48 frozen, 3 `<float>`'s, and those two.
 
+### Open: a Windows translation unit cannot carry both `<mc/host_windows_*>` and `<sys_windows>`
+
+Reported here, not worked around, and not urgent -- it only costs mc-php the CHEAP Windows road.
+
+Since mc's M42 step 2 `pe-exe-x86_64` writes a PE32+ directly, with no `lld-link` and no
+sysroot, and `docs/build.md` says a single `--exe` translation unit that uses the system layer
+"must include `<sys_windows>`". mc-php's entry would need `<mc/host_windows_x86_64>` as well, for
+the same reason every other entry needs a host layer, and the two do not compose:
+
+```sh
+printf '#include <mc/host_windows_x86_64>\n#include <mc/core>\n#include <sys_windows_host>\n' > w.mc
+mc --backend=pe-exe-x86_64 w.mc -o w.exe
+# lib/sys_windows.mc:76: duplicate #define
+```
+
+`src/host_windows.mc:23` and `lib/sys_windows.mc:76` both define `O_CREAT` and `O_TRUNC`, with
+the same values. mc itself never meets it because its own Windows compiler compiles the layer
+into a separate object (`mcrt.obj`) and links; a consumer that wants the one-step road does meet
+it. The smallest additive fix is for one of the two to stop defining what the other already
+does, which is a change to mc's `lib/`, not to its frozen surface.
+
+Until then a Windows mc-php is the object + `lld-link` road, with `llvm-dlltool` and a
+three-file sysroot mc-php would have to generate for itself -- and that is on top of the runtime
+host layer Windows has no equivalent names for. See the README's *Install*.
+
 ### Still unmeasured
 
-- The ELF half of everything above: `probes/t2/run.sh` has never run on Linux.
+- The ELF half of everything above: `probes/t2/run.sh` has never run on Linux. The COMPILER and
+  the RUNTIME have: `tests/linux.sh` grades both on linux/aarch64 and linux/x86_64.
 - Windows/PE: not applicable yet.
 
 ## 6. After the corpus is green

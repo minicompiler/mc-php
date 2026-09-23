@@ -15,11 +15,13 @@ both. No dialect, no annotations, no "mc-php mode".
 
 This is a **proof of concept**, and what exists is the front end.
 
-**What works.** The compiler reads PHP 8.5 and produces a native macOS arm64 binary. Over
-php-src's whole `.phpt` corpus -- 21395 tests -- it agrees with `php` on **1704**, byte for byte
-on stdout and on the exit code. Classes, interfaces, traits, enums, closures, exceptions,
-references, `match`, heredocs, late static binding, `printf`, a 273-row library, `ext/json`
-written in mc: all of it is in, and each of it is measured rather than claimed.
+**What works.** The compiler reads PHP 8.5 and produces a native binary, on **macOS arm64,
+linux/aarch64 and linux/x86_64** -- one binary per host, each of which was run on a host of its
+own architecture and graded there against that host's own `php`. Over php-src's whole `.phpt`
+corpus -- 21395 tests -- it agrees with `php` on **1704**, byte for byte on stdout and on the
+exit code. Classes, interfaces, traits, enums, closures, exceptions, references, `match`,
+heredocs, late static binding, `printf`, a 272-row library, `ext/json` written in mc: all of it
+is in, and each of it is measured rather than claimed.
 
 **What does not work yet.**
 
@@ -27,7 +29,7 @@ written in mc: all of it is in, and each of it is measured rather than claimed.
 |---|---|
 | **the extension back end** | **not written.** This repository compiles a PHP *program* to a binary today. `get_module()` and the module entry are proven by hand outside it (`probes/t1`..`t3`) and are the next step. |
 | `mcphp.toml` | the project file is **designed and documented, not implemented** -- see [docs/mcphp-toml.md](docs/mcphp-toml.md). Today the compiler is driven as `mc-php --exe FILE.php -o BIN`. |
-| hosts other than macOS arm64 | `lib/php_rt.mc` includes `<sys>`, mc's libSystem layer, so a program it writes is a macOS program. Nothing here has been run on Linux or Windows. |
+| Windows | **not built.** macOS arm64, linux/aarch64 and linux/x86_64 are built, run and graded; Windows is not, and [Install](#install) says exactly what it is missing. |
 | generators | `yield` is not built. 252 of the 13623 disagreeing tests use it; the decision and its cost are in `docs/plan.md` D6. |
 | `eval` and reflection | refused **by design**, by name, with exit 3 -- `docs/plan.md` D1 and D6. A refusal is an answer, not a failure. |
 | most of the corpus | 14470 tests still disagree and 1929 are refused by design. The number below is the whole claim; nothing here rounds it up. |
@@ -36,29 +38,59 @@ written in mc: all of it is in, and each of it is measured rather than claimed.
 
 ## Install
 
-Every tagged version is a GitHub release carrying a built compiler and its checksum.
+Every tagged version is a GitHub release carrying a built compiler and its checksum, one archive
+per host.
+
+| host | archive | proved by |
+|---|---|---|
+| macOS arm64 | `mc-php-$V-macos-arm64.tar.gz` | built and graded on the release runner (`tests/run.sh`) |
+| Linux aarch64 | `mc-php-$V-linux-arm64.tar.gz` | cross-built on that runner, then unpacked and graded on an `ubuntu-24.04-arm` runner (`tests/linux.sh`) |
+| Linux x86_64 | `mc-php-$V-linux-x86_64.tar.gz` | the same, on `ubuntu-24.04` |
 
 ```sh
 V=0.1.0
+A=mc-php-$V-macos-arm64          # or mc-php-$V-linux-arm64, mc-php-$V-linux-x86_64
 BASE=https://github.com/minicompiler/mc-php/releases/download/v$V
-curl -fsSLO $BASE/mc-php-$V-macos-arm64.tar.gz
-curl -fsSLO $BASE/mc-php-$V-macos-arm64.tar.gz.sha256
-shasum -a 256 -c mc-php-$V-macos-arm64.tar.gz.sha256
-tar -xzf mc-php-$V-macos-arm64.tar.gz
-sudo mv mc-php-$V-macos-arm64/mc-php /usr/local/bin/
+curl -fsSLO $BASE/$A.tar.gz
+curl -fsSLO $BASE/$A.tar.gz.sha256
+shasum -a 256 -c $A.tar.gz.sha256      # sha256sum on Linux
+tar -xzf $A.tar.gz
+sudo mv $A/mc-php /usr/local/bin/
 ```
 
 Verify the checksum before unpacking it, not after: the line above fails loudly if the archive is
 not the one that was built.
 
-The runtime is inside the binary, so there is nothing to install beside it. One archive, one
-architecture: **macOS on arm64**. The reason is not the compiler but what it emits --
-`lib/php_rt.mc` includes mc's libSystem layer, so a program mc-php compiles is a macOS program,
-and a Linux build of the compiler would only produce binaries that machine cannot run. When the
-extension back end lands that stops being true, because a `.so` and a `.dll` are already proven,
-and the archive list grows with it.
+**The archive is one binary and there is nothing to install beside it.** The runtime is inside the
+compiler (`#embed`) and since the hosts branch it declares its own system calls, so a released
+mc-php does not need mc, mc's library tree, a linker or a sysroot to compile a `.php`. The Linux
+binaries are dynamic ELF64 against **musl** (`/lib/ld-musl-<arch>.so.1`); on a glibc distribution
+run them in a musl container, or build your own with `libc = "gnu"` in `[target]`.
 
-To build it yourself instead, read [Build](#build) below.
+A row is here because something **ran** it. `file` saying "ELF 64-bit LSB executable" is not a
+proof and no row rests on one.
+
+### Why there is no Windows archive
+
+Two things are missing and both are named rather than estimated.
+
+**The compiler.** mc has a direct PE writer for windows/x86_64 (`pe-exe-x86_64`), which would need
+no linker -- but not for a translation unit like this one. mc-php's entry would have to carry both
+`<mc/host_windows_x86_64>` and `<sys_windows_host>`, and the two collide: measured,
+`lib/sys_windows.mc:76: duplicate #define`, because `src/host_windows.mc` and `lib/sys_windows.mc`
+both define `O_CREAT` and `O_TRUNC`. mc's own Windows compiler avoids it by compiling the layer
+into a separate object (`mcrt.obj`) and linking, so mc-php would need the same road: `lld-link`,
+`llvm-dlltool`, and a sysroot of three files it generates itself.
+
+**The runtime.** `lib/rt_host_windows.mc` does not exist. kernel32 has no `stat`, `lseek`,
+`access`, `getenv`, `unlink`, `rename`, `mkdir`, `rmdir`, `getpid`, `getcwd`, `chdir`, `chmod`,
+`putenv` or `unsetenv` under those names, so every one of them is a shim over
+`GetFileAttributesExA`, `SetFilePointerEx`, `GetEnvironmentVariableA` and the rest -- and `chmod`
+has no honest equivalent at all, which is the kind of thing that has to be said in the file and
+made to fail the way php fails, not quietly.
+
+Neither is speculative work and neither is in this repository yet. Until it is run on a Windows
+runner there is no row.
 
 ## What you need
 
@@ -76,6 +108,7 @@ the machine.
 | every OS | **php 8.5**, any build | only for the TESTS: every fixture is compared byte for byte against what `php` prints |
 | every OS | **python3** | the `.phpt` grid runner and three source gates |
 | for the grid only | **php-src at tag `php-8.5.10`**, cloned at the repository root | it is the oracle corpus, 21395 tests, and it is not committed |
+| for `tests/linux.sh` only | **docker** | it runs the fixture gate inside `php:8.5-alpine`, on the host the Linux binary is for |
 
 ### What the extension road needs (the road being built)
 
@@ -92,44 +125,56 @@ One row per operating system, each naming the exact command that provides it.
 Provenance, because a dependency list is worth what its measurement is worth: the mc and php rows
 and the macOS tools were verified on this host (macOS 26 / arm64, PHP 8.5.10 Homebrew NTS, mc
 1.1.0) on 2026-09-22, and the four-value mapping was checked against `php-src/Zend/zend_modules.h`
-at tag `php-8.5.10`. The Linux and Windows link lines are the owner's measurements, recorded here;
-no leg of this repository has run on either host yet.
+at tag `php-8.5.10`. The Linux and Windows link lines in the table above are the owner's
+measurements of the EXTENSION road, recorded here and not yet exercised; the **program** road has
+run on Linux since the hosts branch -- see [Install](#install) and `tests/linux.sh`.
 
 ---
 
 ## Build
 
 ```sh
-mc build                      # -> build/mc-php
+mc build                      # -> build/mc-php   (for the host you are on)
 build/mc-php --exe hello.php -o hello && ./hello
 ```
 
 `mc.toml` is the project file and there is no makefile: the same rule the compiler is being built
 to offer, applied to itself.
 
+### Building for another host
+
+`#include <mc/host>` in `src/mc-php.mc` resolves to the host file of the compiler **doing the
+build**, which is right for a native build and wrong for a cross one: through it a macOS layer
+went into a Linux binary, which linked and then would not load (`Error relocating ./mcphp:
+_NSGetEnviron: symbol not found`). So each cross target has an entry that names its own layer,
+and a config beside it:
+
+```sh
+mc build src --config src/mc-php.linux-aarch64.toml   # -> build/mc-php-linux-arm64
+mc build src --config src/mc-php.linux-x86_64.toml    # -> build/mc-php-linux-x86_64
+```
+
+Neither needs a linker or a sysroot: `os = "linux"` has a direct-executable backend since mc's
+M42, so mc writes the dynamic ELF64 itself. Both cross-build from any host, macOS included.
+
 ### One thing about mc's library tree
 
-`build/mc-php` is a **different binary from `mc`**, and it is itself a compiler: when it compiles
-a `.php` it pushes `lib/php_rt.mc`, whose first line is `#include <sys>` -- mc's libSystem layer.
-Since mc's M52 that is a *library* name, resolved out of a **tree**, not out of the compiler's
-own blob. `mc` finds its tree beside `mc`; `mc-php` needs one it can reach.
-
-If you installed mc with `mc install`, `$HOME/.mc/libs/mc/v<version>/` is that tree and there is
-nothing to do. If you just untarred a release, put the `lib/mc` it carries there:
+`build/mc-php` is a **different binary from `mc`**, and `src/mc-php.mc` includes `<float>` and
+the two float machines. Since mc's M52 those are *library* names, resolved out of a **tree** and
+not out of the compiler's own blob -- so **building** mc-php needs one. If you installed mc with
+`mc install`, `$HOME/.mc/libs/mc/v<version>/` is that tree and there is nothing to do. If you
+just untarred an mc release, put the `lib/mc` it carries there:
 
 ```sh
 mkdir -p ~/.mc/libs
 cp -R /path/to/mc-1.1.0-macos-arm64/lib/mc ~/.mc/libs/mc
 ```
 
-Copying it beside the binary instead (`cp -R .../lib build/lib`) works too, for a binary that
-stays put -- but `tests/fixtures.sh` grades a **snapshot** of the compiler in a temporary
-directory, and a snapshot has no tree beside it. The `$HOME` root is the one that survives being
-copied, which is why it is the one `mc install` writes and the one CI installs.
-
-Without it the compiler builds fine and then refuses every program with
-`#include <sys>: not in this compiler and mc 1.1.0's library tree was not found: run mc install`,
-which is mc telling you exactly this.
+**Running** mc-php needs none of it. The runtime used to open with `#include <sys>` -- a library
+name too -- so every program mc-php compiled needed the tree as well, and a released binary alone
+answered `#include <sys>: not in this compiler and mc 1.1.0's library tree was not found: run mc
+install`. It declares its own system calls now (`lib/rt_host_*.mc`), which is what makes a
+one-binary archive honest.
 
 ## Test
 
@@ -151,6 +196,29 @@ Seven gates, and they are what CI runs on every push:
 
 The last two are there because `d8check` is a **static** classifier: it proves every `.php` is
 reachable from a gate, not that one ever ran. A broken workload test passes it.
+
+### On Linux
+
+`tests/linux.sh` is the same fixture gate, run on the host the binary is **for** -- inside a
+container that has a php 8.5 of its own, so each fixture is compared with php on that host and
+not with a recording made on another one. That is not ceremony: a Linux `PHP_OS` is `"Linux"` and
+a macOS one is `"Darwin"`, and a cross-host comparison would grade that as a failure and hide the
+ones that matter.
+
+```sh
+mc build src --config src/mc-php.linux-aarch64.toml
+sh tests/linux.sh aarch64          # docker, and nothing else
+sh tests/linux.sh x86_64
+```
+
+It is what the CI Linux legs and the release's grading job run. On a macOS host with a Linux VM,
+run it inside the VM against the same path -- the repository is mounted there:
+
+```sh
+limactl shell mc-k7 -- sh "$PWD/tests/linux.sh" aarch64
+```
+
+### The grid
 
 The `.phpt` grid is the number this project answers with and it is **not** a per-commit gate --
 21395 tests, about forty minutes, and it needs php-src:
@@ -205,20 +273,24 @@ never freed, an array copies eagerly, a string is immutable.
 
 ```
 mc.toml              the mc project:  mc build -> build/mc-php
-src/*.mc             the compiler -- one mc Tier 3 module, 15 files
+src/*.mc             the compiler -- one mc Tier 3 module, 17 files
+src/mc-php*.mc       one entry per host, and src/mc-php.<target>.toml beside each
 lib/php_rt.mc        the runtime, #embed'ed into the compiler and pushed into every program
-tests/               the fixtures, the .phpt grid driver and the gates
+lib/rt_host_*.mc     the runtime's system layer, one file per host, pushed ahead of it
+tests/               the fixtures, the .phpt grid driver, the gates and tests/linux.sh
 examples/            empty until the extension road can build one
 docs/                the plan, the decisions, the mcphp.toml schema
 probes/              the measurement record, T0..T10 -- FROZEN, never edited
 php-src/             php's own source, cloned, not committed
 ```
 
-[docs/layout.md](docs/layout.md) has a line for each `src/` file and the one rule about `probes/`.
+[docs/layout.md](docs/layout.md) has a line for each `src/` and `lib/` file and the one rule about
+`probes/`.
 
 `src/` and `lib/` were carved out of `probes/t10/`, which keeps its own copies so it still
-reproduces the number it published. `tests/carve.sh` proves the carve moved nothing, by building
-both and comparing the two binaries byte for byte.
+reproduces the number it published. `tests/carve.sh` proved the carve moved nothing by building
+both and comparing the two binaries byte for byte; its own header said it dies with the first
+commit that changes what the compiler does, and the host layer is that commit, so it is deleted.
 
 ---
 
