@@ -141,6 +141,15 @@ each stream and exit the same. These are the places where they would not:
   `php_shutdown`'s destructors into a stdout the SAPI is tearing down would be worse than not.
 * **The type check is strict always**, as above.
 
+## Thread safety
+
+`[php].thread_safety` is carried into the module header because the loader compares it, and a ZTS
+php refuses an NTS module by name. It is **not** a claim that the runtime is thread safe: D7's
+arena, the class table and the pending-exception flag are process globals, and a ZTS php running
+two requests in two threads through one loaded module would share all three. Nothing here has
+been run under a ZTS php. Build for the php you have, and until that measurement exists, that
+php should be NTS.
+
 ## The memory
 
 `docs/plan.md` D7 is unchanged: one 48 MiB arena per PROCESS, never freed. That is a program's

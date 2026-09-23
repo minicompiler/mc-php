@@ -174,7 +174,7 @@ i64 ph_ext_read(i64 pt, i64 k) {
     if (pt == PT_INT)    return ph_c2("phx_i", ex, ph_int(k), TY_I64);
     if (pt == PT_FLOAT)  return ph_c2("phx_f", ex, ph_int(k), ty_f64);
     if (pt == PT_STRING) return ph_c2("phx_s", ex, ph_int(k), ty_pstr);
-    return ph_cast(TY_U8, ph_c2("phx_b", ex, ph_int(k), TY_U8));
+    return ph_c2("phx_b", ex, ph_int(k), TY_U8);              // bool
 }
 
 // and the writer that puts the answer into return_value
