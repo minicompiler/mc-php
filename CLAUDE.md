@@ -61,9 +61,9 @@ it published; a probe that gets fixed has stopped being a record. `src/`, `lib/`
 were carved out of `probes/t10/`, which keeps its own copies and still runs. A change goes to
 `src/` and never to the probe.
 
-`tests/carve.sh` is that carve's own proof and has a short life by design: it builds both and
-compares the two binaries byte for byte, and it is deleted by the first commit that changes what
-the compiler does.
+`tests/carve.sh` was that carve's own proof and had a short life by design: it built both and
+compared the two binaries byte for byte, and it was to be deleted by the first commit that
+changed what the compiler does. The hosts branch is that commit and it is deleted.
 
 ## State
 - 2026-09-15: repository created; plan and test grid written; no probe run yet.

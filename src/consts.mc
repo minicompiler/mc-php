@@ -85,6 +85,75 @@ i64 ph_pre_find(uptr n) {
     return -1;
 }
 
+// The four predefined constants that are the HOST's answer and not php's.
+// They were four rows of the table below, all four saying macOS, and two of
+// them said it twice: DIRECTORY_SEPARATOR and PATH_SEPARATOR were registered
+// at the head of the table with a LENGTH of 0 and again at its foot with the
+// right one, and ph_pre_find returns the FIRST match -- so both compiled to
+// the empty string and the correct pair was unreachable. Inherited verbatim
+// from probes/t10, which is frozen and keeps it.
+//
+// php's own values, from php-src's Zend/zend_portability.h and main/php.h:
+//
+//   host      DIRECTORY_SEPARATOR   PATH_SEPARATOR   PHP_OS   PHP_OS_FAMILY
+//   macOS     /                     :                Darwin   Darwin
+//   Linux     /                     :                Linux    Linux
+//   Windows   \\                    ;                WINNT    Windows
+//
+// The host is the compiler's own, for the reason src/program.mc gives about
+// the runtime host layer: mc's default target is the host's, so a binary this
+// compiler writes runs on the machine that wrote it.
+//
+// The third column is the string's LENGTH and mc will not check it -- that is
+// what the 0 above was. tests/lencheck.py covers ph_pre since this commit.
+void ph_pre_host() {
+    uptr os = host_os();
+    if (str_eq(os, "windows")) {
+        ph_pre("DIRECTORY_SEPARATOR", 1, 1, "\\");
+        ph_pre("PATH_SEPARATOR", 1, 1, ";");
+        ph_pre("PHP_OS", 1, 5, "WINNT");
+        ph_pre("PHP_OS_FAMILY", 1, 7, "Windows");
+        ph_lc_bsd();
+        return;
+    }
+    ph_pre("DIRECTORY_SEPARATOR", 1, 1, "/");
+    ph_pre("PATH_SEPARATOR", 1, 1, ":");
+    if (str_eq(os, "linux")) {
+        ph_pre("PHP_OS", 1, 5, "Linux");
+        ph_pre("PHP_OS_FAMILY", 1, 5, "Linux");
+        ph_lc_gnu();
+        return;
+    }
+    ph_pre("PHP_OS", 1, 6, "Darwin");
+    ph_pre("PHP_OS_FAMILY", 1, 6, "Darwin");
+    ph_lc_bsd();
+}
+
+// setlocale's category numbers, which php takes straight from the system's
+// locale.h. BSD (macOS) and the Microsoft CRT number them from LC_ALL; glibc
+// and musl number them from LC_CTYPE and put LC_ALL last. They reach libc
+// unchanged -- lib/rt_host_*.mc declares setlocale(3) and php_f_setlocale
+// calls it -- so a wrong number here asks the host about the wrong category.
+void ph_lc_bsd() {
+    ph_pre("LC_ALL", 0, 0, 0);
+    ph_pre("LC_COLLATE", 0, 1, 0);
+    ph_pre("LC_CTYPE", 0, 2, 0);
+    ph_pre("LC_MONETARY", 0, 3, 0);
+    ph_pre("LC_NUMERIC", 0, 4, 0);
+    ph_pre("LC_TIME", 0, 5, 0);
+    ph_pre("LC_MESSAGES", 0, 6, 0);
+}
+
+void ph_lc_gnu() {
+    ph_pre("LC_CTYPE", 0, 0, 0);
+    ph_pre("LC_NUMERIC", 0, 1, 0);
+    ph_pre("LC_TIME", 0, 2, 0);
+    ph_pre("LC_COLLATE", 0, 3, 0);
+    ph_pre("LC_MONETARY", 0, 4, 0);
+    ph_pre("LC_MESSAGES", 0, 5, 0);
+    ph_pre("LC_ALL", 0, 6, 0);
+}
+
 void ph_pre_init() {
     ph_pre("HTML_SPECIALCHARS", 0, 0, 0);
     ph_pre("HTML_ENTITIES", 0, 1, 0);
@@ -95,8 +164,6 @@ void ph_pre_init() {
     ph_pre("FILE_IGNORE_NEW_LINES", 0, 2, 0);
     ph_pre("FILE_SKIP_EMPTY_LINES", 0, 4, 0);
     ph_pre("FILE_APPEND", 0, 8, 0);
-    ph_pre("DIRECTORY_SEPARATOR", 1, 0, "/");
-    ph_pre("PATH_SEPARATOR", 1, 0, ":");
     ph_pre("E_ERROR", 0, 1, 0);
     ph_pre("E_WARNING", 0, 2, 0);
     ph_pre("E_PARSE", 0, 4, 0);
@@ -130,13 +197,6 @@ void ph_pre_init() {
     ph_pre("ENT_HTML401", 0, 0, 0);
     ph_pre("ENT_SUBSTITUTE", 0, 8, 0);
     ph_pre("ENT_IGNORE", 0, 4, 0);
-    ph_pre("LC_ALL", 0, 0, 0);
-    ph_pre("LC_COLLATE", 0, 1, 0);
-    ph_pre("LC_CTYPE", 0, 2, 0);
-    ph_pre("LC_MONETARY", 0, 3, 0);
-    ph_pre("LC_NUMERIC", 0, 4, 0);
-    ph_pre("LC_TIME", 0, 5, 0);
-    ph_pre("LC_MESSAGES", 0, 6, 0);
     ph_pre("PHP_MAJOR_VERSION", 0, 8, 0);
     ph_pre("PHP_MINOR_VERSION", 0, 5, 0);
     ph_pre("PHP_RELEASE_VERSION", 0, 10, 0);
@@ -177,10 +237,7 @@ void ph_pre_init() {
     ph_pre("DEBUG_BACKTRACE_IGNORE_ARGS", 0, 2, 0);
     ph_pre("PHP_MAXPATHLEN", 0, 1024, 0);
     ph_pre("PHP_EOL", 1, 1, "\n");
-    ph_pre("PHP_OS", 1, 6, "Darwin");
-    ph_pre("PHP_OS_FAMILY", 1, 6, "Darwin");
-    ph_pre("DIRECTORY_SEPARATOR", 1, 1, "/");
-    ph_pre("PATH_SEPARATOR", 1, 1, ":");
+    ph_pre_host();
     ph_pre("PHP_VERSION", 1, 6, "8.5.10");
     ph_pre("PHP_EXTRA_VERSION", 1, 0, "");
     ph_pre("PHP_SAPI", 1, 3, "cli");

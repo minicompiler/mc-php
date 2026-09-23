@@ -5,7 +5,14 @@
 #     BIN=/path/to/mc-php sh tests/run.sh
 #
 # The grid is tests/grid.sh and takes about half an hour; it is the number
-# this project answers with and it is not a per-commit gate. These five are:
+# this project answers with and it is not a per-commit gate.
+#
+# This runs on the host it is ON. tests/linux.sh runs the fixture gate below
+# on a LINUX host, inside a container with a php of its own, against a
+# compiler cross-built by `mc build src --config src/mc-php.linux-<arch>.toml`
+# -- the same script, the same comparison, the host the binary is for.
+#
+# These five are:
 #
 #   d8check      every .php in the project is in a regime with an obligation
 #   lencheck     every hand-counted string length in src/ and lib/ is right

@@ -5,12 +5,17 @@
 # release body, every archive carries a .sha256 beside it, and `publish` needs
 # every producer so a half-built release is never published.
 #
-# ONE host, and the reason is not laziness. lib/php_rt.mc includes <sys>, which
-# is mc's libSystem layer, so a program mc-php compiles is a macOS program
-# today -- and every number this repository publishes was measured on macOS
-# arm64. A linux-x86_64 archive would be a compiler nobody has run producing
-# programs nobody has run. When the runtime grows a Linux layer, this grows a
-# matrix; until then the honest artefact list is one row.
+# THREE archives, and each one is a target that has been RUN. macOS arm64 is
+# built and graded on the runner; the two Linux compilers are CROSS-BUILT on
+# the same macOS runner -- mc writes a dynamic ELF64 itself, no linker and no
+# sysroot -- and then each is graded on a Linux runner of its own architecture,
+# by tests/linux.sh, against a php 8.5 of that host. A row is here because
+# something ran it, never because it linked.
+#
+# Windows is NOT here and the README says why on its own row: the compiler
+# needs mc's object + lld-link road there (a single translation unit cannot
+# carry both <mc/host_windows> and <sys_windows> -- they both define O_CREAT),
+# and the runtime needs a kernel32 layer that does not exist yet.
 name: Release
 
 on:
@@ -36,7 +41,7 @@ env:
 
 jobs:
   build:
-    name: Build (macos/arm64)
+    name: Build (macos/arm64 + the two Linux cross-builds)
     runs-on: macos-15
     timeout-minutes: 30
     outputs:
@@ -85,19 +90,22 @@ jobs:
       - name: Install mc's library tree where any mc-php can find it
         run: |
           set -eu
-          # build/mc-php is a DIFFERENT binary from mc, and it is a compiler:
-          # compiling a .php pushes lib/php_rt.mc, whose first line is
-          # `#include <sys>` -- mc's libSystem layer. Since mc's M52 that is a
-          # LIBRARY name, resolved out of a TREE and not out of the blob, and mc
-          # looks in three places: $HOME/.mc/libs, then lib/mc/v<ver>/ beside the
-          # binary, then one directory up.
+          # To BUILD mc-php, not to run it. src/mc-php.mc includes <float> and
+          # the two float machines, and since mc's M52 those are LIBRARY names
+          # resolved out of a tree beside `mc`, not out of its blob.
           #
-          # $HOME/.mc/libs and not beside the binary, on purpose. tests/
-          # fixtures.sh takes a SNAPSHOT of the compiler into a temporary
-          # directory before it grades anything -- so an edit during a run cannot
-          # corrupt it -- and the snapshot has no tree beside it. The HOME root
-          # is the one that survives being copied, which is why it is the one
-          # `mc install` writes.
+          # It used to be needed to RUN it as well: lib/php_rt.mc opened with
+          # `#include <sys>`, so every program mc-php compiled needed the tree
+          # too. Since the hosts branch the runtime declares its own system
+          # calls (lib/rt_host_*.mc) and a released mc-php needs nothing
+          # installed beside it -- which is what makes a one-binary archive
+          # honest on every host.
+          #
+          # $HOME/.mc/libs and not beside the binary: tests/fixtures.sh takes a
+          # SNAPSHOT of the compiler into a temporary directory before it
+          # grades anything, and a snapshot has no tree beside it. The HOME
+          # root is the one that survives being copied, which is why it is the
+          # one `mc install` writes.
           #
           # The tree comes out of the tarball already downloaded and verified,
           # so this needs no network and no registry.
@@ -110,7 +118,7 @@ jobs:
       - name: The fast gates
         run: sh tests/run.sh
 
-      - name: Package
+      - name: Package (macos/arm64)
         id: pkg
         env:
           VERSION: ${{ steps.ver.outputs.version }}
@@ -128,16 +136,89 @@ jobs:
           ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
           ls -l dist
 
+      - name: Cross-build the two Linux compilers
+        run: |
+          set -eu
+          # No linker and no sysroot: `os = "linux"` has a direct-executable
+          # backend (mc's M42), so `mc build` writes the ELF itself. The entry
+          # names the host layer -- `#include <mc/host>` would bake this
+          # runner's macOS one into a Linux binary, which is what the branch
+          # started from (`_NSGetEnviron: symbol not found`).
+          mc build src --config src/mc-php.linux-aarch64.toml
+          mc build src --config src/mc-php.linux-x86_64.toml
+          file build/mc-php-linux-arm64 build/mc-php-linux-x86_64
+
+      - name: Package
+        id: pkg2
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          for pair in "linux-arm64:build/mc-php-linux-arm64" "linux-x86_64:build/mc-php-linux-x86_64"; do
+            slug=${pair%%:*}; bin=${pair#*:}
+            name="mc-php-$VERSION-$slug"
+            stage="$RUNNER_TEMP/$name"
+            mkdir -p "$stage"
+            cp "$bin" "$stage/mc-php"
+            cp README.md LICENSE "$stage/"
+            tar -czf "dist/$name.tar.gz" -C "$RUNNER_TEMP" "$name"
+            ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
+          done
+          ls -l dist
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: mc-php-macos-arm64
+          name: mc-php-archives
           path: dist/
           if-no-files-found: error
 
+  # Each Linux archive is GRADED on a Linux runner of its own architecture
+  # before anything is published: unpacked, and then the same fixture gate the
+  # macOS job ran, against a php 8.5 on that host (tests/linux.sh). `publish`
+  # needs both, so an archive that does not run is never released.
+  grade-linux:
+    name: Grade (${{ matrix.slug }})
+    needs: [build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { slug: linux-arm64,  arch: aarch64, runner: ubuntu-24.04-arm }
+          - { slug: linux-x86_64, arch: x86_64,  runner: ubuntu-24.04 }
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          name: mc-php-archives
+          path: dist
+
+      - name: Unpack the one this host is for, checksum first
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SLUG: ${{ matrix.slug }}
+        run: |
+          set -eu
+          name="mc-php-$VERSION-$SLUG"
+          ( cd dist && sha256sum -c "$name.tar.gz.sha256" )
+          tar -xzf "dist/$name.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p build
+          cp "$RUNNER_TEMP/$name/mc-php" "build/mc-php-$SLUG"
+          chmod +x "build/mc-php-$SLUG"
+
+      - name: It loads, it compiles, and the fixtures agree with php
+        run: sh tests/linux.sh ${{ matrix.arch }}
+
   publish:
     name: Publish the release
-    needs: [build]
+    needs: [build, grade-linux]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -164,9 +245,11 @@ jobs:
             echo
             echo "---"
             echo
-            echo "Built on macOS arm64 only. \`lib/php_rt.mc\` includes \`<sys>\`,"
-            echo "mc's libSystem layer, so a program this compiler writes is a macOS"
-            echo "program: see the README's *What does not work yet*."
+            echo "macOS arm64, linux/aarch64 and linux/x86_64. Each archive was RUN"
+            echo "on a host of its own architecture before this release was published:"
+            echo "the macOS one by \`tests/run.sh\`, the two Linux ones by"
+            echo "\`tests/linux.sh\`, which compiles every fixture and compares it with"
+            echo "php 8.5 on that host. No Windows archive: see the README's *Install*."
           } >> "$RUNNER_TEMP/body.md"
           cat "$RUNNER_TEMP/body.md"
 

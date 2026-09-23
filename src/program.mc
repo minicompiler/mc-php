@@ -399,6 +399,62 @@ i64 ph_dollar_expr() {
 
 #embed ph_rt "../lib/php_rt.mc"
 
+// The runtime's own system layer, one file per host: what a PROGRAM this
+// compiler writes calls, which is not what the compiler calls. All four are
+// embedded and one is pushed, chosen by host_os()/host_arch() -- there is no
+// conditional compilation in this language, and a binary that carries four
+// small files and picks one is smaller and far easier to prove than four
+// compilers that each carry one.
+//
+// The choice is the HOST's because mc's default target is the host's
+// (mc's M37): `mc-php --exe x.php` writes a binary for the machine it is
+// running on, so the runtime's calls have to be that machine's.
+#embed ph_rt_macos   "../lib/rt_host_macos.mc"
+#embed ph_rt_linux   "../lib/rt_host_linux.mc"
+#embed ph_rt_lin_a64 "../lib/rt_host_linux_aarch64.mc"
+#embed ph_rt_lin_x64 "../lib/rt_host_linux_x86_64.mc"
+
+// A push puts its source ON TOP of the lexer's stack, so the LAST push is the
+// FIRST thing parsed (mc's p_push_source has #include's semantics, and it was
+// measured with a control before anything rested on it: two embedded sources,
+// one defining a `#define` the other uses, compile in one order and answer
+// `unknown name` in the other).
+//
+// What that order is FOR is the `#define`s, and only those. php_rt.mc uses
+// O_RDONLY, O_CREAT, S_IFDIR and the rest, and a `#define` must be parsed
+// before its use -- so the runtime is pushed first and therefore lexed LAST,
+// after a host layer that has them.
+//
+// A CALL needs no such order: mc binds one after the whole unit is parsed
+// (which is why mc's own src/host_linux.mc may name mem_eq). So the two Linux
+// halves may go in either order -- rt_host_linux_aarch64.mc calls stat() and
+// rt_host_linux.mc declares it, and that is fine whichever is parsed first.
+// tests/linux.sh is what says so rather than this comment: its smoke case
+// calls is_dir, is_file and filesize, all three of which reach php_stat_mode
+// and php_stat_size and therefore stat(), and it is green on both
+// architectures.
+void ph_push_rt_host() {
+    uptr os = host_os();
+    if (str_eq(os, "macos")) {
+        p_push_source("php runtime host", ph_rt_macos, ph_rt_macos_size);
+        return;
+    }
+    if (str_eq(os, "linux")) {
+        p_push_source("php runtime host", ph_rt_linux, ph_rt_linux_size);
+        uptr a = host_arch();
+        if (str_eq(a, "aarch64")) {
+            p_push_source("php runtime host arch", ph_rt_lin_a64, ph_rt_lin_a64_size);
+            return;
+        }
+        if (str_eq(a, "x86_64")) {
+            p_push_source("php runtime host arch", ph_rt_lin_x64, ph_rt_lin_x64_size);
+            return;
+        }
+        err_at2("mc-php", 1, "mc-php: no runtime host layer for this linux architecture", a);
+    }
+    err_at2("mc-php", 1, "mc-php: no runtime host layer for this host", os);
+}
+
 void user_init() {
     float_init();
     machine_arm64_float_init();
@@ -415,4 +471,5 @@ void user_init() {
     syntax("<?php", &ph_program);
     syntax("<?=", &ph_program);                   // a file may open with it
     p_push_source("php runtime", ph_rt, ph_rt_size);
+    ph_push_rt_host();
 }

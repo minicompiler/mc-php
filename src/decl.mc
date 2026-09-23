@@ -371,7 +371,6 @@ void ph_lib_init() {
     ph_lib("set_time_limit", "php_f_noop", 0, 1, PT_BOOL);
     ph_lib("date_default_timezone_set", "php_f_noop", 0, 1, PT_BOOL);
     ph_lib("assert_options", "php_f_null2", 0, 2, PT_MIXED);
-    ph_lib("flush", "php_f_zero", 0, 0, PT_VOID);
     ph_lib("constant", "php_f_constant", 1, 1, PT_MIXED);
     ph_lib("str_contains", "php_f_contains", 2, 2, PT_BOOL);
     ph_lib("ctype_digit", "php_f_ctype", 1, 1, PT_BOOL);
@@ -516,7 +515,11 @@ void ph_lib_init() {
     ph_lib("ob_get_flush", "php_f_ob_get_flush", 0, 0, PT_MIXED);
     ph_lib("ob_flush", "php_f_ob_flush", 0, 0, PT_BOOL);
     ph_lib("ob_implicit_flush", "php_f_ob_implicit_flush", 0, 1, PT_BOOL);
-    ph_lib("flush", "php_f_flush", 0, 0, PT_BOOL);
+    // php declares `flush(): void`, and this row used to be shadowed: a second
+    // `flush` was registered 145 rows earlier as php_f_zero, a no-op, and
+    // ph_lib_find returns the FIRST match -- so flush() flushed nothing. The
+    // duplicate is gone and this row carries php's own return type.
+    ph_lib("flush", "php_f_flush", 0, 0, PT_VOID);
     ph_lib("error_reporting", "php_f_error_reporting", 0, 1, PT_INT);
     ph_lib("ini_set", "php_f_nullf", 0, 3, PT_MIXED);
     ph_lib("ini_get", "php_f_null1", 0, 1, PT_MIXED);

@@ -6,8 +6,17 @@
 # for a project that ASSEMBLES a taught compiler and then spawns it. This
 # repository's entry IS the taught compiler, so it is an ordinary program.
 #
-# No [target]: with none, mc uses the host pair (mc's M37). Cross-building
-# mc-php itself is `mc build --config` with a target section of your own.
+# No [target]: with none, mc uses the host pair (mc's M37).
+#
+# This entry is the NATIVE build on a host whose mc layer declares everything
+# mc-php calls, which is macOS. It is not Linux -- src/mc-php.mc says why, with
+# the measurement -- and there the entry is the one for your architecture:
+#
+#     mc build src --config src/mc-php.linux-aarch64.toml
+#     mc build src --config src/mc-php.linux-x86_64.toml
+#
+# Those two are the cross-build road from any host AND the native road on
+# Linux; a [target] equal to the host is an ordinary build.
 
 [package]
 name = "mc-php"

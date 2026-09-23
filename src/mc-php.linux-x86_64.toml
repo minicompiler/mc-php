@@ -1,0 +1,27 @@
+# mc-php.linux-x86_64.toml -- cross-building mc-php for a linux/x86_64 HOST.
+#
+#   mc build src --config src/mc-php.linux-x86_64.toml
+#   -> build/mc-php-linux-x86_64     a dynamic ELF64 executable
+#
+# No [linker] and no [sysroot]: `os = "linux"` has a direct-executable backend
+# (mc's M42), so mc writes the binary itself -- a dynamic ELF64 naming the musl
+# loader in PT_INTERP and libc.so in DT_NEEDED. For glibc add `libc = "gnu"` to
+# [target]; one key names the family and the family picks both the loader path
+# and the soname.
+#
+# Every path below is relative to THIS FILE's directory (src/).
+
+[project]
+name  = "mc-php-linux-x86_64"
+entry = "mc-php-linux-x86_64.mc"
+out   = "../build/mc-php-linux-x86_64"
+kind  = "exe"
+
+[target]
+os   = "linux"
+arch = "x86_64"
+
+# The compiler is by far the biggest source here; at the default 0.25 several
+# tables double mid-build.
+[limits]
+tolerance = 1.0
