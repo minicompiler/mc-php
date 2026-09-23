@@ -52,11 +52,23 @@ fi
 # and the one real difference, named with its size
 a=$(wc -c < probes/t10/php_rt.txt)
 b=$(wc -c < lib/php_rt.mc)
-sed -n '7,$p' lib/php_rt.mc > "$tmp/ours"
-sed -n '3,$p' probes/t10/php_rt.txt > "$tmp/theirs"
+# The body is found, not counted to. Hardcoded line numbers were coupled to
+# the length of a COMMENT: editing the header by four lines made this report a
+# difference below it, which is a gate that fails for the wrong reason. The
+# anchor is the first line of the D10 table, which both files carry verbatim
+# and which is the first line of the common body.
+anchor='^// docs/plan.md D10 is the lowering table'
+body() {
+    n=$(grep -n "$anchor" "$1" | head -1 | cut -d: -f1)
+    [ -n "$n" ] || { echo "  carve: no D10 anchor in $1" >&2; return 1; }
+    sed -n "$n,\$p" "$1"
+}
+body lib/php_rt.mc          > "$tmp/ours"   || exit 1
+body probes/t10/php_rt.txt  > "$tmp/theirs" || exit 1
 if cmp -s "$tmp/ours" "$tmp/theirs"; then
     echo "  carve: lib/php_rt.mc differs from the probe's only in its header" \
-         "($a -> $b bytes, all of it comment)"
+         "($a -> $b bytes, all of it comment;" \
+         "$(wc -l < "$tmp/ours" | tr -d ' ') lines of body compared)"
 else
     echo "  carve: lib/php_rt.mc differs from probes/t10/php_rt.txt BELOW the header"
     exit 1

@@ -2,8 +2,10 @@
 // (src/program.mc's user_init: #embed + p_push_source). It is mc source, not
 // a library the program links: there is no linker on this road.
 //
-// Carved from probes/t10/php_rt.txt, which is frozen. Only the three lines
-// above differ; tests/carve.sh asserts the rest byte for byte.
+// Carved from probes/t10/php_rt.txt, which is frozen. This header block
+// replaces that file's, and is the whole difference between the two:
+// tests/carve.sh compares everything from the D10 table down and requires
+// it to be byte for byte identical. The header may be any length.
 //
 // docs/plan.md D10 is the lowering table this file implements:
 //   bool   -> u8, the two values 0 and 1
