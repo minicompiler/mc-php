@@ -256,7 +256,7 @@ the directories, never on the corpus.**
 |---|---|
 | fixtures | **89 / 89** agree with `php` |
 | refusals | **6 / 6** refused by name, exit 3 |
-| `lencheck` | 529 literal lengths, 0 wrong (515 before; `ph_pre`'s pairs are covered since the hosts branch, which is the gate the two shadowed constants needed) |
+| `lencheck` | 529 literal lengths, 0 wrong (514 before; `ph_pre`'s pairs are covered since the hosts branch, which is the gate the two shadowed constants needed) |
 | `aritycheck` | 272 library rows, 0 wrong (273 before; the duplicate `flush` row is gone) |
 | `d8check` | 102 `.php`, every one in a regime |
 | peak scratch disk, full grid | **3836 KiB** -- bounded by the job count, not the corpus |
