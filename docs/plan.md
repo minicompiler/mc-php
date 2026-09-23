@@ -866,12 +866,36 @@ macos/arm64, linux/aarch64 and linux/x86_64.
 
 In the order the measurements put them, each with the number that says why:
 
-1. **The generated code.** `reference/bench.mc`, hand-written, beats the interpreter **11.1x** on
-   `fib(30)`; mc-php's own output for the same function manages **3.3x**, and on a 3-million
-   iteration loop it is **0.78x -- slower than php**. `--dump-asm` names it: two real calls per
-   statement, `php_pos` (T7's diagnostic position) and `php_thrown` (T6's unwinding check), plus
-   every local in the frame. On a program road that starts 38 ms behind php this did not show;
-   an extension is called from inside a process that is already warm, so it is the whole claim.
+1. **The generated code.** PARTLY DONE. `--dump-asm` named two of the three causes and both are
+   fixed: a statement announced its position (`php_pos`, T7's) and was followed by the unwinding
+   check (`php_thrown`, T6's) whatever it contained, because ph_posstmt's own call set the flag
+   that decides it; and `%` by a positive literal went through `php_mod` for a
+   DivisionByZeroError that literal has ruled out. The rule now is that a statement announces its
+   position only when something in it can raise a diagnostic or throw, and is followed by the
+   check only then -- everything that can raise is a runtime call and `ph_call` marks every call
+   it builds, so that mark is the test, conservative in the safe direction.
+
+   Measured with `reference/bench-steady.php` (a warm-up and the best of nine, nine processes
+   interleaved, because `reference/bench.php` times one cold call each and that carries a 2.5x
+   code-alignment band on this host):
+
+   | | interpreted | by hand | mc-php before | mc-php today |
+   |---|---|---|---|---|
+   | `fib(30)` | 30.4 ms | 2.78 ms (11.0x) | 9.62 ms (3.18x) | **4.82 ms (6.31x)** |
+   | `sum(3000000)` | 9.05 ms | 1.65 ms (5.5x) | 10.55 ms (**0.86x**) | **2.26 ms (4.00x)** |
+
+   The third cause is what is LEFT and it is the rest of the original sentence: **every local
+   lives in the frame**. The hand-written column keeps its values in registers, and that is the
+   whole of the remaining 1.4x on `sum` and most of the 1.7x on `fib`. Two roads to it, neither
+   taken: mc's own register allocator through `[project].opt = 1`, and a whole-program "can this
+   function throw" fixpoint, which would remove the last `php_pos`/`php_thrown` pair from a
+   recursive function like `fib` whose body cannot throw at all.
+
+   The unwinding check is also still emitted after ANY runtime call, not only after one that can
+   throw. Narrowing it needs a per-callee classification of the 179 library rows, which is a
+   whitelist whose wrong entry is a silently wrong line, so it is named rather than guessed.
+   On a program road that starts 38 ms behind php none of this showed; an extension is called
+   from inside a process that is already warm, so it is the whole claim.
 2. **A php ternary allocates per evaluation**, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
    exhausts the 48 MiB arena at `f(30)`. The `if` form of the same function does not. On the
    PROGRAM road too, measured with `mc-php --exe` -- so it is a front-end finding and not the

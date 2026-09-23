@@ -266,10 +266,10 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     teeth: an example `tests/ext.sh` does not build is in no regime. `reference/` is a second
     RECORD beside `probes/` -- the extension road written by hand in mc, its README saying so in
     its first line -- and is excluded from D8 for the reason `probes/` is.
-  * **What the back end does not close, with the number**: the generated code. The same two
+  * **What the back end did not close, with the number**: the generated code. The same two
     functions hand-written in mc beat the interpreter **11.1x** on `fib(30)` where mc-php's own
-    output manages **3.3x**, and on a 3-million-iteration loop mc-php is **0.78x -- slower than
-    php**. `--dump-asm` names it in one look: two real calls per statement, `php_pos` and
+    output managed **3.3x**, and on a 3-million-iteration loop mc-php was **0.78x -- slower than
+    php**. Fixed on the `perf` branch: 6.31x and 4.00x, see the entry at the end of this file. `--dump-asm` names it in one look: two real calls per statement, `php_pos` and
     `php_thrown`, and every local in the frame. On the program road that never showed, because
     php starts 38 ms behind; an extension is called from a process that is already warm.
     `docs/plan.md` § 7 is the ordered list, and item 2 is the one that is not the back end's at
@@ -575,3 +575,72 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   Fixtures: **46 of 46** under `g/` byte for byte php's on both streams and the exit code,
   **5 of 5** under `r/` refused by name with exit 3; `lencheck` 418 / 0 wrong, `aritycheck`
   241 / 0 wrong.
+- The generated code, two of its three causes (2026-09-23, branch `perf`), on **mc 1.1.0**:
+  `docs/plan.md` § 7 item 1, the whole claim of the extension road. `reference/README.md`
+  recorded **0.78x on a 3-million-iteration loop -- slower than php** and `--dump-asm` named the
+  cause in one look: two real calls per statement, `php_pos` and `php_thrown`, whatever the
+  statement contained.
+  * **The rule: a statement announces its position only when something in it can raise a
+    diagnostic or throw, and is followed by the unwinding check only then.** Everything that can
+    raise in this compiler is a runtime call and `ph_call` marks every call it builds, so that
+    mark is the test -- conservative in the safe direction, a call that cannot raise still asks
+    for both, which costs nothing because the population this removes is the statements with no
+    call at all.
+  * **The defect underneath was `php_pos` itself.** `ph_posstmt` builds its call with `ph_c2`,
+    which goes through `ph_call`, and it runs AFTER the statement body -- so every statement in
+    every program came out "can throw" and got the check, and no statement anywhere could ever be
+    quiet. `$s = 0;` paid two calls to store a literal. One save/restore around that one call.
+  * **A duplicate announcement**, its own defect and its own commit: `for ($i = 0; ...)` lowered
+    its init with `ph_stmt()`, which prepends a `php_pos`, and the `for` itself got another at the
+    same line from the `ph_stmt()` above it -- the second overwriting the first before anything
+    could read it. `ph_is_pos_at` descends through a BLOCK (whose first statement runs whenever
+    the block does) and never through a loop or an `if`. Over the 92 fixtures, with a counter that
+    requires nothing between the two `bl _php_pos` but the second call's own setup: **1236 emitted
+    / 7 duplicates -> 1229 / 0**.
+  * **`%` by a literal the compiler can see is positive** is `sdiv`/`msub`, not `php_mod`:
+    DivisionByZeroError is the only thing `%` can do besides the remainder, and a positive literal
+    rules it out. The same shape as the literal exponent beside it. Positive and not merely
+    non-zero, because php answers 0 for `PHP_INT_MIN % -1` and a native divide is where that stops
+    being free.
+  * **Measured** (`reference/bench-steady.php`, new -- a warm-up and the best of nine, nine
+    processes interleaved, because `reference/bench.php` times ONE cold call each and that carries
+    a **2.5x code-alignment band** on this host: two builds of the same source differing only in
+    the module's NAME gave `sum` 5.9 ms and 1.9 ms):
+
+    | | interpreted | by hand | before | after |
+    |---|---|---|---|---|
+    | `fib(30)` | 30.4 ms | 2.78 ms (11.0x) | 9.62 ms (3.18x) | **4.82 ms (6.31x)** |
+    | `sum(3000000)` | 9.05 ms | 1.65 ms (5.5x) | 10.55 ms (**0.86x**) | **2.26 ms (4.00x)** |
+
+    `--dump-asm` of `mcb_sum` is **call-free**. The statement-count experiment the report rested
+    on is re-run and inverted: the same arithmetic in one statement and in four was **6.03 / 15.07
+    ms, 2.50x** before and **3.99 / 4.15 ms, 1.04x** after, against php's own 1.43x -- time scales
+    with the work now and not with the statement count.
+  * **A pre-existing SIGFPE the new fixture found**, on the leg that runs it: linux/x86_64 came
+    back 91 / 92 with `93-mod-literal.php (php exit 0, mc-php exit 136)`, and 136 is 128 + 8.
+    x86-64's `idiv` raises #DE for `PHP_INT_MIN / -1` because the quotient does not fit;
+    AArch64's `sdiv` wraps, so every one of these read correctly on the host this repository is
+    developed on and killed the process on the other two. A compiler built from `main` crashes
+    identically. Four sites, each given php's own answer rather than a shortcut, because php has
+    three: `php_mod` -> 0, `php_zv_div` -> the float, `php_intdiv` -> `ArithmeticError` with php's
+    own message, `php_div_i` guarded so its caller's guarantee stays one.
+  * **The gate this needed**, `tests/g/92-diag-line.php`, differential like every other fixture so
+    php says what the right line is: eight shapes, each a raise whose NEIGHBOURS are now silent --
+    after a plain store, inside a loop whose condition and step are native, a throw caught and
+    asked for `getLine()`, a raise after a call has already moved the position, two raises on
+    consecutive lines, a raise inside a function after silent statements, a throw from a deeper
+    frame. **Proved to have teeth**: with the announcement suppressed outright the fixture gate is
+    **76 / 91** and this file is one of the failures. `tests/g/93-mod-literal.php` is the `%` one.
+  * **The three graded directories do not move, and it is checked test for test and not by the
+    count**: `tests/lang` **104**, `Zend/tests` **756**, `ext/standard/tests/strings` **263** --
+    and `diff` over the green, wrong, refused, skip and php-fail lists of all three, between a
+    snapshot of `main`'s compiler and this one, is **empty in all fifteen**.
+  * Gates: `tests/run.sh` green on macos/arm64 (fixtures **92 / 92** on both streams and the exit
+    code, refusals 6 / 6, `lencheck` 556 / 0, the extension road, D8 (a) 6 ok / 0 failed in both
+    worlds, D8 (b) `main.php` 6.88x and `heavy.php` 1.45x); `tests/linux.sh` green on
+    **linux/aarch64 and linux/x86_64**, 92 / 92 each, each against a php of that host's own.
+  * **What is left, named with its number**: every local still lives in the frame, which is the
+    whole of the remaining 1.4x on `sum` and most of the 1.7x on `fib`; and the unwinding check is
+    still emitted after ANY runtime call, not only one that can throw -- narrowing that needs a
+    per-callee classification of the 179 library rows, a whitelist whose wrong entry is a silently
+    wrong line, so it is named rather than guessed.
