@@ -34,6 +34,32 @@ written in mc: all of it is in, and each of it is measured rather than claimed.
 
 ---
 
+## Install
+
+Every tagged version is a GitHub release carrying a built compiler and its checksum.
+
+```sh
+V=0.1.0
+BASE=https://github.com/minicompiler/mc-php/releases/download/v$V
+curl -fsSLO $BASE/mc-php-$V-macos-arm64.tar.gz
+curl -fsSLO $BASE/mc-php-$V-macos-arm64.tar.gz.sha256
+shasum -a 256 -c mc-php-$V-macos-arm64.tar.gz.sha256
+tar -xzf mc-php-$V-macos-arm64.tar.gz
+sudo mv mc-php-$V-macos-arm64/mc-php /usr/local/bin/
+```
+
+Verify the checksum before unpacking it, not after: the line above fails loudly if the archive is
+not the one that was built.
+
+The runtime is inside the binary, so there is nothing to install beside it. One archive, one
+architecture: **macOS on arm64**. The reason is not the compiler but what it emits --
+`lib/php_rt.mc` includes mc's libSystem layer, so a program mc-php compiles is a macOS program,
+and a Linux build of the compiler would only produce binaries that machine cannot run. When the
+extension back end lands that stops being true, because a `.so` and a `.dll` are already proven,
+and the archive list grows with it.
+
+To build it yourself instead, read [Build](#build) below.
+
 ## What you need
 
 Nothing that compiles C. That absence is the product, so it is stated rather than left to be

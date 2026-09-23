@@ -16,6 +16,11 @@ version = "0.1.0"
 # cannot be owned without them, and they landed in 1.1.0.
 mc = "1.1.0"
 
+# An SPDX identifier, for anyone reading the manifest. There are no
+# [package].files and no [[permission]] rows: those exist for mc's package
+# manager, and mc-php is distributed as a GitHub release instead.
+licence = "MIT"
+
 [project]
 name = "mc-php"
 entry = "src/mc-php.mc"
