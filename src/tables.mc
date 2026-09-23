@@ -53,6 +53,11 @@ i64  ph_fvar[PH_MAXFN];                 // 1 when the last parameter is ...$rest
 i64  ph_fvpc[PH_MAXFN];                 // the DECLARED element type of ...$rest
 i64  ph_fpr[PH_MAXFN];                  // bit i: parameter i is `&$x`
 i64  ph_frr[PH_MAXFN];                  // 1 when declared `function &f()`
+// 1 when a CALL came before the declaration, so the declared types were
+// widened to mixed to match the signature that call was built against. The
+// extension back end reads it: the refusal it would otherwise print names the
+// declared type, which is not what is wrong.
+i64  ph_fwid[PH_MAXFN];
 i64  ph_nfn;
 // the row ph_function() last defined, so ph_program can hand a TOP-LEVEL
 // declaration to the extension back end (a `function` nested in another one

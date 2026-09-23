@@ -94,6 +94,7 @@ i64 ph_function() {
         if (variadic) pt = PT_ARR;
         // reached by a call before the declaration: the row the call was
         // built against says zval, so the definition has to agree
+        if (fwd && !variadic && pt != PT_MIXED) st64(ph_fwid + fi * 8, 1);
         if (fwd && !variadic) pt = PT_MIXED;
         // a by-reference parameter IS the caller's zval: the callee writes
         // through it (php_zv_store), which is the same mechanism `$a = &$b`
@@ -178,6 +179,7 @@ i64 ph_function() {
     st64(ph_fnp + fi * 8, np);
     i64 rt = PT_MIXED;
     if (ph_at(":", 1)) { ph_next(); rt = ph_type_word(1); }
+    if (fwd && rt != PT_VOID && rt != PT_MIXED) st64(ph_fwid + fi * 8, 1);
     if (fwd && rt != PT_VOID) rt = PT_MIXED;
     st64(ph_fret + fi * 8, rt);
     uptr mn = ph_mangle(name, "f_");

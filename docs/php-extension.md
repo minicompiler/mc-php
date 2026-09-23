@@ -41,7 +41,18 @@ hello.php:3: mc-php: a namespace in an extension source
 ```
 
 A parameter with a **default** and an **untyped** parameter are both `mixed` by
-`docs/plan.md` D4 (c), so both land on the first of those. A `namespace` is refused rather than
+`docs/plan.md` D4 (c), so both land on the first of those. One more is worth naming because it
+is ordinary php and the reason is not obvious:
+
+```
+hello.php:4: mc-php: an exported function called before it is declared (move it above its first call): b
+```
+
+php HOISTS a global function, so calling one declared further down the file is legal -- but D4
+builds that call against a zval signature and then widens the declaration to match it, and a
+widened signature is not exportable. **Declare before the first call**, which is the fix the
+message names. Closing it properly means teaching the byte pre-scan the declared TYPES, which
+would move every forward call's lowering on the program road too; that is a step of its own. A `namespace` is refused rather than
 flattened: flattening costs a program nothing (T9) but would make the module publish `f` where
 the source says `aw\f`, and `docs/mcphp-toml.md` promises the module obeys the source's own
 namespace.

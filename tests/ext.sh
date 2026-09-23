@@ -164,6 +164,12 @@ refuse 'function f(int ...$x): int { return 1; }'    'a variadic parameter in an
 refuse 'function f(int $x): array { return []; }'    'return type is not a declared scalar'
 refuse 'function &f(int $x): int { return $x; }'     'a by-reference return in an exported function'
 refuse 'namespace aw; function f(): int { return 1; }' 'a namespace in an extension source'
+# php HOISTS a global function, so this is ordinary php -- and D4 builds the
+# call against a zval signature and widens the declaration to match, which the
+# back end cannot export. The refusal has to say THAT and not "not a declared
+# scalar", which is what it would otherwise print.
+refuse 'function a(int $n): int { return b($n); }
+function b(int $n): int { return $n; }' 'called before it is declared'
 rm -rf "$tmp/build"
 say "refusals: $nref signatures outside the scope, each declined by name"
 

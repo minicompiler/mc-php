@@ -151,6 +151,7 @@ void phx_fn(uptr name, uptr handler, i64 nreq, i64 retpt) {
 }
 
 void phx_arg(uptr name, i64 pt) {
+    if (!phx_nfn) php_die("mc-php: an argument record with no function\n", 44);
     if (phx_nai >= PHX_MAXAI) php_die("mc-php: too many argument records\n", 34);
     uptr e = phx_fe + (phx_nfn - 1) * FEX_SIZE;
     uptr a = phx_ai + phx_nai * AIX_SIZE;

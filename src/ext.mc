@@ -110,6 +110,13 @@ i64 ph_ext_scalar(i64 t) {
 
 void ph_ext_check(i64 fi, uptr fl, i64 line) {
     uptr name = ld64(ph_fname + fi * 8);
+    // php HOISTS a global function, so calling one declared further down the
+    // file is ordinary php -- but D4 builds that call against a zval
+    // signature and the declaration is then widened to match it. The refusal
+    // below would name the declared type, which is not what is wrong, so this
+    // one comes first and says what to do.
+    if (ld64(ph_fwid + fi * 8))
+        ph_todo2(fl, line, "an exported function called before it is declared (move it above its first call)", name);
     if (ld64(ph_fvar + fi * 8))
         ph_todo2(fl, line, "a variadic parameter in an exported function", name);
     if (ld64(ph_fpr + fi * 8))
