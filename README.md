@@ -252,14 +252,26 @@ being green). The three directory rows came out identical on both runs, down to 
 `wrong`/`refused`/`skip` columns. **A block worth fewer than a few dozen tests should be read on
 the directories, never on the corpus.**
 
-| the gates | |
+| the gates, macOS arm64 | |
 |---|---|
 | fixtures | **89 / 89** agree with `php` |
 | refusals | **6 / 6** refused by name, exit 3 |
-| `lencheck` | 514 literal lengths, 0 wrong |
-| `aritycheck` | 273 library rows, 0 wrong |
+| `lencheck` | 529 literal lengths, 0 wrong (515 before; `ph_pre`'s pairs are covered since the hosts branch, which is the gate the two shadowed constants needed) |
+| `aritycheck` | 272 library rows, 0 wrong (273 before; the duplicate `flush` row is gone) |
 | `d8check` | 102 `.php`, every one in a regime |
-| peak scratch disk, full grid | **3836 KiB** -- bounded by the job count, not the corpus (identical on both runs of 21395 tests) |
+| peak scratch disk, full grid | **3836 KiB** -- bounded by the job count, not the corpus |
+
+The same gate, on the hosts the other two archives are for -- `tests/linux.sh`, inside
+`php:8.5-alpine`, against PHP 8.5.10 on that host, measured in a Lima VM (Ubuntu 26.04,
+kernel 7.0.0-30, aarch64):
+
+| the gates, Linux | fixtures | refusals |
+|---|---|---|
+| linux/aarch64 | **89 / 89** | **6 / 6** |
+| linux/x86_64 | **89 / 89** | **6 / 6** |
+
+x86_64 ran under qemu emulation on this host, so it is a correctness measurement and not a
+timing one. Both were run natively by CI's own legs.
 
 Against `php` on a real workload (`tests/bench/`, seven interleaved repetitions, recorded in
 `tests/bench/results/`): mc-php wins the whole program **7.13x** on `main.php` and **1.45x** on
