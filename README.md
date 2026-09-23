@@ -13,7 +13,7 @@ both. No dialect, no annotations, no "mc-php mode".
 
 ## The state today, honestly
 
-This is a **proof of concept**, and what exists is the front end.
+This is a **proof of concept**. The front end is wide and the extension back end is narrow.
 
 **What works.** The compiler reads PHP 8.5 and produces a native binary, on **macOS arm64,
 linux/aarch64 and linux/x86_64** -- one binary per host, each of which was run on a host of its
@@ -23,12 +23,28 @@ exit code. Classes, interfaces, traits, enums, closures, exceptions, references,
 heredocs, late static binding, `printf`, a 272-row library, `ext/json` written in mc: all of it
 is in, and each of it is measured rather than claimed.
 
+**And it now builds an extension.** A `.php` with plain functions compiles into a `.so` that the
+stock `php` loads, and the module's answers are byte for byte what the same source gives
+interpreted:
+
+```sh
+mc-php build examples/hello --config examples/hello/mcphp.toml
+php -d extension=examples/hello/build/hello.so -r 'echo hello_greet("world"), "\n";'
+# hi world
+```
+
+Green on all three hosts, each against a php 8.5.10 of its own
+([`tests/ext.sh`](tests/ext.sh)). [`docs/php-extension.md`](docs/php-extension.md) is what it
+compiles and what it refuses by name; [`docs/php-abi.md`](docs/php-abi.md) is every Zend number
+it rests on, with what each was measured against.
+
 **What does not work yet.**
 
 | | |
 |---|---|
-| **the extension back end** | **not written.** This repository compiles a PHP *program* to a binary today. `get_module()` and the module entry are proven by hand outside it (`probes/t1`..`t3`) and are the next step. |
-| `mcphp.toml` | the project file is **designed and documented, not implemented** -- see [docs/mcphp-toml.md](docs/mcphp-toml.md). Today the compiler is driven as `mc-php --exe FILE.php -o BIN`. |
+| **the extension back end, beyond scalars** | it takes plain functions with **declared scalar** parameters and a declared scalar return. A variadic, a by-reference parameter, a default, `mixed`, an array, an object, a class the module declares, a namespace: each is a **named refusal** at the declaration's own position, not a silent lowering. |
+| **the generated code** | it is correct and it is slow. The same two functions, hand-written in mc, beat the interpreter 11.1x on `fib(30)`; mc-php's own output manages 3.3x, and on a 3-million-iteration loop it is **0.78x -- slower than php**. `--dump-asm` names the cause in one look: two real calls per statement, `php_pos` and `php_thrown`. [`reference/README.md`](reference/README.md) has the table. |
+| `mcphp.toml` | part read, part still design -- [docs/php-extension.md](docs/php-extension.md) § The project file is the line between the two. |
 | Windows | **not built.** macOS arm64, linux/aarch64 and linux/x86_64 are built, run and graded; Windows is not, and [Install](#install) says exactly what it is missing. |
 | generators | `yield` is not built. 252 of the 13623 disagreeing tests use it; the decision and its cost are in `docs/plan.md` D6. |
 | `eval` and reflection | refused **by design**, by name, with exit 3 -- `docs/plan.md` D1 and D6. A refusal is an answer, not a failure. |
@@ -334,9 +350,12 @@ commit that changes what the compiler does, and the host layer is that commit, s
 | | |
 |---|---|
 | [docs/plan.md](docs/plan.md) | **read this first.** The plan, the decisions D1..D10, the test grid, and the open mc gaps |
-| [docs/mcphp-toml.md](docs/mcphp-toml.md) | the `mcphp.toml` project file: the schema, decided, not implemented |
+| [docs/php-extension.md](docs/php-extension.md) | the extension back end: what it compiles, what it refuses by name, and where a module differs from the interpreted source |
+| [docs/php-abi.md](docs/php-abi.md) | every Zend number it rests on, what it was read off, and how to re-read it |
+| [docs/mcphp-toml.md](docs/mcphp-toml.md) | the `mcphp.toml` project file: the schema. `php-extension.md` § The project file is the part implemented |
 | [docs/layout.md](docs/layout.md) | what is in each directory |
 | [probes/README.md](probes/README.md) | the index of the measurements, T0..T10, each with its own `RESULTS.md` |
+| [reference/README.md](reference/README.md) | the second record: the extension road built **by hand** in mc, before the compiler could produce it |
 | [CLAUDE.md](CLAUDE.md) | the operating rules |
 
 mc-php is a **consumer** of mc's 1.0 frozen surface (`docs/reference/hooks.md` § 8 there). Nothing

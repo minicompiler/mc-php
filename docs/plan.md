@@ -823,12 +823,71 @@ Until then a Windows mc-php is the object + `lld-link` road, with `llvm-dlltool`
 three-file sysroot mc-php would have to generate for itself -- and that is on top of the runtime
 host layer Windows has no equivalent names for. See the README's *Install*.
 
+### Open: the TOML reader an extension's project file needs is not frozen
+
+Found by the extension back end (2026-09-23), reported rather than worked around, and it costs
+nothing today.
+
+`src/ext.mc` reads `[extension].name`, `[extension].version` and the four `[php]` values out of
+the project file with `toml_get` and `toml_int`. Both come free inside `<mc/core_build>`, which
+`<mc/core>` includes, so they are present and callable in the compiler -- but **neither is in
+`tests/golden/surface.txt`**, and `docs/reference/` does not document either as a callable, so
+mc's own § 8 rule says they are not frozen. A minor that renamed one would break every taught
+compiler that drives itself from a project file, which is what mc's own `[compiler]` road makes
+the normal shape.
+
+What mc-php would like for 1.x is the six-name family `docs/reference/toml.md` already describes
+in prose -- `toml_get`, `toml_get_array`, `toml_count`, `toml_int`, `toml_entries`,
+`toml_path_at`, `toml_val_at` -- named in the freeze. Nothing is asked for in code; the names
+exist and behave.
+
+The alternative, if the answer is no, is a second TOML reader inside mc-php, which
+`docs/mcphp-toml.md` argues against in its own second section: the schema was chosen to stay
+inside what mc already parses precisely so that no parser has to be written here.
+
 ### Still unmeasured
 
-- The ELF half of everything above: `probes/t2/run.sh` has never run on Linux. The COMPILER and
-  the RUNTIME have: `tests/linux.sh` grades both on linux/aarch64 and linux/x86_64.
+- The ELF half of everything above: `probes/t2/run.sh` has never run on Linux. What HAS: the
+  compiler, the runtime and now the EXTENSION -- `tests/linux.sh` grades all three on
+  linux/aarch64 and linux/x86_64, and step 4 of `tests/ext.sh` loads an mc-written `.so` into
+  the container's own php on each.
 - Windows/PE: not applicable yet.
 
 ## 6. After the corpus is green
 
 Native lowering behind type inference, the web server, multithreading, async. Not before.
+
+## 7. The extension back end -- what is built and what is next
+
+Built (2026-09-23): `src/ext.mc` and `lib/php_ext.mc`, for plain functions with declared scalar
+parameters and a declared scalar return. `docs/php-extension.md` is the page; `docs/php-abi.md`
+is every Zend number, with what each was measured against; `tests/ext.sh` is the gate, green on
+macos/arm64, linux/aarch64 and linux/x86_64.
+
+In the order the measurements put them, each with the number that says why:
+
+1. **The generated code.** `reference/bench.mc`, hand-written, beats the interpreter **11.1x** on
+   `fib(30)`; mc-php's own output for the same function manages **3.3x**, and on a 3-million
+   iteration loop it is **0.78x -- slower than php**. `--dump-asm` names it: two real calls per
+   statement, `php_pos` (T7's diagnostic position) and `php_thrown` (T6's unwinding check), plus
+   every local in the frame. On a program road that starts 38 ms behind php this did not show;
+   an extension is called from inside a process that is already warm, so it is the whole claim.
+2. **A php ternary allocates per evaluation**, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
+   exhausts the 48 MiB arena at `f(30)`. The `if` form of the same function does not. On the
+   PROGRAM road too, measured with `mc-php --exe` -- so it is a front-end finding and not the
+   back end's.
+3. **A declared scalar RETURN is not checked.** `function f(): int { return "x"; }` answers
+   `int(0)` where php throws a `TypeError` -- on the PROGRAM road too, so it is D4/D9's return
+   coercion and not the back end's. It matters more here, because the extension road's headline
+   claim is byte-for-byte agreement with the interpreted source. Found by the reviewer of #15.
+4. **The arena has no request lifecycle.** D7 is one arena per PROCESS, never freed; a module
+   outlives a request. `RINIT`/`RSHUTDOWN` is where that is answered.
+5. **Output buffering.** The runtime writes to fd 1 and php's `ob_start()` never sees it.
+   `php_output_write` is exported and routing `php_flush`'s one write through a sink the
+   extension road sets is the whole fix -- it touches the runtime's hot path, so it is a step
+   with its own bench row.
+6. **Two mc-php extensions in one process** share every runtime symbol, and the first loaded
+   wins in silence. `docs/mcphp-toml.md` § The symbol prefix is the design;
+   `reference/extA.mc`/`extB.mc` is the measurement.
+7. Then the signature: `mixed`, `array`, an object, a class the module declares, a namespace,
+   defaults, variadics, by-reference. Each is a named refusal today.

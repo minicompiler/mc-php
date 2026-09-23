@@ -1,9 +1,10 @@
 # `mcphp.toml` -- the project file
 
-**Not implemented.** This page is the schema, decided and written down so the README can
-describe it truthfully as the shape that is coming. `mc-php build` does not read it yet; today
-the compiler is driven by `mc-php --exe FILE.php -o BIN`, which is the PROGRAM road and not the
-extension road.
+**The schema.** Part of it is implemented and part of it is still the design;
+[`docs/php-extension.md`](php-extension.md) § The project file is the line between the two, and
+it is the page to read for what `mc-php build` does today. In one sentence: `[extension].name`,
+`[extension].version` and the four `[php]` values are read, mc's own `[project]`/`[linker]`/
+`[target]`/`[include]` carry the rest, and everything else on this page is the design.
 
 ## Why a file and not a command line
 

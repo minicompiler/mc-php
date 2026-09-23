@@ -12,8 +12,10 @@ answers here).
 **A compiler that turns PHP source into a native PHP extension** (`.so`/`.dll`): no C, no
 `phpize`, no autotools, no php development headers. The front end is the PHP grammar taught to
 mc, in `src/`. The back end emits `get_module()`, a `zend_module_entry`, the
-`zend_function_entry` tables and the handlers; it is proven by hand in `probes/t1`..`t3` and is
-**not written yet**.
+`zend_function_entry` tables and the handlers; it was proven by hand in `probes/t1`..`t3` and in
+`reference/`, and **it is written** -- `src/ext.mc` plus `lib/php_ext.mc`, for plain functions
+with declared scalar parameters and a declared scalar return. `docs/php-extension.md` is what it
+takes and what it refuses by name.
 
 The earlier line -- PHP to a standalone binary -- is closed. Its front end is what survives and
 it is what `src/` is.
@@ -37,7 +39,10 @@ it is what `src/` is.
 Exactly as `mc.toml` is to mc, an extension is described by a FILE and `mc-php build` does the
 whole road from it: read the file, read the target php, compile, link, write the artefact. **No
 make, no cmake, no long command lines, nothing the user has to remember twice.** The schema is
-`docs/mcphp-toml.md`; it is decided and **not implemented**.
+`docs/mcphp-toml.md`; `docs/php-extension.md` § The project file is the part implemented, which
+is `[extension].name`, `[extension].version` and the four `[php]` values -- and that is also the
+SWITCH: an `[extension]` table means the extension road and no table means the program road, so
+there is no flag and there will not be one.
 
 The repository's own build follows the same rule: `mc build` for the compiler, shell only for the
 test grid. There is no makefile here and there should not be one.
@@ -49,11 +54,14 @@ The schema stays inside the TOML subset mc's own parser already reads (it comes 
 
 ```
 mc.toml        mc build -> build/mc-php
-src/*.mc       the compiler, 15 files, included in ORDER (mc is single pass)
+src/*.mc       the compiler, 18 files, included in ORDER (mc is single pass)
 lib/php_rt.mc  the runtime, #embed'ed and pushed into every program
-tests/         the fixtures, the grid driver and the five fast gates
-docs/          the plan, the decisions, the mcphp.toml schema
+lib/php_ext.mc the EXTENSION runtime, pushed only on that road
+tests/         the fixtures, the grid driver and the fast gates
+examples/      one directory per PHP extension mc-php compiles
+docs/          the plan, the decisions, the mcphp.toml schema, the Zend ABI
 probes/        T0..T10. FROZEN.
+reference/     the extension road built BY HAND in mc. A record, not mc-php output.
 ```
 
 **Nothing under `probes/` is ever edited.** A probe's value is that it still answers the number
@@ -216,6 +224,73 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   here measured a binary that was being rebuilt underneath it.
   Fixtures: **30 of 30** under `g/` byte for byte php's on both streams, **5 of 5** under `r/`
   refused by name with exit 3; `lencheck` 97 / 0 wrong, `aritycheck` 179 / 0 wrong.
+- The EXTENSION back end done (2026-09-23), on **mc 1.1.0**: **a `.php` source compiled into a
+  native PHP extension**, which is what this repository is named for and what `probes/t1`..`t3`
+  and `reference/` had only proved by hand. Two files: `src/ext.mc` (303) emits one Zend handler
+  per exported function and `get_module`, and `lib/php_ext.mc` (357) is everything it calls --
+  the 168-byte `zend_module_entry`, the 48-byte `zend_function_entry` table, the 32-byte
+  `zend_internal_arg_info` records, the conversions across the boundary and the two refusals in
+  php's own words. The emitter knows no Zend offset; `docs/php-abi.md` is the record and
+  `tests/ext/abi.c` the oracle, 55 offsets and constants read out of the installed headers.
+  * **The switch is the project file and there is no flag**, which is `docs/mcphp-toml.md`'s own
+    rule: an `[extension]` table means the extension road, no table means the program road. The
+    single-file CLI sees no project file, so `mc-php --exe x.php -o x` is byte for byte what it
+    was. `main` becomes `mc_php_minit`, the module's MINIT, so the top-level statement stream
+    (`php_bootstrap`, the class entries, a `declare`, a `require`) runs when php loads it.
+  * **Scope is plain functions with declared scalar parameters and a declared scalar return.**
+    Seven other signatures are a NAMED refusal at the declaration's own position -- `mixed`, an
+    untyped parameter, a default, a variadic, a by-reference return, a non-scalar return, and a
+    `namespace` (flattening costs a program nothing since T9, but would make the module publish
+    `f` where the source says `aw\f`). The BODY is the whole language.
+  * **The engine coerces nothing**, measured against a reference extension built the ordinary C
+    way: `arg_info` is declarative, ZPP is what enforces in C, and a `zend_long` parameter handed
+    `"41"` arrives as the `zend_string *`. So the handler checks the zval's LOW BYTE itself --
+    a string carries `0x106` and an object `0x308`, only `IS_LONG` is exactly 4 -- with php's
+    STRICT rule always, plus the one int-to-float widening strict mode allows.
+  * **An internal function's messages are not a userland function's**, which is why the error
+    fixture is not differential: no `called in FILE on line N` tail, an extra argument is an
+    `ArgumentCountError` rather than being ignored, and an arity failure is
+    `zend_argument_count_error` and not `zend_type_error`. An object gives its CLASS name
+    (`stdClass given`, `Closure given`) and a bool gives `true`/`false`, not `bool`.
+  * `tests/ext.sh` is the gate, six steps, every one a comparison against something php produced:
+    the layout against the headers (55, self-skipping where there is no `php-config` or `cc` --
+    the COMPILER needs neither and that is the claim), the four `[php]` values against the target
+    php, the build and the LOAD, the **differential** (`examples/hello/check.php` run twice, with
+    the `.so` and with the `.php`, byte for byte on each stream and the same exit), the wrong
+    calls against `errors.expect` (re-measured from `tests/ext/refx.c` wherever it can be built),
+    and the seven refusals. **Green on macos/arm64, linux/aarch64 and linux/x86_64**, each
+    against a php 8.5.10 of that host's own, and inside `tests/run.sh` and `tests/linux.sh`.
+    The macOS leg runs all six (the runner has `php-config` and `cc`); the Linux legs run four
+    and say which two they skipped and why.
+  * `examples/` is no longer empty and `d8check.py` gained the SEVENTH regime, `extension`, with
+    teeth: an example `tests/ext.sh` does not build is in no regime. `reference/` is a second
+    RECORD beside `probes/` -- the extension road written by hand in mc, its README saying so in
+    its first line -- and is excluded from D8 for the reason `probes/` is.
+  * **What the back end does not close, with the number**: the generated code. The same two
+    functions hand-written in mc beat the interpreter **11.1x** on `fib(30)` where mc-php's own
+    output manages **3.3x**, and on a 3-million-iteration loop mc-php is **0.78x -- slower than
+    php**. `--dump-asm` names it in one look: two real calls per statement, `php_pos` and
+    `php_thrown`, and every local in the frame. On the program road that never showed, because
+    php starts 38 ms behind; an extension is called from a process that is already warm.
+    `docs/plan.md` § 7 is the ordered list, and item 2 is the one that is not the back end's at
+    all -- a php ternary allocates per evaluation, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
+    exhausts the arena at `f(30)` on the PROGRAM road too.
+  * **One mc gap reported, not worked around** (`docs/plan.md` § 5): the project file is read
+    with `toml_get`/`toml_int`, which come free inside `<mc/core_build>` and are **not** in
+    `tests/golden/surface.txt`. Nothing is asked for in code -- the names exist and behave --
+    only that the family mc's own `docs/reference/toml.md` describes be named in the freeze.
+  * **The program road does not move, and it is proved twice.** 96 of the 96 `.php` under
+    `tests/g/`, `tests/r/` and `tests/bench/` compile to **byte-identical objects** under a
+    `main` compiler and this one (the 97th is `28-compile-fatal.php`, which both refuse with the
+    same text). And the three graded directories come out at T10's recorded numbers **to the
+    test**: `tests/lang` **104**, `Zend/tests` **756**, `ext/standard/tests/strings` **263**,
+    measured against a SNAPSHOT of the compiler (T7's rule). The fast gates are green before and
+    after: `test` 90/90 fixtures, 6/6 refusals, `d8check` 103 `.php` in a regime, `lencheck`
+    554/0 (it caught a wrong byte count in `php_ext.mc` before the commit did), `aritycheck`,
+    D8 (a) 6 ok / 0 failed in both worlds, D8 (b) `main.php` 6.80x and `heavy.php` 1.44x.
+  * Cost: **314 lines of `src/ext.mc` (220 of them neither comment nor blank) and 379 of
+    `lib/php_ext.mc` (253)**; the front end moved **+22 lines across six files**, every one of
+    them guarded by `ph_ext`.
 - T10 done (`probes/t10`), on **mc 1.1.0**: the review backlog -- 59 Copilot findings across
   #1..#7 that nothing had acted on (`docs/review-backlog.md`), all three sections, plus one
   the sections did not name and a disk that ran out. **green 1637 -> 1697**:

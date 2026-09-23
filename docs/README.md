@@ -3,10 +3,14 @@
 | file | what it is |
 |---|---|
 | [plan.md](plan.md) | the plan, the decisions D1..D10, the test grid and the open mc gaps. **Read it first.** |
-| [mcphp-toml.md](mcphp-toml.md) | the `mcphp.toml` project file -- the schema, decided and **not yet implemented** |
+| [php-extension.md](php-extension.md) | the extension back end: what it compiles, what it refuses by name, and the four places a module differs from the interpreted source |
+| [php-abi.md](php-abi.md) | every Zend number the back end rests on, what it was read off, and how to re-read it |
+| [mcphp-toml.md](mcphp-toml.md) | the `mcphp.toml` project file -- the schema. `php-extension.md` § The project file is the part implemented |
 | [layout.md](layout.md) | what is in each directory, and the one rule about `probes/` |
 | [review-backlog.md](review-backlog.md) | the 59 Copilot findings from #1..#7, grouped by cost. T10 worked section 1 |
 | copilot-raw.txt | those findings as they arrived, unedited |
 
 The measurements are not here: each probe under [`probes/`](../probes) carries its own
 `RESULTS.md`, and [`probes/README.md`](../probes/README.md) is the index.
+[`reference/`](../reference) is the second record -- the extension road built BY HAND in mc,
+before the compiler could produce any of it.

@@ -1,0 +1,14 @@
+TypeError: hello_addone(): Argument #1 ($n) must be of type int, string given
+ArgumentCountError: hello_addone() expects exactly 1 argument, 0 given
+ArgumentCountError: hello_addone() expects exactly 1 argument, 2 given
+TypeError: hello_addone(): Argument #1 ($n) must be of type int, float given
+TypeError: hello_addone(): Argument #1 ($n) must be of type int, true given
+TypeError: hello_addone(): Argument #1 ($n) must be of type int, null given
+TypeError: hello_addone(): Argument #1 ($n) must be of type int, array given
+TypeError: hello_addone(): Argument #1 ($n) must be of type int, stdClass given
+TypeError: hello_greet(): Argument #1 ($who) must be of type string, int given
+TypeError: hello_not(): Argument #1 ($b) must be of type bool, int given
+TypeError: hello_half(): Argument #1 ($x) must be of type float, string given
+ArgumentCountError: hello_sum() expects exactly 3 arguments, 2 given
+ArgumentCountError: hello_sum() expects exactly 3 arguments, 4 given
+ArgumentCountError: hello_zero() expects exactly 0 arguments, 1 given

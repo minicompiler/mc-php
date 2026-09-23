@@ -175,6 +175,9 @@ i64 ph_in_try;
 uptr ph_frv;                   // the local holding the value, 0 = no try yet
 uptr ph_frf;                   // its flag
 i64 ph_toplevel;               // parsing main: an uncaught throwable is fatal
+// The extension road (src/ext.mc). Here and not there because src/lvalue.mc
+// reads it and mc is single pass; ext.mc is included after both.
+i64 ph_ext;
 uptr ph_entry;                 // the absolute path of the file mc-php was given
 i64  ph_pushing;
 i64  ph_type_word(i64 must);

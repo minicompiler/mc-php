@@ -23,7 +23,9 @@
 #
 # perl is what tests/lim.sh bounds every fixture with, and the php image does
 # not carry it; it is the one package this adds, so that the gate stays the
-# gate instead of a Linux fork of it.
+# gate instead of a Linux fork of it. lld is the second, and it is the LINKER:
+# php loads a shared object and mc writes an ELF executable, so the [linker]
+# road is the only road here as it is on macOS (docs/php-extension.md).
 set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH= cd -- "$here/.." && pwd)
@@ -56,7 +58,7 @@ exec docker run --rm --platform "$plat" \
     "$img" sh -c '
 set -u
 mkdir -p /tmp/mcphp-linux
-apk add --no-cache perl >/dev/null 2>&1 || { echo "  cannot install perl"; exit 2; }
+apk add --no-cache perl lld >/dev/null 2>&1 || { echo "  cannot install perl and lld"; exit 2; }
 echo ""
 echo "  uname:  $(uname -srm)"
 echo "  php:    $(php -v | head -1)"
@@ -83,5 +85,12 @@ fi
 
 echo ""
 echo "== the fixture gate, on this host =="
-sh tests/fixtures.sh
+sh tests/fixtures.sh || exit 1
+
+echo ""
+echo "== the extension road, on this host =="
+# The same six steps the macOS gate runs, with examples/hello/mcphp.linux.toml
+# for the [linker]. The .so is loaded by the php IN THIS CONTAINER and graded
+# against that php -- which is the whole reason this script exists.
+LINUX=1 sh tests/ext.sh
 '

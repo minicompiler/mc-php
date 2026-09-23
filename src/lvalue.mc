@@ -1107,6 +1107,12 @@ i64 ph_stmt_1() {
         return ph_empty();
     }
     if (ph_is("namespace") || ph_is("use")) {
+        // A namespace is FLATTENED on the program road (T9), which costs a
+        // program nothing but would make an EXTENSION publish `f` where the
+        // source says `aw\f` -- and docs/mcphp-toml.md promises the module
+        // obeys the source's own namespace. Refused by name until it does.
+        if (ph_ext && ph_is("namespace"))
+            ph_todo(fl, line, "a namespace in an extension source");
         ph_next();
         loop { if (ph_at(";", 1)) break; if (ph_at("{", 1)) break; if (ph_tid == T_EOF) break; ph_next(); }
         ph_accept(";", 1);

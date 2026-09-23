@@ -38,6 +38,7 @@ i64 ph_function() {
         fi = ph_nfn;
         ph_nfn = ph_nfn + 1;
     }
+    ph_last_fn = fi;
     st64(ph_fname + fi * 8, name);
     st64(ph_fret + fi * 8, PT_MIXED);
     st64(ph_fnp + fi * 8, 0);
@@ -93,6 +94,7 @@ i64 ph_function() {
         if (variadic) pt = PT_ARR;
         // reached by a call before the declaration: the row the call was
         // built against says zval, so the definition has to agree
+        if (fwd && !variadic && pt != PT_MIXED) st64(ph_fwid + fi * 8, 1);
         if (fwd && !variadic) pt = PT_MIXED;
         // a by-reference parameter IS the caller's zval: the callee writes
         // through it (php_zv_store), which is the same mechanism `$a = &$b`
@@ -177,6 +179,7 @@ i64 ph_function() {
     st64(ph_fnp + fi * 8, np);
     i64 rt = PT_MIXED;
     if (ph_at(":", 1)) { ph_next(); rt = ph_type_word(1); }
+    if (fwd && rt != PT_VOID && rt != PT_MIXED) st64(ph_fwid + fi * 8, 1);
     if (fwd && rt != PT_VOID) rt = PT_MIXED;
     st64(ph_fret + fi * 8, rt);
     uptr mn = ph_mangle(name, "f_");
@@ -236,6 +239,11 @@ i64 ph_function() {
     }
     ph_hoist_head = hh;
     ph_hoist_tail = ht;
+    // AFTER the body: a `function` nested in it went through here too and
+    // left ph_last_fn pointing at ITS row, so ph_program would export the
+    // nested declaration and lose this one. Measured: `function outer() {
+    // function nested() {} }` published `nested` and not `outer`.
+    ph_last_fn = fi;
     ph_scope_restore(save);
     ph_ncp = scp;
     ph_cpzv = scz;
