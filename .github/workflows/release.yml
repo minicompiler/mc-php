@@ -1,0 +1,159 @@
+# Release -- build the compiler for the hosts CI can produce, and publish it.
+#
+# Started by autotag.yml with the tag it just pushed, or by hand from the
+# Actions tab. The shape is mc's release.yml: the tag's annotation becomes the
+# release body, every archive carries a .sha256 beside it, and `publish` needs
+# every producer so a half-built release is never published.
+#
+# ONE host, and the reason is not laziness. lib/php_rt.mc includes <sys>, which
+# is mc's libSystem layer, so a program mc-php compiles is a macOS program
+# today -- and every number this repository publishes was measured on macOS
+# arm64. A linux-x86_64 archive would be a compiler nobody has run producing
+# programs nobody has run. When the runtime grows a Linux layer, this grows a
+# matrix; until then the honest artefact list is one row.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to release, e.g. v0.1.0"
+        required: true
+        type: string
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  MC_VERSION: "1.1.0"
+  PHP_VERSION: "8.5"
+
+jobs:
+  build:
+    name: Build (macos/arm64)
+    runs-on: macos-15
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0     # the annotation is the release body
+
+      - name: The version
+        id: ver
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          case "$TAG" in v*) : ;; *) echo "::error::$TAG is not a v* tag"; exit 1 ;; esac
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install mc ${{ env.MC_VERSION }}
+        run: |
+          set -eu
+          asset="mc-$MC_VERSION-macos-arm64.tar.gz"
+          base="https://github.com/minicompiler/mc/releases/download/v$MC_VERSION"
+          curl -fsSL -o "$RUNNER_TEMP/$asset"        "$base/$asset"
+          curl -fsSL -o "$RUNNER_TEMP/$asset.sha256" "$base/$asset.sha256"
+          ( cd "$RUNNER_TEMP" && shasum -a 256 -c "$asset.sha256" )
+          mkdir -p "$RUNNER_TEMP/mc"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/mc" --strip-components=1
+          echo "$RUNNER_TEMP/mc" >> "$GITHUB_PATH"
+
+      - name: Install PHP ${{ env.PHP_VERSION }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          coverage: none
+
+      - name: Build
+        run: |
+          mc --version
+          mc build
+          ls -l build/mc-php
+
+      # A release is not published on a compiler that has not been graded.
+      # This is the same tests/run.sh CI runs on every pull request.
+      - name: The fast gates
+        run: sh tests/run.sh
+
+      - name: Package
+        id: pkg
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          name="mc-php-$VERSION-macos-arm64"
+          stage="$RUNNER_TEMP/$name"
+          mkdir -p "$stage"
+          cp build/mc-php "$stage/mc-php"
+          cp README.md LICENSE "$stage/" 2>/dev/null || cp README.md "$stage/"
+          # What a user needs beside the binary, and nothing else: the runtime
+          # is INSIDE it (#embed), so there is no lib/ to ship.
+          mkdir -p dist
+          tar -czf "dist/$name.tar.gz" -C "$RUNNER_TEMP" "$name"
+          ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
+          ls -l dist
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-php-macos-arm64
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Download every producer's artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: The body is the tag's own annotation
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          git tag -l --format='%(contents)' "$TAG" > "$RUNNER_TEMP/body.md"
+          [ -s "$RUNNER_TEMP/body.md" ] || echo "mc-php $TAG" > "$RUNNER_TEMP/body.md"
+          {
+            echo
+            echo "---"
+            echo
+            echo "Built on macOS arm64 only. \`lib/php_rt.mc\` includes \`<sys>\`,"
+            echo "mc's libSystem layer, so a program this compiler writes is a macOS"
+            echo "program: see the README's *What does not work yet*."
+          } >> "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          ls -l dist
+          gh release create "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/body.md" \
+            dist/* || \
+          gh release upload "$TAG" dist/* --clobber
