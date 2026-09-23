@@ -203,7 +203,15 @@ uptr ph_absfile(uptr fl) {
 
 i64 ph_posstmt(uptr fl, i64 line) {
     uptr a = ph_absfile(fl);
+    // Recording a position cannot raise and cannot throw, so it must not be
+    // what makes its own statement look like it can. It was: ph_c2 goes
+    // through ph_call, which marks every call it builds, and ph_posstmt runs
+    // AFTER the statement body -- so every statement in every program came
+    // out "can throw" and got the php_thrown check below it, whatever it
+    // contained. `$s = 0;` paid two calls to store a literal.
+    i64 save = ph_can_throw;
     i64 c = ph_c2("php_pos", ph_raw(a, cstrlen(a)), ph_int(line), TY_VOID);
+    ph_can_throw = save;
     i64 s = node_new(N_EXPRSTMT, line, fl);
     set_nd_a(s, c);
     return s;

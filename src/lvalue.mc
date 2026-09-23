@@ -570,13 +570,29 @@ void ph_require(i64 once, uptr fl, i64 line) {
     ph_next();
 }
 
-// every statement announces its position first; a declaration and an empty
-// statement lower to nothing and get none.
+// A statement announces its position only when something in it can raise a
+// diagnostic or throw; a declaration and an empty statement lower to nothing
+// and get none either way.
+//
+// The position exists so a diagnostic can name a line and a throw can carry
+// one, and the check after the statement exists so a throw can unwind. A
+// statement that contains no call can do neither: under
+// declare(strict_types=1) with declared scalar types `$s = $s + $i` is two
+// loads, an add and a store, and everything that can raise in this compiler
+// is a runtime call. So ph_call's mark is the test -- it is conservative in
+// the safe direction, since a call that cannot raise still asks for both --
+// and php_pos itself is the one call exempt from it, for the reason
+// ph_posstmt gives.
 i64 ph_stmt() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
+    i64 save = ph_can_throw;
+    ph_can_throw = 0;
     i64 s = ph_stmt_1();
+    i64 raises = ph_can_throw;
+    ph_can_throw = raises | save;
     if (nd_kind(s) == N_BLOCK && !nd_a(s) && !nd_next(s)) return s;
+    if (!raises) return s;
     if (ph_is_pos_at(s, fl, line)) return s;
     i64 p = ph_posstmt(fl, line);
     set_nd_next(p, s);
