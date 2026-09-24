@@ -10,7 +10,8 @@
 # This runs on the host it is ON. tests/linux.sh runs the fixture gate below
 # on a LINUX host, inside a container with a php of its own, against a
 # compiler cross-built by `mc build src --config src/mc-php.linux-<arch>.toml`
-# -- the same script, the same comparison, the host the binary is for.
+# -- the same script, the same comparison, the host the binary is for -- and
+# tests/windows.sh does the same on a Windows host, with a compiler built there.
 #
 # These five are:
 #

@@ -113,11 +113,13 @@ void ph_pre_host() {
         ph_pre("PATH_SEPARATOR", 1, 1, ";");
         ph_pre("PHP_OS", 1, 5, "WINNT");
         ph_pre("PHP_OS_FAMILY", 1, 7, "Windows");
+        ph_pre("PHP_EOL", 1, 2, "\r\n");
         ph_lc_bsd();
         return;
     }
     ph_pre("DIRECTORY_SEPARATOR", 1, 1, "/");
     ph_pre("PATH_SEPARATOR", 1, 1, ":");
+    ph_pre("PHP_EOL", 1, 1, "\n");
     if (str_eq(os, "linux")) {
         ph_pre("PHP_OS", 1, 5, "Linux");
         ph_pre("PHP_OS_FAMILY", 1, 5, "Linux");
@@ -236,7 +238,6 @@ void ph_pre_init() {
     ph_pre("MB_CASE_TITLE", 0, 2, 0);
     ph_pre("DEBUG_BACKTRACE_IGNORE_ARGS", 0, 2, 0);
     ph_pre("PHP_MAXPATHLEN", 0, 1024, 0);
-    ph_pre("PHP_EOL", 1, 1, "\n");
     ph_pre_host();
     ph_pre("PHP_VERSION", 1, 6, "8.5.10");
     ph_pre("PHP_EXTRA_VERSION", 1, 0, "");

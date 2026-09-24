@@ -1,0 +1,17 @@
+; The five php names lib/php_ext.mc calls, and the DLL that exports them.
+;
+; _emalloc is ZEND_FASTCALL, which MSVC builds of php make __vectorcall
+; (Zend/zend_portability.h), and a __vectorcall export carries its argument
+; bytes in its name: php's DLL exports _emalloc@@8, not _emalloc. The
+; convention itself is the ordinary Win64 one for an integer argument, so mc's
+; call is right as it is; only the NAME needs the alias, which is what `==`
+; says -- the program links to _emalloc, the loader looks up _emalloc@@8.
+; Measured: without it php refused the module with "The specified procedure
+; could not be found".
+LIBRARY php8ts.dll
+EXPORTS
+_emalloc == _emalloc@@8
+zend_argument_count_error
+zend_lookup_class
+zend_throw_exception
+zend_type_error

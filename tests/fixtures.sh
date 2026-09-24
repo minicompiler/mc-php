@@ -49,8 +49,11 @@ BIN=${BIN:-build/mc-php}
 . "$here/tmp.sh"
 mcphp_tmp_init mcphp-fx
 tmp=$MCPHP_TMP
-cp "$BIN" "$tmp/mc-php"
-MCPHP_BIN=$tmp/mc-php
+# a Windows executable keeps its suffix: the loader starts nothing without it
+sfx=
+case "$BIN" in *.exe) sfx=.exe ;; esac
+cp "$BIN" "$tmp/mc-php$sfx"
+MCPHP_BIN=$tmp/mc-php$sfx
 export MCPHP_BIN
 # The cleanup is the EXIT trap and the signal traps EXIT: a handler that
 # only cleans up RETURNS, so an interrupted run carried on with its
@@ -82,7 +85,7 @@ for f in $P/g/*.php; do
     # environments for the same fixture.
     lim env -u MCPHP_OUT -u MCPHP_BIN -u MCPHP_TMP "$PHP" $PHPINI "$f" > "$tmp/p.out" 2> "$tmp/p.err"; pe=$?; pto=$timedout
     lim $P/mcphp.sh "$f" > "$tmp/m.out" 2> "$tmp/m.err"; me=$?; mto=$timedout
-    rm -f "$MCPHP_OUT" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
+    rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
     # A fixture that HANGS in both worlds leaves both streams empty and both
     # codes 124, which the comparison below would otherwise call agreement.
     # The ALARM says so, not the code: a fixture may legitimately exit(124).
@@ -123,7 +126,7 @@ for f in $P/r/*.php; do
         continue
     fi
     lim $P/mcphp.sh "$f" > "$tmp/r.out" 2> "$tmp/r.err"; rc=$?
-    rm -f "$MCPHP_OUT" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
+    rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
     if [ "$timedout" = yes ]; then rc=timeout; fi
     msg=$(sed 's/^[^:]*:[0-9]*: //' "$tmp/r.err" | head -1)
     case "$rc:$msg" in

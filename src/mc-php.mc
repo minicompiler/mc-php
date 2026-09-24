@@ -18,7 +18,8 @@
 //     mc build src --config src/mc-php.linux-x86_64.toml
 //
 // Those two include src/host_extra_linux.mc, which is the one declaration mc's
-// Linux host layer does not carry.
+// Linux host layer does not carry. Windows has an entry per architecture too
+// (src/mc-php-windows-*.mc), built on Windows only.
 #include <mc/host>
 #include <mc/core>
 #include <float>

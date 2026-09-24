@@ -197,7 +197,8 @@ void ph_ovr_check(uptr ceg, uptr cname, uptr mname, i64 kind, uptr fl, i64 line)
     st64(av + 8, ph_strlit(what, cstrlen(what)));
     st64(av + 16, ph_strlit(mname, cstrlen(mname)));
     st64(av + 24, ph_int(kind));
-    st64(av + 32, ph_raw(ph_absfile(fl), cstrlen(ph_absfile(fl))));
+    uptr af = ph_disp(ph_absfile(fl));
+    st64(av + 32, ph_raw(af, cstrlen(af)));
     st64(av + 40, ph_int(line));
     i64 s = ph_stmt_of(ph_calln("php_ce_ovr", av, 6, TY_VOID));
     if (ph_ovr_tail) set_nd_next(ph_ovr_tail, s);

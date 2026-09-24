@@ -1,0 +1,20 @@
+LIBRARY ucrtbase.dll
+EXPORTS
+acos
+acosh
+asin
+asinh
+atan
+atan2
+atanh
+cos
+cosh
+expm1
+hypot
+log1p
+log2
+setlocale
+sin
+sinh
+tan
+tanh

@@ -798,30 +798,72 @@ and `exit`, which a module may declare `extern` itself -- that is how a php COMP
 `Fatal error:` reaches stdout with exit 255 from inside the compiler. `php.mc` now calls **53**
 names from outside itself: 48 frozen, 3 `<float>`'s, and those two.
 
-### Open: a Windows translation unit cannot carry both `<mc/host_windows_*>` and `<sys_windows>`
+### Open: one unit cannot declare a name `extern` and define it (windows, mc 1.3.0)
 
-Reported here, not worked around, and not urgent -- it only costs mc-php the CHEAP Windows road.
+Built and graded on both Windows architectures since the windows branch -- the compiler is
+compiled ON each Windows runner by that runner's own `mc.exe` and linked with `lld-link`
+(`src/mc-php.windows-*.toml`, `tests/winsys.sh`), and `tests/windows.sh` runs the fixture gate
+and the extension gate there. What was measured before any of it was written, cross-compiling
+on macOS with mc 1.3.0's release binary:
 
-Since mc's M42 step 2 `pe-exe-x86_64` writes a PE32+ directly, with no `lld-link` and no
-sysroot, and `docs/build.md` says a single `--exe` translation unit that uses the system layer
-"must include `<sys_windows>`". mc-php's entry would need `<mc/host_windows_x86_64>` as well, for
-the same reason every other entry needs a host layer, and the two do not compose:
+- **The `duplicate #define` half is closed by mc 1.3.0** (mc PR #106: repeating a `#define` with
+  the same value is legal). The reproducer that stood here now gets past it:
 
-```sh
-printf '#include <mc/host_windows_x86_64>\n#include <mc/core>\n#include <sys_windows_host>\n' > w.mc
-mc --backend=pe-exe-x86_64 w.mc -o w.exe
-# lib/sys_windows.mc:76: duplicate #define
-```
+  ```sh
+  printf '#include <mc/host_windows_x86_64>\n#include <mc/core>\n#include <sys_windows_host>\n' > w.mc
+  mc --backend=pe-exe-x86_64 w.mc -o w.exe
+  # mc 1.1.0: lib/sys_windows.mc:76: duplicate #define
+  # mc 1.3.0: lib/sys_windows.mc:94: function declared twice
+  ```
 
-`src/host_windows.mc:23` and `lib/sys_windows.mc:76` both define `O_CREAT` and `O_TRUNC`, with
-the same values. mc itself never meets it because its own Windows compiler compiles the layer
-into a separate object (`mcrt.obj`) and links; a consumer that wants the one-step road does meet
-it. The smallest additive fix is for one of the two to stop defining what the other already
-does, which is a change to mc's `lib/`, not to its frozen surface.
+- **The second half is real and it is mc's, so the ONE-STEP road stays closed for the
+  compiler.** mc's core (`src/arena.mc`) declares `open`, `read`, `write`, `close`, `creat`,
+  `_exit` and `mmap` `extern`, and `<sys_windows>` DEFINES `write` (line 94) and the rest. One
+  translation unit cannot declare a name `extern` and then define it; a plain prototype followed
+  by a definition is fine. Reduced to three lines:
 
-Until then a Windows mc-php is the object + `lld-link` road, with `llvm-dlltool` and a
-three-file sysroot mc-php would have to generate for itself -- and that is on top of the runtime
-host layer Windows has no equivalent names for. See the README's *Install*.
+  ```sh
+  printf 'extern i64 f(i64 x);\ni64 f(i64 x) { return x; }\ni64 main() { return f(42); }\n' > t.mc
+  mc --exe t.mc -o t          # t.mc:2: function declared twice
+  printf 'i64 f(i64 x);\ni64 f(i64 x) { return x; }\ni64 main() { return f(42); }\n' > p.mc
+  mc --exe p.mc -o p && ./p   # exit 42
+  ```
+
+  Without `<sys_windows>` the one-step PE IS written -- `mc --backend=pe-exe-x86_64
+  src/mc-php-windows-x86_64.mc` exits 0 -- but it imports `write`, `open`, `mmap`,
+  `posix_spawnp` and fourteen more POSIX names from `kernel32.dll`, which exports none of them
+  (`llvm-readobj --coff-imports`), so the loader would refuse it before its first instruction
+  (mc's `docs/reference/objects.md` § 8c describes exactly that trade-off). The smallest additive
+  fix in mc is C's rule: an `extern` declaration followed by a definition with the same
+  signature is that definition. **Reported, not worked around**: the object + `lld-link` road is
+  what mc builds its own Windows compiler with, it works, and it is the road taken here -- the
+  compiler is an object linked next to `mcrt.obj` (`<sys_windows_host>`) and `winstart.obj`
+  (`<sys_windows_start>`), both compiled on their own, and a kernel32 import library.
+
+- **A PROGRAM mc-php writes does not meet it**: its translation unit is the runtime and the
+  generated code, not `<mc/core>`, so `lib/rt_host_windows.mc` DEFINES the runtime's system calls
+  over kernel32 (nothing declares them `extern` first) and windows/x86_64 programs use mc's
+  one-step PE writer. Measured: the one-step PE imports only names kernel32.dll and ucrtbase.dll
+  export (19 and 18 of them), and it runs -- 94 of 94 fixtures on `windows-latest`.
+
+- **windows/aarch64 has no direct executable in mc** (its exe slot is 0; mc's
+  `docs/build.md` § A direct PE, no lld-link: an arm64 PE needs `DYNAMICBASE` and `.reloc`,
+  deferred until validated on a real Windows-on-ARM loader). `mc-php --exe` there answers `mc:
+  windows/aarch64 requires a linker: there is no direct executable`, so an arm64 program is an
+  object linked by `lld-link` with `kernel32.lib` and `ucrtbase.lib` (`tests/mcphp.sh`,
+  `MCPHP_WINLINK`). Already known to mc; recorded here because it is what an arm64 user types.
+
+- **Not mc's: php publishes no arm64 Windows build** (windows.php.net's 8.5 release lists
+  `nts-vs17-x64`, `ts-vs17-x64` and two x86 builds). On `windows-11-arm` `setup-php` installs the
+  x64 php and it runs emulated, and an emulated x64 process loads x64 DLLs -- so the extension
+  on a Windows-on-ARM machine is an x64 `.dll`, cross-compiled ACROSS ARCHITECTURES by the arm64
+  mc-php (`examples/hello/mcphp.windows.toml` says `arch = "x86_64"` on both hosts).
+
+- **Not mc's either: `_emalloc` is `_emalloc@@8` in php's DLL.** `ZEND_FASTCALL` is
+  `__vectorcall` in an MSVC build of php (`Zend/zend_portability.h`), and a vectorcall export
+  carries its argument bytes in its name. The convention is the ordinary Win64 one for integer
+  arguments, so only the name needed an alias (`_emalloc == _emalloc@@8` in `src/win/php8.def`).
+  Measured: without it php refused the module with `The specified procedure could not be found`.
 
 ### Open: the TOML reader an extension's project file needs is not frozen
 
@@ -851,7 +893,10 @@ inside what mc already parses precisely so that no parser has to be written here
   compiler, the runtime and now the EXTENSION -- `tests/linux.sh` grades all three on
   linux/aarch64 and linux/x86_64, and step 4 of `tests/ext.sh` loads an mc-written `.so` into
   the container's own php on each.
-- Windows/PE: not applicable yet.
+- Windows/PE: the program road and the extension road RUN on `windows-latest` (x86_64) and
+  `windows-11-arm` (aarch64), each against the runner's own php 8.5 (`tests/windows.sh`). What
+  is not measured there: the `.phpt` grid, and a thread-safe php (`php8ts.dll`, whose import
+  library `tests/winsys.sh` writes but no runner loads).
 
 ## 6. After the corpus is green
 
@@ -859,10 +904,40 @@ Native lowering behind type inference, the web server, multithreading, async. No
 
 ## 7. The extension back end -- what is built and what is next
 
+### The roadmap, in the order the owner set it (2026-09-23)
+
+Each step is gated before the next, and a step is done when its gate is green in CI -- not when
+its code is written.
+
+1. **Windows.** DONE on the windows branch: mc-php built natively on `windows-latest` (x86_64)
+   and `windows-11-arm` (aarch64) by each runner's own mc, the runtime's kernel32 host layer
+   (`lib/rt_host_windows.mc`), the fixture gate and the extension gate graded against the
+   runner's own php 8.5 (`tests/windows.sh`), and a release archive per architecture built on
+   those runners. What it cost mc-php and what it left open in mc is § 5.
+2. **Examples first, and they are the first gates.** What already has code moves into
+   `examples/`, each with a gate that compiles it and compares it with php:
+   - `hello` -- exists, and is the extension gate today (`tests/ext.sh`);
+   - the two extensions that reach each other's symbols -- `reference/extA.mc`/`extB.mc`, the
+     measurement behind item 6 of the list below;
+   - `awaitable` -- `reference/aw6.mc`, hand-written mc today, compiled from `aw6.php` once the
+     back end reaches its signatures;
+   - then two that do not exist yet: a **fixed-point DECIMAL** example, and a large-volume
+     **"mission critical" database** example.
+3. **Port ctype.** php-src's `ext/ctype` written in php and compiled by mc-php, graded against
+   php's own `ctype.so` (T1 measured it at 7 Zend functions and no data global).
+4. **Port bcmath.**
+5. **Port json.** `ext/json` cannot be built shared at all (T1), so this port is the only way a
+   json extension exists outside php's own binary.
+6. **Distribution -- Composer, Packagist, PIE. To be designed with the owner**: the owner stops
+   at this step to think it through, so nothing here is a plan yet, only the name of the step.
+
+### What the back end itself still owes, in the order the measurements put it
+
 Built (2026-09-23): `src/ext.mc` and `lib/php_ext.mc`, for plain functions with declared scalar
 parameters and a declared scalar return. `docs/php-extension.md` is the page; `docs/php-abi.md`
 is every Zend number, with what each was measured against; `tests/ext.sh` is the gate, green on
-macos/arm64, linux/aarch64 and linux/x86_64.
+macos/arm64, linux/aarch64, linux/x86_64, windows/x86_64 and windows/arm64 (the last two load an
+x64 `.dll`: § 5).
 
 In the order the measurements put them, each with the number that says why:
 

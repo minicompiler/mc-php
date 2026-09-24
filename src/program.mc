@@ -437,6 +437,8 @@ i64 ph_dollar_expr() {
 #embed ph_rt_linux   "../lib/rt_host_linux.mc"
 #embed ph_rt_lin_a64 "../lib/rt_host_linux_aarch64.mc"
 #embed ph_rt_lin_x64 "../lib/rt_host_linux_x86_64.mc"
+#embed ph_rt_win     "../lib/rt_host_windows.mc"
+#embed ph_rt_win_st  "../lib/rt_host_windows_start.mc"
 
 // A push puts its source ON TOP of the lexer's stack, so the LAST push is the
 // FIRST thing parsed (mc's p_push_source has #include's semantics, and it was
@@ -461,6 +463,17 @@ void ph_push_rt_host() {
     uptr os = host_os();
     if (str_eq(os, "macos")) {
         p_push_source("php runtime host", ph_rt_macos, ph_rt_macos_size);
+        return;
+    }
+    // Windows: one file for both architectures -- nothing below it reads a
+    // struct whose layout depends on the architecture (php_stat_* read
+    // WIN32_FILE_ATTRIBUTE_DATA, which is the same on arm64 and x64). The
+    // entry point is a second file because it names `main`, which an
+    // extension does not have; pushed FIRST so it is parsed LAST, after the
+    // host layer that declares ExitProcess.
+    if (str_eq(os, "windows")) {
+        if (!ph_ext) p_push_source("php runtime entry", ph_rt_win_st, ph_rt_win_st_size);
+        p_push_source("php runtime host", ph_rt_win, ph_rt_win_size);
         return;
     }
     if (str_eq(os, "linux")) {

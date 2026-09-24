@@ -5,17 +5,17 @@
 # release body, every archive carries a .sha256 beside it, and `publish` needs
 # every producer so a half-built release is never published.
 #
-# THREE archives, and each one is a target that has been RUN. macOS arm64 is
+# FIVE archives, and each one is a target that has been RUN. macOS arm64 is
 # built and graded on the runner; the two Linux compilers are CROSS-BUILT on
 # the same macOS runner -- mc writes a dynamic ELF64 itself, no linker and no
 # sysroot -- and then each is graded on a Linux runner of its own architecture,
 # by tests/linux.sh, against a php 8.5 of that host. A row is here because
 # something ran it, never because it linked.
 #
-# Windows is NOT here and the README says why on its own row: the compiler
-# needs mc's object + lld-link road there (a single translation unit cannot
-# carry both <mc/host_windows> and <sys_windows> -- they both define O_CREAT),
-# and the runtime needs a kernel32 layer that does not exist yet.
+# The two Windows archives are NOT cross-built: mc-php does not cross-compile
+# across operating systems, so each is built ON a Windows runner of its own
+# architecture by that runner's mc.exe (the object + lld-link road,
+# docs/plan.md § 5), graded there by tests/windows.sh, and packaged there.
 name: Release
 
 on:
@@ -36,7 +36,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  MC_VERSION: "1.1.0"
+  MC_VERSION: "1.3.0"
   PHP_VERSION: "8.5"
 
 jobs:
@@ -216,9 +216,113 @@ jobs:
       - name: It loads, it compiles, and the fixtures agree with php
         run: sh tests/linux.sh ${{ matrix.arch }}
 
+  # Built, graded and packaged ON Windows -- the same steps as ci.yml's
+  # windows job, then the archive. `publish` needs both, so a Windows archive
+  # that did not pass the fixture gate and the extension gate on its own host
+  # is never released.
+  build-windows:
+    name: Build and grade (windows-${{ matrix.nick }})
+    needs: [build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { arch: x86_64,  nick: x86_64, runner: windows-latest }
+          - { arch: aarch64, nick: arm64,  runner: windows-11-arm }
+    defaults:
+      run:
+        shell: bash
+    env:
+      MSYS2_ARG_CONV_EXCL: "*"
+    steps:
+      - name: Never translate line endings
+        run: git config --global core.autocrlf false
+
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Install mc ${{ env.MC_VERSION }} (the Windows build)
+        run: |
+          set -eu
+          asset="mc-$MC_VERSION-windows-${{ matrix.nick }}.tar.gz"
+          base="https://github.com/minicompiler/mc/releases/download/v$MC_VERSION"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o "$asset"        "$base/$asset"
+          curl -fsSL -o "$asset.sha256" "$base/$asset.sha256"
+          sha256sum -c "$asset.sha256"
+          mkdir -p mc
+          tar -xzf "$asset" -C mc --strip-components=1
+          cygpath -w "$RUNNER_TEMP/mc" >> "$GITHUB_PATH"
+
+      - name: lld-link
+        run: |
+          set -eu
+          if command -v lld-link >/dev/null 2>&1; then :
+          elif [ -x "/c/Program Files/LLVM/bin/lld-link.exe" ]; then
+            printf '%s\n' 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+          else
+            # No download: an unverified toolchain put on PATH would run as
+            # the linker of a release. Both images carry LLVM today (measured:
+            # C:\Program Files\LLVM on windows-latest and windows-11-arm);
+            # an image that stops carrying it fails here, by name.
+            printf '%s\n' '::error::lld-link is not on this runner (looked on PATH and in C:\Program Files\LLVM\bin)'
+            exit 1
+          fi
+
+      - name: Install PHP ${{ env.PHP_VERSION }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          coverage: none
+
+      - name: Build
+        run: |
+          set -eu
+          mc --version
+          sh tests/winsys.sh ${{ matrix.arch }}
+          [ "${{ matrix.arch }}" = x86_64 ] || sh tests/winsys.sh x86_64
+          mc build src --config src/mc-php.windows-${{ matrix.arch }}.toml
+          build/mc-php-windows-${{ matrix.arch }}.exe --host
+
+      - name: It compiles, the fixtures agree, and the extension loads
+        run: |
+          TMPDIR=$(cygpath -m "$RUNNER_TEMP")
+          export TMPDIR
+          sh tests/windows.sh ${{ matrix.arch }}
+
+      - name: Package (windows-${{ matrix.nick }})
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -eu
+          name="mc-php-$VERSION-windows-${{ matrix.nick }}"
+          stage="$RUNNER_TEMP/$name"
+          mkdir -p "$stage" dist
+          cp build/mc-php-windows-${{ matrix.arch }}.exe "$stage/mc-php.exe"
+          # the two import libraries a PROGRAM links against on the object
+          # road (windows/arm64 has no other road), so the archive alone is
+          # enough there: lists of kernel32.dll's and ucrtbase.dll's names,
+          # written by tests/winsys.sh from src/win/*.def
+          cp build/win-${{ matrix.arch }}/kernel32.lib build/win-${{ matrix.arch }}/ucrtbase.lib "$stage/"
+          cp README.md LICENSE "$stage/"
+          tar -czf "dist/$name.tar.gz" -C "$RUNNER_TEMP" "$name"
+          ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+          ls -l dist
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-php-windows-${{ matrix.nick }}
+          path: dist/
+          if-no-files-found: error
+
   publish:
     name: Publish the release
-    needs: [build, grade-linux]
+    needs: [build, grade-linux, build-windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -245,11 +349,13 @@ jobs:
             echo
             echo "---"
             echo
-            echo "macOS arm64, linux/aarch64 and linux/x86_64. Each archive was RUN"
-            echo "on a host of its own architecture before this release was published:"
-            echo "the macOS one by \`tests/run.sh\`, the two Linux ones by"
-            echo "\`tests/linux.sh\`, which compiles every fixture and compares it with"
-            echo "php 8.5 on that host. No Windows archive: see the README's *Install*."
+            echo "macOS arm64, linux/aarch64, linux/x86_64, windows/x86_64 and"
+            echo "windows/arm64. Each archive was RUN on a host of its own architecture"
+            echo "before this release was published: the macOS one by \`tests/run.sh\`,"
+            echo "the two Linux ones by \`tests/linux.sh\` and the two Windows ones --"
+            echo "built on those Windows runners, not cross-built -- by"
+            echo "\`tests/windows.sh\`, each compiling every fixture and comparing it"
+            echo "with php 8.5 on that host."
           } >> "$RUNNER_TEMP/body.md"
           cat "$RUNNER_TEMP/body.md"
 
