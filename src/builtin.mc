@@ -925,9 +925,24 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         }
         // no $count: the replacement itself, with no wrapper call around it,
         // and quiet -- over three strings str_replace raises nothing
-        if (na == 3)
-            return ph_quiet("php_str_replace", 3, ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)),
-                            ph_to_str(ph_a(av, 2), ph_aty(av, 2)), 0, ty_pstr);
+        if (na == 3) {
+            i64 rs = ph_to_str(a0, t0);
+            i64 rr = ph_to_str(ph_a(av, 1), ph_aty(av, 1));
+            i64 rj = ph_to_str(ph_a(av, 2), ph_aty(av, 2));
+            // str_replace('a', '', str_replace('b', '', $s)), two single
+            // bytes deleted: one pass (php_str_del2)
+            if (ph_lit_len(rs) == 1 && ph_lit_len(rr) == 0 && nd_kind(rj) == N_CALL
+                && str_eq(nd_name(rj), "php_str_replace")) {
+                i64 is = nd_a(rj);
+                i64 ir = nd_next(is);
+                i64 isj = nd_next(ir);
+                if (ph_lit_len(is) == 1 && ph_lit_len(ir) == 0) {
+                    set_nd_next(isj, 0);
+                    return ph_quiet("php_str_del2", 3, isj, ph_int(ph_lit_byte(is)), ph_int(ph_lit_byte(rs)), 0, ty_pstr);
+                }
+            }
+            return ph_quiet("php_str_replace", 3, rs, rr, rj, 0, ty_pstr);
+        }
         return ph_c4("php_str_replace_c", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)),
                      ph_to_str(ph_a(av, 2), ph_aty(av, 2)), cnt, ty_pstr);
     }

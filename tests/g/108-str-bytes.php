@@ -14,3 +14,14 @@ foreach ($subjects as $x) {
     echo "[", str_replace("-", "", $x), "] [", str_replace(".", "", str_replace("-", "", $x)), "] [",
          str_replace("-", "+", $x), "] [", str_replace("-", "<->", $x), "]\n";
 }
+// the same over NATIVE strings, where two one-byte deletions nested are ONE
+// pass (php_str_del2) -- and the shapes that are not that stay two calls
+function del2(string $s): string { return str_replace(".", "", str_replace("-", "", $s)); }
+function not2(string $s): string {
+    return str_replace(".", "x", str_replace("-", "", $s)) . "|" . str_replace("..", "", str_replace("-", "", $s))
+         . "|" . str_replace(".", "", str_replace("-", "+", $s));
+}
+foreach ($subjects as $x) {
+    $ns = (string) $x;
+    echo "[", del2($ns), "] [", not2($ns), "]\n";
+}

@@ -257,6 +257,13 @@ i64 ph_is_strlit(i64 n) {
     return nd_kind(n) == N_CALL && str_eq(nd_name(n), "php_str_lit");
 }
 
+// a literal's length, -1 when `n` is not one; and its first byte
+i64 ph_lit_len(i64 n) {
+    if (!ph_is_strlit(n)) return 0 - 1;
+    return nd_val(nd_next(nd_a(n)));
+}
+i64 ph_lit_byte(i64 n) { return ld8(nd_name(nd_next(nd_a(n)))); }
+
 uptr php_dec(i64 v) {
     uptr o = xalloc(24);
     i64 k = 0;

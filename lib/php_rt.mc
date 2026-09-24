@@ -78,7 +78,16 @@ uptr php_alloc(i64 n) {
 #define ZS_HDR 24
 
 uptr php_str_alloc(i64 n) {
-    uptr s = php_alloc(ZS_HDR + n + 1);
+    // php_alloc's bump inlined for the one allocation every string makes:
+    // a call less per string on the extension road (the arena road, and a
+    // block that does not fit, take php_alloc)
+    uptr s = 0;
+    if (ph_zalloc) {
+        i64 z = (ph_zpos + 7) & (0 - 8);
+        i64 e = z + ZS_HDR + n + 1;
+        if (n < PH_ZBIG && e <= ph_zlim) { ph_zpos = e; s = ph_zcur + z; }
+    }
+    if (!s) s = php_alloc(ZS_HDR + n + 1);
     st32(s, 1);
     st32(s + 4, 22);                          // GC_STRING
     st64(s + 8, 0);                           // h: not computed
@@ -119,7 +128,7 @@ void php_memcpy(uptr d, uptr s, i64 n) {
 
 // the first byte c in p[0..n), or -1: eight bytes a step, the has-a-zero-byte
 // test on the word xor'ed with c in every byte, then the byte itself
-i64 php_memchr(uptr p, i64 c, i64 n) {
+i64 php_memchr_w(uptr p, i64 c, i64 n) {
     u64 pat = c * 0x0101010101010101;
     i64 i = 0;
     loop {
@@ -128,12 +137,23 @@ i64 php_memchr(uptr p, i64 c, i64 n) {
         if (((x - 0x0101010101010101) & (x ^ 0xffffffffffffffff) & 0x8080808080808080) != 0) break;
         i = i + 8;
     }
-    // past the last whole word: the LAST eight bytes as one more word, when
-    // there are eight, so a miss costs no byte loop at all
-    if (i < n && n >= 8 && i + 8 > n) {
+    // past the last whole word: the LAST eight bytes as one more word, so a
+    // miss costs no byte loop at all
+    if (i + 8 > n) {
         u64 y = ld64(p + n - 8) ^ pat;
         if (((y - 0x0101010101010101) & (y ^ 0xffffffffffffffff) & 0x8080808080808080) == 0) return 0 - 1;
     }
+    loop { if (i >= n) break; if (ld8(p + i) == c) return i; i = i + 1; }
+    return 0 - 1;
+}
+
+// Under sixteen bytes a byte loop, in a function whose few locals cost few
+// saved registers: the word scan above needs three 64-bit constants and nine
+// registers, which mc's optimizer materialises and saves at entry whatever
+// the length, and a decimal's strings are ten to twenty bytes long.
+i64 php_memchr(uptr p, i64 c, i64 n) {
+    if (n >= 16) return php_memchr_w(p, c, n);
+    i64 i = 0;
     loop { if (i >= n) break; if (ld8(p + i) == c) return i; i = i + 1; }
     return 0 - 1;
 }
@@ -2420,6 +2440,31 @@ uptr php_str_replace1(i64 c, uptr repl, uptr subj) {
         if (b != c) { st8(w, b); w = w + 1; }
         i = i + 1;
     }
+    return o;
+}
+
+// str_replace(c2, '', str_replace(c1, '', $s)) of two single bytes: both
+// deleted in ONE pass (the compiler fuses the two calls). Deleting a byte
+// joins its neighbours and cannot make a new c2, so the order of the two
+// never mattered.
+uptr php_str_del2(uptr subj, i64 c1, i64 c2) {
+    i64 hn = ld64(subj + 16);
+    uptr v = subj + ZS_HDR;
+    i64 f = 0;
+    loop { if (f >= hn) return subj; i64 b = ld8(v + f); if (b == c1 || b == c2) break; f = f + 1; }
+    uptr o = php_str_alloc(hn);
+    uptr w = o + ZS_HDR;
+    php_memcpy(w, v, f);
+    i64 k = f;
+    i64 i = f + 1;
+    loop {
+        if (i >= hn) break;
+        i64 d = ld8(v + i);
+        if (d != c1 && d != c2) { st8(w + k, d); k = k + 1; }
+        i = i + 1;
+    }
+    st64(o + 16, k);
+    st8(w + k, 0);
     return o;
 }
 
