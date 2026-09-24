@@ -93,10 +93,43 @@ uptr php_str_val(uptr s) { return s + ZS_HDR; }
 // Eight bytes a step and then the tail. Every host this runtime targets
 // (arm64, x86-64) loads and stores unaligned words; a forward copy is also
 // right for d < s overlapping, which is the only overlap a caller makes.
+// The tail of a copy of at least eight bytes is ONE more word, the last
+// eight bytes, read before the loop writes anything (so a forward overlap
+// still gets the source's own bytes); under eight it is two overlapping
+// halves of four, or single bytes. A decimal's strings are ten to twenty
+// bytes long, and the byte loop for the tail was most of what a copy cost.
 void php_memcpy(uptr d, uptr s, i64 n) {
+    if (n >= 8) {
+        u64 t = ld64(s + n - 8);
+        i64 i = 0;
+        loop { if (i + 8 > n) break; st64(d + i, ld64(s + i)); i = i + 8; }
+        st64(d + n - 8, t);
+        return;
+    }
+    if (n >= 4) {
+        i64 a = ld32(s);
+        i64 b = ld32(s + n - 4);
+        st32(d, a);
+        st32(d + n - 4, b);
+        return;
+    }
+    i64 j = 0;
+    loop { if (j >= n) break; st8(d + j, ld8(s + j)); j = j + 1; }
+}
+
+// the first byte c in p[0..n), or -1: eight bytes a step, the has-a-zero-byte
+// test on the word xor'ed with c in every byte, then the byte itself
+i64 php_memchr(uptr p, i64 c, i64 n) {
+    u64 pat = c * 0x0101010101010101;
     i64 i = 0;
-    loop { if (i + 8 > n) break; st64(d + i, ld64(s + i)); i = i + 8; }
-    loop { if (i >= n) break; st8(d + i, ld8(s + i)); i = i + 1; }
+    loop {
+        if (i + 8 > n) break;
+        u64 x = ld64(p + i) ^ pat;
+        if (((x - 0x0101010101010101) & (x ^ 0xffffffffffffffff) & 0x8080808080808080) != 0) break;
+        i = i + 8;
+    }
+    loop { if (i >= n) break; if (ld8(p + i) == c) return i; i = i + 1; }
+    return 0 - 1;
 }
 
 uptr php_str_new(uptr b, i64 n) {
@@ -2325,11 +2358,35 @@ uptr php_str_repeat(uptr s, i64 times) {
 uptr php_str_replace1(i64 c, uptr repl, uptr subj) {
     i64 hn = ld64(subj + 16);
     uptr v = subj + ZS_HDR;
-    i64 cnt = 0;
-    i64 i = 0;
-    loop { if (i >= hn) break; if (ld8(v + i) == c) cnt = cnt + 1; i = i + 1; }
-    if (cnt == 0) return subj;
+    i64 f = php_memchr(v, c, hn);
+    if (f < 0) return subj;
     i64 rn = ld64(repl + 16);
+    // a replacement of at most one byte cannot grow the string: ONE pass,
+    // copying the runs between occurrences, into a buffer the size of the
+    // subject whose length is then what was written
+    if (rn <= 1) {
+        uptr o = php_str_alloc(hn);
+        uptr w = o + ZS_HDR;
+        i64 j = 0;
+        loop {
+            php_memcpy(w, v + j, f - j);
+            w = w + (f - j);
+            if (rn == 1) { st8(w, ld8(repl + ZS_HDR)); w = w + 1; }
+            j = f + 1;
+            i64 g = php_memchr(v + j, c, hn - j);
+            if (g < 0) break;
+            f = j + g;
+        }
+        php_memcpy(w, v + j, hn - j);
+        w = w + (hn - j);
+        i64 wn = w - (o + ZS_HDR);
+        st64(o + 16, wn);
+        st8(o + ZS_HDR + wn, 0);
+        return o;
+    }
+    i64 cnt = 0;
+    i64 i = f;
+    loop { if (i >= hn) break; if (ld8(v + i) == c) cnt = cnt + 1; i = i + 1; }
     uptr o = php_str_alloc(hn + cnt * (rn - 1));
     uptr w = o + ZS_HDR;
     i = 0;
