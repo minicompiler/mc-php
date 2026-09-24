@@ -72,7 +72,10 @@ void ph_program() {
     }
     i64 boot = ph_stmt_of(ph_call("php_bootstrap", 0, 0, 0, 0, 0, TY_VOID));
     set_nd_next(boot, ph_cnew_head);
-    ph_cnew_head = boot;
+    // every literal is built before anything can use one (ph_lit_finish)
+    i64 lini = ph_stmt_of(ph_call("ph_lit_init", 0, 0, 0, 0, 0, TY_VOID));
+    set_nd_next(lini, boot);
+    ph_cnew_head = lini;
     if (ph_cnew_head) {
         i64 ct = ph_cnew_head;
         loop { if (!nd_next(ct)) break; ct = nd_next(ct); }
@@ -102,6 +105,7 @@ void ph_program() {
     }
     top_add(f);
     if (ph_ext) ph_ext_emit(fl, line);
+    top_add(ph_lit_finish(fl, line));
 }
 
 // A .php the core lexer would meet before `<?php` is a named refusal, not a

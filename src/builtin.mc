@@ -876,7 +876,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         ph_ety = PT_NULL;
         return ph_int(0);
     }
-    if (str_eq(name, "strlen"))   { ph_need(na, 1, name, fl, line); ph_ety = PT_INT; return ph_c1("php_strlen", ph_to_str(a0, t0), TY_I64); }
+    if (str_eq(name, "strlen"))   { ph_need(na, 1, name, fl, line); ph_ety = PT_INT; return ph_strlen_of(ph_to_str(a0, t0)); }
     if (str_eq(name, "count") || str_eq(name, "sizeof")) {
         ph_need(na, 1, name, fl, line);
         if (t0 == PT_MIXED) { ph_ety = PT_INT; return ph_c1("php_count", ph_c1("php_zv_arr_r", a0, ty_parr), TY_I64); }
@@ -1064,6 +1064,25 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "strrev")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_strrev", ph_to_str(a0, t0), ty_pstr); }
     if (str_eq(name, "trim") || str_eq(name, "ltrim") || str_eq(name, "rtrim") || str_eq(name, "chop")) {
         if (na < 1 || na > 2) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        // a native string (and a native mask) needs no zval on either side:
+        // a trim raises nothing, and a LITERAL mask's byte map is built once
+        // per run (php_bmap_lit) instead of once per call
+        i64 tmode = 0;
+        if (str_eq(name, "ltrim")) tmode = 1;
+        if (str_eq(name, "rtrim") || str_eq(name, "chop")) tmode = 2;
+        if (t0 == PT_STRING && na == 1) {
+            ph_ety = PT_STRING;
+            return ph_quiet("php_trim", 2, a0, ph_int(tmode), 0, 0, ty_pstr);
+        }
+        if (t0 == PT_STRING && na == 2 && ph_aty(av, 1) == PT_STRING) {
+            ph_ety = PT_STRING;
+            i64 mk = ph_a(av, 1);
+            if (ph_is_strlit(mk))
+                return ph_quiet("php_trim_m", 3, a0,
+                    ph_quiet("php_bmap_lit", 3, ph_cache_slot("phm_"), mk, ph_int(1), 0, TY_UPTR),
+                    ph_int(tmode), 0, ty_pstr);
+            return ph_quiet("php_trim_s", 3, a0, mk, ph_int(tmode), 0, ty_pstr);
+        }
         uptr f = "php_f_trim";
         if (str_eq(name, "ltrim")) f = "php_f_ltrim";
         if (str_eq(name, "rtrim") || str_eq(name, "chop")) f = "php_f_rtrim";
@@ -1071,6 +1090,38 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (na == 2) cl = ph_to_mixed(ph_a(av, 1), ph_aty(av, 1));
         ph_ety = PT_STRING;
         return ph_c2(f, ph_to_mixed(a0, t0), cl, ty_pstr);
+    }
+    // strspn/strcspn over native strings and int offsets: no zval, and a
+    // LITERAL set's byte map built once per run. Neither raises in php 8 (the
+    // window is clamped), so the call is quiet.
+    if ((str_eq(name, "strspn") || str_eq(name, "strcspn")) && na >= 2 && na <= 4
+        && t0 == PT_STRING && ph_aty(av, 1) == PT_STRING
+        && (na < 3 || ph_aty(av, 2) == PT_INT) && (na < 4 || ph_aty(av, 3) == PT_INT)) {
+        i64 want = 1;
+        if (str_eq(name, "strcspn")) want = 0;
+        i64 so = ph_int(0);
+        i64 sl = ph_int(0);
+        i64 hasl = 0;
+        if (na >= 3) so = ph_a(av, 2);
+        if (na == 4) { sl = ph_a(av, 3); hasl = 1; }
+        i64 set = ph_a(av, 1);
+        u8 sa[48];
+        st64(sa, a0);
+        st64(sa + 16, so);
+        st64(sa + 24, sl);
+        st64(sa + 32, ph_int(hasl));
+        st64(sa + 40, ph_int(want));
+        uptr sf = "php_spn_s";
+        if (ph_is_strlit(set)) {
+            sf = "php_spn";
+            set = ph_quiet("php_bmap_lit", 3, ph_cache_slot("phm_"), set, ph_int(0), 0, TY_UPTR);
+        }
+        st64(sa + 8, set);
+        i64 save = ph_can_throw;
+        i64 sc = ph_calln(sf, sa, 6, TY_I64);
+        ph_can_throw = save;
+        ph_ety = PT_INT;
+        return sc;
     }
     if (str_eq(name, "str_pad")) {
         if (na < 2 || na > 4) ph_need(na, 2, name, fl, line);

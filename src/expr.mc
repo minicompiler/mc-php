@@ -324,11 +324,21 @@ i64 ph_index(i64 base, i64 bt) {
         i64 i = ph_to_int(ph_expr(0), ph_ety);
         ph_want("]", 1, "expected ] after a php string offset");
         ph_ety = PT_STRING;
-        return ph_c2("php_str_off", base, i, ty_pstr);
+        // quiet: the native offset read raises nothing (it answers "" out of
+        // range) and does not allocate (php_str_ch)
+        return ph_quiet("php_str_off", 2, base, i, 0, 0, ty_pstr);
     }
-    i64 k = ph_zkey(ph_expr(0), ph_ety);
+    i64 kx = ph_expr(0);
+    i64 kt = ph_ety;
     ph_want("]", 1, "expected ] after a php array index");
     ph_ety = PT_MIXED;
+    // an int key on an array needs no key zval: php_arr_iget(_w) is the
+    // IS_LONG arm of php_arr_zget(_w), word for word
+    if (bt == PT_ARR && kt == PT_INT) {
+        if (ph_at("??", 2)) return ph_c2("php_arr_iget", base, kx, ty_pzv);
+        return ph_c2("php_arr_iget_w", base, kx, ty_pzv);
+    }
+    i64 k = ph_zkey(kx, kt);
     // php's `??` is a FETCH_DIM_IS and warns for nothing it reads; the one
     // thing that tells this read apart from any other is the token after the
     // closing bracket, and it is right here.
@@ -509,6 +519,15 @@ i64 ph_primary() {
                     i64 v = ph_expr(55);
                     i64 vt = ph_ety;
                     ph_ety = ct;
+                    // (int) substr(...): the window read as an int in
+                    // place, the substring never built (php_substr_i). Only
+                    // here, where the substr's value has no other reader.
+                    if (ct == PT_INT && vt == PT_STRING && nd_kind(v) == N_CALL
+                        && str_eq(nd_name(v), "php_substr")) {
+                        set_nd_name(v, "php_substr_i");
+                        set_nd_type(v, TY_I64);
+                        return v;
+                    }
                     if (ct == PT_INT)    return ph_to_int(v, vt);
                     if (ct == PT_FLOAT)  return ph_to_float(v, vt);
                     if (ct == PT_STRING) return ph_to_str(v, vt);
@@ -938,6 +957,26 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
     if (lt == PT_IFALSE) lt = PT_INT;
     if (rt == PT_IFALSE) rt = PT_INT;
     if (lt == PT_STRING && rt == PT_STRING) {
+        // $s[$i] === 'c' (either side): the byte compared in place. A string
+        // offset is a one-byte string or "", so only === and !== against a
+        // one-byte LITERAL are this -- `==` would compare numeric strings.
+        if (strict) {
+            i64 off = 0;
+            i64 lit = 0;
+            if (nd_kind(lhs) == N_CALL && str_eq(nd_name(lhs), "php_str_off") && ph_is_strlit(rhs)) { off = lhs; lit = rhs; }
+            if (nd_kind(rhs) == N_CALL && str_eq(nd_name(rhs), "php_str_off") && ph_is_strlit(lhs)) { off = rhs; lit = lhs; }
+            if (off && nd_val(nd_next(nd_next(nd_a(lit)))) == 1) {
+                i64 by = ld8(nd_name(nd_next(nd_a(lit))));
+                i64 sb = nd_a(off);
+                i64 ix = nd_next(sb);
+                set_nd_next(sb, 0);
+                i64 at = ph_quiet("php_str_at_is", 3, sb, ix, ph_int(by), 0, TY_I64);
+                ph_ety = PT_BOOL;
+                i64 eop = ph_tok("!=", 2);
+                if (neg) eop = ph_tok("==", 2);
+                return ph_cast(TY_U8, ph_bin(eop, at, ph_int(0), TY_U8));
+            }
+        }
         i64 c = ph_c2("php_str_cmp", lhs, rhs, TY_I64);
         if (t == ph_tok("<=>", 3)) { ph_ety = PT_INT; return c; }
         i64 op = t;

@@ -71,8 +71,16 @@ i64 ph_byval(uptr d, i64 line, uptr fl) {
     return iff;
 }
 
+// the unwinding check reads the runtime's pending-exception global in place:
+// php_thrown() was a call per checked statement to load one word. The mark a
+// call would have left is kept, so nothing that reads ph_can_throw after a
+// check sees a difference.
 i64 ph_check(i64 line, uptr fl) {
-    i64 cond = ph_call("php_thrown", 0, 0, 0, 0, 0, TY_I64);
+    i64 exc = node_new(N_IDENT, line, fl);
+    set_nd_name(exc, "ph_exc");
+    set_nd_type(exc, TY_UPTR);
+    i64 cond = ph_truthy(exc);
+    ph_can_throw = 1;
     i64 act = 0;
     if (ph_in_try) {
         act = node_new(N_BREAK, line, fl);
@@ -88,7 +96,7 @@ i64 ph_check(i64 line, uptr fl) {
         if (ph_fn_ret == PT_ARR) set_nd_a(act, ph_c1("php_arr_new", ph_int(8), ty_parr));
     }
     i64 iff = node_new(N_IF, line, fl);
-    set_nd_a(iff, ph_cast(TY_U8, cond));
+    set_nd_a(iff, cond);
     set_nd_b(iff, act);
     return iff;
 }
@@ -227,11 +235,20 @@ i64 ph_posstmt(uptr fl, i64 line) {
     // AFTER the statement body -- so every statement in every program came
     // out "can throw" and got the php_thrown check below it, whatever it
     // contained. `$s = 0;` paid two calls to store a literal.
-    i64 save = ph_can_throw;
-    i64 c = ph_c2("php_pos", ph_raw(a, cstrlen(a)), ph_int(line), TY_VOID);
-    ph_can_throw = save;
-    i64 s = node_new(N_EXPRSTMT, line, fl);
-    set_nd_a(s, c);
+    //
+    // And it is not a call at all: php_pos(f, l) was a call per announcing
+    // statement to store two words. The two stores are written in place, as
+    // one block (the caller links a single node after it), and ph_is_pos_at
+    // below knows that shape.
+    i64 df = node_new(N_ASSIGN, line, fl);
+    set_nd_name(df, "ph_dfile");
+    set_nd_a(df, ph_raw(a, cstrlen(a)));
+    i64 dl = node_new(N_ASSIGN, line, fl);
+    set_nd_name(dl, "ph_dline");
+    set_nd_a(dl, ph_int(line));
+    set_nd_next(df, dl);
+    i64 s = node_new(N_BLOCK, line, fl);
+    set_nd_a(s, df);
     return s;
 }
 
@@ -242,18 +259,17 @@ i64 ph_posstmt(uptr fl, i64 line) {
 i64 ph_is_pos_at(i64 s, uptr fl, i64 line) {
     // through a block, because the first statement of a block runs whenever
     // the block does; NOT through a loop or an if, whose body may not run.
+    // ph_posstmt's own block is one of them, so the descent ends on its
+    // first store.
     loop {
         if (nd_kind(s) != N_BLOCK) break;
         if (!nd_a(s)) return 0;
         s = nd_a(s);
     }
-    if (nd_kind(s) != N_EXPRSTMT) return 0;
+    if (nd_kind(s) != N_ASSIGN) return 0;
     if (nd_line(s) != line) return 0;
     if (!str_eq(nd_file(s), fl)) return 0;
-    i64 c = nd_a(s);
-    if (!c) return 0;
-    if (nd_kind(c) != N_CALL) return 0;
-    return str_eq(nd_name(c), "php_pos");
+    return str_eq(nd_name(s), "ph_dfile");
 }
 
 // A CONDITION that can throw has to be checked before the branch is taken:
