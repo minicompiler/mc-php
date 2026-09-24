@@ -264,7 +264,7 @@ jobs:
           set -eu
           if command -v lld-link >/dev/null 2>&1; then :
           elif [ -x "/c/Program Files/LLVM/bin/lld-link.exe" ]; then
-            echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+            printf '%s\n' 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
           else
             base="https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION"
             # the runner's own CPU: a tarball first, then the NSIS installer
@@ -299,7 +299,8 @@ jobs:
 
       - name: It compiles, the fixtures agree, and the extension loads
         run: |
-          export TMPDIR="$(cygpath -m "$RUNNER_TEMP")"
+          TMPDIR=$(cygpath -m "$RUNNER_TEMP")
+          export TMPDIR
           sh tests/windows.sh ${{ matrix.arch }}
 
       - name: Package (windows-${{ matrix.nick }})
