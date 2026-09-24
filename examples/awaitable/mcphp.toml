@@ -1,0 +1,36 @@
+# awaitable -- awaitable.src.php, the PHP form of awaitable.mc, described by a file.
+#
+#     mc-php build examples/awaitable --config examples/awaitable/mcphp.toml
+#
+# This is the build the example is WAITING for, and today it is refused by
+# name at its first line of code (a `namespace` in an extension source).
+# README.md lists every refusal behind that one, found by removing each in
+# turn; tests/examples.sh runs this build on every host and requires the
+# first -- the day it moves, the gate says so. Until then the example is the
+# hand-written awaitable.mc, which tests/examples.sh compiles with plain mc
+# and links itself.
+#
+# One file and not one per host: the refusal is raised while PARSING, before
+# any [linker] line is read.
+
+[project]
+entry = "awaitable.src.php"
+out = "build/awaitable.so"
+kind = "exe"
+
+[linker]
+cmd = "ld"
+args = ["-bundle", "-undefined", "dynamic_lookup",
+        "-arch", "arm64", "-platform_version", "macos", "13.0", "13.0",
+        "-syslibroot", "{sdk}", "-lSystem",
+        "-o", "{out}", "{obj}"]
+
+[extension]
+name = "awaitable"
+version = "0.1.0"
+
+[php]
+api = 20250925
+build_id = "API20250925,NTS"
+thread_safety = false
+debug = false

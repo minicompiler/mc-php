@@ -189,5 +189,29 @@ if build examples/hello "examples/hello/mcphp$suf.toml" "hello.$sx" && [ -f "$ds
 fi
 pin "$EX" "extB.php:8: mc-php: a php function mc-php does not have: a_add is not implemented yet"
 
+# --- awaitable -----------------------------------------------------------------
+echo "  -- awaitable"
+EX=examples/awaitable
+if hand_ok "awaitable.mc"; then
+    if ! "$PHP" -m | tr -d '\r' | grep -qix curl; then
+        skip "awaitable.mc: this php has no curl, and the module resolves libcurl from php's own process"
+    elif handbuild "$EX/awaitable.mc" "$tmp/awaitable.$sx"; then
+        "$PHP" -d extension="$tmp/awaitable.$sx" "$EX/check.php" > "$tmp/aw.out" 2>&1
+        if cmp -s "$tmp/aw.out" "$EX/check.expect"; then
+            say "check.php: $(wc -l < "$tmp/aw.out" | tr -d ' ') lines, every one check.expect's"
+        else
+            bad "check.php differs from $EX/check.expect:"
+            diff -u "$EX/check.expect" "$tmp/aw.out" | sed -n '3,24p' | sed 's/^/      /'
+        fi
+        "$PHP" -d extension="$tmp/awaitable.$sx" "$EX/demo.php" > "$tmp/demo.out" 2>&1
+        if grep -q '^same results: true$' "$tmp/demo.out"; then
+            say "demo.php: $(sed -n 2p "$tmp/demo.out" | tr -s ' ')"
+        else
+            bad "demo.php:"; sed -n '1,12p' "$tmp/demo.out" | sed 's/^/      /'
+        fi
+    fi
+fi
+pin "$EX" "awaitable.src.php:7: mc-php: a namespace in an extension source is not implemented yet"
+
 [ "$fail" = 0 ] || { echo "  examples: something failed"; exit 1; }
 echo "  examples: green"

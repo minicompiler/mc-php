@@ -1,0 +1,35 @@
+loaded: true
+awaitable\Intent: true
+awaitable\Semaphore: true
+awaitable\WaitGroup: true
+awaitable\Mutex: true
+awaitable\Intent done=true failed=false data=42 exception=NULL
+internal callable: INTENT
+a callable that throws: failed=true RuntimeException: boom
+TypeError: awaitable\await(): Argument #1 ($fn) must be a valid callback
+parallel: 6 results, the same sums as sequential: true, distinct pids: 6, none of them this process: true
+sums: 599997,600003,600002,600001,600000,600006
+array(2) {
+  [0]=>
+  string(3) "[a]"
+  [1]=>
+  string(3) "[b]"
+}
+array(2) {
+  [0]=>
+  string(3) "HI!"
+  [1]=>
+  string(4) "BYE!"
+}
+array(2) {
+  [0]=>
+  string(3) "cba"
+  [1]=>
+  string(3) "zyx"
+}
+a child that throws: 'failed on q', errors() = 1
+await(parallel): failed=false sums=599997,600003
+http_get_many: 6 bodies, all as written: true, completed() = 6, peak concurrency within the semaphore's 2: true
+http_get: 3000 bytes
+http_get of a missing file throws Exception
+WaitGroup, Mutex and Semaphore: every call returned
