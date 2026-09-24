@@ -15,17 +15,23 @@ $port = (int) substr($name, strrpos($name, ':') + 1);
 $cmd = [PHP_BINARY];
 if ($ext !== '') { array_push($cmd, '-d', "extension=$ext"); }
 array_push($cmd, '-S', "127.0.0.1:$port", basename($router));
-$null = DIRECTORY_SEPARATOR === '\\' ? 'NUL' : '/dev/null';
-$p = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['file', $null, 'w'], 2 => ['file', $null, 'w']],
+// the server's own log, shown when it does not come up
+$log = dirname($router) . '/php-S.log';
+$p = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['file', $log, 'w'], 2 => ['file', $log, 'a']],
                $pipes, dirname($router), null, ['bypass_shell' => true]);
 if (!is_resource($p)) { echo "cannot start php -S\n"; exit(1); }
+// up to a minute: an emulated php (a Windows-on-ARM runner, qemu) starts slowly
 $up = false;
-for ($t = 0; $t < 200 && !$up; $t++) {
-    $c = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.2);
-    if ($c) { fclose($c); $up = true; } else { usleep(50000); }
+$t0 = microtime(true);
+while (!$up && microtime(true) - $t0 < 60) {
+    $c = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.5);
+    if ($c) { fclose($c); $up = true; } else { usleep(100000); }
 }
 $rc = 0;
-if (!$up) { echo "php -S did not come up on port $port\n"; $rc = 1; }
+if (!$up) {
+    echo "php -S did not come up on port $port within 60 s; its log:\n", @file_get_contents($log);
+    $rc = 1;
+}
 for ($i = 0; $up && $i < (int) $n; $i++) {
     $body = @file_get_contents("http://127.0.0.1:$port/");
     if ($body === false) { echo "request ", $i + 1, " failed\n"; $rc = 1; break; }
