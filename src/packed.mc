@@ -54,6 +54,14 @@
 // `null * 5` are ints -- and everywhere else (a call's argument, a
 // comparison, echo, `.`) it becomes the zval php has (php_zinull), which is
 // exactly what the read was before this file existed.
+//
+// One deviation, named: php promotes an int that overflows to a float, and
+// the zval road this replaces did. So + - * on an element, and on what such
+// an operation answered in the same expression, are php_add_ck/sub_ck/mul_ck:
+// php's overflow test, and where php would make a float an ArithmeticError
+// that says so -- a refusal at run time, never a wrapped int. (An int
+// VARIABLE assigned from one is the native int road's own, which wraps; that
+// is D10's gap, docs/plan.md § 7.)
 
 #define PK_MAXT 16384
 #define PK_MAXV 512
@@ -191,7 +199,7 @@ i64 pkx_punct(uptr src, i64 len, i64 i) {
 
 // the words that end the proof for the whole body
 i64 pkx_badword(uptr w) {
-    return str_eq(w, "function") || str_eq(w, "class") || str_eq(w, "interface")
+    return str_eq(w, "function") || str_eq(w, "fn") || str_eq(w, "class") || str_eq(w, "interface")
         || str_eq(w, "trait") || str_eq(w, "yield") || str_eq(w, "goto") || str_eq(w, "switch")
         || str_eq(w, "eval") || str_eq(w, "include") || str_eq(w, "include_once")
         || str_eq(w, "require") || str_eq(w, "require_once") || str_eq(w, "compact")

@@ -561,7 +561,9 @@ i64 ph_primary() {
         ph_inull_ok = 1;
         i64 v = ph_expr(70);
         i64 t = ph_ety;
-        if (t == PT_INULL) t = PT_INT;                 // -null is int(0)
+        // -null is int(0); -PHP_INT_MIN is php's float, so an element's
+        // negation is the checked subtraction
+        if (t == PT_INULL) { ph_ety = PT_INT; return ph_c2("php_sub_ck", ph_int(0), v, TY_I64); }
         if (t == PT_FLOAT) return ph_c1("php_fneg", v, ty_f64);
         // -"1.2" is float(-1.2) and -"abc" is a TypeError: a zval keeps its
         // own rules, and converting to int first threw the fraction away.
@@ -881,8 +883,14 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
     // every operator here, and with a number on the other side neither the
     // value nor an error message can tell the two apart (src/packed.mc).
     // Beside anything else it is the zval php has.
-    if (lt == PT_INULL) { if (ph_numeric(rt) || rt == PT_INULL) lt = PT_INT; else { lhs = ph_inull_zv(lhs); lt = PT_MIXED; } }
-    if (rt == PT_INULL) { if (ph_numeric(lt)) rt = PT_INT; else { rhs = ph_inull_zv(rhs); rt = PT_MIXED; } }
+    // `**` keeps its zval road for an element: php_pow_i has no overflow test.
+    i64 ck = ph_is_ck(lhs) || ph_is_ck(rhs);
+    if (op == ph_tok("**", 2)) {
+        if (lt == PT_INULL) { lhs = ph_inull_zv(lhs); lt = PT_MIXED; }
+        if (rt == PT_INULL) { rhs = ph_inull_zv(rhs); rt = PT_MIXED; }
+    }
+    if (lt == PT_INULL) { if (ph_numeric(rt) || rt == PT_INULL) { lt = PT_INT; ck = 1; } else { lhs = ph_inull_zv(lhs); lt = PT_MIXED; } }
+    if (rt == PT_INULL) { if (ph_numeric(lt)) { rt = PT_INT; ck = 1; } else { rhs = ph_inull_zv(rhs); rt = PT_MIXED; } }
     // anything a static type cannot answer exactly goes to the zval
     if (!ph_numeric(lt) || !ph_numeric(rt)) return ph_arith_zv(op, lhs, lt, rhs, rt);
     if (lt == PT_BOOL) { lhs = ph_to_int(lhs, lt); lt = PT_INT; }
@@ -943,7 +951,22 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         return ph_bin(op, ph_to_float(lhs, lt), ph_to_float(rhs, rt), ty_f64);
     }
     ph_ety = PT_INT;
+    // + - * on a packed element, or on what such an operation answered: php's
+    // overflow test, and a named ArithmeticError where php would make a float
+    // (php_add_ck and its two siblings, lib/php_rt.mc) -- never a wrapped int
+    if (ck) {
+        if (op == ph_tok("+", 1)) return ph_c2("php_add_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
+        if (op == ph_tok("-", 1)) return ph_c2("php_sub_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
+        if (op == ph_tok("*", 1)) return ph_c2("php_mul_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
+    }
     return ph_bin(op, lhs, rhs, TY_I64);
+}
+
+// a node one of the checked operations built
+i64 ph_is_ck(i64 n) {
+    if (nd_kind(n) != N_CALL) return 0;
+    uptr nm = nd_name(n);
+    return str_eq(nm, "php_add_ck") || str_eq(nm, "php_sub_ck") || str_eq(nm, "php_mul_ck");
 }
 
 i64 ph_cmp_zv(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt) {

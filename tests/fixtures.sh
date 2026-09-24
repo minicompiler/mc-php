@@ -154,4 +154,26 @@ else
     echo "  FAIL  packed: $pk / $pn accepted in g/105; lowered in g/106 where the proof must fail: ${pe:-none}"
     fail=1
 fi
+# The one place the packed lowering is NOT php: an int that overflows on an
+# element. php makes a float; a native int cannot hold one, so it is a named
+# ArithmeticError and never a wrapped int. Not a differential -- php's answer
+# is the float -- so the refusal's text is what is checked.
+cat > "$tmp/pko.php" <<'PKO'
+<?php
+function pko(int $n): string {
+    $x = [];
+    $x[] = $n;
+    try { return (string) ($x[0] * 3); } catch (ArithmeticError $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+echo pko(5), "\n", pko(PHP_INT_MAX), "\n";
+PKO
+lim $P/mcphp.sh "$tmp/pko.php" > "$tmp/pko.out" 2> "$tmp/pko.err"
+rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
+pko=$(tr -d '\r' < "$tmp/pko.out")
+pkw=$(printf '15\nArithmeticError: mc-php: an int overflowed in * on a packed array'"'"'s element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)')
+if [ "$pko" = "$pkw" ]; then
+    echo "  packed: an overflow on an element is the named ArithmeticError, not a wrapped int"
+else
+    echo "  FAIL  packed overflow: want [$pkw], got [$pko]"; fail=1
+fi
 exit $fail

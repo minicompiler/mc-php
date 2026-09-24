@@ -85,7 +85,7 @@ uptr php_str_alloc(i64 n) {
     if (ph_zalloc) {
         i64 z = (ph_zpos + 7) & (0 - 8);
         i64 e = z + ZS_HDR + n + 1;
-        if (n < PH_ZBIG && e <= ph_zlim) { ph_zpos = e; s = ph_zcur + z; }
+        if (ZS_HDR + n + 1 <= PH_ZBIG && e <= ph_zlim) { ph_zpos = e; s = ph_zcur + z; }
     }
     if (!s) s = php_alloc(ZS_HDR + n + 1);
     st32(s, 1);
@@ -1485,6 +1485,32 @@ uptr php_pk_getq(uptr p, i64 k) {
 i64 php_pk_count(uptr p) {
     if (ld64(p + 24)) return php_count(ld64(p + 24));
     return ld64(p);
+}
+
+// Arithmetic on a packed element is native (src/packed.mc), and php
+// promotes an int that overflows to a float, which a native int cannot hold.
+// So + - * on an element (and on what such an operation answered) are these:
+// the operation, php's overflow test, and on overflow an ArithmeticError
+// that says so -- a named refusal at run time, never a wrapped int.
+void php_pk_overflow(i64 op) {
+    php_mreset();
+    php_mc("mc-php: an int overflowed in ");
+    if (op == 0) php_mc("+");
+    if (op == 1) php_mc("-");
+    if (op == 2) php_mc("*");
+    php_mc(" on a packed array's element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)");
+    php_throw_str(php_str_new("ArithmeticError", 15), php_str_new(ph_msg, ph_msgn));
+}
+i64 php_add_ck(i64 x, i64 y) { i64 r = x + y; if (((x ^ r) & (y ^ r)) < 0) php_pk_overflow(0); return r; }
+i64 php_sub_ck(i64 x, i64 y) { i64 r = x - y; if (((x ^ y) & (x ^ r)) < 0) php_pk_overflow(1); return r; }
+i64 php_mul_ck(i64 x, i64 y) {
+    i64 r = x * y;
+    // both within 32 bits cannot overflow: no division on the common path
+    if (x + 2147483648 >= 0 && x + 2147483648 < 4294967296 && y + 2147483648 >= 0 && y + 2147483648 < 4294967296) return r;
+    if (x == 0) return 0;
+    if (x == -1 && r == -9223372036854775807 - 1) { php_pk_overflow(2); return r; }
+    if (r / x != y) php_pk_overflow(2);
+    return r;
 }
 
 // an element read where null and 0 differ: the value php has
