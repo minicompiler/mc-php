@@ -58,7 +58,7 @@ src/*.mc       the compiler, 18 files, included in ORDER (mc is single pass)
 lib/php_rt.mc  the runtime, #embed'ed and pushed into every program
 lib/php_ext.mc the EXTENSION runtime, pushed only on that road
 tests/         the fixtures, the grid driver and the fast gates
-examples/      one directory per PHP extension mc-php compiles
+examples/      one directory per extension, each gated; a hand-written one says so first
 docs/          the plan, the decisions, the mcphp.toml schema, the Zend ABI
 probes/        T0..T10. FROZEN.
 reference/     the extension road built BY HAND in mc. A record, not mc-php output.
@@ -693,3 +693,15 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   * The roadmap the owner set is `docs/plan.md` § 7: Windows (this), examples as the first gates
     (hello, extA/extB, awaitable, then a fixed-point decimal and a large-volume database), ctype,
     bcmath, json, then distribution (Composer/Packagist/PIE) to be designed with the owner.
+- Examples (2026-09-23, branch `examples`), roadmap item 2 of `docs/plan.md` § 7, four of five
+  parts: `examples/decimal` **compiled from PHP** (exact fixed-point decimals, half-even; the
+  differential 60 lines byte for byte, 1219 results against bcmath where php has it, the bench
+  row **0.51x** on macos/arm64 -- slower, string work), `examples/two-extensions` and
+  `examples/awaitable` as **hand-written mc** labelled so, each beside the PHP source whose
+  refusal its gate PINS, and two mc-php extensions measured to coexist in one php. The gate is
+  `tests/examples.sh` (inside `tests/run.sh`, `tests/linux.sh`, `tests/windows.sh`; the
+  hand-written halves are plain mc, POSIX only, and skip by name on Windows or without an mc;
+  the Linux CI legs install mc's static Linux release for them). Two front-end defects the
+  examples found are fixed with a fixture each (a static method's arguments, an elseif with a
+  string condition); `str_replace` with an array search is recorded, not fixed. The database
+  example is the next part, and what it needs is in § 7.

@@ -168,16 +168,18 @@ lifecycle (`RINIT`/`RSHUTDOWN`) would answer, and it is not built.
 
 ## Two extensions in one process
 
-Both would define `php_alloc`, `ph_heap`, `php_bootstrap` and every other runtime symbol, and the
-namespace a php extension is loaded into is FLAT -- the first one loaded wins, in silence. The
-example's link line exports everything, which is what makes the two collide.
-`docs/mcphp-toml.md` § The symbol prefix is the design that answers it;
-[`reference/extA.mc`](../reference/extA.mc) and [`reference/extB.mc`](../reference/extB.mc)
-are the measurement it rests on. Neither is implemented, and until one is, **load one mc-php
-extension per process**. The cheap half of the fix is a linker argument and nothing else --
-`-exported_symbols_list` naming only `_get_module` on macOS, a version script on Linux -- and it
-is not taken here because the schema's answer is the prefix and picking the other one by accident
-would be worse than saying so.
+Both define `php_alloc`, `ph_heap`, `php_bootstrap` and every other runtime symbol, and the
+example's link line exports everything. **Measured, they do not collide**: `tests/examples.sh`
+loads `examples/hello` and `examples/decimal` into one php in both orders, on every host, and each
+answers. mc calls a function and takes an address with a direct `bl`/`adrp`, and the Linux link
+is `-Bsymbolic`, so nothing inside a module is resolved through the loader and each keeps using
+its own runtime. What IS shared is the exported names: a third module that looked one up would
+find the first one loaded -- which is exactly how
+[`examples/two-extensions`](../examples/two-extensions/) reaches from one extension into the
+other on purpose. `docs/mcphp-toml.md` § The symbol prefix is the design that gives each module
+names of its own; it is not implemented. The cheap half would be a linker argument --
+`-exported_symbols_list` naming only `_get_module` on macOS, a version script on Linux -- and it is
+not taken here because the schema's answer is the prefix.
 
 ## Windows
 

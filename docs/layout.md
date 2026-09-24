@@ -11,7 +11,8 @@ lib/php_ext.mc       the EXTENSION runtime, pushed only on that road: the module
 lib/rt_host_*.mc     the runtime's system layer, one file per host, #embed'ed beside
                      it and pushed ahead of it
 tests/               the fixtures, the .phpt grid driver and the gates
-examples/            one directory per PHP extension mc-php compiles
+examples/            one directory per extension, each gated (tests/ext.sh, tests/examples.sh);
+                     a hand-written one says so on its README's first line
 docs/                the plan, the decisions, this
 probes/              the measurement record, T0..T10. FROZEN.
 reference/           the second record: the extension road built BY HAND in mc, before

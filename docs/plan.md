@@ -915,14 +915,56 @@ its code is written.
    runner's own php 8.5 (`tests/windows.sh`), and a release archive per architecture built on
    those runners. What it cost mc-php and what it left open in mc is § 5.
 2. **Examples first, and they are the first gates.** What already has code moves into
-   `examples/`, each with a gate that compiles it and compares it with php:
-   - `hello` -- exists, and is the extension gate today (`tests/ext.sh`);
-   - the two extensions that reach each other's symbols -- `reference/extA.mc`/`extB.mc`, the
-     measurement behind item 6 of the list below;
-   - `awaitable` -- `reference/aw6.mc`, hand-written mc today, compiled from `aw6.php` once the
-     back end reaches its signatures;
-   - then two that do not exist yet: a **fixed-point DECIMAL** example, and a large-volume
-     **"mission critical" database** example.
+   `examples/`, each with a gate that compiles it and compares it with php. Four of the five parts
+   are DONE (the examples branch, 2026-09-23), gated by `tests/ext.sh` and `tests/examples.sh`
+   inside `tests/run.sh`, `tests/linux.sh` and `tests/windows.sh`, green on macos/arm64,
+   linux/aarch64 and linux/x86_64 before the pull request:
+   - `hello` -- DONE, the extension gate (`tests/ext.sh`).
+   - `decimal` -- DONE, and **compiled from PHP**: `examples/decimal/decimal.php`, six functions
+     over strings (`dec_add`, `dec_sub`, `dec_mul`, `dec_div`, `dec_cmp`, `dec_round`), exact,
+     no float anywhere, half-even rounding in every function. The differential is 60 lines byte
+     for byte on every host; **1219 results agree with bcmath** where the host php has it (macOS;
+     the `php:8.5-alpine` image does not, and the gate says `SKIPPED`); and the bench row --
+     three loan schedules, the best of nine, three rounds interleaved -- is **0.51x on
+     macos/arm64** (1.72 ms interpreted, 3.41 ms compiled), 0.40x on linux/aarch64: string work
+     is C inside php and mc inside mc-php, and every intermediate string is an arena allocation.
+     `[project].opt = 1` measured once gives 2.4 ms, 0.74x; not adopted.
+   - `two-extensions` -- DONE as **hand-written mc**: `extA.mc`/`extB.mc` from `reference/`,
+     loaded in both orders and compared byte for byte with `extA.php` + `extB.php` interpreted.
+     `extB.php` is refused -- `a php function mc-php does not have: a_add` -- because a call to a
+     function the source does not declare is not lowered to a lookup in php's function table at
+     call time, and the gate pins that refusal. On Windows the pair SKIPS by name (`dlsym`).
+   - `awaitable` -- DONE as **hand-written mc**: `awaitable.mc` from `reference/aw6.mc`, 35 lines
+     against `check.expect` (await, forked `parallel` over any callable, libcurl on pthreads under
+     a semaphore, the sync primitives), and `awaitable.src.php` refused at its first line, pinned.
+     Its README lists the five refusals behind it. POSIX only; Windows SKIPS by name.
+   - **NEXT, not in that pull request: a large-volume "mission critical" DATABASE example.** What
+     it needs from the compiler, each measured by the examples above:
+     * **calling a C library from PHP source** -- sqlite3 or libpq, which is
+       `awaitable.src.php`'s `#[Extern('lib')]` with its `variadic:` field: where a C variadic
+       argument travels is the ABI's (on the stack after eight registers on Apple arm64, in the
+       next register on AAPCS64 and SysV x86-64 -- measured, `awaitable.mc` needs both forms);
+     * **a request lifecycle for the arena** -- D7's 48 MiB is exhausted by about 31 000
+       `dec_add` calls in ONE process (`examples/decimal/README.md`), and a large-volume example
+       is a long process by definition;
+     * **signatures past the scalars**: rows come back as arrays or objects, and a connection is
+       a resource or an object the module declares -- today a class the source declares compiles
+       and is NOT published, with no refusal (measured on `awaitable.src.php`);
+     * **module-private functions**: every top-level function of an extension source is published
+       (the `_dec_*` helpers of `examples/decimal` are), and a class's methods, which are private,
+       are dispatched by name and typed `mixed`.
+
+   **Found while writing them**, and fixed at the root with a fixture each:
+   - a STATIC method with parameters read its first argument out of the receiver slot, because
+     it was declared without one and every caller passes one: `C::f($x)` said `Too few arguments`
+     (`tests/g/96-static-args.php`);
+   - an `elseif` whose condition emitted statements of its own -- a string comparison, a call --
+     was DROPPED: its if came back as a statement list and the else branch keeps one node
+     (`tests/g/97-elseif-string.php`).
+
+   And one recorded, not fixed: **`str_replace` with an ARRAY search is a wrong answer** --
+   `Array to string conversion` and the array's text searched for -- where the convention here is
+   a named refusal. `examples/decimal` calls it twice with strings instead.
 3. **Port ctype.** php-src's `ext/ctype` written in php and compiled by mc-php, graded against
    php's own `ctype.so` (T1 measured it at 7 Zend functions and no data global).
 4. **Port bcmath.**
@@ -985,8 +1027,11 @@ In the order the measurements put them, each with the number that says why:
    `php_output_write` is exported and routing `php_flush`'s one write through a sink the
    extension road sets is the whole fix -- it touches the runtime's hot path, so it is a step
    with its own bench row.
-6. **Two mc-php extensions in one process** share every runtime symbol, and the first loaded
-   wins in silence. `docs/mcphp-toml.md` § The symbol prefix is the design;
-   `reference/extA.mc`/`extB.mc` is the measurement.
+6. **Two mc-php extensions in one process** both EXPORT every runtime symbol -- but measured
+   by `tests/examples.sh` (examples/hello and examples/decimal, both load orders, every host),
+   each keeps using its OWN: mc calls and takes addresses with direct `bl`/`adrp`, and the Linux
+   link is `-Bsymbolic`, so nothing inside a module goes through the loader. What is left is the
+   exported names themselves -- a third module that looked one up would find the first loaded.
+   `docs/mcphp-toml.md` § The symbol prefix is the design that answers that.
 7. Then the signature: `mixed`, `array`, an object, a class the module declares, a namespace,
    defaults, variadics, by-reference. Each is a named refusal today.
