@@ -11,7 +11,6 @@
 // Case 9 is the parse this file also found: after a non-empty initializer the
 // empty condition's `;` used to be consumed as the initializer's own, and
 // `for ($i = 0;; $i = $i + 1)` was refused with "expected ; in for".
-declare(strict_types=1);
 
 function boom(string $where): int { echo "boom($where) ran\n"; throw new RuntimeException($where); }
 

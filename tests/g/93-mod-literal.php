@@ -4,7 +4,6 @@
 // php_thrown. This checks the answers are still php's, at the edges where a
 // native remainder and php's could part company, and that the divisor forms
 // the fold does NOT take are unchanged: a variable, a zero, a negative.
-declare(strict_types=1);
 
 function m(int $a, int $b): int { return $a % $b; }
 
