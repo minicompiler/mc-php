@@ -489,7 +489,9 @@ void phx_track(uptr p) {
 // the slow path: a block too big for a chunk gets its own, and a full chunk
 // gets a successor
 uptr phx_zalloc(i64 n) {
-    if (n > PH_ZBIG) {
+    // a size that wrapped negative (PHP_INT_MAX bytes and a header) is a
+    // huge one: Zend's allocator refuses it with php's own memory fatal
+    if (n > PH_ZBIG || n < 0) {
         uptr b = _ecalloc(n, 1);
         phx_track(b);
         return b;

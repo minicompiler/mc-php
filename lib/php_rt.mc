@@ -64,11 +64,14 @@ void php_pin() { if (ph_zalloc) ph_pin = 1; }
 uptr php_alloc(i64 n) {
     if (ph_zalloc) {
         i64 z = (ph_zpos + 7) / 8 * 8;
-        if (n <= PH_ZBIG && z + n <= ph_zlim) { ph_zpos = z + n; return ph_zcur + z; }
+        // n >= 0: a size that wrapped (a string of PHP_INT_MAX bytes plus its
+        // header) is not a small block -- it goes to Zend, whose memory limit
+        // refuses it by name
+        if (n >= 0 && n <= PH_ZBIG && z + n <= ph_zlim) { ph_zpos = z + n; return ph_zcur + z; }
         return callp(ph_zalloc, n);
     }
     i64 a = (ph_top + 7) / 8 * 8;
-    if (a + n > PH_ARENA) php_die("mc-php: arena exhausted\n", 24);
+    if (n < 0 || a + n > PH_ARENA) php_die("mc-php: arena exhausted\n", 24);
     ph_top = a + n;
     return ph_heap + a;
 }
@@ -85,7 +88,7 @@ uptr php_str_alloc(i64 n) {
     if (ph_zalloc) {
         i64 z = (ph_zpos + 7) & (0 - 8);
         i64 e = z + ZS_HDR + n + 1;
-        if (ZS_HDR + n + 1 <= PH_ZBIG && e <= ph_zlim) { ph_zpos = e; s = ph_zcur + z; }
+        if (n >= 0 && n <= PH_ZBIG - ZS_HDR - 1 && e <= ph_zlim) { ph_zpos = e; s = ph_zcur + z; }
     }
     if (!s) s = php_alloc(ZS_HDR + n + 1);
     st32(s, 1);
