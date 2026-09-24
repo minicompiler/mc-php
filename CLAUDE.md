@@ -784,8 +784,8 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     strings 271 -> 272, no test out of green. `tests/run.sh` green; D8 (b) `heavy.php` 1.85x.
 - Decimal-c (2026-09-24, branch `decimal-c`), on **mc 1.1.0** here: **`examples/decimal` from 6.3x
   the C twin's time to 4.1x** -- the module 1.514 -> **0.98 ms**, interpreted 3.29 ms (3.3x), the
-  twin 0.240 ms (13.7x), macos/arm64; on the five CI legs 2.57x to 4.73x interpreted (main after
-  batch E: 1.36x to 2.98x), macos-15's module/C 7.3 -> 4.6. `decimal.php` unchanged. Profile first (`sample`, 4262
+  twin 0.240 ms (13.7x), macos/arm64; on the five CI legs 2.48x to 4.65x interpreted (main after
+  batch E: 1.36x to 2.98x), macos-15's module/C 7.3 -> 4.7. `decimal.php` unchanged. Profile first (`sample`, 4262
   samples): batch E's `_dec_umul` cause confirmed (12.9% of the module in array/zval calls) and
   allocation confirmed (13.1%); the "prologue saves registers it does not use" cause CORRECTED --
   805 of 805 functions save exactly what they use; what costs is that mc gives a leaf function
@@ -796,7 +796,7 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     prediction (a disagreement is a compile error). A missing key is php's warning and null; a
     key past the end turns the buffer into php's hash in place. An element read (`PT_INULL`) is an
     int beside a number and the zval php has elsewhere. `tests/g/105` (accepted), `tests/g/106`
-    (15 refusals of the proof), and `tests/fixtures.sh` reads the lowering back.
+    (17 refusals of the proof), and `tests/fixtures.sh` reads the lowering back.
   * Compiler: a cast binds as tightly as unary minus (`(int) "1.9" + 0.5` was int(2),
     `tests/g/107`); byte maps built with the literals; `str_pad((string) $int)` fused; `===`
     between strings is `php_str_eq`; two nested one-byte `str_replace` deletions are one pass

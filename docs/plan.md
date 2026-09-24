@@ -1260,11 +1260,11 @@ In the order the measurements put them, each with the number that says why:
    1.513 -> 0.977 ms** (twice), php interpreting the same source 3.26-3.34 ms, the C twin 0.239-0.240
    ms. **The three columns: interpreted 3.29 ms, the module 0.98 ms (3.3x), the C twin 0.240 ms
    (13.7x); module/C 6.3 -> 4.1.** `tests/examples.sh`'s own row on the final tree: 3.299 / 0.998
-   (3.31x) / 0.237 (13.92x). On the pull request's CI run, against main's run after batch E
+   (3.31x) / 0.237 (13.92x). On the pull request's final CI run, against main's run after batch E
    (the ratio is what compares; runners differ by up to ~40% in absolute time): macos/arm64
-   1.68x -> **2.62x** with the twin at 12.1x (module/C 7.3 -> 4.6), linux/aarch64 1.74x -> **2.65x**,
-   linux/x86_64 1.36x -> **2.57x**, windows/aarch64 2.98x -> **4.73x**, windows/x86_64 2.77x ->
-   **3.91x** (`examples/decimal/README.md` has the milliseconds).
+   1.68x -> **2.61x** with the twin at 12.2x (module/C 7.3 -> 4.7), linux/aarch64 1.74x -> **2.66x**,
+   linux/x86_64 1.36x -> **2.48x**, windows/aarch64 2.98x -> **4.65x**, windows/x86_64 2.77x ->
+   **4.34x** (`examples/decimal/README.md` has the milliseconds).
 
    **The packed int array** (`src/packed.mc`) is a proof and a lowering. Per plain function, a token
    scan of the body before it is compiled proves that a local array holds only ints under keys
@@ -1284,7 +1284,7 @@ In the order the measurements put them, each with the number that says why:
    variable whose only assignment is `$v = $x[K];` keeps both halves native. The buffer comes from
    `php_alloc`: Zend's chunk on the extension road, the arena on the program road. Gated by
    `tests/g/105` (six functions the proof accepts, absent and sparse keys included), `tests/g/106`
-   (fifteen ways it must fail) and the end of `tests/fixtures.sh`, which reads the lowering back
+   (seventeen ways it must fail) and the end of `tests/fixtures.sh`, which reads the lowering back
    and checks which way each went. Afterwards `_dec_umul` is 14.3% inclusive of a smaller whole,
    and its array work 3.5% of the module, from 12.9% (the buffer's own calls 135 samples of 6010,
    an element handed to `_dec_limb` as a zval 78).
