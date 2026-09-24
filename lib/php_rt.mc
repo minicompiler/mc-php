@@ -2383,6 +2383,9 @@ i64 php_strpos(uptr h, uptr nd, i64 off) {
     return -1;
 }
 
+// strpos($h, 'c') from the start: the byte scan alone
+i64 php_strpos1(uptr h, i64 c) { return php_memchr(h + ZS_HDR, c, ld64(h + 16)); }
+
 uptr php_str_repeat(uptr s, i64 times) {
     if (times <= 0) return php_str_new("", 0);
     i64 n = php_strlen(s);

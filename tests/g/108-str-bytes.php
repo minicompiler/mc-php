@@ -25,3 +25,18 @@ foreach ($subjects as $x) {
     $ns = (string) $x;
     echo "[", del2($ns), "] [", not2($ns), "]\n";
 }
+// strpos of a one-byte literal from the start is a scan alone (php_strpos1),
+// and $s[$i] === 'c' reads the byte in place when the name and index are
+// plain -- the call only outside the string, where php warns
+function find_dot(string $s): string {
+    $p = strpos($s, '.');
+    if ($p === false) { return "none"; }
+    return (string) $p;
+}
+function at(string $s, int $i): string {
+    return var_export($s[$i] === '.', true) . var_export($s[0] !== '-', true);
+}
+foreach (["", ".", "a.", "abcdefgh.", "abcdefghijklmnopq.", "no dot here at all"] as $t) {
+    echo find_dot($t), " ";
+}
+echo "\n", at("1.5", 1), at("-1.5", 2), at("x", -1), at(".", 3), "\n";

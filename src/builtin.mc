@@ -903,7 +903,12 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         i64 off = ph_int(0);
         if (na == 3) off = ph_to_int(ph_a(av, 2), ph_aty(av, 2));
         ph_ety = PT_IFALSE;
-        return ph_c3("php_strpos", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), off, TY_I64);
+        i64 nd = ph_to_str(ph_a(av, 1), ph_aty(av, 1));
+        // strpos($s, 'c'): one byte from the start is a scan and nothing
+        // else, and raises nothing (php_strpos1)
+        if (na == 2 && ph_lit_len(nd) == 1)
+            return ph_quiet("php_strpos1", 2, ph_to_str(a0, t0), ph_int(ph_lit_byte(nd)), 0, 0, TY_I64);
+        return ph_c3("php_strpos", ph_to_str(a0, t0), nd, off, TY_I64);
     }
     if (str_eq(name, "str_replace")) {
         if (na < 3 || na > 4) ph_todo2(fl, line, "the wrong number of arguments for", name);
