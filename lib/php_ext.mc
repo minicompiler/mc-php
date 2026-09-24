@@ -103,6 +103,7 @@ extern void zend_type_error(uptr fmt);
 extern void zend_argument_count_error(uptr fmt);
 extern uptr zend_throw_exception(uptr ce, uptr msg, i64 code);
 extern uptr zend_lookup_class(uptr name);
+extern i64 php_output_write(uptr str, i64 len);
 
 // ---- the tables the module entry points at ---------------------------------
 // Filled by get_module() at CALL time rather than laid out as initialised
@@ -118,6 +119,8 @@ u8  phx_fe[12336];                  // (PHX_MAXFN + 1) * FEX_SIZE, the last row 
 u8  phx_ai[106496];                 // PHX_MAXAI * AIX_SIZE
 i64 phx_nfn;
 i64 phx_nai;
+
+void phx_owrite(uptr b, i64 n) { php_output_write(b, n); }
 
 // ---- building the tables ---------------------------------------------------
 // The compiler names a php TYPE by docs/plan.md D10's code (PT_INT is 0, the
@@ -168,6 +171,16 @@ void phx_arg(uptr name, i64 pt) {
 // which is why all four come from the target php and never from this file.
 uptr phx_module(uptr name, uptr version, i64 api, uptr build_id,
                 i64 zts, i64 dbg, uptr minit, uptr mshutdown) {
+    // Output goes through php's own output layer from here on: what the
+    // module echoes passes every ob_start() level the script opened, as an
+    // internal function's php_printf does (before a request is active, php
+    // writes it straight through). Set here, before MINIT runs, and never on
+    // the program road.
+    //
+    // Through a local function and not &php_output_write: mc materialises
+    // the address of an extern with adrp/add, which Apple's ld refuses for a
+    // symbol the bundle resolves at load time (docs/plan.md § 5).
+    ph_osink = &phx_owrite;
     st16(phx_me + MEX_SIZE_FIELD, MEX_SIZE);
     st32(phx_me + MEX_ZEND_API, api);
     st8(phx_me + MEX_ZEND_DEBUG, dbg);

@@ -1,4 +1,4 @@
-; The five php names lib/php_ext.mc calls, and the DLL that exports them.
+; The six php names lib/php_ext.mc calls, and the DLL that exports them.
 ;
 ; _emalloc is ZEND_FASTCALL, which MSVC builds of php make __vectorcall
 ; (Zend/zend_portability.h), and a __vectorcall export carries its argument
@@ -11,6 +11,7 @@
 LIBRARY php8.dll
 EXPORTS
 _emalloc == _emalloc@@8
+php_output_write
 zend_argument_count_error
 zend_lookup_class
 zend_throw_exception

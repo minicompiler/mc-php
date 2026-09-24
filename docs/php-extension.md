@@ -159,13 +159,12 @@ expectation and not against the interpreted source.
 the module loaded, once with the source `require`d -- and the two must print the same bytes on
 each stream and exit the same. These are the places where they would not:
 
-* **Output buffering.** The runtime writes what a php function `echo`s straight to fd 1; php's
-  own `ob_start()` never sees it. Measured on 2026-09-23: with `ob_start(); echo "A";
-  hello_say("B"); $x = ob_get_clean();` the interpreted run captures `A[B]` and the module's `[B]`
-  is already on the terminal. Ordinary output is in php's own order because the CLI SAPI does not
-  buffer. **The fix is named**: `php_output_write` is exported, and routing `php_flush`'s one
-  `write(1, ...)` through a sink the extension road sets is the whole of it -- it touches the
-  runtime's hot path, so it belongs to a step of its own with its own bench row.
+* **Output buffering is php's.** What a module echoes goes through `php_output_write`, php's own
+  output layer, exactly as an internal function's `php_printf` does -- so `ob_start()` captures it
+  in order with php's own `echo`, nested levels included (`check.php`'s last two lines). The
+  runtime keeps one sink, `php_out1`: fd 1 on the program road, `php_output_write` once
+  `get_module` has run. Before batch A it wrote fd 1 on both roads and `ob_start(); hello_say("B");`
+  left `[B]` on the terminal.
 * **An exception the body throws** crosses as its own class when php has one of that name --
   every built-in does, so `throw new InvalidArgumentException(...)` arrives as itself. A class
   the SOURCE declares is not in the engine's class table (the back end registers no class yet),

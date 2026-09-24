@@ -493,7 +493,16 @@ f64 php_stof(uptr s) {
 u8 ph_out[4096];
 i64 ph_outn;
 
-void php_flush() { if (ph_outn) write(1, ph_out, ph_outn); ph_outn = 0; }
+// The ONE place stdout is written. A program writes fd 1; an extension sets
+// ph_osink to php's own php_output_write (lib/php_ext.mc), so what a module
+// echoes goes through php's output layer and ob_start() sees it.
+uptr ph_osink;
+void php_out1(uptr b, i64 n) {
+    if (ph_osink) { callp(ph_osink, b, n); return; }
+    write(1, b, n);
+}
+
+void php_flush() { if (ph_outn) php_out1(ph_out, ph_outn); ph_outn = 0; }
 
 // output capture: print_r($x, true), var_export($x, true) and php's own
 // ob_* family, which NESTS -- so this is a stack and php_ob_start is a push.
@@ -531,7 +540,7 @@ void php_ob_put(i64 lv, uptr b, i64 n) {
 
 void php_write(uptr b, i64 n) {
     if (ph_nob) { php_ob_put(ph_nob - 1, b, n); return; }
-    if (n > 2048) { php_flush(); write(1, b, n); return; }
+    if (n > 2048) { php_flush(); php_out1(b, n); return; }
     if (ph_outn + n > 4096) php_flush();
     php_memcpy(ph_out + ph_outn, b, n);
     ph_outn = ph_outn + n;
@@ -593,7 +602,7 @@ u8 php_f_ob_flush() {
     st64(ph_obn + (ph_nob - 1) * 8, 0);
     if (n) {
         if (ph_nob > 1) php_ob_put(ph_nob - 2, b, n);
-        if (ph_nob < 2) { php_flush(); write(1, b, n); }
+        if (ph_nob < 2) { php_flush(); php_out1(b, n); }
     }
     return 1;
 }
