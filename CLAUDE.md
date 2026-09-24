@@ -784,7 +784,7 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     strings 271 -> 272, no test out of green. `tests/run.sh` green; D8 (b) `heavy.php` 1.85x.
 - Decimal-c (2026-09-24, branch `decimal-c`), on **mc 1.1.0** here: **`examples/decimal` from 6.3x
   the C twin's time to 4.1x** -- the module 1.514 -> **0.98 ms**, interpreted 3.29 ms (3.3x), the
-  twin 0.240 ms (13.7x), macos/arm64; on the five CI legs 2.48x to 4.65x interpreted (main after
+  twin 0.240 ms (13.7x), macos/arm64; on the five CI legs 2.47x to 4.62x interpreted (main after
   batch E: 1.36x to 2.98x), macos-15's module/C 7.3 -> 4.7. `decimal.php` unchanged. Profile first (`sample`, 4262
   samples): batch E's `_dec_umul` cause confirmed (12.9% of the module in array/zval calls) and
   allocation confirmed (13.1%); the "prologue saves registers it does not use" cause CORRECTED --
@@ -808,5 +808,8 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   * The grid: `tests/lang` 104, `Zend/tests` 766, strings 272, every one of the fifteen lists
     identical to main's (`comm`). `tests/run.sh` green. The one deviation, named: `+ - *` on a
     packed element that overflows is an `ArithmeticError` saying php would make a float (never a
-    wrapped int). Found and NOT fixed, on record in § 7: native int arithmetic wraps on overflow
-    (D10 says it promotes), and an array local assigned on one path only is a SIGSEGV on the other.
+    wrapped int), and a store whose value throws is not reached. `**` between ints is php's
+    `pow_function_base` (it wrapped on main: `(PHP_INT_MAX - 1) ** 2` was int(4)). Found and NOT
+    fixed, on record in § 7: native int arithmetic wraps on overflow (D10 says it promotes), an
+    array local assigned on one path only is a SIGSEGV on the other, an assignment from anything
+    that throws clobbers its target, and the float printer is not shortest-round-trip.

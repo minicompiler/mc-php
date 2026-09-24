@@ -1262,9 +1262,9 @@ In the order the measurements put them, each with the number that says why:
    (13.7x); module/C 6.3 -> 4.1.** `tests/examples.sh`'s own row on the final tree: 3.299 / 0.998
    (3.31x) / 0.237 (13.92x). On the pull request's final CI run, against main's run after batch E
    (the ratio is what compares; runners differ by up to ~40% in absolute time): macos/arm64
-   1.68x -> **2.61x** with the twin at 12.2x (module/C 7.3 -> 4.7), linux/aarch64 1.74x -> **2.66x**,
-   linux/x86_64 1.36x -> **2.48x**, windows/aarch64 2.98x -> **4.65x**, windows/x86_64 2.77x ->
-   **4.34x** (`examples/decimal/README.md` has the milliseconds).
+   1.68x -> **2.57x** with the twin at 12.1x (module/C 7.3 -> 4.7), linux/aarch64 1.74x -> **2.64x**,
+   linux/x86_64 1.36x -> **2.47x**, windows/aarch64 2.98x -> **4.62x**, windows/x86_64 2.77x ->
+   **4.35x** (`examples/decimal/README.md` has the milliseconds).
 
    **The packed int array** (`src/packed.mc`) is a proof and a lowering. Per plain function, a token
    scan of the body before it is compiled proves that a local array holds only ints under keys
