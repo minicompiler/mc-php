@@ -1852,11 +1852,44 @@ uptr php_zv_mod(uptr a, uptr b) {
     return php_zlong(php_mod(php_zv_ilong(a), y));
 }
 
+extern f64 pow(f64 x, f64 y);       // libm, as php's safe_pow is
+
+// 1 when x * y does not fit an i64
+i64 php_mul_ovf(i64 x, i64 y) {
+    if (x + 2147483648 >= 0 && x + 2147483648 < 4294967296 && y + 2147483648 >= 0 && y + 2147483648 < 4294967296) return 0;
+    if (x == 0) return 0;
+    i64 r = x * y;
+    if (x == -1 && r == -9223372036854775807 - 1) return 1;
+    if (r / x != y) return 1;
+    return 0;
+}
+
+// int ** int, php's pow_function_base (Zend/zend_operators.c) step for step:
+// square-and-multiply, and the FIRST product that overflows becomes a float
+// times what is left of the power. It wrapped here (`PHP_INT_MAX ** 2` was
+// int(1)), found by the review of #21.
 uptr php_zv_pow(uptr a, uptr b) {
     if (!php_arith_ok(a, b, php_str_new("**", 2))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b) || php_zv_long(b) < 0)
         return php_zdouble(php_pow_f(php_zv_double(a), php_zv_long(b)));
-    return php_zlong(php_pow_i(php_zv_long(a), php_zv_long(b)));
+    i64 l1 = 1;
+    i64 l2 = php_zv_long(a);
+    i64 i = php_zv_long(b);
+    if (i == 0) return php_zlong(1);
+    if (l2 == 0) return php_zlong(0);
+    loop {
+        if (i < 1) break;
+        if (i % 2) {
+            i = i - 1;
+            if (php_mul_ovf(l1, l2)) return php_zdouble(((f64) l1) * ((f64) l2) * pow((f64) l2, (f64) i));
+            l1 = l1 * l2;
+        } else {
+            i = i / 2;
+            if (php_mul_ovf(l2, l2)) return php_zdouble(((f64) l1) * pow(((f64) l2) * ((f64) l2), (f64) i));
+            l2 = l2 * l2;
+        }
+    }
+    return php_zlong(l1);
 }
 
 uptr php_zv_neg(uptr a) {

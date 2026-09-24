@@ -891,6 +891,9 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
     }
     if (lt == PT_INULL) { if (ph_numeric(rt) || rt == PT_INULL) { lt = PT_INT; ck = 1; } else { lhs = ph_inull_zv(lhs); lt = PT_MIXED; } }
     if (rt == PT_INULL) { if (ph_numeric(lt)) { rt = PT_INT; ck = 1; } else { rhs = ph_inull_zv(rhs); rt = PT_MIXED; } }
+    // ... and so does `**` on what a checked operation answered:
+    // `($x[0] + 1) ** 2` is php's float when it overflows
+    if (ck && op == ph_tok("**", 2)) return ph_arith_zv(op, lhs, lt, rhs, rt);
     // anything a static type cannot answer exactly goes to the zval
     if (!ph_numeric(lt) || !ph_numeric(rt)) return ph_arith_zv(op, lhs, lt, rhs, rt);
     if (lt == PT_BOOL) { lhs = ph_to_int(lhs, lt); lt = PT_INT; }

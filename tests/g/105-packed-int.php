@@ -91,6 +91,14 @@ function pk_grow(int $n): int {
     return $t;
 }
 
+// `**` on a packed read and on a checked sum: php's pow_function_base, so
+// the first product that overflows turns into a float instead of wrapping
+function pk_pow(int $n) {
+    $x = [];
+    $x[] = $n;
+    var_dump(($x[0] + 1) ** 2, $x[0] ** 2, -($x[0] + 1) ** 3);
+}
+
 echo pk_mul("123456789012345678", "98765432109876543210"), "\n";
 echo pk_mul("9999", "9999"), " ", pk_mul("0", "5"), " ", pk_mul("1", "1"), "\n";
 pk_absent();
@@ -101,3 +109,5 @@ try { echo pk_fill(PHP_INT_MAX), "\n"; } catch (ValueError $e) { echo get_class(
 try { echo pk_fill(1 << 31), "\n"; } catch (ValueError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
 echo pk_sum(10), "\n";
 echo pk_grow(100), "\n";
+pk_pow(3);
+pk_pow(PHP_INT_MAX - 1);

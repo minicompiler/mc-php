@@ -1333,7 +1333,13 @@ In the order the measurements put them, each with the number that says why:
    array local that was never assigned), measured on main's compiler; and `abs(PHP_INT_MIN)` is
    `int(-9223372036854775808)` where php says `float(9.223372036854776E+18)` (the lowering types
    `abs` of an int as an int; found by the third review of #21, which is why `abs` is not on the
-   packed proof's list of int-valued calls).
+   packed proof's list of int-valued calls). `$a ** $b` on two ints WRAPPED on main
+   (`PHP_INT_MAX - 1` squared was `int(4)`): `php_zv_pow` is php's `pow_function_base` now
+   (the first product that overflows becomes a float times libm's `pow` of what is left, which
+   is php's `safe_pow`), and a checked operand of `**` goes there too (the sixth review of #21,
+   `tests/g/105`'s `pk_pow`). Also found and NOT fixed: the float printer is not the shortest
+   round trip -- `var_dump(1.0000000000000002E+64)` prints `float(1.0E+64)` while the value
+   itself compares unequal to `1.0E+64`, so `10 ** 64` is computed right and printed wrong.
 
 2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
    through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
