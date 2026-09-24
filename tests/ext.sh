@@ -188,7 +188,7 @@ nref=0
 # contain the phrase passed).
 refuse() {
     nref=$((nref + 1))
-    printf '<?php\ndeclare(strict_types=1);\n%s\n' "$1" > "$tmp/r.php"
+    printf '<?php\n%s\n' "$1" > "$tmp/r.php"
     rm -f "$tmp/build/r.$sx"
     # NOT `got=$(... | tail -1); rc=$?` -- that reads tail's status, which is
     # always 0, and every refusal then reported "it BUILT".
@@ -225,7 +225,7 @@ say "refusals: $nref signatures outside the scope, each declined by name"
 #     the module published the nested declaration and lost the outer one.
 #     php declares a nested function only when the outer RUNS, so the module
 #     must publish the outer and not the nested.
-printf '<?php\ndeclare(strict_types=1);\nfunction outer(int $n): int { function nested(int $m): int { return $m * 3; } return nested($n) + 1; }\n' > "$tmp/r.php"
+printf '<?php\nfunction outer(int $n): int { function nested(int $m): int { return $m * 3; } return nested($n) + 1; }\n' > "$tmp/r.php"
 rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/n.build" 2>&1; then
     got=$("$PHP" -d extension="$tmp/build/r.$sx" \

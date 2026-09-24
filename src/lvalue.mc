@@ -1162,7 +1162,20 @@ i64 ph_stmt_1() {
     if (ph_is("declare")) {
         ph_next();
         ph_want("(", 1, "expected ( after declare");
-        loop { if (ph_at(")", 1)) break; if (ph_tid == T_EOF) break; ph_next(); }
+        // mc-php is strict by definition (D4): strict_types=1 says what it
+        // already does and is a no-op; strict_types=0 asks for the coercions
+        // D4 rules out, so it is refused rather than ignored. `st` counts the
+        // tokens since `strict_types`: the value is the third, after `=`.
+        i64 st = 0;
+        loop {
+            if (ph_at(")", 1)) break;
+            if (ph_tid == T_EOF) break;
+            if (ph_tid == T_IDENT && str_eq(ph_tname, "strict_types")) st = 1;
+            if (st == 3 && ph_tid == T_INT && ph_tval == 0)
+                ph_refuse(fl, line, "declare(strict_types=0)", "D4");
+            if (st) st = st + 1;
+            ph_next();
+        }
         ph_want(")", 1, "expected ) after declare");
         ph_accept(";", 1);
         return ph_empty();

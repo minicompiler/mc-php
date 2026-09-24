@@ -92,18 +92,29 @@ stream -- `php_bootstrap`, the class entries, a `declare`, a `require` -- runs w
 module. `src/ext.mc` is the emitter, [`lib/php_ext.mc`](../lib/php_ext.mc) is everything it calls,
 and the emitter knows no Zend offset at all.
 
-## What `declare(strict_types=1)` means here
+## `declare(strict_types)`: mc-php is strict by definition
 
-The type check is **php's strict rule, always**: the zval's tag must be the declared one, plus
-`int` where a `float` is declared, which is the one widening strict mode allows. There is no weak
-mode and no coercion.
+An mc-php source does not need `declare(strict_types=1)` and does not carry it: the type rules
+are php's STRICT ones always (`docs/plan.md` D4), so the declaration would say nothing the
+compiler does not already do. It is still **accepted, as a no-op**, because it is valid php and
+a file written for php may have it. `declare(strict_types=0)` asks for the weak-mode coercions D4
+rules out, so it is a **named refusal**, exit 3:
 
-That is a divergence and it is the honest one to take. An extension's function is an INTERNAL
-function, and for a real C extension what decides weak-or-strict is the `declare(strict_types=1)`
-of the file that CALLS it, resolved inside ZPP. mc-php generates its own check, so it cannot see
-the caller's declaration. A caller under `strict_types=1` gets exactly php's behaviour; a caller
-without it gets a `TypeError` where php would have coerced. Write `declare(strict_types=1)` in
-the caller and the two agree.
+```
+x.php:2: mc-php: declare(strict_types=0) is refused by design (docs/plan.md D4)
+```
+
+The argument check is **php's strict rule, always**: the zval's tag must be the declared one,
+plus `int` where a `float` is declared, which is the one widening strict mode allows. There is
+no weak mode and no coercion.
+
+That is a divergence on the CALLER's side, and it is the honest one to take. An extension's
+function is an INTERNAL function, and for a real C extension what decides weak-or-strict is the
+`declare(strict_types=1)` of the file that CALLS it, resolved inside ZPP. mc-php generates its
+own check, so it cannot see the caller's declaration. A caller under `strict_types=1` gets
+exactly php's behaviour; a caller without it gets a `TypeError` where php would have coerced.
+The php files that CALL a module in this repository (`examples/*/check.php`, `errors.php`,
+`bench.php`) therefore keep `declare(strict_types=1)`: there it steers php, not mc-php.
 
 ## What a wrong call says
 

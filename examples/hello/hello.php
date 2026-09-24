@@ -5,7 +5,6 @@
 // functions and does nothing; `mc-php build` beside mcphp.toml turns the same
 // file into hello.so, which `php -d extension=hello.so` loads. Neither tool
 // reads anything the other does not.
-declare(strict_types=1);
 
 function hello_addone(int $n): int { return $n + 1; }
 
