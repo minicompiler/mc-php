@@ -64,6 +64,11 @@ the table above -- the ratios are what compare):
 |---|---|---|---|
 | before batch A | 3.29 ms | 6.48 ms (0.51x) | 0.238 ms (13.8x) |
 | after batch A | 3.29 ms | 6.41 ms (0.51x) | 0.238 ms (13.8x) |
+| after batch A, CI (`macos-15`, a quiet runner) | 2.10 ms | 4.25 ms (0.49x) | 0.172 ms (12.2x) |
+
+The other four CI legs have no C column (no `php-config` or no `cc`) and measured the module at
+0.50x (linux/aarch64), 0.51x (linux/x86_64), 0.93x (windows/aarch64, an x64 php emulated) and
+0.88x (windows/x86_64) on the pull request's run.
 
 The C twin is what a competent C extension does -- digit strings, schoolbook multiplication, long
 division by repeated subtraction, `emalloc` for every buffer -- and it is **27x faster than the
