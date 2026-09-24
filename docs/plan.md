@@ -970,8 +970,10 @@ its code is written.
    PHP interpreted (> 1x), and each one has a C TWIN -- the same functions written as an ordinary
    C extension -- measured beside it on the same harness, because the target is to come as close
    as possible to C.** `decimal` has its twin (`examples/decimal/c/`, batch A); `two-extensions`
-   and `awaitable` get theirs when they are compiled from PHP. By that rule none of the three is
-   done yet: `decimal` compiles from PHP and is 0.51x interpreted against the twin's 13.8x (below). What already has code moves into
+   and `awaitable` get theirs when they are compiled from PHP. By that rule `decimal` is
+   DONE since batch E -- compiled from PHP and faster than interpreted on all five legs, 1.52x to
+   2.99x (macos/arm64 2.19x here, the twin 13.8x; § 7 item 1 below has the profile and the
+   table) -- and the other two are not. What already has code moves into
    `examples/`, each with a gate that compiles it and compares it with php. Four of the five parts
    are DONE (the examples branch, 2026-09-23), gated by `tests/ext.sh` and `tests/examples.sh`
    inside `tests/run.sh`, `tests/linux.sh` and `tests/windows.sh`, **green on all five CI legs**
@@ -991,7 +993,11 @@ its code is written.
      higher than above and the ratios are what compare): interpreted 3.29 ms; the module 6.48 ms
      (0.51x) before batch A and **6.41 ms (0.51x)** after; the C twin **0.238 ms (13.8x)**. The
      allocator change did not move the ratio -- the arena was a bump allocator too -- and the soak
-     did: a million calls in one request, where the module used to die near 29 000.
+     did: a million calls in one request, where the module used to die near 29 000. **Batch E**
+     (2026-09-24) took it past php: **6.46 -> 1.51 ms, 0.51x -> 2.19x** on this Mac with the twin
+     at 13.8x, and on the pull request's CI run macos/arm64 1.70x (twin 12.2x), linux/aarch64
+     1.74x, linux/x86_64 1.52x, windows/x86_64 2.29x, windows/arm64 2.99x -- all from the compiler
+     and its runtime, `decimal.php` unchanged (item 1 of the list below).
    - `two-extensions` -- DONE as **hand-written mc**: `extA.mc`/`extB.mc` from `reference/`,
      loaded in both orders and compared byte for byte with `extA.php` + `extB.php` interpreted.
      `extB.php` is refused -- `a php function mc-php does not have: a_add` -- because a call to a
@@ -1066,16 +1072,94 @@ In the order the measurements put them, each with the number that says why:
 
    The third cause is what is LEFT and it is the rest of the original sentence: **every local
    lives in the frame**. The hand-written column keeps its values in registers, and that is the
-   whole of the remaining 1.4x on `sum` and most of the 1.7x on `fib`. Two roads to it, neither
-   taken: mc's own register allocator through `[project].opt = 1`, and a whole-program "can this
-   function throw" fixpoint, which would remove the last `php_pos`/`php_thrown` pair from a
-   recursive function like `fib` whose body cannot throw at all.
+   whole of the remaining 1.4x on `sum` and most of the 1.7x on `fib`. Two roads to it: mc's own
+   register allocator through `[project].opt = 1` -- TAKEN in batch E for every extension this
+   repository builds (below) -- and a whole-program "can this function throw" fixpoint, not taken:
+   since batch E the position and the unwinding check are written in place, three instructions
+   together, so what the fixpoint would remove is no longer a call.
 
    The unwinding check is also still emitted after ANY runtime call, not only after one that can
-   throw. Narrowing it needs a per-callee classification of the 179 library rows, which is a
+   throw (batch E made a short, reviewed list quiet: a literal, `strlen`, the native strspn and
+   trim forms, `str_replace` over three strings, `$s[$i] ?? d` -- each a callee that raises
+   nothing). Narrowing it needs a per-callee classification of the 179 library rows, which is a
    whitelist whose wrong entry is a silently wrong line, so it is named rather than guessed.
    On a program road that starts 38 ms behind php none of this showed; an extension is called
    from inside a process that is already warm, so it is the whole claim.
+   **Batch E (2026-09-24): the string path, measured on `examples/decimal`.** The profile came
+   first. `sample` on macos/arm64 over the bench workload in a loop (8 s, 5924 samples on php's
+   thread, 99.5% of them inside the module), before any change:
+
+   | where the time went | samples | share |
+   |---|---|---|
+   | allocation -- `php_alloc` 555, `php_str_alloc` 226, `php_zv_alloc` 98, `phx_zero` (the call's chunk zeroed on return) 282 | 1161 | 19.6% |
+   | `php_inset`: strspn's set membership, a CALL per byte of input per byte of the set | 625 | 10.6% |
+   | `php_memcpy`: a byte loop | 606 | 10.2% |
+   | `php_strpos` (str_replace's two passes, `_dec_sc`) | 435 | 7.3% |
+   | zvals built only to call a library row -- strspn/ltrim/trim take `mixed` (`php_zv_type`, `settype`, `zv_str`, `zstr`, `znull`, `zlong`, `span_win`) | 392 | 6.6% |
+   | `php_thrown` 218 + `php_pos` 169: a call per checked statement to load one word, and one to store two | 387 | 6.5% |
+   | `php_strlen`: a call to load one word | 342 | 5.8% |
+   | `php_str_lit`: a call and a cache test per USE of a literal | 128 | 2.2% |
+
+   By php function, inclusive: `_dec_valid` 29.9% (strspn), `_dec_umul` 17.0% (an int array is
+   zvals, and every `$a[$i]` built a key zval), `_dec_coef` 15.8% (two `str_replace`, an `ltrim`).
+   `$s[$i]`, `ord()` and `.=` were not where the time was; neither was a string built in a loop
+   (`php_str_concat` 0.4%: the decimal's strings are one to three limbs long).
+
+   Every change is in the compiler or its runtime -- `decimal.php` is byte for byte what it was.
+   Measured one after another with `examples/decimal/bench.php` (best of nine, interleaved, the
+   same Mac), the module's column:
+
+   | change | ms |
+   |---|---|
+   | main | 6.46 |
+   | runtime: `php_memcpy` eight bytes a step; `$s[$i]` one of 256 shared one-byte strings (no allocation); strspn/strcspn/trim masks as a 256-bit map; strpos scanning for the first byte | 5.24 |
+   | the position and the unwinding check written in place (two stores, one load) instead of `php_pos`/`php_thrown`; `strlen` of a native string loaded in place | 4.96 |
+   | strspn/strcspn/trim/ltrim/rtrim over native strings take no zval; a LITERAL set's map built once per run | 4.14 |
+   | a literal cannot throw, so it no longer marks its statement (nor gets spilled into a temporary) | 3.70 |
+   | every literal built once before the first statement (`ph_lit_init`); a use is one load | 3.36 |
+   | `$s[$i] === 'c'` compares the byte in place; `(int) substr(...)` reads the window without building it | 2.92 |
+   | an int key reads and writes an array with no key zval; a fresh zval is not copied again when stored | 2.79 |
+   | **`[project].opt = 1` in the project file of every extension built from php** (hello, decimal; mc's `-O`, proven on the five targets) | 1.64 |
+   | a one-byte `str_replace` scans in place | 1.61 |
+   | zval `+ - *` between two ints in place, and the boxes written without two more calls | 1.52 |
+   | `$s[$i]` out of range warns again on the native road (it did not; now `tests/g/102`) | 1.53 |
+   | a zval against a native int passes the int unboxed | 1.51 |
+
+   `[project].opt = 1` alone, on main's compiler, is 6.46 -> 4.30 ms. **Two wrong answers the new
+   fixtures found, fixed**: `-1 * PHP_INT_MIN` through zvals was `int(PHP_INT_MIN)` on arm64 and a
+   SIGFPE on x86-64 (its overflow check divided by -1), and `$s[$i]` outside the string was silent
+   on the native road where php warns (the zval road warned). **Two found and NOT fixed**, both
+   pre-existing on main and left out of the fixtures with the reason in this line: a float whose
+   shortest round-trip form has 17 digits prints its last digit one off (`PHP_INT_MIN * 3` is
+   `-2.7670116110564327E+19` in php and `...328E+19` here), and `2 * $s` with a non-numeric `$s`
+   says `int * string` where php says `string * int` (php swaps a commutative op's constant
+   operand).
+
+   On the pull request's CI run, the same bench row on every leg: macos/arm64 2.08 / 1.22 ms
+   (1.70x, the twin 12.2x), linux/aarch64 3.08 / 1.77 (1.74x), linux/x86_64 2.10 / 1.39 (1.52x),
+   windows/x86_64 4.23 / 1.84 (2.29x), windows/arm64 8.82 / 2.95 (2.99x) -- against 0.49x to
+   0.93x after batch A.
+
+   **The grid does not lose a test**, three directories against a snapshot of main measured the
+   same day (`tests/grid.sh`), every move accounted for by `comm` over the five lists: `tests/lang`
+   104 = 104; `Zend/tests` 763 -> **766** (`str_offset_001`, `str_offset_003`,
+   `string_offset_int_min_max`: the offset warning above); `ext/standard/tests/strings` 271 ->
+   **272**, and five tests leave `refused` -- `bug26878` for green, `004`, `bug69751`,
+   `vfprintf_error4` and `sprintf_rope_optimization_003` for wrong. Those five were FALSE refusals:
+   `printf('...%s', 'x')` was refused as "a printf format that is not a literal" because the
+   literal after the format marked the call as throwing, so `ph_read_args` spilled the format into
+   a temporary and it no longer looked like one. No test moved out of green.
+
+   **What stays between the module (1.51 ms) and the C twin (0.24 ms)**, from a profile of the
+   final build (2369 samples): `_dec_umul` is 20.3% inclusive -- its int array is zvals, and
+   every intermediate `$r[$i + $j] + $xi * $y[$j] + $carry` is a box; allocation and the chunk
+   zeroed on return are 14.5%; the php functions' own bodies are 11.6% self time, much of it mc's
+   callee-saved prologue under `-O` (`php_strpos` saves ten registers to scan ten bytes); the
+   rest is the runtime calls a string-shaped decimal makes per operation. Each is a feature of its
+   own, not a tuning: a typed int array, inlining small php functions, and a "can this function
+   throw" fixpoint -- the last now worth little, since the position and the check it would remove
+   are three instructions each.
+
 2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
    through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
    exhausted the arena at `f(30)`; the condition is native now and so is the value when both

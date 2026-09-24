@@ -11,9 +11,35 @@
 // a php array is a value (see php_rt.txt "array value semantics").
 i64 ph_own(i64 v, i64 t) {
     if (t == PT_ARR && !ph_efresh)   return ph_c1("php_arr_copy", v, ty_parr);
-    if (t == PT_MIXED || t == PT_NULL) return ph_c1("php_zv_val", v, ty_pzv);
+    if (t == PT_MIXED || t == PT_NULL) {
+        if (ph_zv_fresh(v)) return v;
+        return ph_c1("php_zv_val", v, ty_pzv);
+    }
     return v;
 }
+
+// a zval nothing else can reach: what a constructor or an operator returns is
+// a box the runtime has just allocated (an array it holds is a copy made for
+// it), so the value copy ph_own makes for a variable would copy it again
+i64 ph_zv_fresh(i64 v) {
+    if (nd_kind(v) != N_CALL) return 0;
+    uptr n = nd_name(v);
+    return str_eq(n, "php_zlong") || str_eq(n, "php_zdouble") || str_eq(n, "php_zbool")
+        || str_eq(n, "php_znull") || str_eq(n, "php_zstr") || str_eq(n, "php_zv_val")
+        || str_eq(n, "php_zv_add") || str_eq(n, "php_zv_sub") || str_eq(n, "php_zv_mul")
+        || str_eq(n, "php_zv_div") || str_eq(n, "php_zv_mod") || str_eq(n, "php_zv_pow")
+        || str_eq(n, "php_zv_neg") || str_eq(n, "php_zv_concat")
+        || str_eq(n, "php_zv_add_zi") || str_eq(n, "php_zv_add_iz") || str_eq(n, "php_zv_sub_zi")
+        || str_eq(n, "php_zv_sub_iz") || str_eq(n, "php_zv_mul_zi") || str_eq(n, "php_zv_mul_iz")
+        || str_eq(n, "php_zv_mod_zi") || str_eq(n, "php_zv_band") || str_eq(n, "php_zv_bor")
+        || str_eq(n, "php_zv_bxor") || str_eq(n, "php_zv_shl") || str_eq(n, "php_zv_shr");
+}
+
+// An INT key on the last subscript of an assignment's lvalue (the one caller
+// that sets ph_lv_ikok): kept native, and ph_lv_ikey says so, so the element
+// is written and read through php_arr_iset/iget_w without a key zval.
+i64 ph_lv_ikok;
+i64 ph_lv_ikey;
 
 // a temporary holding an already-computed node, so a compound assignment reads
 // and writes the same container and key without evaluating either twice
@@ -46,6 +72,11 @@ i64 ph_tref(i64 n) {
 // `ph_lv_prop` is the property name of the last accessor, 0 for an element;
 // `cur` is then the RECEIVER (a zval) instead of an array handle.
 i64 ph_lv_walk(uptr d, uptr fl, i64 line, uptr pkey, i64 hoist) {
+    // taken and cleared on entry: a walk nested inside this one -- an
+    // unset() in a closure written as a key, say -- must see the default and
+    // hand its caller a key zval, whatever this walk's caller allows
+    i64 ikok = ph_lv_ikok;
+    ph_lv_ikok = 0;
     i64 vt = ph_var_type(d);
     i64 base = node_new(N_IDENT, line, fl);
     set_nd_name(base, ph_mangle(d, "v_"));
@@ -78,12 +109,17 @@ i64 ph_lv_walk(uptr d, uptr fl, i64 line, uptr pkey, i64 hoist) {
         ph_want("[", 1, "expected [ in a php array assignment");
         if (!isarr) { cur = ph_c1("php_zv_arr_w", cur, ty_parr); isarr = 1; }
         i64 k = 0;
-        if (!ph_at("]", 1)) k = ph_zkey(ph_expr(0), ph_ety);
+        i64 kx = 0;
+        i64 kt = -1;
+        if (!ph_at("]", 1)) { kx = ph_expr(0); kt = ph_ety; k = ph_zkey(kx, kt); }
         ph_want("]", 1, "expected ] in a php array assignment");
         if (!ph_at("[", 1) && !ph_at("->", 2) && !ph_at("?->", 3)) {
+            ph_lv_ikey = 0;
+            if (ikok && kt == PT_INT) { k = kx; ph_lv_ikey = 1; }
             if (hoist) {
                 cur = ph_temp(cur, ty_parr, "phc_");
-                if (k) k = ph_temp(k, ty_pzv, "phk_");
+                if (k && ph_lv_ikey) k = ph_temp(k, TY_I64, "phk_");
+                if (k && !ph_lv_ikey) k = ph_temp(k, ty_pzv, "phk_");
             }
             st64(pkey, k);
             return cur;
@@ -109,6 +145,12 @@ i64 ph_store(i64 cur, i64 k, i64 zv, uptr prop) {
     if (prop) return ph_c4("php_zv_pset", cur, ph_strlit(prop, cstrlen(prop)), zv, ph_scope(), TY_VOID);
     if (k) return ph_c3("php_arr_set", cur, k, zv, TY_VOID);
     return ph_c2("php_arr_push", cur, zv, TY_VOID);
+}
+
+// ph_store with the key native when `ik` says it is an int
+i64 ph_store_ik(i64 cur, i64 k, i64 zv, uptr prop, i64 ik) {
+    if (!prop && k && ik) return ph_c3("php_arr_iset", cur, k, zv, TY_VOID);
+    return ph_store(cur, k, zv, prop);
 }
 
 // the CELL the same path ends on, which is what a reference needs
@@ -181,9 +223,14 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         // follows: a compound form has to READ the element as well as write
         // it, and there is no way to walk the same tokens twice. T8: that is
         // what `a compound assignment to an array element` was waiting for.
+        ph_lv_ikok = 1;
+        ph_lv_ikey = 0;
         i64 cur = ph_lv_walk(d, fl, line, kb, 1);
+        i64 ik = ph_lv_ikey;
+        ph_lv_ikey = 0;
         uptr lprop = ph_lv_prop;
         i64 k = ld64(kb);
+        if (lprop) ik = 0;
         i64 op = 0;
         if (ph_at(".=", 2))  op = ph_tok(".", 1);
         if (ph_at("+=", 2))  op = ph_tok("+", 1);
@@ -211,7 +258,8 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
             if (k) k2 = ph_tref(k);
             i64 rd = 0;
             if (lprop) rd = ph_c3("php_zv_pget", cur2, ph_strlit(lprop, cstrlen(lprop)), ph_scope(), ty_pzv);
-            if (!lprop && k) rd = ph_c2("php_arr_zget_w", cur2, k2, ty_pzv);
+            if (!lprop && k && ik) rd = ph_c2("php_arr_iget_w", cur2, k2, ty_pzv);
+            if (!lprop && k && !ik) rd = ph_c2("php_arr_zget_w", cur2, k2, ty_pzv);
             if (!lprop && !k) ph_todo(fl, line, "a compound assignment to $a[]");
             if (ph_at("??=", 3)) {
                 // the hoisted container and key are initialised BEFORE the
@@ -225,14 +273,15 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
                 if (semi) ph_semi("expected ; after ??=");
                 i64 quiet = 0;
                 if (lprop) quiet = ph_c3("php_zv_pget_q", ph_tref(cur), ph_strlit(lprop, cstrlen(lprop)), ph_scope(), ty_pzv);
-                if (!lprop) quiet = ph_c2("php_arr_zget", ph_tref(cur), ph_tref(k), ty_pzv);
+                if (!lprop && ik) quiet = ph_c2("php_arr_iget", ph_tref(cur), ph_tref(k), ty_pzv);
+                if (!lprop && !ik) quiet = ph_c2("php_arr_zget", ph_tref(cur), ph_tref(k), ty_pzv);
                 i64 nn = node_new(N_UNARY, line, fl);
                 set_nd_op(nn, ph_tok("!", 1));
                 set_nd_a(nn, ph_cast(TY_U8, ph_c1("php_zv_isset", quiet, TY_I64)));
                 set_nd_type(nn, TY_U8);
                 i64 iff = node_new(N_IF, line, fl);
                 set_nd_a(iff, nn);
-                set_nd_b(iff, ph_expr_stmt_of(ph_store(cur, k, ph_to_mixed(ph_own(rv, rvt), rvt), lprop)));
+                set_nd_b(iff, ph_expr_stmt_of(ph_store_ik(cur, k, ph_to_mixed(ph_own(rv, rvt), rvt), lprop, ik)));
                 return ph_prefix_stmts(hpre, ph_wrap(iff));
             }
             i64 nv = 0;
@@ -250,14 +299,17 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
                 if (op == ph_tok(".", 1)) nv = ph_c2("php_zv_concat", rd, ph_to_mixed(rv, rvt), ty_pzv);
                 if (op != ph_tok(".", 1)) { nv = ph_arith(op, rd, PT_MIXED, rv, rvt, fl, line); nv = ph_to_mixed(nv, ph_ety); }
             }
-            return ph_expr_stmt_of(ph_store(cur, k, nv, lprop));
+            return ph_expr_stmt_of(ph_store_ik(cur, k, nv, lprop, ik));
         }
         ph_want("=", 1, "expected = after a php array index");
-        if (ph_at("&", 1)) return ph_ref_into(ph_slot(cur, k, lprop), fl, line, semi);
+        if (ph_at("&", 1)) {
+            if (ik) k = ph_to_mixed(k, PT_INT);
+            return ph_ref_into(ph_slot(cur, k, lprop), fl, line, semi);
+        }
         i64 v = ph_expr(0);
         i64 vt = ph_ety;
         if (semi) ph_semi("expected ; after a php assignment");
-        return ph_expr_stmt_of(ph_store(cur, k, ph_to_mixed(ph_own(v, vt), vt), lprop));
+        return ph_expr_stmt_of(ph_store_ik(cur, k, ph_to_mixed(ph_own(v, vt), vt), lprop, ik));
     }
 
     i64 op = 0;

@@ -59,6 +59,24 @@ i64 ph_call(uptr name, i64 nargs, i64 a0, i64 a1, i64 a2, i64 a3, i64 ty) {
     return c;
 }
 
+// a call that can neither raise nor throw -- an mc intrinsic such as ld64, or
+// a runtime leaf that only reads memory -- and so does not make its statement
+// announce a position or check for an exception (ph_stmt's rule). Only for a
+// callee that provably calls nothing that raises: a wrong entry here is a
+// diagnostic naming a stale line.
+i64 ph_quiet(uptr name, i64 nargs, i64 a0, i64 a1, i64 a2, i64 a3, i64 ty) {
+    i64 save = ph_can_throw;
+    i64 c = ph_call(name, nargs, a0, a1, a2, a3, ty);
+    ph_can_throw = save;
+    return c;
+}
+
+// the length of a native php string: the zend_string's len field, loaded in
+// place (php_strlen is exactly that load, behind a call)
+i64 ph_strlen_of(i64 s) {
+    return ph_quiet("ld64", 1, ph_bin(ph_tok("+", 1), s, ph_int(16), TY_UPTR), 0, 0, 0, TY_I64);
+}
+
 i64 ph_c1(uptr n, i64 a, i64 ty) { return ph_call(n, 1, a, 0, 0, 0, ty); }
 i64 ph_c2(uptr n, i64 a, i64 b, i64 ty) { return ph_call(n, 2, a, b, 0, 0, ty); }
 i64 ph_c3(uptr n, i64 a, i64 b, i64 c, i64 ty) { return ph_call(n, 3, a, b, c, 0, ty); }
@@ -94,7 +112,95 @@ i64 ph_strlit(uptr bytes, i64 len) {
     top_add(g);
     i64 cache = node_new(N_IDENT, ph_tline, ph_tfile);
     set_nd_name(cache, nm);
-    return ph_c3("php_str_lit", cache, ph_raw(bytes, len), ph_int(len), ty_pstr);
+    // quiet: building a literal allocates and cannot raise, so a literal
+    // must not make its statement announce a position or check for an
+    // exception -- nor make ph_read_args spill it into a temporary, which
+    // is what hid it from ph_is_strlit
+    i64 c = ph_quiet("php_str_lit", 3, cache, ph_raw(bytes, len), ph_int(len), 0, ty_pstr);
+    // Every literal is BUILT once, before the program's first statement
+    // (ph_lit_finish), so a USE is one load from its cache. The node keeps
+    // the php_str_lit shape until then, because the lowering reads literals
+    // by that shape (define(), a class name, a map's set).
+    if (ph_nlits == ph_litcap) {
+        i64 cap = ph_litcap * 2;
+        if (cap == 0) cap = 256;
+        uptr nl = xalloc(cap * 8);
+        i64 i = 0;
+        loop { if (i >= ph_nlits) break; st64(nl + i * 8, ld64(ph_lits + i * 8)); i = i + 1; }
+        ph_lits = nl;
+        ph_litcap = cap;
+    }
+    st64(ph_lits + ph_nlits * 8, c);
+    ph_nlits = ph_nlits + 1;
+    return c;
+}
+
+uptr ph_lits;
+i64  ph_nlits;
+i64  ph_litcap;
+
+// The end of the unit: one function that builds every literal the unit
+// uses, called first thing by main (or MINIT), and every USE turned into a
+// load of the cache that function filled -- php_str_lit was a call, and a
+// test of the cache, per use. A literal lives in module memory either way.
+i64 ph_lit_finish(uptr fl, i64 line) {
+    i64 head = 0;
+    i64 tail = 0;
+    i64 i = 0;
+    loop {
+        if (i >= ph_nlits) break;
+        i64 c = ld64(ph_lits + i * 8);
+        i64 cache = nd_a(c);
+        i64 raw = nd_next(cache);
+        i64 len = nd_next(raw);
+        i64 c2 = node_new(N_IDENT, nd_line(c), nd_file(c));
+        set_nd_name(c2, nd_name(cache));
+        set_nd_next(c2, ph_raw(nd_name(raw), nd_val(raw)));
+        set_nd_next(nd_next(c2), ph_int(nd_val(len)));
+        i64 bc = node_new(N_CALL, nd_line(c), nd_file(c));
+        set_nd_name(bc, "php_str_lit");
+        set_nd_a(bc, c2);
+        set_nd_type(bc, ty_pstr);
+        i64 st = node_new(N_EXPRSTMT, nd_line(c), nd_file(c));
+        set_nd_a(st, bc);
+        if (tail) set_nd_next(tail, st);
+        if (!tail) head = st;
+        tail = st;
+        // the use: ld64(&cache)
+        set_nd_name(c, "ld64");
+        set_nd_next(cache, 0);
+        i = i + 1;
+    }
+    i64 b = node_new(N_BLOCK, line, fl);
+    set_nd_a(b, head);
+    i64 f = node_new(N_FUNC, line, fl);
+    set_nd_name(f, "ph_lit_init");
+    set_nd_type(f, TY_VOID);
+    set_nd_b(f, b);
+    return f;
+}
+
+// one uptr global the runtime fills once and reads ever after -- the shape a
+// literal's cache has, for anything else built once per literal site (a
+// byte map, below). The IDENT is the global's address, as for php_str_lit.
+i64 ph_cache_slot(uptr pfx) {
+    ph_nonce = ph_nonce + 1;
+    uptr nm = p_cat(pfx, "", 0, 0);
+    nm = p_cat(nm, php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+    i64 g = node_new(N_GLOBAL, ph_tline, ph_tfile);
+    set_nd_name(g, nm);
+    set_nd_type(g, TY_UPTR);
+    set_nd_val(g, 1);
+    set_nd_a(g, 0);
+    top_add(g);
+    i64 cache = node_new(N_IDENT, ph_tline, ph_tfile);
+    set_nd_name(cache, nm);
+    return cache;
+}
+
+// is `n` a php string literal (ph_strlit's node)?
+i64 ph_is_strlit(i64 n) {
+    return nd_kind(n) == N_CALL && str_eq(nd_name(n), "php_str_lit");
 }
 
 uptr php_dec(i64 v) {

@@ -45,7 +45,7 @@ and compared with something php produced on every host, by [`tests/ext.sh`](test
 | example | | the gate |
 |---|---|---|
 | [`hello`](examples/hello/) | compiled from PHP | seven scalar functions; `check.php` byte for byte the interpreted source, the wrong calls against a C extension of the same signatures |
-| [`decimal`](examples/decimal/) | compiled from PHP | exact fixed-point decimals, half-even; the differential, 1219 results against bcmath, and a bench row -- **0.51x**, the compiled module is slower on string work, and its README says why |
+| [`decimal`](examples/decimal/) | compiled from PHP, **done** | exact fixed-point decimals, half-even; the differential, 1219 results against bcmath, and a bench row -- **2.19x** php interpreting the same source (1.52x to 2.99x on the five CI legs; 0.51x before batch E), with its C twin at 13.8x beside it |
 | [`two-extensions`](examples/two-extensions/) | **hand-written mc** | two extensions calling each other, loaded in both orders; two mc-php extensions in one php; and the refusal of `extB.php`, pinned |
 | [`awaitable`](examples/awaitable/) | **hand-written mc** | `await`, `parallel` over forked children, libcurl on pthreads under a semaphore; and the refusal of `awaitable.src.php`, pinned |
 

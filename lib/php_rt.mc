@@ -90,8 +90,12 @@ uptr php_str_alloc(i64 n) {
 i64  php_strlen(uptr s) { return ld64(s + 16); }
 uptr php_str_val(uptr s) { return s + ZS_HDR; }
 
+// Eight bytes a step and then the tail. Every host this runtime targets
+// (arm64, x86-64) loads and stores unaligned words; a forward copy is also
+// right for d < s overlapping, which is the only overlap a caller makes.
 void php_memcpy(uptr d, uptr s, i64 n) {
     i64 i = 0;
+    loop { if (i + 8 > n) break; st64(d + i, ld64(s + i)); i = i + 8; }
     loop { if (i >= n) break; st8(d + i, ld8(s + i)); i = i + 1; }
 }
 
@@ -117,8 +121,8 @@ uptr php_str_lit(uptr cache, uptr b, i64 n) {
 }
 
 uptr php_str_concat(uptr a, uptr b) {
-    i64 la = php_strlen(a);
-    i64 lb = php_strlen(b);
+    i64 la = ld64(a + 16);
+    i64 lb = ld64(b + 16);
     uptr s = php_str_alloc(la + lb);
     php_memcpy(s + ZS_HDR, a + ZS_HDR, la);
     php_memcpy(s + ZS_HDR + la, b + ZS_HDR, lb);
@@ -127,8 +131,8 @@ uptr php_str_concat(uptr a, uptr b) {
 
 // memcmp over the bytes, then the length: PHP's own strcmp ordering.
 i64 php_str_cmp(uptr a, uptr b) {
-    i64 la = php_strlen(a);
-    i64 lb = php_strlen(b);
+    i64 la = ld64(a + 16);
+    i64 lb = ld64(b + 16);
     i64 n = la;
     if (lb < n) n = lb;
     i64 i = 0;
@@ -451,9 +455,11 @@ uptr php_ftos(f64 x) {
 }
 
 // ---- string to number (php's leading-numeric rule) -------------------------
-i64 php_stoi(uptr s) {
-    i64 n = php_strlen(s);
-    uptr v = s + ZS_HDR;
+i64 php_stoi(uptr s) { return php_stoi_b(s + ZS_HDR, ld64(s + 16)); }
+
+// (int) over n bytes at v: php_stoi's reading, and what (int) substr(...)
+// uses on the substring's window without building it
+i64 php_stoi_b(uptr v, i64 n) {
     i64 i = 0;
     loop { if (i >= n) break; i64 c = ld8(v + i); if (c != 32 && c != 9 && c != 10 && c != 13) break; i = i + 1; }
     i64 neg = 0;
@@ -938,13 +944,16 @@ void php_zv_cp(uptr d, uptr s) { st64(d, ld64(s)); st32(d + 8, ld32(s + 8)); }
 
 uptr php_zv_dup(uptr s) { uptr z = php_zv_alloc(); php_zv_cp(z, s); return z; }
 
-uptr php_znull() { uptr z = php_zv_alloc(); php_zv_settype(z, IS_NULL); return z; }
+// The boxes, each written in place: one php_alloc and two stores, where the
+// zv_alloc/settype pair was two more calls. Word 1 is the type_info u32 and
+// the collision link u32 above it, both what php_zv_alloc + settype leave.
+uptr php_znull() { uptr z = php_alloc(ZV_SIZE); st64(z, 0); st64(z + 8, IS_NULL); return z; }
 // "this argument was not passed", which a null that WAS passed is not
 uptr php_zundef() { uptr z = php_zv_alloc(); php_zv_settype(z, IS_UNDEF); return z; }
-uptr php_zlong(i64 v) { uptr z = php_zv_alloc(); st64(z, v); php_zv_settype(z, IS_LONG); return z; }
+uptr php_zlong(i64 v) { uptr z = php_alloc(ZV_SIZE); st64(z, v); st64(z + 8, IS_LONG); return z; }
 uptr php_zbool(u8 b) { uptr z = php_zv_alloc(); if (b) php_zv_settype(z, IS_TRUE); if (!b) php_zv_settype(z, IS_FALSE); return z; }
-uptr php_zdouble(f64 x) { uptr z = php_zv_alloc(); stf64(z, x); php_zv_settype(z, IS_DOUBLE); return z; }
-uptr php_zstr(uptr s) { uptr z = php_zv_alloc(); st64(z, s); php_zv_settype(z, IS_STRING); return z; }
+uptr php_zdouble(f64 x) { uptr z = php_alloc(ZV_SIZE); stf64(z, x); st64(z + 8, IS_DOUBLE); return z; }
+uptr php_zstr(uptr s) { uptr z = php_alloc(ZV_SIZE); st64(z, s); st64(z + 8, IS_STRING); return z; }
 uptr php_zarr(uptr a) { uptr z = php_zv_alloc(); st64(z, a); php_zv_settype(z, IS_ARRAY); return z; }
 uptr php_zobj(uptr o) { uptr z = php_zv_alloc(); st64(z, o); php_zv_settype(z, IS_OBJECT); return z; }
 
@@ -1147,6 +1156,13 @@ uptr php_arr_iget(uptr a, i64 k) {
     return php_znull();
 }
 
+// php_arr_zget_w's IS_LONG arm, with the key native
+uptr php_arr_iget_w(uptr a, i64 k) {
+    uptr b = php_ht_find(a, k, 0);
+    if (!b) { php_undef_ikey(k); return php_znull(); }
+    return b;
+}
+
 uptr php_arr_sget(uptr a, uptr key) {
     u8 nb[8];
     if (php_key_numeric(key, nb)) return php_arr_iget(a, ld64(nb));
@@ -1285,7 +1301,7 @@ i64 php_zv_bool(uptr z) {
 }
 
 i64 php_zv_long(uptr z) {
-    i64 t = php_zv_type(z);
+    i64 t = ld8(z + 8);
     if (t == IS_LONG) return ld64(z);
     if (t == IS_TRUE) return 1;
     if (t == IS_DOUBLE) return (i64) ldf64(z);
@@ -1355,7 +1371,7 @@ i64 php_str_isnum(uptr s, uptr pl, uptr pd) {
 // context is a TypeError. T6 follows the numeric-string half and treats the
 // rest as 0, which is php 7's rule -- named in RESULTS.md, not hidden.
 i64 php_zv_isdouble(uptr z) {
-    i64 t = php_zv_type(z);
+    i64 t = ld8(z + 8);
     if (t == IS_DOUBLE) return 1;
     if (t == IS_STRING) {
         u8 lb[8];
@@ -1415,7 +1431,16 @@ i64 php_arith_ok(uptr a, uptr b, uptr op) {
     return 0;
 }
 
+// Every operator's int-and-int case first, in place: two tags, the
+// operation and its overflow test, one box -- what the checks below come to
+// for two IS_LONGs, without the calls.
 uptr php_zv_add(uptr a, uptr b) {
+    if (ld8(a + 8) == IS_LONG && ld8(b + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        i64 y = ld64(b);
+        i64 r = x + y;
+        if (((x ^ r) & (y ^ r)) >= 0) return php_zlong(r);
+    }
     if (php_zv_type(a) == IS_ARRAY && php_zv_type(b) == IS_ARRAY) {
         uptr r = php_arr_copy(ld64(a));
         uptr s = ld64(b);
@@ -1440,7 +1465,7 @@ uptr php_zv_add(uptr a, uptr b) {
         }
         return php_zarr(r);
     }
-    if (!php_arith_ok(a, b, php_str_new("+", 1))) return php_znull();
+    if (!php_arith_ok(a, b, php_str_ch('+'))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b)) return php_zdouble(php_zv_double(a) + php_zv_double(b));
     i64 x = php_zv_long(a);
     i64 y = php_zv_long(b);
@@ -1451,7 +1476,13 @@ uptr php_zv_add(uptr a, uptr b) {
 }
 
 uptr php_zv_sub(uptr a, uptr b) {
-    if (!php_arith_ok(a, b, php_str_new("-", 1))) return php_znull();
+    if (ld8(a + 8) == IS_LONG && ld8(b + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        i64 y = ld64(b);
+        i64 r = x - y;
+        if (((x ^ y) & (x ^ r)) >= 0) return php_zlong(r);
+    }
+    if (!php_arith_ok(a, b, php_str_ch('-'))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b)) return php_zdouble(php_zv_double(a) - php_zv_double(b));
     i64 x = php_zv_long(a);
     i64 y = php_zv_long(b);
@@ -1461,17 +1492,28 @@ uptr php_zv_sub(uptr a, uptr b) {
 }
 
 uptr php_zv_mul(uptr a, uptr b) {
-    if (!php_arith_ok(a, b, php_str_new("*", 1))) return php_znull();
+    if (ld8(a + 8) == IS_LONG && ld8(b + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        i64 y = ld64(b);
+        i64 r = x * y;
+        if (x == 0) return php_zlong(0);
+        // -1 * PHP_INT_MIN overflows, and r / x is itself x86-64's #DE there
+        if (!(x == -1 && r == -9223372036854775807 - 1)) { if (r / x == y) return php_zlong(r); }
+    }
+    if (!php_arith_ok(a, b, php_str_ch('*'))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b)) return php_zdouble(php_zv_double(a) * php_zv_double(b));
     i64 x = php_zv_long(a);
     i64 y = php_zv_long(b);
     i64 r = x * y;
-    if (x != 0) { if (r / x != y) return php_zdouble(php_zv_double(a) * php_zv_double(b)); }
+    if (x != 0) {
+        if (x == -1 && r == -9223372036854775807 - 1) return php_zdouble(php_zv_double(a) * php_zv_double(b));
+        if (r / x != y) return php_zdouble(php_zv_double(a) * php_zv_double(b));
+    }
     return php_zlong(r);
 }
 
 uptr php_zv_div(uptr a, uptr b) {
-    if (!php_arith_ok(a, b, php_str_new("/", 1))) return php_znull();
+    if (!php_arith_ok(a, b, php_str_ch('/'))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b)) {
         f64 d = php_zv_double(b);
         if (d == 0.0) { php_throw_str(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16)); return php_znull(); }
@@ -1488,6 +1530,74 @@ uptr php_zv_div(uptr a, uptr b) {
     return php_zdouble((f64) x / (f64) y);
 }
 
+// A zval with a NATIVE int on one side (the compiler knows the other
+// operand's type): the int-and-int case in place, anything else is the
+// zval operator with the int boxed, so every message is that operator's.
+uptr php_zv_add_zi(uptr a, i64 y) {
+    if (ld8(a + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        i64 r = x + y;
+        if (((x ^ r) & (y ^ r)) >= 0) return php_zlong(r);
+    }
+    return php_zv_add(a, php_zlong(y));
+}
+
+uptr php_zv_add_iz(i64 x, uptr b) {
+    if (ld8(b + 8) == IS_LONG) {
+        i64 y = ld64(b);
+        i64 r = x + y;
+        if (((x ^ r) & (y ^ r)) >= 0) return php_zlong(r);
+    }
+    return php_zv_add(php_zlong(x), b);
+}
+
+uptr php_zv_sub_zi(uptr a, i64 y) {
+    if (ld8(a + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        i64 r = x - y;
+        if (((x ^ y) & (x ^ r)) >= 0) return php_zlong(r);
+    }
+    return php_zv_sub(a, php_zlong(y));
+}
+
+uptr php_zv_sub_iz(i64 x, uptr b) {
+    if (ld8(b + 8) == IS_LONG) {
+        i64 y = ld64(b);
+        i64 r = x - y;
+        if (((x ^ y) & (x ^ r)) >= 0) return php_zlong(r);
+    }
+    return php_zv_sub(php_zlong(x), b);
+}
+
+uptr php_zv_mul_zi(uptr a, i64 y) {
+    if (ld8(a + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        if (x == 0 || y == 0) return php_zlong(0);
+        i64 r = x * y;
+        if (!(x == -1 && r == -9223372036854775807 - 1)) {
+            if (r / x == y) return php_zlong(r);
+        }
+    }
+    return php_zv_mul(a, php_zlong(y));
+}
+
+uptr php_zv_mul_iz(i64 x, uptr b) {
+    if (ld8(b + 8) == IS_LONG) {
+        i64 y = ld64(b);
+        if (x == 0 || y == 0) return php_zlong(0);
+        i64 r = x * y;
+        if (!(x == -1 && r == -9223372036854775807 - 1)) {
+            if (r / x == y) return php_zlong(r);
+        }
+    }
+    return php_zv_mul(php_zlong(x), b);
+}
+
+uptr php_zv_mod_zi(uptr a, i64 y) {
+    if (ld8(a + 8) == IS_LONG && y != 0) return php_zlong(php_mod(ld64(a), y));
+    return php_zv_mod(a, php_zlong(y));
+}
+
 uptr php_zv_mod(uptr a, uptr b) {
     i64 y = php_zv_ilong(b);
     if (y == 0) { php_throw_str(php_str_new("DivisionByZeroError", 19), php_str_new("Modulo by zero", 14)); return php_znull(); }
@@ -1502,7 +1612,7 @@ uptr php_zv_pow(uptr a, uptr b) {
 }
 
 uptr php_zv_neg(uptr a) {
-    if (!php_arith_ok(a, php_zlong(0), php_str_new("*", 1))) return php_znull();
+    if (!php_arith_ok(a, php_zlong(0), php_str_ch('*'))) return php_znull();
     if (php_zv_isdouble(a)) return php_zdouble(0.0 - php_zv_double(a));
     i64 v = php_zv_long(a);
     if (v == -9223372036854775807 - 1) return php_zdouble(9223372036854775808.0);
@@ -1515,7 +1625,8 @@ uptr php_zv_concat(uptr a, uptr b) { return php_zstr(php_str_concat(php_zv_str(a
 // float-string that lose precision there. An explicit (int) cast does not go
 // through this, which is why it is a second function and not php_zv_long.
 i64 php_zv_ilong(uptr z) {
-    i64 t = php_zv_type(z);
+    i64 t = ld8(z + 8);
+    if (t == IS_LONG) return ld64(z);
     if (t == IS_DOUBLE) return php_dtoi_chk(ldf64(z));
     if (t == IS_STRING) {
         u8 lb[8];
@@ -2026,7 +2137,7 @@ void php_var_export(uptr z) { php_ex_zv(z, 0); php_write("\n", 1); }
 
 // ---- the string functions T5 implements ------------------------------------
 uptr php_substr(uptr s, i64 start, i64 len, i64 haslen) {
-    i64 n = php_strlen(s);
+    i64 n = ld64(s + 16);
     if (start < 0) { start = n + start; if (start < 0) start = 0; }
     if (start > n) return php_str_new("", 0);
     i64 want = n - start;
@@ -2038,22 +2149,57 @@ uptr php_substr(uptr s, i64 start, i64 len, i64 haslen) {
     return php_str_new(s + ZS_HDR + start, want);
 }
 
+// (int) substr($s, ...): the same window, read as an int in place -- the
+// compiler fuses the two (ph_to_int), so the substring is never built
+i64 php_substr_i(uptr s, i64 start, i64 len, i64 haslen) {
+    i64 n = ld64(s + 16);
+    if (start < 0) { start = n + start; if (start < 0) start = 0; }
+    if (start > n) return 0;
+    i64 want = n - start;
+    if (haslen) {
+        if (len < 0) { want = n - start + len; } else { want = len; }
+    }
+    if (want < 0) want = 0;
+    if (start + want > n) want = n - start;
+    return php_stoi_b(s + ZS_HDR + start, want);
+}
+
+// $s[$i] === 'c': the byte compared in place, with php_str_off's bounds and
+// its warning (an offset outside the string is "", which equals no one-byte
+// literal)
+i64 php_str_at_is(uptr s, i64 i, i64 c) {
+    i64 n = ld64(s + 16);
+    i64 j = i;
+    if (j < 0) j = n + j;
+    if (j < 0 || j >= n) { php_str_off_warn(i); return 0; }
+    return ld8(s + ZS_HDR + j) == c;
+}
+
+// the first byte is scanned for on its own; the rest is compared only where
+// it matched, which is most of what a strpos costs for a short needle
 i64 php_strpos(uptr h, uptr nd, i64 off) {
-    i64 hn = php_strlen(h);
-    i64 nn = php_strlen(nd);
+    i64 hn = ld64(h + 16);
+    i64 nn = ld64(nd + 16);
     if (off < 0) { off = hn + off; if (off < 0) off = 0; }
     if (off > hn) return -1;
+    if (nn == 0) return off;
+    uptr hb = h + ZS_HDR;
+    uptr nb = nd + ZS_HDR;
+    i64 c0 = ld8(nb);
+    if (nn == 1) {
+        i64 k = off;
+        loop { if (k >= hn) break; if (ld8(hb + k) == c0) return k; k = k + 1; }
+        return -1;
+    }
+    i64 last = hn - nn;
     i64 i = off;
     loop {
-        if (i + nn > hn) break;
-        i64 j = 0;
-        i64 ok = 1;
-        loop {
-            if (j >= nn) break;
-            if (ld8(h + ZS_HDR + i + j) != ld8(nd + ZS_HDR + j)) { ok = 0; break; }
-            j = j + 1;
+        if (i > last) break;
+        if (ld8(hb + i) == c0) {
+            i64 j = 1;
+            loop { if (j >= nn) break; if (ld8(hb + i + j) != ld8(nb + j)) break; j = j + 1; }
+            if (j >= nn) return i;
         }
-        if (ok) return i;
         i = i + 1;
     }
     return -1;
@@ -2068,33 +2214,73 @@ uptr php_str_repeat(uptr s, i64 times) {
     return o;
 }
 
-uptr php_str_replace(uptr search, uptr repl, uptr subj) {
-    i64 sn = php_strlen(search);
-    if (sn == 0) return subj;
-    i64 hn = php_strlen(subj);
-    i64 rn = php_strlen(repl);
+// A one-byte search, the common case, scanned in this function: no strpos
+// call per occurrence. The count first (a byte compare per byte), then one
+// pass that copies.
+uptr php_str_replace1(i64 c, uptr repl, uptr subj) {
+    i64 hn = ld64(subj + 16);
+    uptr v = subj + ZS_HDR;
     i64 cnt = 0;
     i64 i = 0;
-    loop {
-        i64 p = php_strpos(subj, search, i);
-        if (p < 0) break;
-        cnt = cnt + 1;
-        i = p + sn;
-    }
+    loop { if (i >= hn) break; if (ld8(v + i) == c) cnt = cnt + 1; i = i + 1; }
     if (cnt == 0) return subj;
-    uptr o = php_str_alloc(hn + cnt * (rn - sn));
-    i64 w = 0;
+    i64 rn = ld64(repl + 16);
+    uptr o = php_str_alloc(hn + cnt * (rn - 1));
+    uptr w = o + ZS_HDR;
     i = 0;
     loop {
-        i64 p = php_strpos(subj, search, i);
-        if (p < 0) break;
+        if (i >= hn) break;
+        i64 b = ld8(v + i);
+        if (b == c) {
+            if (rn == 1) { st8(w, ld8(repl + ZS_HDR)); w = w + 1; }
+            if (rn > 1) { php_memcpy(w, repl + ZS_HDR, rn); w = w + rn; }
+        }
+        if (b != c) { st8(w, b); w = w + 1; }
+        i = i + 1;
+    }
+    return o;
+}
+
+// No occurrence is the subject itself. A replacement no longer than what it
+// replaces cannot grow the string, so it is ONE pass into a buffer the size
+// of the subject, trimmed to what was written; a longer one counts first.
+uptr php_str_replace(uptr search, uptr repl, uptr subj) {
+    i64 sn = ld64(search + 16);
+    if (sn == 0) return subj;
+    if (sn == 1) return php_str_replace1(ld8(search + ZS_HDR), repl, subj);
+    i64 hn = ld64(subj + 16);
+    i64 rn = ld64(repl + 16);
+    i64 first = php_strpos(subj, search, 0);
+    if (first < 0) return subj;
+    i64 cnt = 1;
+    i64 i = first + sn;
+    i64 cap = hn;
+    if (rn > sn) {
+        loop {
+            i64 p = php_strpos(subj, search, i);
+            if (p < 0) break;
+            cnt = cnt + 1;
+            i = p + sn;
+        }
+        cap = hn + cnt * (rn - sn);
+    }
+    uptr o = php_str_alloc(cap);
+    i64 w = 0;
+    i = 0;
+    i64 p = first;
+    loop {
         php_memcpy(o + ZS_HDR + w, subj + ZS_HDR + i, p - i);
         w = w + (p - i);
         php_memcpy(o + ZS_HDR + w, repl + ZS_HDR, rn);
         w = w + rn;
         i = p + sn;
+        p = php_strpos(subj, search, i);
+        if (p < 0) break;
     }
     php_memcpy(o + ZS_HDR + w, subj + ZS_HDR + i, hn - i);
+    w = w + (hn - i);
+    st64(o + 16, w);
+    st8(o + ZS_HDR + w, 0);
     return o;
 }
 
@@ -2337,6 +2523,7 @@ uptr php_trim(uptr s, i64 mode) {         // 0 both, 1 left, 2 right
     i64 b = n;
     if (mode != 2) { loop { if (a >= b) break; if (!php_trimset(ld8(s + ZS_HDR + a))) break; a = a + 1; } }
     if (mode != 1) { loop { if (b <= a) break; if (!php_trimset(ld8(s + ZS_HDR + b - 1))) break; b = b - 1; } }
+    if (a == 0 && b == n) return s;
     return php_str_new(s + ZS_HDR + a, b - a);
 }
 
@@ -2591,12 +2778,43 @@ uptr php_it_val(uptr a, i64 i) { return php_zv_val(php_ht_bkt(a, i)); }
 uptr php_it_ref(uptr a, i64 i) { return php_ht_bkt(a, i); }
 
 // a string offset: $s[3], and php's negative index
-uptr php_str_off(uptr s, i64 i) {
-    i64 n = php_strlen(s);
-    if (i < 0) i = n + i;
-    if (i < 0 || i >= n) return php_str_new("", 0);
-    return php_str_new(s + ZS_HDR + i, 1);
+// $s[$i] is a one-byte string, and there are 256 of them: built once, in
+// module memory beside the literal caches (php_str_lit's rule), and shared --
+// strings are immutable here, and php interns its own one-byte strings the
+// same way (ZSTR_CHAR). A loop over $s[$i] allocates nothing.
+uptr ph_ch1;
+uptr php_str_ch(i64 c) {
+    uptr za = ph_zalloc;
+    if (!ph_ch1) { ph_zalloc = 0; ph_ch1 = php_alloc(256 * 8); ph_zalloc = za; }
+    uptr s = ld64(ph_ch1 + c * 8);
+    if (s) return s;
+    ph_zalloc = 0;
+    s = php_str_alloc(1);
+    ph_zalloc = za;
+    st8(s + ZS_HDR, c);
+    st64(ph_ch1 + c * 8, s);
+    return s;
 }
+
+// $s[$i] outside the string is php's "Warning: Uninitialized string offset"
+// and "" -- the zval road's php_zv_dim_rd said so already, the native one
+// did not. php_str_off_q (isset's read, a null when absent) is what `??`
+// reads, and it warns for nothing.
+void php_str_off_warn(i64 i) {
+    php_mreset();
+    php_mc("Uninitialized string offset ");
+    php_mi(i);
+    php_raise_m(PHE_WARNING);
+}
+
+uptr php_str_off(uptr s, i64 i) {
+    i64 n = ld64(s + 16);
+    i64 j = i;
+    if (j < 0) j = n + j;
+    if (j < 0 || j >= n) { php_str_off_warn(i); return php_str_new("", 0); }
+    return php_str_ch(ld8(s + ZS_HDR + j));
+}
+
 
 // ---- ++ and -- on a zval, php's own rules ----------------------------------
 // null++ is 1, null-- stays null, a numeric string is a number, and a
@@ -3274,26 +3492,48 @@ i64 php_span_win(uptr s, uptr oz, uptr lz, uptr pb) {
     return l;
 }
 
+// A set of bytes as a 256-bit map, built once per call: a membership test is
+// then one load and a shift, where php_inset walks the whole set per byte.
+void php_bmap(uptr set, uptr bm) {
+    st64(bm, 0); st64(bm + 8, 0); st64(bm + 16, 0); st64(bm + 24, 0);
+    i64 n = ld64(set + 16);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(set + ZS_HDR + i);
+        st8(bm + (c >> 3), ld8(bm + (c >> 3)) | (1 << (c & 7)));
+        i = i + 1;
+    }
+}
+
+// strspn/strcspn over the window: `want` is 1 for strspn (stop at the first
+// byte NOT in the set) and 0 for strcspn (stop at the first byte in it)
+i64 php_span(uptr s, uptr set, i64 o, i64 l, i64 want) {
+    u8 bm[32];
+    php_bmap(set, bm);
+    uptr p = s + ZS_HDR + o;
+    i64 i = 0;
+    loop {
+        if (i >= l) break;
+        i64 c = ld8(p + i);
+        if (((ld8(bm + (c >> 3)) >> (c & 7)) & 1) != want) break;
+        i = i + 1;
+    }
+    return i;
+}
+
 i64 php_f_strspn(uptr a, uptr b, uptr oz, uptr lz) {
     uptr s = php_zv_str(a);
-    uptr set = php_zv_str(b);
     u8 ob[8];
     i64 l = php_span_win(s, oz, lz, ob);
-    i64 o = ld64(ob);
-    i64 i = 0;
-    loop { if (i >= l) break; if (!php_inset(set, ld8(s + ZS_HDR + o + i))) break; i = i + 1; }
-    return i;
+    return php_span(s, php_zv_str(b), ld64(ob), l, 1);
 }
 
 i64 php_f_strcspn(uptr a, uptr b, uptr oz, uptr lz) {
     uptr s = php_zv_str(a);
-    uptr set = php_zv_str(b);
     u8 ob[8];
     i64 l = php_span_win(s, oz, lz, ob);
-    i64 o = ld64(ob);
-    i64 i = 0;
-    loop { if (i >= l) break; if (php_inset(set, ld8(s + ZS_HDR + o + i))) break; i = i + 1; }
-    return i;
+    return php_span(s, php_zv_str(b), ld64(ob), l, 0);
 }
 
 uptr php_f_chunk_split(uptr a, uptr lz, uptr ez) {
@@ -5926,37 +6166,94 @@ uptr php_f_str_word_count(uptr z, uptr _p2, uptr _p3) {
 
 // trim's charlist understands `x..y` as a RANGE (measured:
 // trim("a..z", "a..z") is ".." because a..z is every letter)
-i64 php_trimset2(uptr set, i64 c) {
-    i64 n = php_strlen(set);
-    uptr b = set + ZS_HDR;
-    i64 i = 0;
+// a trim mask as a 256-bit map, "a..b" read as a range -- built once per
+// call instead of walked once per byte
+void php_tmap(uptr set, uptr bm) {
+    st64(bm, 0); st64(bm + 8, 0); st64(bm + 16, 0); st64(bm + 24, 0);
+    i64 sn = ld64(set + 16);
+    uptr sb = set + ZS_HDR;
+    i64 k = 0;
     loop {
-        if (i >= n) break;
-        if (i + 3 < n) {
-            if (ld8(b + i + 1) == 46) { if (ld8(b + i + 2) == 46) {
-                i64 lo = ld8(b + i);
-                i64 hi = ld8(b + i + 3);
-                if (c >= lo && c <= hi) return 1;
-                i = i + 4;
-                continue;
-            } }
-        }
-        if (ld8(b + i) == c) return 1;
-        i = i + 1;
+        if (k >= sn) break;
+        i64 lo = ld8(sb + k);
+        i64 hi = lo;
+        k = k + 1;
+        if (k + 2 < sn && ld8(sb + k) == 46 && ld8(sb + k + 1) == 46) { hi = ld8(sb + k + 2); k = k + 3; }
+        i64 c = lo;
+        loop { if (c > hi) break; st8(bm + (c >> 3), ld8(bm + (c >> 3)) | (1 << (c & 7))); c = c + 1; }
     }
-    return 0;
+}
+
+// trim over a map; mode 0 both ends, 1 left, 2 right. Nothing trimmed is the
+// string itself -- strings are immutable here
+uptr php_trim_m(uptr s, uptr bm, i64 mode) {
+    i64 n = ld64(s + 16);
+    uptr v = s + ZS_HDR;
+    i64 a = 0;
+    i64 b = n;
+    i64 c = 0;
+    if (mode != 2) { loop { if (a >= b) break; c = ld8(v + a); if (!((ld8(bm + (c >> 3)) >> (c & 7)) & 1)) break; a = a + 1; } }
+    if (mode != 1) { loop { if (b <= a) break; c = ld8(v + b - 1); if (!((ld8(bm + (c >> 3)) >> (c & 7)) & 1)) break; b = b - 1; } }
+    if (a == 0 && b == n) return s;
+    return php_str_new(v + a, b - a);
+}
+
+// trim with a mask the compiler could not see
+uptr php_trim_s(uptr s, uptr set, i64 mode) {
+    u8 bm[32];
+    php_tmap(set, bm);
+    return php_trim_m(s, bm, mode);
 }
 
 uptr php_f_ltrim_c(uptr z, uptr cz, i64 mode) {
     uptr s = php_zv_str(z);
     if (php_zv_type(cz) == IS_NULL) return php_trim(s, mode);
-    uptr set = php_zv_str(cz);
-    i64 n = php_strlen(s);
-    i64 a = 0;
-    i64 b = n;
-    if (mode != 2) { loop { if (a >= b) break; if (!php_trimset2(set, ld8(s + ZS_HDR + a))) break; a = a + 1; } }
-    if (mode != 1) { loop { if (b <= a) break; if (!php_trimset2(set, ld8(s + ZS_HDR + b - 1))) break; b = b - 1; } }
-    return php_str_new(s + ZS_HDR + a, b - a);
+    return php_trim_s(s, php_zv_str(cz), mode);
+}
+
+// A LITERAL mask or span set: its map built once per program run, in module
+// memory beside the literal's own cache (php_str_lit's rule), and read by
+// every later call. `trim` says which reading: 1 php's trim mask, 0 a plain
+// set of bytes (strspn/strcspn).
+uptr php_bmap_lit(uptr cache, uptr set, i64 trim) {
+    uptr m = ld64(cache);
+    if (m) return m;
+    uptr za = ph_zalloc;
+    ph_zalloc = 0;
+    m = php_alloc(32);
+    ph_zalloc = za;
+    if (trim) php_tmap(set, m);
+    if (!trim) php_bmap(set, m);
+    st64(cache, m);
+    return m;
+}
+
+// strspn/strcspn with native arguments: php_span_win's window, then the scan
+i64 php_spn(uptr s, uptr bm, i64 o, i64 l, i64 hasl, i64 want) {
+    i64 n = ld64(s + 16);
+    if (o < 0) { o = n + o; if (o < 0) o = 0; }
+    if (o > n) o = n;
+    i64 len = n - o;
+    if (hasl) {
+        len = l;
+        if (l < 0) { len = n - o + l; if (len < 0) len = 0; }
+        if (len > n - o) len = n - o;
+    }
+    uptr p = s + ZS_HDR + o;
+    i64 i = 0;
+    loop {
+        if (i >= len) break;
+        i64 c = ld8(p + i);
+        if (((ld8(bm + (c >> 3)) >> (c & 7)) & 1) != want) break;
+        i = i + 1;
+    }
+    return i;
+}
+
+i64 php_spn_s(uptr s, uptr set, i64 o, i64 l, i64 hasl, i64 want) {
+    u8 bm[32];
+    php_bmap(set, bm);
+    return php_spn(s, bm, o, l, hasl, want);
 }
 
 uptr php_f_trim(uptr z, uptr c) { return php_f_ltrim_c(z, c, 0); }

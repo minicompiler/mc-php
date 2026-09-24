@@ -20,6 +20,12 @@
 entry = "hello.php"
 out = "build/hello.so"
 kind = "exe"
+# mc's optimizer (-O: its register allocator, its branch peephole and loop
+# hoisting), on for every extension this repository builds: an extension is
+# called from a php that is already warm, so the generated code is the whole
+# cost. examples/decimal measured 2.79 ms without it and 1.64 ms with it
+# (docs/plan.md § 7 item 1).
+opt = 1
 
 # The escape hatch, and on macOS it is the only road: mc writes a Mach-O
 # EXECUTABLE by itself and php loads a BUNDLE, which is a different file type.
