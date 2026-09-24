@@ -970,8 +970,10 @@ its code is written.
    PHP interpreted (> 1x), and each one has a C TWIN -- the same functions written as an ordinary
    C extension -- measured beside it on the same harness, because the target is to come as close
    as possible to C.** `decimal` has its twin (`examples/decimal/c/`, batch A); `two-extensions`
-   and `awaitable` get theirs when they are compiled from PHP. By that rule none of the three is
-   done yet: `decimal` compiles from PHP and is 0.51x interpreted against the twin's 13.8x (below). What already has code moves into
+   and `awaitable` get theirs when they are compiled from PHP. By that rule `decimal` is
+   DONE since batch E -- compiled from PHP and faster than interpreted on all five legs, 1.52x to
+   2.99x (macos/arm64 2.19x here, the twin 13.8x; § 7 item 1 below has the profile and the
+   table) -- and the other two are not. What already has code moves into
    `examples/`, each with a gate that compiles it and compares it with php. Four of the five parts
    are DONE (the examples branch, 2026-09-23), gated by `tests/ext.sh` and `tests/examples.sh`
    inside `tests/run.sh`, `tests/linux.sh` and `tests/windows.sh`, **green on all five CI legs**
@@ -991,7 +993,11 @@ its code is written.
      higher than above and the ratios are what compare): interpreted 3.29 ms; the module 6.48 ms
      (0.51x) before batch A and **6.41 ms (0.51x)** after; the C twin **0.238 ms (13.8x)**. The
      allocator change did not move the ratio -- the arena was a bump allocator too -- and the soak
-     did: a million calls in one request, where the module used to die near 29 000.
+     did: a million calls in one request, where the module used to die near 29 000. **Batch E**
+     (2026-09-24) took it past php: **6.46 -> 1.51 ms, 0.51x -> 2.19x** on this Mac with the twin
+     at 13.8x, and on the pull request's CI run macos/arm64 1.70x (twin 12.2x), linux/aarch64
+     1.74x, linux/x86_64 1.52x, windows/x86_64 2.29x, windows/arm64 2.99x -- all from the compiler
+     and its runtime, `decimal.php` unchanged (item 1 of the list below).
    - `two-extensions` -- DONE as **hand-written mc**: `extA.mc`/`extB.mc` from `reference/`,
      loaded in both orders and compared byte for byte with `extA.php` + `extB.php` interpreted.
      `extB.php` is refused -- `a php function mc-php does not have: a_add` -- because a call to a
@@ -1128,6 +1134,11 @@ In the order the measurements put them, each with the number that says why:
    `-2.7670116110564327E+19` in php and `...328E+19` here), and `2 * $s` with a non-numeric `$s`
    says `int * string` where php says `string * int` (php swaps a commutative op's constant
    operand).
+
+   On the pull request's CI run, the same bench row on every leg: macos/arm64 2.08 / 1.22 ms
+   (1.70x, the twin 12.2x), linux/aarch64 3.08 / 1.77 (1.74x), linux/x86_64 2.10 / 1.39 (1.52x),
+   windows/x86_64 4.23 / 1.84 (2.29x), windows/arm64 8.82 / 2.95 (2.99x) -- against 0.49x to
+   0.93x after batch A.
 
    **The grid does not lose a test**, three directories against a snapshot of main measured the
    same day (`tests/grid.sh`), every move accounted for by `comm` over the five lists: `tests/lang`

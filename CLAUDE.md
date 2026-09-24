@@ -756,3 +756,29 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     limit (`tests/ext.sh` step 9b, now 32 768 bytes); and a module's `ob_start()` was the
     runtime's private stack, so the script's echo after the call escaped it -- the ob_* functions
     are php's own output layer on this road now (step 10's second and third lines).
+- Batch E (2026-09-24, branch `batch-e`, PR #20), on **mc 1.1.0** here and 1.3.0 in CI:
+  **`examples/decimal` past php, and DONE by `docs/plan.md` § 7's rule** -- 6.46 -> **1.51 ms,
+  0.51x -> 2.19x** interpreted on macos/arm64 (the C twin 0.241 ms, 13.8x), and 1.52x to 2.99x on
+  the five CI legs. `decimal.php` is unchanged: every gain is in the compiler and its runtime,
+  chosen from a `sample` profile (allocation 19.6%, strspn's per-byte `php_inset` 10.6%, a
+  byte-loop `php_memcpy` 10.2%, `php_pos`/`php_thrown` calls 6.5%, `php_strlen` as a call 5.8%,
+  zvals built only to call a library row 6.6%). `docs/plan.md` § 7 item 1 has the table of what
+  each change bought; the largest single step is **`[project].opt = 1` in every extension's
+  project file** (mc's `-O`; 2.79 -> 1.64 ms), which a taught compiler cannot set for itself.
+  * Compiler: the position and the unwinding check written in place (`ph_dfile`/`ph_dline`
+    stores, a `ph_exc` load); `strlen` loaded in place; every literal built once by
+    `ph_lit_init` and each use one load; literals, `strlen`, the native strspn/trim forms,
+    `str_replace` of three strings and `$s[$i] ?? d` are quiet (`ph_quiet`); `$s[$i] === 'c'`
+    compares the byte; `(int) substr(...)` reads the window in place; an int key reads/writes an
+    array without a key zval; a fresh zval is not copied again; a zval against a native int
+    passes the int unboxed.
+  * Runtime: 8-byte `php_memcpy`; 256 shared one-byte strings (`php_str_ch`); byte maps for
+    strspn/strcspn/trim masks, a literal's built once per run (`php_bmap_lit`); strpos
+    first-byte scan; one-pass and one-byte `str_replace`; zval `+ - *` int-and-int in place.
+  * Fixed on the way, with fixtures: `-1 * PHP_INT_MIN` through zvals was `int(PHP_INT_MIN)` on
+    arm64 and a SIGFPE on x86-64 (`tests/g/103`); `$s[$i]` out of range was silent on the native
+    road (`tests/g/102`); five `printf` tests were FALSE refusals (a literal format spilled into a
+    temporary because a later literal "could throw"). Found and not fixed (pre-existing): a
+    17-digit shortest float's last digit, and `2 * "abc"`'s operand order in the TypeError.
+  * The grid against a snapshot of main: `tests/lang` 104 = 104, `Zend/tests` 763 -> 766,
+    strings 271 -> 272, no test out of green. `tests/run.sh` green; D8 (b) `heavy.php` 1.85x.

@@ -83,6 +83,19 @@ what each change bought:
 |---|---|---|---|
 | before batch E | 3.29 ms | 6.46 ms (0.51x) | 0.240 ms (13.7x) |
 | after batch E | 3.31 ms | **1.51 ms (2.19x)** | 0.241 ms (13.8x) |
+| after batch E, CI (`macos-15`) | 2.08 ms | 1.22 ms (1.70x) | 0.171 ms (12.2x) |
+
+and on the other four CI legs of the pull request's run, which have no C column:
+
+| host | interpreted | the module | ratio |
+|---|---|---|---|
+| linux/aarch64 (`ubuntu-24.04-arm`, container) | 3.08 ms | 1.77 ms | **1.74x** (was 0.50x) |
+| linux/x86_64 (`ubuntu-24.04`, container) | 2.10 ms | 1.39 ms | **1.52x** (was 0.51x) |
+| windows/x86_64 (`windows-latest`) | 4.23 ms | 1.84 ms | **2.29x** (was 0.88x) |
+| windows/arm64 (`windows-11-arm`, x64 php emulated) | 8.82 ms | 2.95 ms | **2.99x** (was 0.93x) |
+
+**By `docs/plan.md` § 7's acceptance rule `decimal` is DONE**: compiled from its PHP source,
+faster than php interpreting the same source on every leg that runs it, with its C twin beside it.
 
 The module is **4.3x faster than it was and 2.2x faster than php interpreting the same source**;
 the C twin is still 6.3x faster than the module, and the rest of that gap is named in
