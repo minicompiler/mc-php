@@ -374,7 +374,7 @@ uptr phx_zstr(uptr s) {
     return z;
 }
 
-// A string the call built in a block of its own -- anything over PHX_BIG --
+// A string the call built in a block of its own -- anything over PH_ZBIG --
 // is HANDED OVER, not copied: it is one Zend block already, laid as a
 // zend_string with refcount 1 and GC_STRING, so it leaves the call's list and
 // the engine owns it. A small one lives inside a chunk and is copied, which
@@ -411,7 +411,6 @@ void phx_ret_str(uptr rv, uptr s) {
 // The list is [phx_keep, phx_cn) for the call and [0, phx_keep) for what the
 // request's PINNED calls kept; RSHUTDOWN frees all of it.
 #define PHX_CK   32768
-#define PHX_BIG  4096
 
 uptr phx_cl;
 i64  phx_cn;
@@ -444,7 +443,7 @@ void phx_track(uptr p) {
 // the slow path: a block too big for a chunk gets its own, and a full chunk
 // gets a successor
 uptr phx_zalloc(i64 n) {
-    if (n > PHX_BIG) {
+    if (n > PH_ZBIG) {
         uptr b = _ecalloc(n, 1);
         phx_track(b);
         return b;

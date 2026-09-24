@@ -53,6 +53,7 @@ void php_die(uptr msg, i64 n) { php_flush(); write(2, msg, n); exit(255); }
 // state is put back as MINIT left it (php_request_reset). Every such write
 // calls php_pin; a write that does not is a use-after-free, which is why the
 // list of them is short and each one says so.
+#define PH_ZBIG 4096                // a block bigger than this is never bumped: it gets its own
 uptr ph_zalloc;                     // the slow path; set = inside an extension call
 uptr ph_zcur;                       // the Zend chunk the call is bumping through
 i64  ph_zpos;
@@ -63,7 +64,7 @@ void php_pin() { if (ph_zalloc) ph_pin = 1; }
 uptr php_alloc(i64 n) {
     if (ph_zalloc) {
         i64 z = (ph_zpos + 7) / 8 * 8;
-        if (z + n <= ph_zlim) { ph_zpos = z + n; return ph_zcur + z; }
+        if (n <= PH_ZBIG && z + n <= ph_zlim) { ph_zpos = z + n; return ph_zcur + z; }
         return callp(ph_zalloc, n);
     }
     i64 a = (ph_top + 7) / 8 * 8;
