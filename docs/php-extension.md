@@ -12,6 +12,9 @@ mc-php build examples/hello --config examples/hello/mcphp.toml
 php -d extension=examples/hello/build/hello.so -r 'echo hello_addone(41), "\n";'   # 42
 ```
 
+On Windows the artefact is a `.dll` and the file is `examples/hello/mcphp.windows.toml`, after
+`sh tests/winsys.sh x86_64` has written the import libraries its link names (§ Windows below).
+
 There is no flag and there will not be one. The switch is the project file, exactly as
 `docs/mcphp-toml.md` says: **an `[extension]` table means an extension, and no `[extension]`
 table means the program road, unchanged.** `mc-php --exe x.php -o x` sees no project file at all
@@ -176,6 +179,29 @@ extension per process**. The cheap half of the fix is a linker argument and noth
 is not taken here because the schema's answer is the prefix and picking the other one by accident
 would be worse than saying so.
 
+## Windows
+
+The same source and the same emitter; three things differ, each measured on the Windows runners
+and each said in `examples/hello/mcphp.windows.toml`:
+
+- **The link.** `lld-link -dll -noentry -export:get_module`, against `php8.lib` (or `php8ts.lib`
+  for a thread-safe php), `kernel32.lib` and `ucrtbase.lib`. All three are IMPORT libraries,
+  lists of names that `tests/winsys.sh` writes with `lld-link -lib -def:` from `src/win/*.def`:
+  no php development pack, no Windows SDK, no `llvm-dlltool`. Only `get_module` is exported, so
+  unlike the flat namespace of § Two extensions in one process, two mc-php DLLs in one php do
+  not see each other's runtime symbols (not yet measured with two).
+- **`_emalloc` is `_emalloc@@8`.** An MSVC build of php makes `ZEND_FASTCALL` `__vectorcall`,
+  whose exports carry their argument bytes in the name. The convention is the ordinary Win64 one
+  for integer arguments, so the call is unchanged and only the import needs the alias
+  (`_emalloc == _emalloc@@8`). Without it the loader answers `The specified procedure could not be
+  found` and php says nothing else.
+- **The architecture is php's.** php publishes no arm64 Windows build, so on a Windows-on-ARM
+  machine php is the x64 build, emulated, and loads x64 DLLs: the project file says
+  `arch = "x86_64"` on both Windows hosts, and the arm64 mc-php cross-compiles across
+  ARCHITECTURES for it.
+
+The build id names the compiler php was built with: `API20250925,NTS,VS17` on both runners.
+
 ## The project file
 
 What `mc-php build` reads today, of the schema in [`docs/mcphp-toml.md`](mcphp-toml.md):
@@ -211,4 +237,8 @@ on the machine.
 [`tests/ext.sh`](../tests/ext.sh), inside `tests/run.sh` and inside `tests/linux.sh`. Six steps,
 each a comparison against something php produced; its own header says what each one measures.
 Green on **macos/arm64**, **linux/aarch64** and **linux/x86_64**, each against a php 8.5.10 of
-that host's own.
+that host's own, and on **windows/x86_64** and **windows/arm64** inside `tests/windows.sh`, each
+against the runner's own php 8.5 (8.5.10 and 8.5.11 on the day it was measured; the patch is not
+pinned). The two Windows legs run four of the six steps: the layout gate and the C reference need
+`php-config` and a C compiler, and a Windows runner has neither -- the compiler needs neither
+either, which is the claim.

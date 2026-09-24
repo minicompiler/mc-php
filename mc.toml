@@ -17,6 +17,13 @@
 #
 # Those two are the cross-build road from any host AND the native road on
 # Linux; a [target] equal to the host is an ordinary build.
+#
+# On Windows the build is NATIVE and only native -- an object linked by
+# lld-link next to the three files tests/winsys.sh writes (docs/plan.md § 5
+# says why it is not mc's one-step PE):
+#
+#     sh tests/winsys.sh x86_64 && mc build src --config src/mc-php.windows-x86_64.toml
+#     sh tests/winsys.sh aarch64 && mc build src --config src/mc-php.windows-aarch64.toml
 
 [package]
 name = "mc-php"

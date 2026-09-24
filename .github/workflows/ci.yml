@@ -243,11 +243,16 @@ jobs:
             echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
           else
             base="https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION"
+            # the runner's own CPU: a tarball first, then the NSIS installer
+            case "${{ matrix.arch }}" in
+              aarch64) tgz=aarch64-pc-windows-msvc; nsis=woa64 ;;
+              *)       tgz=x86_64-pc-windows-msvc;  nsis=win64 ;;
+            esac
             mkdir -p "$RUNNER_TEMP/llvm"
-            if curl -fSL -o "$RUNNER_TEMP/llvm.tar.xz" "$base/clang+llvm-$LLVM_VERSION-aarch64-pc-windows-msvc.tar.xz"; then
+            if curl -fSL -o "$RUNNER_TEMP/llvm.tar.xz" "$base/clang+llvm-$LLVM_VERSION-$tgz.tar.xz"; then
               tar -xf "$RUNNER_TEMP/llvm.tar.xz" -C "$RUNNER_TEMP/llvm" --strip-components=1
             else
-              curl -fSL -o "$RUNNER_TEMP/llvm.exe" "$base/LLVM-$LLVM_VERSION-woa64.exe"
+              curl -fSL -o "$RUNNER_TEMP/llvm.exe" "$base/LLVM-$LLVM_VERSION-$nsis.exe"
               7z x -o"$RUNNER_TEMP/llvm" "$RUNNER_TEMP/llvm.exe" > /dev/null
             fi
             cygpath -w "$RUNNER_TEMP/llvm/bin" >> "$GITHUB_PATH"
@@ -271,7 +276,9 @@ jobs:
           # The names src/win/php8.def says php's DLL exports, read out of the
           # DLL itself: a wrong one is a module php refuses to load with
           # "The specified procedure could not be found" and nothing else.
-          pdir=$(dirname "$(command -v php)")
+          # (Windows form: MSYS2_ARG_CONV_EXCL keeps /c/tools/... from being
+          # translated, and llvm-readobj is a native program)
+          pdir=$(cygpath -m "$(dirname "$(command -v php)")")
           for d in php8.dll php8ts.dll; do
             [ -f "$pdir/$d" ] || continue
             echo "$d:"

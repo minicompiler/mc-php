@@ -656,3 +656,38 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     still emitted after ANY runtime call, not only one that can throw -- narrowing that needs a
     per-callee classification of the 179 library rows, a whitelist whose wrong entry is a silently
     wrong line, so it is named rather than guessed.
+- Windows done (2026-09-23, branch `windows`), on **mc 1.3.0** -- CI and release moved from 1.1.0
+  to 1.3.0 on every leg, with the macOS gates re-run green on it first. **mc-php built ON
+  windows/x86_64 (`windows-latest`) and windows/arm64 (`windows-11-arm`), never cross-built
+  across operating systems**, and graded there by `tests/windows.sh`: **93/93 fixtures, 6/6
+  refusals, the extension gate green (check.php 24 lines byte for byte, errors.php 14 wrong calls,
+  8 refusals)** on both, against the runner's own php 8.5 (8.5.10 x64 and 8.5.11 x64-emulated).
+  * **The compiler is the object + `lld-link` road**: `src/mc-php-windows-*.mc` compiled by the
+    runner's mc.exe and linked next to `mcrt.obj` (`<sys_windows_host>`), `winstart.obj`
+    (`<sys_windows_start>`) and a kernel32 import library, all three written by
+    `tests/winsys.sh` (`lld-link -lib -def:src/win/*.def` -- no `llvm-dlltool`). The one-step PE
+    is closed by mc: mc 1.3.0 fixed the `duplicate #define` half, and the second half is
+    `extern` + a definition of the same name in one unit, `function declared twice`, reduced to
+    three lines in `docs/plan.md` § 5 and reported. `src/host_extra_windows.mc` is `realpath` over
+    `GetFullPathNameA`, answering '/' because every mc path function cuts on '/'.
+  * **The runtime DEFINES its system calls on Windows** (`lib/rt_host_windows.mc`, over kernel32;
+    libm and `setlocale` from ucrtbase.dll through `#dylib`), and a program on windows/x86_64 is
+    mc's one-step PE (19 kernel32 + 18 ucrtbase imports, nothing else). windows/aarch64 has no
+    direct PE in mc, so a program there is an object + `lld-link` (`MCPHP_WINLINK` in
+    `tests/mcphp.sh`). `lib/rt_host_windows_start.mc` is the program's `mc_start`, pushed on the
+    program road only (an extension has no `main`).
+  * **What the first run found (90/93, and the module refused)**, each fixed at its root: a
+    drive-letter path is absolute; php PRINTS backslashes, so the compiler keeps '/' and
+    `ph_disp` converts at the five places a path is printed; `basename`/`dirname` split on both
+    separators (`php_is_sep`, a host answer) and `setlocale` applies php's Windows-only `xx_YY`
+    refusal (`php_setlocale`, a host answer); `PHP_EOL` is `"\r\n"`; `_emalloc` is `__vectorcall`
+    in an MSVC php and exported as `_emalloc@@8` (`_emalloc == _emalloc@@8` in `src/win/php8.def`).
+  * **The extension is an x64 `.dll` on both Windows hosts**: php publishes no arm64 Windows build,
+    so php on Windows-on-ARM is x64 emulated and loads x64 DLLs; `examples/hello/mcphp.windows.toml`
+    says `arch = "x86_64"` and the arm64 mc-php cross-compiles across ARCHITECTURES for it. Link:
+    `lld-link -dll -noentry -export:get_module` against `php8.lib`, `kernel32.lib`, `ucrtbase.lib`.
+  * Release: `build-windows` builds, grades and packages both Windows archives on their runners
+    (five archives now); `publish` needs it. `.gitattributes` is `* -text`.
+  * The roadmap the owner set is `docs/plan.md` § 7: Windows (this), examples as the first gates
+    (hello, extA/extB, awaitable, then a fixed-point decimal and a large-volume database), ctype,
+    bcmath, json, then distribution (Composer/Packagist/PIE) to be designed with the owner.

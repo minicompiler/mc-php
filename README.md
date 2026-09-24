@@ -16,7 +16,7 @@ both. No dialect, no annotations, no "mc-php mode".
 This is a **proof of concept**. The front end is wide and the extension back end is narrow.
 
 **What works.** The compiler reads PHP 8.5 and produces a native binary, on **macOS arm64,
-linux/aarch64 and linux/x86_64** -- one binary per host, each of which was run on a host of its
+linux/aarch64, linux/x86_64, windows/x86_64 and windows/arm64** -- one binary per host, each of which was run on a host of its
 own architecture and graded there against that host's own `php`. Over php-src's whole `.phpt`
 corpus -- 21395 tests -- it agrees with `php` on **1705**, byte for byte on stdout and on the
 exit code. Classes, interfaces, traits, enums, closures, exceptions, references, `match`,
@@ -45,7 +45,7 @@ it rests on, with what each was measured against.
 | **the extension back end, beyond scalars** | it takes plain functions with **declared scalar** parameters and a declared scalar return. A variadic, a by-reference parameter, a default, `mixed`, an array, an object, a class the module declares, a namespace: each is a **named refusal** at the declaration's own position, not a silent lowering. |
 | **the generated code** | it is correct and it is no longer slower than php. The two calls `--dump-asm` named -- `php_pos` and `php_thrown`, emitted per statement whatever it contained -- are emitted only where something can raise or throw, and `%` by a positive literal is one instruction: `fib(30)` went 3.18x -> **6.31x** and a 3-million-iteration loop 0.86x -> **4.00x**, against 11.0x and 5.5x for the same two functions hand-written in mc. What is left is that every local lives in the frame. [`reference/README.md`](reference/README.md) has the table. |
 | `mcphp.toml` | part read, part still design -- [docs/php-extension.md](docs/php-extension.md) § The project file is the line between the two. |
-| Windows | **not built.** macOS arm64, linux/aarch64 and linux/x86_64 are built, run and graded; Windows is not, and [Install](#install) says exactly what it is missing. |
+| Windows | **built ON Windows, not cross-built**: the compiler is compiled on each Windows runner by its own mc and linked with `lld-link`, because mc's one-step PE road is closed for a translation unit that holds mc's core (`docs/plan.md` § 5). A PROGRAM on windows/arm64 needs `lld-link` too (mc has no arm64 PE writer); on windows/x86_64 `mc-php --exe` writes the `.exe` itself. The extension is an x64 `.dll` on both, because php ships no arm64 Windows build. The `.phpt` grid has not been run there. |
 | generators | `yield` is not built. 252 of the 13623 disagreeing tests use it; the decision and its cost are in `docs/plan.md` D6. |
 | `eval` and reflection | refused **by design**, by name, with exit 3 -- `docs/plan.md` D1 and D6. A refusal is an answer, not a failure. |
 | most of the corpus | 14468 tests still disagree and 1929 are refused by design. The number below is the whole claim; nothing here rounds it up. |
@@ -62,6 +62,8 @@ per host.
 | macOS arm64 | `mc-php-$V-macos-arm64.tar.gz` | built and graded on the release runner (`tests/run.sh`) |
 | Linux aarch64 | `mc-php-$V-linux-arm64.tar.gz` | cross-built on that runner, then unpacked and graded on an `ubuntu-24.04-arm` runner (`tests/linux.sh`) |
 | Linux x86_64 | `mc-php-$V-linux-x86_64.tar.gz` | the same, on `ubuntu-24.04` |
+| Windows x86_64 | `mc-php-$V-windows-x86_64.tar.gz` | built **on** a `windows-latest` runner by that runner's mc, and graded there (`tests/windows.sh`) |
+| Windows arm64 | `mc-php-$V-windows-arm64.tar.gz` | the same, on `windows-11-arm` |
 
 ```sh
 # the newest tag, so this block does not go stale with the next release
@@ -88,27 +90,33 @@ run them in a musl container, or build your own with `libc = "gnu"` in `[target]
 A row is here because something **ran** it. `file` saying "ELF 64-bit LSB executable" is not a
 proof and no row rests on one.
 
-### Why there is no Windows archive
+### On Windows
 
-Two things are missing and both are named rather than estimated.
+The same archive shape, `mc-php.exe` inside, plus `kernel32.lib` and `ucrtbase.lib`. From Git Bash (PowerShell users: `tar` and
+`Get-FileHash` do the same two jobs):
 
-**The compiler.** mc has a direct PE writer for windows/x86_64 (`pe-exe-x86_64`), which would need
-no linker -- but not for a translation unit like this one. mc-php's entry would have to carry both
-`<mc/host_windows_x86_64>` and `<sys_windows_host>`, and the two collide: measured,
-`lib/sys_windows.mc:76: duplicate #define`, because `src/host_windows.mc` and `lib/sys_windows.mc`
-both define `O_CREAT` and `O_TRUNC`. mc's own Windows compiler avoids it by compiling the layer
-into a separate object (`mcrt.obj`) and linking, so mc-php would need the same road: `lld-link`,
-`llvm-dlltool`, and a sysroot of three files it generates itself.
+```sh
+A=mc-php-$V-windows-x86_64       # or mc-php-$V-windows-arm64
+curl -fsSLO $BASE/$A.tar.gz
+curl -fsSLO $BASE/$A.tar.gz.sha256
+sha256sum -c $A.tar.gz.sha256
+tar -xzf $A.tar.gz
+./$A/mc-php.exe --exe hello.php -o hello.exe && ./hello.exe     # windows/x86_64
+```
 
-**The runtime.** `lib/rt_host_windows.mc` does not exist. kernel32 has no `stat`, `lseek`,
-`access`, `getenv`, `unlink`, `rename`, `mkdir`, `rmdir`, `getpid`, `getcwd`, `chdir`, `chmod`,
-`putenv` or `unsetenv` under those names, so every one of them is a shim over
-`GetFileAttributesExA`, `SetFilePointerEx`, `GetEnvironmentVariableA` and the rest -- and `chmod`
-has no honest equivalent at all, which is the kind of thing that has to be said in the file and
-made to fail the way php fails, not quietly.
+On **windows/arm64** there is no one-step `.exe`: mc has no direct PE writer for that
+architecture yet, so the compiler writes an object and `lld-link` (one LLVM install) makes the
+program, with the two import libraries the archive carries beside `mc-php.exe` (lists of names,
+written by `tests/winsys.sh` from `src/win/*.def`):
 
-Neither is speculative work and neither is in this repository yet. Until it is run on a Windows
-runner there is no row.
+```sh
+./$A/mc-php.exe hello.php -o hello.obj
+lld-link -machine:arm64 -subsystem:console -entry:mc_start -nodefaultlib \
+    -out:hello.exe hello.obj $A/kernel32.lib $A/ucrtbase.lib
+```
+
+A program imports from **kernel32.dll** and, for libm and `setlocale`, **ucrtbase.dll** -- both are
+in System32 on Windows 10 and later -- and from nothing else: no Visual C++ redistributable.
 
 ## What you need
 
@@ -138,14 +146,14 @@ One row per operating system, each naming the exact command that provides it.
 | **every** | a `php` of the **target** build, *or* four values written into `mcphp.toml` | any php 8.5 install | only `PHP API`, `PHP Extension Build`, `Thread Safety` and `Debug Build` are read -- they are `zend_module_entry`'s `zend_api`, `build_id`, `zts` and `zend_debug`, and nothing else about php is consulted. **Cross-build: state the four and no php is needed.** |
 | **macOS** | `ld`, and `xcrun --show-sdk-path` | `xcode-select --install` (the Xcode command line tools) | the link is `ld -bundle -undefined dynamic_lookup` |
 | **Linux** | a linker that does `-shared -Bsymbolic` | `apt install lld` / `dnf install lld` -- `ld.lld` is what was measured | `-Bsymbolic` is **not optional**: mc takes the address of its own functions with `adrp`/`add`, and in a shared object a default-visibility symbol is preemptible, so the link is refused without it |
-| **Windows** | `lld-link` and `llvm-dlltool` | one LLVM install ([releases](https://github.com/llvm/llvm-project/releases), or `brew install llvm` when cross-building) | there is no flat namespace there, so every `zend_*` comes from an import library -- and an import library is only a list of names, so a two-line `.def` plus `llvm-dlltool` replaces the whole development pack. **No Windows SDK, no php devel pack.** |
+| **Windows** | `lld-link` | one LLVM install ([releases](https://github.com/llvm/llvm-project/releases); `windows-latest` carries one) | there is no flat namespace there, so every `zend_*` comes from an import library -- and an import library is only a list of names: `lld-link -lib -def:` writes one from `src/win/php8.def`, which is what `tests/winsys.sh` does. **No Windows SDK, no php devel pack, no `llvm-dlltool`.** Measured on the Windows runners. |
 
 Provenance, because a dependency list is worth what its measurement is worth: the mc and php rows
 and the macOS tools were verified on this host (macOS 26 / arm64, PHP 8.5.10 Homebrew NTS, mc
 1.1.0) on 2026-09-22, and the four-value mapping was checked against `php-src/Zend/zend_modules.h`
 at tag `php-8.5.10`. The Linux and Windows link lines in the table above are the owner's
-measurements of the EXTENSION road, recorded here and not yet exercised; the **program** road has
-run on Linux since the hosts branch -- see [Install](#install) and `tests/linux.sh`.
+measurements of the EXTENSION road; both have since RUN in CI -- Linux by `tests/linux.sh` and
+Windows by `tests/windows.sh`, each loading the module into the runner's own php.
 
 ---
 
@@ -183,6 +191,24 @@ declares it, so `mc build` there is `src/stmt.mc:195: call to unknown function`.
 declaration cannot simply be added for every host, because a second `extern` of a name the host
 layer already has is `function declared twice`; it is `src/host_extra_linux.mc`, which the two
 Linux entries include.
+
+### On Windows
+
+Built **on** Windows, from Git Bash, with the Windows build of mc and `lld-link` on `PATH`. Not a
+cross-build: mc-php does not cross-compile across operating systems.
+
+```sh
+sh tests/winsys.sh x86_64                              # or aarch64 -> build/win-<arch>/
+mc build src --config src/mc-php.windows-x86_64.toml   # -> build/mc-php-windows-x86_64.exe
+```
+
+`tests/winsys.sh` writes what the link needs besides the object mc wrote: a kernel32 import
+library (from `src/win/kernel32.def`, by `lld-link -lib`) and two of mc's own objects,
+`<sys_windows_host>` and `<sys_windows_start>`, compiled on their own. They are separate because
+mc's core declares `write`, `open` and the rest `extern` and `<sys_windows_host>` defines them,
+and one translation unit cannot do both -- which is also why the one-step `mc --exe` road is
+closed for the compiler (`docs/plan.md` § 5, with the three-line reproducer). It is how mc builds
+its own Windows compiler.
 
 ### One thing about mc's library tree
 
@@ -244,6 +270,20 @@ run it inside the VM against the same path -- the repository is mounted there:
 ```sh
 limactl shell mc-k7 -- sh "$PWD/tests/linux.sh" aarch64
 ```
+
+### On Windows
+
+`tests/windows.sh` is the same fixture gate and the extension gate, run on the Windows host the
+compiler was built on, against that host's php 8.5 -- where `PHP_OS` is `WINNT`, `PHP_EOL` is
+`"\r\n"` and every path php prints has backslashes. From Git Bash, after the build above:
+
+```sh
+sh tests/winsys.sh x86_64                              # the extension's import libraries
+export TMPDIR="$(cygpath -m "$TEMP")"                  # a temp path both worlds read
+sh tests/windows.sh x86_64                             # or aarch64
+```
+
+It is what the two CI Windows legs and the release's Windows jobs run.
 
 ### The grid
 
