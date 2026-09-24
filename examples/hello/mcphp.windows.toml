@@ -23,12 +23,16 @@
 #                     else is exported, so two mc-php modules in one php do
 #                     not see each other's runtime (docs/plan.md § 7 item 6
 #                     is macOS's and Linux's flat namespace, not this one's)
-#   php8.lib          the five php8.dll names lib/php_ext.mc calls. A
-#                     thread-safe php is php8ts.dll: php8ts.lib, and
-#                     thread_safety = true below
+#   php8.lib          the five php8.dll names lib/php_ext.mc calls
 #   kernel32.lib, ucrtbase.lib   the runtime's own (lib/rt_host_windows.mc)
 # Every one of them is an import library tests/winsys.sh writes from a list of
 # names: no php development pack and no Windows SDK.
+#
+# NTS ONLY. This file targets the non-thread-safe php (php8.dll, and
+# `thread_safety = false` / `NTS` in the build id below), which is what the CI
+# runners carry and the only Windows php this has been measured against. A
+# thread-safe php is php8ts.dll and refuses an NTS module at load; nothing
+# here selects it, and no ZTS build has been run on Windows (docs/plan.md § 5).
 
 [project]
 entry = "hello.php"

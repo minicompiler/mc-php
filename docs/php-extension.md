@@ -184,8 +184,9 @@ would be worse than saying so.
 The same source and the same emitter; three things differ, each measured on the Windows runners
 and each said in `examples/hello/mcphp.windows.toml`:
 
-- **The link.** `lld-link -dll -noentry -export:get_module`, against `php8.lib` (or `php8ts.lib`
-  for a thread-safe php), `kernel32.lib` and `ucrtbase.lib`. All three are IMPORT libraries,
+- **The link.** `lld-link -dll -noentry -export:get_module`, against `php8.lib`, `kernel32.lib`
+  and `ucrtbase.lib`. **Non-thread-safe php only**: a thread-safe php is `php8ts.dll`, refuses
+  an NTS module at load, and has not been built or run against on Windows (`docs/plan.md` § 5). All three are IMPORT libraries,
   lists of names that `tests/winsys.sh` writes with `lld-link -lib -def:` from `src/win/*.def`:
   no php development pack, no Windows SDK, no `llvm-dlltool`. Only `get_module` is exported, so
   unlike the flat namespace of § Two extensions in one process, two mc-php DLLs in one php do
