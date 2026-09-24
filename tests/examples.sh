@@ -82,17 +82,18 @@ differential() {
     [ "$ok" = 1 ] && say "$name: $(wc -l < "$tmp/n.out" | tr -d ' ') lines, byte for byte php's own, exit $nrc"
 }
 
-# pin EX WANT: the build this example waits for is refused, by exactly WANT
+# pin EX WANT: the build this example waits for is refused, and its last line
+# is exactly "EX/WANT" -- equality, not a substring, so a changed suffix or a
+# second message on the line is a moved refusal (the reviewer of #18).
 pin() {
     "$BIN" build "$1" --config "$1/mcphp.toml" > "$tmp/pin.out" 2>&1; rc=$?
     got=$(tail -1 "$tmp/pin.out" | tr -d '\r')
     if [ "$rc" = 0 ]; then
         bad "$1: the pinned build SUCCEEDED -- the compiler can do it now; retire the hand-written file"
+    elif [ "$got" = "$1/$2" ]; then
+        say "pinned (exit $rc): $2"
     else
-        case $got in
-            *"$2"*) say "pinned: $2" ;;
-            *) bad "$1: the pinned refusal moved"; printf '      want ...%s...\n      got  %s\n' "$2" "$got" ;;
-        esac
+        bad "$1: the pinned refusal moved"; printf '      want %s\n      got  %s\n' "$1/$2" "$got"
     fi
     rm -rf "$1/build"
 }
@@ -135,8 +136,11 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
     say "built: $(wc -c < "$dso" | tr -d ' ') bytes from $EX/decimal.php"
     differential check.php "$EX/check.php" -d extension="$dso"
     if "$PHP" -m | tr -d '\r' | grep -qix bcmath; then
-        if "$PHP" -d extension="$dso" "$EX/bccheck.php" > "$tmp/bc.out" 2>&1; then
-            say "$(tail -1 "$tmp/bc.out" | tr -d '\r')"
+        # the exit AND the exact summary: a weakened oracle that checked less
+        # must not pass (the reviewer of #18)
+        if "$PHP" -d extension="$dso" "$EX/bccheck.php" > "$tmp/bc.out" 2>&1 &&
+           [ "$(tr -d '\r' < "$tmp/bc.out")" = "bcmath agrees: 1219 results, 0 wrong" ]; then
+            say "$(tr -d '\r' < "$tmp/bc.out")"
         else
             bad "bccheck.php:"; sed 's/^/      /' "$tmp/bc.out"
         fi
@@ -187,7 +191,7 @@ if build examples/hello "examples/hello/mcphp$suf.toml" "hello.$sx" && [ -f "$ds
         fi
     done
 fi
-pin "$EX" "extB.php:8: mc-php: a php function mc-php does not have: a_add is not implemented yet"
+pin "$EX" "extB.php:8: mc-php: a php function mc-php does not have: a_add is not implemented yet (probes/t10/RESULTS.md)"
 
 # --- awaitable -----------------------------------------------------------------
 echo "  -- awaitable"
@@ -196,22 +200,22 @@ if hand_ok "awaitable.mc"; then
     if ! "$PHP" -m | tr -d '\r' | grep -qix curl; then
         skip "awaitable.mc: this php has no curl, and the module resolves libcurl from php's own process"
     elif handbuild "$EX/awaitable.mc" "$tmp/awaitable.$sx"; then
-        "$PHP" -d extension="$tmp/awaitable.$sx" "$EX/check.php" > "$tmp/aw.out" 2>&1
-        if cmp -s "$tmp/aw.out" "$EX/check.expect"; then
+        "$PHP" -d extension="$tmp/awaitable.$sx" "$EX/check.php" > "$tmp/aw.out" 2>&1; awrc=$?
+        if [ "$awrc" = 0 ] && cmp -s "$tmp/aw.out" "$EX/check.expect"; then
             say "check.php: $(wc -l < "$tmp/aw.out" | tr -d ' ') lines, every one check.expect's"
         else
-            bad "check.php differs from $EX/check.expect:"
+            bad "check.php exited $awrc, or differs from $EX/check.expect:"
             diff -u "$EX/check.expect" "$tmp/aw.out" | sed -n '3,24p' | sed 's/^/      /'
         fi
-        "$PHP" -d extension="$tmp/awaitable.$sx" "$EX/demo.php" > "$tmp/demo.out" 2>&1
-        if grep -q '^same results: true$' "$tmp/demo.out"; then
+        "$PHP" -d extension="$tmp/awaitable.$sx" "$EX/demo.php" > "$tmp/demo.out" 2>&1; demorc=$?
+        if [ "$demorc" = 0 ] && grep -q '^same results: true$' "$tmp/demo.out"; then
             say "demo.php: $(sed -n 2p "$tmp/demo.out" | tr -s ' ')"
         else
-            bad "demo.php:"; sed -n '1,12p' "$tmp/demo.out" | sed 's/^/      /'
+            bad "demo.php (exit $demorc):"; sed -n '1,12p' "$tmp/demo.out" | sed 's/^/      /'
         fi
     fi
 fi
-pin "$EX" "awaitable.src.php:7: mc-php: a namespace in an extension source is not implemented yet"
+pin "$EX" "awaitable.src.php:7: mc-php: a namespace in an extension source is not implemented yet (probes/t10/RESULTS.md)"
 
 [ "$fail" = 0 ] || { echo "  examples: something failed"; exit 1; }
 echo "  examples: green"

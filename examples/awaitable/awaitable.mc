@@ -265,11 +265,16 @@ void zif_http_get_many(uptr ex, uptr rv) {
     i64 n = ld32(ex + 44);
     if (n < 1) { zend_argument_count_error("awaitable\\http_get_many() expects at least 1 argument, 0 given"); return; }
     if (n > 64) { zend_type_error("awaitable\\http_get_many(): at most 64 urls"); return; }
+    // every argument checked BEFORE any thread starts: a late wrong one
+    // must not leave the earlier jobs running and unjoined
     i64 i = 0;
     while (i < n) {
-        uptr z = ex + 80 + i * 16;
-        if (ld8(z + 8) != IS_STRING) { zend_type_error("awaitable\\http_get_many(): every argument must be a string"); return; }
-        st64(&jobs + i * 8, run_job(dup_zstr(z)));
+        if (ld8(ex + 80 + i * 16 + 8) != IS_STRING) { zend_type_error("awaitable\\http_get_many(): every argument must be a string"); return; }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        st64(&jobs + i * 8, run_job(dup_zstr(ex + 80 + i * 16)));
         i = i + 1;
     }
     uptr ht = _zend_new_array(n);
@@ -334,9 +339,11 @@ void zif_parallel(uptr ex, uptr rv) {
 
     i64 i = 0;
     while (i < nj) {
+        // a job that cannot start -- no pipe, no fork -- is marked -1 in ITS
+        // slot and answered as a failed job below; nothing else is touched
+        st64(&kid_pid + i * 8, 0 - 1);
         u8 fdb[8]; uptr fd = &fdb;
-        if (pipe(fd) != 0) { st64(&kid_pid + i * 8, 0 - 1); i = i + 1; }
-        if (ld64(&kid_pid + i * 8) != (0 - 1)) {
+        if (pipe(fd) == 0) {
             i32 rfd = ld32(fd); i32 wfd = ld32(fd + 4);
             i32 pid = fork();
             if (pid == 0) {
@@ -369,7 +376,8 @@ void zif_parallel(uptr ex, uptr rv) {
                 _exit(0);
             }
             close(wfd);
-            st64(&kid_pid + i * 8, pid); st64(&kid_fd + i * 8, rfd);
+            if (pid < 0) { close(rfd); }
+            if (pid > 0) { st64(&kid_pid + i * 8, pid); st64(&kid_fd + i * 8, rfd); }
         }
         i = i + 1;
     }
@@ -377,14 +385,16 @@ void zif_parallel(uptr ex, uptr rv) {
     uptr ht = _zend_new_array(nj);
     i = 0;
     while (i < nj) {
-        i32 rfd = ld64(&kid_fd + i * 8);
         u8 tagb[1]; uptr tg = &tagb; st8(tg, 1);
         i64 len = 0;
-        if (read_all(rfd, tg, 1) == 1) { if (read_all(rfd, lp, 8) == 8) { len = ld64(lp); } }
         uptr buf = 0;
-        if (len > 0) { buf = malloc(len + 1); if (read_all(rfd, buf, len) != len) { len = 0; } }
-        close(rfd);
-        u8 stb[8]; waitpid(ld64(&kid_pid + i * 8), &stb, 0);
+        if (ld64(&kid_pid + i * 8) != (0 - 1)) {
+            i32 rfd = ld64(&kid_fd + i * 8);
+            if (read_all(rfd, tg, 1) == 1) { if (read_all(rfd, lp, 8) == 8) { len = ld64(lp); } }
+            if (len > 0) { buf = malloc(len + 1); if (read_all(rfd, buf, len) != len) { len = 0; } }
+            close(rfd);
+            u8 stb[8]; waitpid(ld64(&kid_pid + i * 8), &stb, 0);
+        }
 
         u8 zb[16]; uptr z = &zb; st64(z, 0); st32(z + 8, 1);   // IS_NULL by default
         if (ld8(tg) == 0) {
