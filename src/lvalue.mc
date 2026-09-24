@@ -72,6 +72,11 @@ i64 ph_tref(i64 n) {
 // `ph_lv_prop` is the property name of the last accessor, 0 for an element;
 // `cur` is then the RECEIVER (a zval) instead of an array handle.
 i64 ph_lv_walk(uptr d, uptr fl, i64 line, uptr pkey, i64 hoist) {
+    // taken and cleared on entry: a walk nested inside this one -- an
+    // unset() in a closure written as a key, say -- must see the default and
+    // hand its caller a key zval, whatever this walk's caller allows
+    i64 ikok = ph_lv_ikok;
+    ph_lv_ikok = 0;
     i64 vt = ph_var_type(d);
     i64 base = node_new(N_IDENT, line, fl);
     set_nd_name(base, ph_mangle(d, "v_"));
@@ -110,7 +115,7 @@ i64 ph_lv_walk(uptr d, uptr fl, i64 line, uptr pkey, i64 hoist) {
         ph_want("]", 1, "expected ] in a php array assignment");
         if (!ph_at("[", 1) && !ph_at("->", 2) && !ph_at("?->", 3)) {
             ph_lv_ikey = 0;
-            if (ph_lv_ikok && kt == PT_INT) { k = kx; ph_lv_ikey = 1; }
+            if (ikok && kt == PT_INT) { k = kx; ph_lv_ikey = 1; }
             if (hoist) {
                 cur = ph_temp(cur, ty_parr, "phc_");
                 if (k && ph_lv_ikey) k = ph_temp(k, TY_I64, "phk_");
@@ -221,7 +226,6 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         ph_lv_ikok = 1;
         ph_lv_ikey = 0;
         i64 cur = ph_lv_walk(d, fl, line, kb, 1);
-        ph_lv_ikok = 0;
         i64 ik = ph_lv_ikey;
         ph_lv_ikey = 0;
         uptr lprop = ph_lv_prop;

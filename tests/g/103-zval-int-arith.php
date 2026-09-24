@@ -52,3 +52,9 @@ $s = $v[3] << 3;
 $s2 = $s;
 $s2 += 1;
 var_dump($b, $b2, $s, $s2, $v[3] & 6, $v[3] ^ 1, $v[3] >> 1);
+// an int key is native only for the walk that asked: a walk nested inside the
+// key (an unset() in a closure) still gets a key zval -- it crashed (SIGSEGV)
+// on this branch before the permission was scoped to one walk
+$q = [];
+$q[(function () { $c = [1, 2, 3]; unset($c[1]); $c[5] = 9; return count($c); })()] = 5;
+var_dump($q);
