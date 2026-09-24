@@ -9234,6 +9234,101 @@ uptr php_f_get_html_translation_table(uptr tz, uptr fz, uptr ez) {
     return a;
 }
 
+// How many times `search` occurs in `subj`, without overlap: str_replace's
+// count, and php_str_replace's own first pass.
+i64 php_str_occ(uptr subj, uptr search) {
+    i64 sn = php_strlen(search);
+    if (sn == 0) return 0;
+    i64 n = 0;
+    i64 i = 0;
+    loop {
+        i64 p = php_strpos(subj, search, i);
+        if (p < 0) break;
+        n = n + 1;
+        i = p + sn;
+    }
+    return n;
+}
+
+// str_replace over ONE subject string, with php's array forms: an array of
+// searches is applied in order, each to the result of the one before; an
+// array of replacements is consumed in step (an empty search consumes its
+// replacement too) and runs out into "". ext/standard/string.c's
+// php_str_replace_in_subject is the model. `cnt` is an i64 cell.
+uptr php_sr_subject(uptr sz, uptr rz, uptr subj, uptr cnt) {
+    if (php_zv_type(sz) != IS_ARRAY) {
+        uptr s1 = php_zv_str(sz);
+        st64(cnt, ld64(cnt) + php_str_occ(subj, s1));
+        return php_str_replace(s1, php_zv_str(rz), subj);
+    }
+    uptr sh = ld64(sz);
+    uptr rh = 0;
+    uptr rs = 0;
+    if (php_zv_type(rz) == IS_ARRAY) rh = ld64(rz);
+    if (!rh) rs = php_zv_str(rz);
+    i64 ri = 0;
+    i64 used = php_ht_used(sh);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(sh, i);
+        i = i + 1;
+        if (ld8(b + 8) == IS_UNDEF) continue;
+        uptr s = php_zv_str(b);
+        uptr r = rs;
+        if (rh) {
+            r = php_str_new("", 0);
+            loop {
+                if (ri >= php_ht_used(rh)) break;
+                uptr rb = php_ht_bkt(rh, ri);
+                ri = ri + 1;
+                if (ld8(rb + 8) != IS_UNDEF) { r = php_zv_str(rb); break; }
+            }
+        }
+        if (php_strlen(s) == 0) continue;
+        st64(cnt, ld64(cnt) + php_str_occ(subj, s));
+        subj = php_str_replace(s, r, subj);
+    }
+    return subj;
+}
+
+// str_replace with php's whole signature: string|array for all three, the
+// subject's keys kept when it is an array, and php 8's TypeError for an
+// array of replacements against a string search.
+uptr php_f_str_replace(uptr sz, uptr rz, uptr subz, uptr cz) {
+    if (php_zv_type(sz) != IS_ARRAY && php_zv_type(rz) == IS_ARRAY) {
+        php_throw_str(php_str_new("TypeError", 9),
+            php_str_new("str_replace(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string", 99));
+        return php_znull();
+    }
+    u8 cnt[8];
+    st64(cnt, 0);
+    uptr res = 0;
+    if (php_zv_type(subz) == IS_ARRAY) {
+        uptr h = ld64(subz);
+        uptr r = php_arr_new(8);
+        i64 used = php_ht_used(h);
+        i64 i = 0;
+        loop {
+            if (i >= used) break;
+            uptr b = php_ht_bkt(h, i);
+            i = i + 1;
+            if (ld8(b + 8) == IS_UNDEF) continue;
+            uptr v = php_zstr(php_sr_subject(sz, rz, php_zv_str(b), cnt));
+            uptr k = ld64(b + 24);
+            if (k) php_zv_cpv(php_ht_slotfor(r, php_str_hash(k), k), v);
+            if (!k) php_zv_cpv(php_arr_islot(r, ld64(b + 16)), v);
+        }
+        res = php_zarr(r);
+    }
+    if (!res) res = php_zstr(php_sr_subject(sz, rz, php_zv_str(subz), cnt));
+    if (cz) {
+        st64(cz, ld64(cnt));
+        php_zv_settype(cz, IS_LONG);
+    }
+    return res;
+}
+
 // str_replace($search, $replace, $subject, &$count): php's fourth argument
 // is by reference and carries how many replacements were made.
 uptr php_str_replace_c(uptr search, uptr repl, uptr subj, uptr cz) {

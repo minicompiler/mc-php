@@ -55,8 +55,8 @@ function _dec_sc(string $v): int {
 
 // the coefficient: "-012.30" is "1230". Zero is "0".
 function _dec_coef(string $v): string {
-    // two calls, not str_replace(['-', '.'], ...): mc-php's str_replace takes
-    // strings only today (docs/plan.md § 7)
+    // two calls, not str_replace(['-', '.'], ...): both forms compile, and
+    // three strings lower to a native call where an array goes through zvals
     $c = ltrim(str_replace('.', '', str_replace('-', '', $v)), '0');
     if ($c === '') { return '0'; }
     return $c;
