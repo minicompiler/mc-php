@@ -170,12 +170,13 @@ fi
 # --- 6. the refusals -------------------------------------------------------
 # Out of scope is NAMED, at the declaration's own position. A silent lowering
 # here would publish a signature php does not have.
-# [sysroot] is relative to the config's own directory, and this copy lives in
-# $tmp: it is made absolute, in the form the NATIVE compiler reads (a
-# Windows mc-php does not understand an MSYS /d/a/... path).
-rootn=$root
-command -v cygpath >/dev/null 2>&1 && rootn=$(cygpath -m "$root")
-sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.$sx\"|; s|^path = \"\.\./\.\./|path = \"$rootn/|" "$cfg" > "$tmp/r.toml"
+# [sysroot] is relative to the config's own directory and this copy lives in
+# $tmp, so the directory it names comes along. Not an absolute path: mc joins
+# a Windows one (D:/...) onto the config's directory as if it were relative.
+if grep -q '^\[sysroot\]' "$cfg"; then
+    cp -R build/win-x86_64 "$tmp/sysroot"
+fi
+sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.$sx\"|; s|^path = .*|path = \"sysroot\"|" "$cfg" > "$tmp/r.toml"
 nref=0
 # A refusal is three things and the gate checks all three: the build FAILS,
 # the last line names the reason, and it carries the classification. This

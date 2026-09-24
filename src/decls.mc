@@ -126,6 +126,7 @@ i64  ph_var_bind(uptr d, i64 ty);
 void ph_refuse(uptr fl, i64 line, uptr what, uptr dref);
 void ph_phpfatal(uptr fl, i64 line, uptr msg);
 uptr ph_absfile(uptr fl);
+uptr ph_disp(uptr p);
 i64  ph_scan_hop(uptr src, i64 len, i64 i);
 void ph_todo(uptr fl, i64 line, uptr what);
 void ph_todo2(uptr fl, i64 line, uptr what, uptr detail);
@@ -234,7 +235,7 @@ void ph_refuse(uptr fl, i64 line, uptr what, uptr dref) {
 // error. It is neither a refusal (the grid's third column) nor an mc
 // diagnostic: it is php's answer, produced where php produces it.
 void ph_phpfatal(uptr fl, i64 line, uptr msg) {
-    uptr a = ph_absfile(fl);
+    uptr a = ph_disp(ph_absfile(fl));
     uptr d0 = php_dec(line);
     // a plain `php file.php` has log_errors=On and writes the stderr form
     // first; the phpt runner sets log_errors=0 and grades stdout alone.

@@ -184,7 +184,9 @@ uptr ph_absfile(uptr fl) {
         i = i + 1;
     }
     uptr a = fl;
-    if (ld8(fl) != 47) {
+    // absolute: "/x", and on Windows "D:/x" or "D:\x" too -- a drive-letter
+    // path joined onto the cwd came out D:\a\repo/D:/a/_temp/x.php
+    if (ld8(fl) != 47 && !(ld8(fl) && ld8(fl + 1) == ':')) {
         uptr cwd = host_getcwd();
         if (cwd) a = path_norm(path_join(p_cat(cwd, "/x", 0, 2), fl));
     }
@@ -201,8 +203,24 @@ uptr ph_absfile(uptr fl) {
     return a;
 }
 
+// The path php PRINTS. ph_absfile's answer is the compiler's own form, cut on
+// '/' by every path function it goes through (mc's path_join and path_norm
+// know no other separator); php on Windows prints its resolved path with
+// backslashes, in "in FILE on line N", __FILE__ and __DIR__ alike. So the
+// conversion happens where a path leaves the compiler to be PRINTED -- the
+// position, __FILE__, __DIR__, an override diagnostic and a compile-time
+// fatal -- and nowhere else.
+uptr ph_disp(uptr p) {
+    if (!str_eq(host_os(), "windows")) return p;
+    i64 n = cstrlen(p);
+    uptr q = xstrdup(p, n);
+    i64 i = 0;
+    loop { if (i >= n) break; if (ld8(q + i) == 47) st8(q + i, 92); i = i + 1; }
+    return q;
+}
+
 i64 ph_posstmt(uptr fl, i64 line) {
-    uptr a = ph_absfile(fl);
+    uptr a = ph_disp(ph_absfile(fl));
     // Recording a position cannot raise and cannot throw, so it must not be
     // what makes its own statement look like it can. It was: ph_c2 goes
     // through ph_call, which marks every call it builds, and ph_posstmt runs

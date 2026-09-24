@@ -268,6 +268,17 @@ jobs:
           php --version | head -1
           php -r 'echo php_uname("m"), " ", PHP_INT_SIZE, "\n";'
           php -i | tr -d '\r' | grep -E '^(PHP API|PHP Extension Build|Thread Safety|Debug Build) '
+          # The names src/win/php8.def says php's DLL exports, read out of the
+          # DLL itself: a wrong one is a module php refuses to load with
+          # "The specified procedure could not be found" and nothing else.
+          pdir=$(dirname "$(command -v php)")
+          for d in php8.dll php8ts.dll; do
+            [ -f "$pdir/$d" ] || continue
+            echo "$d:"
+            llvm-readobj --coff-exports "$pdir/$d" | tr -d '\r' \
+              | grep -E 'Name: (_emalloc|zend_type_error|zend_argument_count_error|zend_throw_exception|zend_lookup_class)(@|$)' \
+              || echo "  (llvm-readobj could not say)"
+          done
 
       - name: Build mc-php here
         run: |

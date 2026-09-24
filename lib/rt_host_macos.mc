@@ -84,3 +84,11 @@ i64 php_stat_size(uptr p) {
     if (stat(p, sb) != 0) return 0 - 1;
     return ld64(sb + 96);
 }
+
+// php's path separator test and php's setlocale, per host, because php's own
+// differ per host: on Windows a backslash separates too (IS_SLASH in
+// php-src), and setlocale refuses a name shaped like "xx_YY" before the C
+// library sees it (ext/standard/string.c, a BC rule). Here both are the plain
+// answer.
+i64 php_is_sep(i64 c) { return c == '/'; }
+uptr php_setlocale(i64 cat, uptr name) { return setlocale(cat, name); }

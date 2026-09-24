@@ -6157,9 +6157,9 @@ uptr php_f_addcslashes(uptr sz, uptr cz) {
 uptr php_f_basename(uptr z, uptr sz) {
     uptr s = php_zv_str(z);
     i64 n = php_strlen(s);
-    loop { if (n <= 0) break; if (ld8(s + ZS_HDR + n - 1) != '/') break; n = n - 1; }
+    loop { if (n <= 0) break; if (!php_is_sep(ld8(s + ZS_HDR + n - 1))) break; n = n - 1; }
     i64 i = n;
-    loop { if (i <= 0) break; if (ld8(s + ZS_HDR + i - 1) == '/') break; i = i - 1; }
+    loop { if (i <= 0) break; if (php_is_sep(ld8(s + ZS_HDR + i - 1))) break; i = i - 1; }
     uptr r = php_str_new(s + ZS_HDR + i, n - i);
     if (php_zv_type(sz) != IS_NULL) {
         uptr suf = php_zv_str(sz);
@@ -6173,10 +6173,12 @@ uptr php_f_basename(uptr z, uptr sz) {
 uptr php_f_dirname(uptr z, uptr _p2) {
     uptr s = php_zv_str(z);
     i64 n = php_strlen(s);
-    loop { if (n <= 1) break; if (ld8(s + ZS_HDR + n - 1) != '/') break; n = n - 1; }
+    loop { if (n <= 1) break; if (!php_is_sep(ld8(s + ZS_HDR + n - 1))) break; n = n - 1; }
     i64 i = n;
-    loop { if (i <= 0) break; if (ld8(s + ZS_HDR + i - 1) == '/') break; i = i - 1; }
-    if (i <= 1) { if (i == 1) return php_str_new("/", 1); return php_str_new(".", 1); }
+    loop { if (i <= 0) break; if (php_is_sep(ld8(s + ZS_HDR + i - 1))) break; i = i - 1; }
+    // the root is the separator the path HAS: "/" on every host, and "\" is
+    // one too on Windows
+    if (i <= 1) { if (i == 1) return php_str_new(s + ZS_HDR, 1); return php_str_new(".", 1); }
     return php_str_new(s + ZS_HDR, i - 1);
 }
 
@@ -7436,7 +7438,7 @@ uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5,
 }
 
 uptr php_locale_now(uptr cz, uptr c) {
-    uptr r = setlocale(php_zv_long(cz), 0);
+    uptr r = php_setlocale(php_zv_long(cz), 0);
     if (!r) return php_zstr(c);
     return php_zstr(php_str_new(r, php_cstrlen(r)));
 }
@@ -7468,14 +7470,14 @@ uptr php_f_setlocale(uptr cz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
             i64 i = php_it_next(h, 0);
             loop {
                 if (i < 0) break;
-                uptr ra = setlocale(php_zv_long(cz), php_zv_str(php_it_val(h, i)) + ZS_HDR);
+                uptr ra = php_setlocale(php_zv_long(cz), php_zv_str(php_it_val(h, i)) + ZS_HDR);
                 if (ra) return php_zstr(php_str_new(ra, php_cstrlen(ra)));
                 i = php_it_next(h, i + 1);
             }
             k = k + 1;
             continue;
         }
-        uptr r = setlocale(php_zv_long(cz), php_zv_str(v) + ZS_HDR);
+        uptr r = php_setlocale(php_zv_long(cz), php_zv_str(v) + ZS_HDR);
         if (r) return php_zstr(php_str_new(r, php_cstrlen(r)));
         k = k + 1;
     }

@@ -458,13 +458,13 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "__LINE__")) { i64 l = ph_tline; ph_next(); ph_ety = PT_INT; return ph_int(l); }
     // php's __FILE__ is the RESOLVED path, the same one its diagnostics print
     if (str_eq(name, "__FILE__")) {
-        uptr f = ph_absfile(ph_tfile);
+        uptr f = ph_disp(ph_absfile(ph_tfile));
         ph_next();
         ph_ety = PT_STRING;
         return ph_strlit(f, cstrlen(f));
     }
     if (str_eq(name, "__DIR__")) {
-        uptr f = path_norm(path_join(ph_absfile(ph_tfile), "."));
+        uptr f = ph_disp(path_norm(path_join(ph_absfile(ph_tfile), ".")));
         ph_next();
         ph_ety = PT_STRING;
         return ph_strlit(f, cstrlen(f));

@@ -308,3 +308,29 @@ i64 chmod(uptr path, i64 mode) {
 // is the point: it is set once, here, and the runtime is not edited per host.
 #dylib "ucrtbase.dll"
 extern uptr setlocale(i64 category, uptr name);
+
+// php's separator test on Windows: IS_SLASH is '/' or '\' (php-src
+// Zend/zend_virtual_cwd.h), so basename() and dirname() split on both.
+i64 php_is_sep(i64 c) { return c == '/' || c == 92; }
+
+// php's setlocale on Windows (ext/standard/string.c): for backward
+// compatibility a name shaped /^[a-z]{2}_[A-Z]{2}($|\..*)/ is refused before
+// the C runtime sees it -- the C runtime would accept "zz_ZZ" -- except
+// uk_UA/us_US's /^u[ks]_U[KS]$/. Measured on windows/x86_64:
+// setlocale(LC_ALL, ["zz_ZZ", "C"]) is "C" under php and was "zz_ZZ" before
+// this rule was here.
+uptr php_setlocale(i64 cat, uptr p) {
+    if (!p) return setlocale(cat, 0);
+    i64 a = ld8(p);
+    i64 b = 0; if (a) b = ld8(p + 1);
+    i64 u = 0; if (b) u = ld8(p + 2);
+    i64 c = 0; if (u) c = ld8(p + 3);
+    i64 d = 0; if (c) d = ld8(p + 4);
+    i64 e = 0; if (d) e = ld8(p + 5);
+    if (u == '_' && a >= 'a' && a <= 'z' && b >= 'a' && b <= 'z'
+        && c >= 'A' && c <= 'Z' && d >= 'A' && d <= 'Z' && (e == 0 || e == '.')) {
+        if (!(a == 'u' && (b == 'k' || b == 's') && c == 'U' && (d == 'K' || d == 'S') && e == 0))
+            return 0;
+    }
+    return setlocale(cat, p);
+}
