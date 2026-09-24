@@ -763,8 +763,8 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   chosen from a `sample` profile (allocation 19.6%, strspn's per-byte `php_inset` 10.6%, a
   byte-loop `php_memcpy` 10.2%, `php_pos`/`php_thrown` calls 6.5%, `php_strlen` as a call 5.8%,
   zvals built only to call a library row 6.6%). `docs/plan.md` § 7 item 1 has the table of what
-  each change bought; the largest single step is **`[project].opt = 1` in every extension's
-  project file** (mc's `-O`; 2.79 -> 1.64 ms), which a taught compiler cannot set for itself.
+  each change bought; the largest single step is **`[project].opt = 1` in the project file of
+  every extension built from php** (hello, decimal; mc's `-O`; 2.79 -> 1.64 ms), which a taught compiler cannot set for itself.
   * Compiler: the position and the unwinding check written in place (`ph_dfile`/`ph_dline`
     stores, a `ph_exc` load); `strlen` loaded in place; every literal built once by
     `ph_lit_init` and each use one load; literals, `strlen`, the native strspn/trim forms,
