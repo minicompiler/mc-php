@@ -635,10 +635,22 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     count**: `tests/lang` **104**, `Zend/tests` **756**, `ext/standard/tests/strings` **263** --
     and `diff` over the green, wrong, refused, skip and php-fail lists of all three, between a
     snapshot of `main`'s compiler and this one, is **empty in all fifteen**.
-  * Gates: `tests/run.sh` green on macos/arm64 (fixtures **92 / 92** on both streams and the exit
-    code, refusals 6 / 6, `lencheck` 556 / 0, the extension road, D8 (a) 6 ok / 0 failed in both
-    worlds, D8 (b) `main.php` 6.88x and `heavy.php` 1.45x); `tests/linux.sh` green on
-    **linux/aarch64 and linux/x86_64**, 92 / 92 each, each against a php of that host's own.
+  * Gates: `tests/run.sh` green on macos/arm64 (fixtures **93 / 93** on both streams and the exit
+    code, refusals 6 / 6 + 8, `lencheck` 556 / 0, `aritycheck` 272 / 0, the extension road, D8 (a)
+    6 ok / 0 failed in both worlds, D8 (b) `main.php` 7.06x and `heavy.php` 1.43x); the fixture gate
+    green in CI on **linux/aarch64 and linux/x86_64**, 93 / 93 each, against a php of that host's own.
+  * **The review, three passes, each finding reproduced before it was fixed.** (1) A throwing `for`
+    initializer: did not reproduce (its mark reached the condition's check), but writing the fixture
+    found a throwing STEP running the body again -- fixed by checking each part on its own mark
+    (`bb54e3c`, `tests/g/94-for-init-throws.php`). (2) A stale fixture header, and behind it a
+    pre-existing parse defect: `for ($i = 0;; $i++)` was refused (`expected ; in for`) because the
+    empty condition's `;` was consumed as the initializer's (`8ad845a`, three more cases). (3) This
+    PR's own regression: a diagnostic from a `for` CONDITION named the previous statement's line,
+    since zeroing each part's mark left nothing to make the `for` announce its own; the `for` now
+    carries the union of its parts' marks up (`c0b7cc4`, `tests/g/92-diag-line.php` case 8, proved
+    to fail with the line reverted). `while`/`if`/`do-while` probed the same way and were right.
+    The two new fixtures also dropped `declare(strict_types=1)` (`ff866b6`): mc-php is strict by
+    definition, and both stay byte for byte php's without it.
   * **What is left, named with its number**: every local still lives in the frame, which is the
     whole of the remaining 1.4x on `sum` and most of the 1.7x on `fib`; and the unwinding check is
     still emitted after ANY runtime call, not only one that can throw -- narrowing that needs a
