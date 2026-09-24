@@ -15,6 +15,13 @@ EXPORTS
 _emalloc == _emalloc@@8
 _ecalloc == _ecalloc@@16
 _efree == _efree@@8
+php_output_discard
+php_output_end
+php_output_flush
+php_output_get_contents
+php_output_get_length
+php_output_get_level
+php_output_start_default
 php_output_write
 zend_argument_count_error
 zend_lookup_class

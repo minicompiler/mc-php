@@ -164,7 +164,11 @@ each stream and exit the same. These are the places where they would not:
   in order with php's own `echo`, nested levels included (`check.php`'s last two lines). The
   runtime keeps one sink, `php_out1`: fd 1 on the program road, `php_output_write` once
   `get_module` has run. Before batch A it wrote fd 1 on both roads and `ob_start(); hello_say("B");`
-  left `[B]` on the terminal.
+  left `[B]` on the terminal. The other direction holds too: an `ob_start()` the MODULE calls is
+  php's own (`php_output_start_default` and the rest of `main/php_output.h`), so a level it leaves
+  open captures the script's echo after the call, as an internal function's would
+  (`tests/ext.sh` step 10). The runtime's own stack stays for what it captures itself
+  (`print_r($x, true)`).
 * **An exception the body throws** crosses as its own class when php has one of that name --
   every built-in does, so `throw new InvalidArgumentException(...)` arrives as itself. A class
   the SOURCE declares is not in the engine's class table (the back end registers no class yet),

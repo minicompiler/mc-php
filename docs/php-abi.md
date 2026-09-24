@@ -130,6 +130,7 @@ All exported from the php binary, all reached as ordinary `extern`s:
 | `void *_ecalloc(size_t, size_t)` | a call's chunk and any block too big for one, zeroed as the arena was |
 | `void _efree(void *)` | the call's blocks, when it returns |
 | `size_t php_output_write(const char *, size_t)` | php's output layer: what a module echoes passes every `ob_start()` level |
+| `php_output_start_default`, `_get_contents`, `_get_length`, `_get_level`, `_discard`, `_end`, `_flush` | the ob_* functions a module calls, on php's own stack; each answers a `zend_result`, an `int` whose 0 is SUCCESS, so mc declares them `i32` |
 | `void zend_type_error(const char *fmt, ...)` | a `TypeError` |
 | `void zend_argument_count_error(const char *fmt, ...)` | an `ArgumentCountError` -- **not** a `TypeError`; php distinguishes them and so does the gate |
 | `zend_object *zend_throw_exception(zend_class_entry *, const char *, zend_long)` | with a null class entry it is `Exception` |

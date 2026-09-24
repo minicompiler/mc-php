@@ -587,26 +587,54 @@ uptr php_ob_get() {
     return php_str_new(ld64(ph_obb + ph_nob * 8), ld64(ph_obn + ph_nob * 8));
 }
 
-u8 php_f_ob_start(uptr a, uptr b, uptr c) { php_ob_start(); return 1; }
+// php's own ob_* functions. On the EXTENSION road they are php's output
+// layer (lib/php_ext.mc's phx_ob, set as ph_obx): a level a module opens is
+// the same stack the script's own echo goes into, as it is for an internal
+// function. The runtime's stack below stays for what the runtime captures
+// itself (print_r($x, true) and friends), and is the whole of ob_* on the
+// program road.
+uptr ph_obx;
+#define PHOB_START     1
+#define PHOB_GET_CLEAN 2
+#define PHOB_CONTENTS  3
+#define PHOB_LENGTH    4
+#define PHOB_LEVEL     5
+#define PHOB_END_CLEAN 6
+#define PHOB_END_FLUSH 7
+#define PHOB_GET_FLUSH 8
+#define PHOB_FLUSH     9
+
+u8 php_f_ob_start(uptr a, uptr b, uptr c) {
+    if (ph_obx) return callp(ph_obx, PHOB_START);
+    php_ob_start();
+    return 1;
+}
 
 uptr php_f_ob_get_clean() {
+    if (ph_obx) return callp(ph_obx, PHOB_GET_CLEAN);
     if (!ph_nob) return php_zbool(0);
     return php_zstr(php_ob_get());
 }
 
 uptr php_f_ob_get_contents() {
+    if (ph_obx) return callp(ph_obx, PHOB_CONTENTS);
     if (!ph_nob) return php_zbool(0);
     return php_zstr(php_str_new(ld64(ph_obb + (ph_nob - 1) * 8), ld64(ph_obn + (ph_nob - 1) * 8)));
 }
 
 uptr php_f_ob_get_length() {
+    if (ph_obx) return callp(ph_obx, PHOB_LENGTH);
     if (!ph_nob) return php_zbool(0);
     return php_zlong(ld64(ph_obn + (ph_nob - 1) * 8));
 }
 
-i64 php_f_ob_get_level() { return ph_nob; }
+i64 php_f_ob_get_level() {
+    if (ph_obx) return callp(ph_obx, PHOB_LEVEL);
+    return ph_nob;
+}
 
 u8 php_f_ob_end_clean() {
+    if (ph_obx) return callp(ph_obx, PHOB_END_CLEAN);
     if (!ph_nob) return 0;
     ph_nob = ph_nob - 1;
     return 1;
@@ -614,6 +642,7 @@ u8 php_f_ob_end_clean() {
 
 // the buffer goes to the level below it, or to the real output
 u8 php_f_ob_end_flush() {
+    if (ph_obx) return callp(ph_obx, PHOB_END_FLUSH);
     if (!ph_nob) return 0;
     uptr b = ld64(ph_obb + (ph_nob - 1) * 8);
     i64 n = ld64(ph_obn + (ph_nob - 1) * 8);
@@ -623,6 +652,7 @@ u8 php_f_ob_end_flush() {
 }
 
 uptr php_f_ob_get_flush() {
+    if (ph_obx) return callp(ph_obx, PHOB_GET_FLUSH);
     if (!ph_nob) return php_zbool(0);
     uptr s = php_str_new(ld64(ph_obb + (ph_nob - 1) * 8), ld64(ph_obn + (ph_nob - 1) * 8));
     php_f_ob_end_flush();
@@ -630,6 +660,7 @@ uptr php_f_ob_get_flush() {
 }
 
 u8 php_f_ob_flush() {
+    if (ph_obx) return callp(ph_obx, PHOB_FLUSH);
     if (!ph_nob) return 0;
     uptr b = ld64(ph_obb + (ph_nob - 1) * 8);
     i64 n = ld64(ph_obn + (ph_nob - 1) * 8);
@@ -9495,12 +9526,15 @@ void php_request_reset() {
         i = i - 1;
         if (ld64(ph_fh_own + i * 8) && ld64(ph_fh_fd + i * 8) >= 0) close(ld64(ph_fh_fd + i * 8));
     }
+    // top first, each level into the one below it, the last onto the output
+    // -- php's own order for the buffers a request leaves open
     i64 lv = ld64(ph_rsnap + 104);
     loop {
-        if (lv >= ph_nob) break;
-        i64 n = ld64(ph_obn + lv * 8);
-        if (n) { php_flush(); php_out1(ld64(ph_obb + lv * 8), n); }
-        lv = lv + 1;
+        if (ph_nob <= lv) break;
+        ph_nob = ph_nob - 1;
+        i64 n = ld64(ph_obn + ph_nob * 8);
+        if (n) php_write(ld64(ph_obb + ph_nob * 8), n);
     }
+    php_flush();
     php_roots(0);
 }

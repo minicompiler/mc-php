@@ -109,6 +109,15 @@ extern void zend_argument_count_error(uptr fmt);
 extern uptr zend_throw_exception(uptr ce, uptr msg, i64 code);
 extern uptr zend_lookup_class(uptr name);
 extern i64 php_output_write(uptr str, i64 len);
+// php's output layer, for the ob_* functions a module calls (phx_ob). Each
+// answers a zend_result, an int: 0 is SUCCESS.
+extern i32 php_output_start_default();
+extern i32 php_output_get_contents(uptr zv);
+extern i32 php_output_get_length(uptr zv);
+extern i32 php_output_get_level();
+extern i32 php_output_discard();
+extern i32 php_output_end();
+extern i32 php_output_flush();
 
 // defined further down; mc reads a unit once
 i64  phx_take(uptr p);
@@ -131,6 +140,41 @@ i64 phx_nfn;
 i64 phx_nai;
 
 void phx_owrite(uptr b, i64 n) { php_output_write(b, n); }
+
+// The ob_* family on this road: php's own stack (php_rt.mc's ph_obx). What
+// the runtime has buffered goes to php first, so a level starts and stops
+// exactly where the source says. The failures answer what the program road's
+// answer (false, no notice).
+i64 phx_ob(i64 op) {
+    php_flush();
+    if (op == PHOB_START) return php_output_start_default() == 0;
+    i64 lv = php_output_get_level();
+    if (op == PHOB_LEVEL) return lv;
+    if (!lv) {
+        if (op == PHOB_GET_CLEAN || op == PHOB_CONTENTS || op == PHOB_LENGTH || op == PHOB_GET_FLUSH)
+            return php_zbool(0);
+        return 0;
+    }
+    if (op == PHOB_END_CLEAN) return php_output_discard() == 0;
+    if (op == PHOB_END_FLUSH) return php_output_end() == 0;
+    if (op == PHOB_FLUSH) return php_output_flush() == 0;
+    u8 z[16];
+    if (op == PHOB_LENGTH) {
+        php_output_get_length(z);
+        return php_zlong(ld64(z));
+    }
+    // a copy of the buffer (IS_STRING, refcount 1): ours, then released
+    php_output_get_contents(z);
+    uptr zs = ld64(z);
+    uptr r = php_str_new(zs + ZSX_VAL, ld64(zs + ZSX_LEN));
+    if (!(ld32(zs + 4) & ZSX_INTERNED)) {
+        st32(zs, ld32(zs) - 1);
+        if (!ld32(zs)) _efree(zs);
+    }
+    if (op == PHOB_GET_CLEAN) php_output_discard();
+    if (op == PHOB_GET_FLUSH) php_output_end();
+    return php_zstr(r);
+}
 
 // ---- building the tables ---------------------------------------------------
 // The compiler names a php TYPE by docs/plan.md D10's code (PT_INT is 0, the
@@ -191,6 +235,7 @@ uptr phx_module(uptr name, uptr version, i64 api, uptr build_id,
     // the address of an extern with adrp/add, which Apple's ld refuses for a
     // symbol the bundle resolves at load time (docs/plan.md § 5).
     ph_osink = &phx_owrite;
+    ph_obx = &phx_ob;
     st16(phx_me + MEX_SIZE_FIELD, MEX_SIZE);
     st32(phx_me + MEX_ZEND_API, api);
     st8(phx_me + MEX_ZEND_DEBUG, dbg);
@@ -457,17 +502,20 @@ uptr phx_zalloc(i64 n) {
     return c;
 }
 
-// Zero n bytes of a chunk, 64 at a time: the chunk is PHX_CK long and a
-// multiple of 64, so rounding up stays inside it. Written out rather than a
-// call to memset, which is not in every host's import list here.
+// Zero n bytes of a chunk: 64 at a time while a whole 64 fits, then 8, then
+// bytes. `p` is where the call started (a pinned call's end, not 64-aligned),
+// so no store may pass p + n (found by the review of #19). Written out rather
+// than a call to memset, which is not in every host's import list here.
 void phx_zero(uptr p, i64 n) {
     uptr e = p + n;
     loop {
-        if (p >= e) break;
+        if (p + 64 > e) break;
         st64(p, 0); st64(p + 8, 0); st64(p + 16, 0); st64(p + 24, 0);
         st64(p + 32, 0); st64(p + 40, 0); st64(p + 48, 0); st64(p + 56, 0);
         p = p + 64;
     }
+    loop { if (p + 8 > e) break; st64(p, 0); p = p + 8; }
+    loop { if (p >= e) break; st8(p, 0); p = p + 1; }
 }
 
 // a block this call made: taken OUT of the list (the engine owns it now)
