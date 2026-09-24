@@ -56,6 +56,7 @@ i64  ph_isof(i64 na, i64 t0, i64 a0, i64 want, i64 ztype, uptr fl, i64 line, upt
 i64  ph_a(uptr av, i64 i);
 i64  ph_aty(uptr av, i64 i);
 i64  ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line);
+i64  ph_is_ck(i64 n);
 i64  ph_assign_stmt(uptr fl, i64 line, i64 semi);
 i64  ph_strlit(uptr bytes, i64 len);
 i64  ph_digit(i64 c, i64 base);

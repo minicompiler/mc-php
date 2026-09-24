@@ -32,7 +32,7 @@
 //
 // "an int" is a STATIC answer: the scan predicts the type the lowering will
 // give the expression (int literals, int-only variables, `+ - * %` of ints,
-// `(int)`, intdiv/strlen/ord/count/abs, min/max of two ints, and a packed
+// `(int)`, intdiv/strlen/ord/count, min/max of two ints, and a packed
 // element read inside arithmetic), and the lowering checks each prediction
 // where it builds the call -- a disagreement is a compile error naming this
 // file, never a wrong answer. Whatever the scan cannot show is an int keeps
@@ -464,12 +464,6 @@ i64 pkx_prim(i64 i) {
             if ((str_eq(w, "min") || str_eq(w, "max")) && na == 2) {
                 if (pkx_arg(ld64(as)) == 1 && pkx_arg(ld64(as + 8)) == 1) { pkx_at = m + 1; return 1; }
                 pkx_at = m + 1;
-                return 0;
-            }
-            if (str_eq(w, "abs") && na == 1) {
-                i64 r = pkx_arg(ld64(as));
-                pkx_at = m + 1;
-                if (r == 1) return 1;
                 return 0;
             }
             return 0;

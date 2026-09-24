@@ -1330,7 +1330,10 @@ In the order the measurements put them, each with the number that says why:
    at run time, never a wrapped int (`tests/fixtures.sh` checks the text; no measurable cost,
    0.977 against 0.976 ms); an int VARIABLE assigned from one is the native road's again. And
    `function f(bool $c) { if ($c) { $x = []; } $x[] = 1; }` called with false is a SIGSEGV (an
-   array local that was never assigned), measured on main's compiler.
+   array local that was never assigned), measured on main's compiler; and `abs(PHP_INT_MIN)` is
+   `int(-9223372036854775808)` where php says `float(9.223372036854776E+18)` (the lowering types
+   `abs` of an int as an int; found by the third review of #21, which is why `abs` is not on the
+   packed proof's list of int-valued calls).
 
 2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
    through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`

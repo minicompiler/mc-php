@@ -40,3 +40,14 @@ foreach (["", ".", "a.", "abcdefgh.", "abcdefghijklmnopq.", "no dot here at all"
     echo find_dot($t), " ";
 }
 echo "\n", at("1.5", 1), at("-1.5", 2), at("x", -1), at(".", 3), at("x", PHP_INT_MAX), "\n";
+// every position of a one-byte needle in every length from 1 to 40, which
+// crosses the byte loop, the word scan and its overlapping last word
+$sweep = "";
+for ($len = 1; $len <= 40; $len++) {
+    for ($k = 0; $k < $len; $k++) {
+        $h = str_repeat("a", $k) . "." . str_repeat("b", $len - $k - 1);
+        $sweep .= find_dot($h) . "," . strlen(del2($h)) . ";";
+    }
+    $sweep .= find_dot(str_repeat("c", $len)) . "\n";
+}
+echo md5($sweep), " ", strlen($sweep), "\n";
