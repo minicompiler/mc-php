@@ -922,6 +922,11 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             if (t2 == PT_MIXED || ph_is_arr(t2)) { ph_ety = PT_MIXED; return z; }
             return ph_c1("php_zv_str", z, ty_pstr);
         }
+        // no $count: the replacement itself, with no wrapper call around it,
+        // and quiet -- over three strings str_replace raises nothing
+        if (na == 3)
+            return ph_quiet("php_str_replace", 3, ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)),
+                            ph_to_str(ph_a(av, 2), ph_aty(av, 2)), 0, ty_pstr);
         return ph_c4("php_str_replace_c", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)),
                      ph_to_str(ph_a(av, 2), ph_aty(av, 2)), cnt, ty_pstr);
     }

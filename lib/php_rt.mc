@@ -944,13 +944,16 @@ void php_zv_cp(uptr d, uptr s) { st64(d, ld64(s)); st32(d + 8, ld32(s + 8)); }
 
 uptr php_zv_dup(uptr s) { uptr z = php_zv_alloc(); php_zv_cp(z, s); return z; }
 
-uptr php_znull() { uptr z = php_zv_alloc(); php_zv_settype(z, IS_NULL); return z; }
+// The boxes, each written in place: one php_alloc and two stores, where the
+// zv_alloc/settype pair was two more calls. Word 1 is the type_info u32 and
+// the collision link u32 above it, both what php_zv_alloc + settype leave.
+uptr php_znull() { uptr z = php_alloc(ZV_SIZE); st64(z, 0); st64(z + 8, IS_NULL); return z; }
 // "this argument was not passed", which a null that WAS passed is not
 uptr php_zundef() { uptr z = php_zv_alloc(); php_zv_settype(z, IS_UNDEF); return z; }
-uptr php_zlong(i64 v) { uptr z = php_zv_alloc(); st64(z, v); php_zv_settype(z, IS_LONG); return z; }
+uptr php_zlong(i64 v) { uptr z = php_alloc(ZV_SIZE); st64(z, v); st64(z + 8, IS_LONG); return z; }
 uptr php_zbool(u8 b) { uptr z = php_zv_alloc(); if (b) php_zv_settype(z, IS_TRUE); if (!b) php_zv_settype(z, IS_FALSE); return z; }
-uptr php_zdouble(f64 x) { uptr z = php_zv_alloc(); stf64(z, x); php_zv_settype(z, IS_DOUBLE); return z; }
-uptr php_zstr(uptr s) { uptr z = php_zv_alloc(); st64(z, s); php_zv_settype(z, IS_STRING); return z; }
+uptr php_zdouble(f64 x) { uptr z = php_alloc(ZV_SIZE); stf64(z, x); st64(z + 8, IS_DOUBLE); return z; }
+uptr php_zstr(uptr s) { uptr z = php_alloc(ZV_SIZE); st64(z, s); st64(z + 8, IS_STRING); return z; }
 uptr php_zarr(uptr a) { uptr z = php_zv_alloc(); st64(z, a); php_zv_settype(z, IS_ARRAY); return z; }
 uptr php_zobj(uptr o) { uptr z = php_zv_alloc(); st64(z, o); php_zv_settype(z, IS_OBJECT); return z; }
 
@@ -1298,7 +1301,7 @@ i64 php_zv_bool(uptr z) {
 }
 
 i64 php_zv_long(uptr z) {
-    i64 t = php_zv_type(z);
+    i64 t = ld8(z + 8);
     if (t == IS_LONG) return ld64(z);
     if (t == IS_TRUE) return 1;
     if (t == IS_DOUBLE) return (i64) ldf64(z);
@@ -1368,7 +1371,7 @@ i64 php_str_isnum(uptr s, uptr pl, uptr pd) {
 // context is a TypeError. T6 follows the numeric-string half and treats the
 // rest as 0, which is php 7's rule -- named in RESULTS.md, not hidden.
 i64 php_zv_isdouble(uptr z) {
-    i64 t = php_zv_type(z);
+    i64 t = ld8(z + 8);
     if (t == IS_DOUBLE) return 1;
     if (t == IS_STRING) {
         u8 lb[8];
@@ -1428,7 +1431,16 @@ i64 php_arith_ok(uptr a, uptr b, uptr op) {
     return 0;
 }
 
+// Every operator's int-and-int case first, in place: two tags, the
+// operation and its overflow test, one box -- what the checks below come to
+// for two IS_LONGs, without the calls.
 uptr php_zv_add(uptr a, uptr b) {
+    if (ld8(a + 8) == IS_LONG && ld8(b + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        i64 y = ld64(b);
+        i64 r = x + y;
+        if (((x ^ r) & (y ^ r)) >= 0) return php_zlong(r);
+    }
     if (php_zv_type(a) == IS_ARRAY && php_zv_type(b) == IS_ARRAY) {
         uptr r = php_arr_copy(ld64(a));
         uptr s = ld64(b);
@@ -1464,6 +1476,12 @@ uptr php_zv_add(uptr a, uptr b) {
 }
 
 uptr php_zv_sub(uptr a, uptr b) {
+    if (ld8(a + 8) == IS_LONG && ld8(b + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        i64 y = ld64(b);
+        i64 r = x - y;
+        if (((x ^ y) & (x ^ r)) >= 0) return php_zlong(r);
+    }
     if (!php_arith_ok(a, b, php_str_ch('-'))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b)) return php_zdouble(php_zv_double(a) - php_zv_double(b));
     i64 x = php_zv_long(a);
@@ -1474,12 +1492,23 @@ uptr php_zv_sub(uptr a, uptr b) {
 }
 
 uptr php_zv_mul(uptr a, uptr b) {
+    if (ld8(a + 8) == IS_LONG && ld8(b + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        i64 y = ld64(b);
+        i64 r = x * y;
+        if (x == 0) return php_zlong(0);
+        // -1 * PHP_INT_MIN overflows, and r / x is itself x86-64's #DE there
+        if (!(x == -1 && r == -9223372036854775807 - 1)) { if (r / x == y) return php_zlong(r); }
+    }
     if (!php_arith_ok(a, b, php_str_ch('*'))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b)) return php_zdouble(php_zv_double(a) * php_zv_double(b));
     i64 x = php_zv_long(a);
     i64 y = php_zv_long(b);
     i64 r = x * y;
-    if (x != 0) { if (r / x != y) return php_zdouble(php_zv_double(a) * php_zv_double(b)); }
+    if (x != 0) {
+        if (x == -1 && r == -9223372036854775807 - 1) return php_zdouble(php_zv_double(a) * php_zv_double(b));
+        if (r / x != y) return php_zdouble(php_zv_double(a) * php_zv_double(b));
+    }
     return php_zlong(r);
 }
 
@@ -1528,7 +1557,8 @@ uptr php_zv_concat(uptr a, uptr b) { return php_zstr(php_str_concat(php_zv_str(a
 // float-string that lose precision there. An explicit (int) cast does not go
 // through this, which is why it is a second function and not php_zv_long.
 i64 php_zv_ilong(uptr z) {
-    i64 t = php_zv_type(z);
+    i64 t = ld8(z + 8);
+    if (t == IS_LONG) return ld64(z);
     if (t == IS_DOUBLE) return php_dtoi_chk(ldf64(z));
     if (t == IS_STRING) {
         u8 lb[8];
@@ -2066,13 +2096,15 @@ i64 php_substr_i(uptr s, i64 start, i64 len, i64 haslen) {
     return php_stoi_b(s + ZS_HDR + start, want);
 }
 
-// $s[$i] === 'c': the byte compared in place, php_str_off's bounds (an
-// offset outside the string is "", which equals no one-byte literal)
+// $s[$i] === 'c': the byte compared in place, with php_str_off's bounds and
+// its warning (an offset outside the string is "", which equals no one-byte
+// literal)
 i64 php_str_at_is(uptr s, i64 i, i64 c) {
     i64 n = ld64(s + 16);
-    if (i < 0) i = n + i;
-    if (i < 0 || i >= n) return 0;
-    return ld8(s + ZS_HDR + i) == c;
+    i64 j = i;
+    if (j < 0) j = n + j;
+    if (j < 0 || j >= n) { php_str_off_warn(i); return 0; }
+    return ld8(s + ZS_HDR + j) == c;
 }
 
 // the first byte is scanned for on its own; the rest is compared only where
@@ -2114,12 +2146,40 @@ uptr php_str_repeat(uptr s, i64 times) {
     return o;
 }
 
+// A one-byte search, the common case, scanned in this function: no strpos
+// call per occurrence. The count first (a byte compare per byte), then one
+// pass that copies.
+uptr php_str_replace1(i64 c, uptr repl, uptr subj) {
+    i64 hn = ld64(subj + 16);
+    uptr v = subj + ZS_HDR;
+    i64 cnt = 0;
+    i64 i = 0;
+    loop { if (i >= hn) break; if (ld8(v + i) == c) cnt = cnt + 1; i = i + 1; }
+    if (cnt == 0) return subj;
+    i64 rn = ld64(repl + 16);
+    uptr o = php_str_alloc(hn + cnt * (rn - 1));
+    uptr w = o + ZS_HDR;
+    i = 0;
+    loop {
+        if (i >= hn) break;
+        i64 b = ld8(v + i);
+        if (b == c) {
+            if (rn == 1) { st8(w, ld8(repl + ZS_HDR)); w = w + 1; }
+            if (rn > 1) { php_memcpy(w, repl + ZS_HDR, rn); w = w + rn; }
+        }
+        if (b != c) { st8(w, b); w = w + 1; }
+        i = i + 1;
+    }
+    return o;
+}
+
 // No occurrence is the subject itself. A replacement no longer than what it
 // replaces cannot grow the string, so it is ONE pass into a buffer the size
 // of the subject, trimmed to what was written; a longer one counts first.
 uptr php_str_replace(uptr search, uptr repl, uptr subj) {
     i64 sn = ld64(search + 16);
     if (sn == 0) return subj;
+    if (sn == 1) return php_str_replace1(ld8(search + ZS_HDR), repl, subj);
     i64 hn = ld64(subj + 16);
     i64 rn = ld64(repl + 16);
     i64 first = php_strpos(subj, search, 0);
@@ -2668,12 +2728,25 @@ uptr php_str_ch(i64 c) {
     return s;
 }
 
+// $s[$i] outside the string is php's "Warning: Uninitialized string offset"
+// and "" -- the zval road's php_zv_dim_rd said so already, the native one
+// did not. php_str_off_q (isset's read, a null when absent) is what `??`
+// reads, and it warns for nothing.
+void php_str_off_warn(i64 i) {
+    php_mreset();
+    php_mc("Uninitialized string offset ");
+    php_mi(i);
+    php_raise_m(PHE_WARNING);
+}
+
 uptr php_str_off(uptr s, i64 i) {
     i64 n = ld64(s + 16);
-    if (i < 0) i = n + i;
-    if (i < 0 || i >= n) return php_str_new("", 0);
-    return php_str_ch(ld8(s + ZS_HDR + i));
+    i64 j = i;
+    if (j < 0) j = n + j;
+    if (j < 0 || j >= n) { php_str_off_warn(i); return php_str_new("", 0); }
+    return php_str_ch(ld8(s + ZS_HDR + j));
 }
+
 
 // ---- ++ and -- on a zval, php's own rules ----------------------------------
 // null++ is 1, null-- stays null, a numeric string is a number, and a

@@ -324,9 +324,11 @@ i64 ph_index(i64 base, i64 bt) {
         i64 i = ph_to_int(ph_expr(0), ph_ety);
         ph_want("]", 1, "expected ] after a php string offset");
         ph_ety = PT_STRING;
-        // quiet: the native offset read raises nothing (it answers "" out of
-        // range) and does not allocate (php_str_ch)
-        return ph_quiet("php_str_off", 2, base, i, 0, 0, ty_pstr);
+        // out of range is php's warning and "" (php_str_off); in range it
+        // allocates nothing. `$s[$i] ?? d` is isset's quiet read, whose
+        // absent offset is null, so the default is taken as php takes it.
+        if (ph_at("??", 2)) { ph_ety = PT_MIXED; return ph_quiet("php_str_off_q", 2, base, i, 0, 0, ty_pzv); }
+        return ph_c2("php_str_off", base, i, ty_pstr);
     }
     i64 kx = ph_expr(0);
     i64 kt = ph_ety;
@@ -970,7 +972,7 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
                 i64 sb = nd_a(off);
                 i64 ix = nd_next(sb);
                 set_nd_next(sb, 0);
-                i64 at = ph_quiet("php_str_at_is", 3, sb, ix, ph_int(by), 0, TY_I64);
+                i64 at = ph_c3("php_str_at_is", sb, ix, ph_int(by), TY_I64);
                 ph_ety = PT_BOOL;
                 i64 eop = ph_tok("!=", 2);
                 if (neg) eop = ph_tok("==", 2);
