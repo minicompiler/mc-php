@@ -9465,7 +9465,10 @@ uptr php_str_replace_c(uptr search, uptr repl, uptr subj, uptr cz) {
 // pinned call may have written (php_pin's list) -- and lib/php_ext.mc saves
 // them when MINIT ends and puts them back in RSHUTDOWN, together with the
 // arena MINIT built. A program never calls either: it ends instead.
-u8 ph_rsnap[184];
+// PH_NROOT roots of 8 bytes: the offsets below run 0 .. (PH_NROOT - 1) * 8,
+// and adding one means adding it to both halves AND here
+#define PH_NROOT 23
+u8 ph_rsnap[184];                   // PH_NROOT * 8
 
 void php_roots(i64 save) {
     if (save) {

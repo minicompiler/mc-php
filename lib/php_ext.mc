@@ -160,11 +160,11 @@ i64 phx_ob(i64 op) {
     if (op == PHOB_FLUSH) return php_output_flush() == 0;
     u8 z[16];
     if (op == PHOB_LENGTH) {
-        php_output_get_length(z);
+        if (php_output_get_length(z) != 0) return php_zbool(0);
         return php_zlong(ld64(z));
     }
     // a copy of the buffer (IS_STRING, refcount 1): ours, then released
-    php_output_get_contents(z);
+    if (php_output_get_contents(z) != 0) return php_zbool(0);
     uptr zs = ld64(z);
     uptr r = php_str_new(zs + ZSX_VAL, ld64(zs + ZSX_LEN));
     if (!(ld32(zs + 4) & ZSX_INTERNED)) {
@@ -365,7 +365,7 @@ f64 phx_f(uptr ex, i64 k) {
 // zend_string_hash_val stores, and never into an interned string, whose hash
 // is already there. A call that PINS may have stored it somewhere that
 // outlives the call, so phx_leave takes a reference on each one then.
-u8  phx_bor[128];                   // the current call's borrowed strings
+u8  phx_bor[96];                    // the current call's borrowed strings
 i64 phx_nbor;
 
 uptr phx_s(uptr ex, i64 k) {
@@ -374,7 +374,7 @@ uptr phx_s(uptr ex, i64 k) {
     // the handler, and a handler is never re-entered -- a module's code cannot
     // call php code (examples/two-extensions pins that refusal). Loud, not
     // silent, if that ever stops being true.
-    if (phx_nbor >= 16) php_die("mc-php: too many borrowed strings in one call\n", 46);
+    if (phx_nbor >= 12) php_die("mc-php: too many borrowed strings in one call\n", 46);
     st64(phx_bor + phx_nbor * 8, z);
     phx_nbor = phx_nbor + 1;
     return z;

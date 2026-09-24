@@ -1109,7 +1109,8 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
                 rt3 = bt3;
             if (rt3 == PT_MIXED) { b3 = ph_to_mixed(b3, bt3); c3 = ph_to_mixed(c3, ct3); }
             ph_nonce = ph_nonce + 1;
-            uptr tn3 = p_cat("phq_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+            uptr nn3 = php_dec(ph_nonce);
+            uptr tn3 = p_cat("phq_", nn3, 0, cstrlen(nn3));
             ph_local(tn3, ph_mcty(rt3));
             i64 iff3 = node_new(N_IF, line3, fl3);
             set_nd_a(iff3, cnd3);
