@@ -1178,7 +1178,23 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
         i64 rhs = ph_expr(rp);
         i64 rt = ph_ety;
         if (t == ph_tok(".", 1)) {
-            lhs = ph_c2("php_str_concat", ph_to_str(lhs, lt), ph_to_str(rhs, rt), ty_pstr);
+            i64 rs = ph_to_str(rhs, rt);
+            // `a . b . c` is ONE string: the chain php_str_concat just built
+            // takes the next part instead of being copied into a new string
+            // (php_str_cat3, then php_str_cat4) -- php's own rope, in short
+            if (lt == PT_STRING && nd_kind(lhs) == N_CALL && str_eq(nd_name(lhs), "php_str_concat")) {
+                i64 p0 = nd_a(lhs);
+                set_nd_next(nd_next(p0), rs);
+                set_nd_name(lhs, "php_str_cat3");
+                continue;
+            }
+            if (lt == PT_STRING && nd_kind(lhs) == N_CALL && str_eq(nd_name(lhs), "php_str_cat3")) {
+                i64 q0 = nd_a(lhs);
+                set_nd_next(nd_next(nd_next(q0)), rs);
+                set_nd_name(lhs, "php_str_cat4");
+                continue;
+            }
+            lhs = ph_c2("php_str_concat", ph_to_str(lhs, lt), rs, ty_pstr);
             lt = PT_STRING;
             continue;
         }

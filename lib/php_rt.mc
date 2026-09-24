@@ -188,6 +188,32 @@ uptr php_str_concat(uptr a, uptr b) {
     return s;
 }
 
+// `a . b . c` and `a . b . c . d` in one allocation (the compiler folds a
+// concatenation chain into these)
+uptr php_str_cat3(uptr a, uptr b, uptr c) {
+    i64 la = ld64(a + 16);
+    i64 lb = ld64(b + 16);
+    i64 lc = ld64(c + 16);
+    uptr s = php_str_alloc(la + lb + lc);
+    php_memcpy(s + ZS_HDR, a + ZS_HDR, la);
+    php_memcpy(s + ZS_HDR + la, b + ZS_HDR, lb);
+    php_memcpy(s + ZS_HDR + la + lb, c + ZS_HDR, lc);
+    return s;
+}
+
+uptr php_str_cat4(uptr a, uptr b, uptr c, uptr d) {
+    i64 la = ld64(a + 16);
+    i64 lb = ld64(b + 16);
+    i64 lc = ld64(c + 16);
+    i64 ld = ld64(d + 16);
+    uptr s = php_str_alloc(la + lb + lc + ld);
+    php_memcpy(s + ZS_HDR, a + ZS_HDR, la);
+    php_memcpy(s + ZS_HDR + la, b + ZS_HDR, lb);
+    php_memcpy(s + ZS_HDR + la + lb, c + ZS_HDR, lc);
+    php_memcpy(s + ZS_HDR + la + lb + lc, d + ZS_HDR, ld);
+    return s;
+}
+
 // memcmp over the bytes, then the length: PHP's own strcmp ordering.
 i64 php_str_cmp(uptr a, uptr b) {
     i64 la = ld64(a + 16);
