@@ -1283,9 +1283,11 @@ In the order the measurements put them, each with the number that says why:
    number (php's null is 0 to every arithmetic operator) and the zval php has anywhere else; a
    variable whose only assignment is `$v = $x[K];` keeps both halves native. The buffer comes from
    `php_alloc`: Zend's chunk on the extension road, the arena on the program road. Gated by
-   `tests/g/105` (six functions the proof accepts, absent and sparse keys included), `tests/g/106`
-   (seventeen ways it must fail) and the end of `tests/fixtures.sh`, which reads the lowering back
-   and checks which way each went. Afterwards `_dec_umul` is 14.3% inclusive of a smaller whole,
+   `tests/g/105` (seven functions the proof accepts, absent and sparse keys and `**` on a checked
+   operand included), `tests/g/106` (seventeen ways it must fail) and the end of
+   `tests/fixtures.sh`, which reads the lowering back and checks which way each went, and that a
+   store whose value overflows is not reached (`try { $x[] = $x[0] * 3; }` leaves `$x` as it was:
+   the value is computed and checked before `php_pk_push`/`php_pk_set`). Afterwards `_dec_umul` is 14.3% inclusive of a smaller whole,
    and its array work 3.5% of the module, from 12.9% (the buffer's own calls 135 samples of 6010,
    an element handed to `_dec_limb` as a zval 78).
 
@@ -1339,7 +1341,12 @@ In the order the measurements put them, each with the number that says why:
    is php's `safe_pow`), and a checked operand of `**` goes there too (the sixth review of #21,
    `tests/g/105`'s `pk_pow`). Also found and NOT fixed: the float printer is not the shortest
    round trip -- `var_dump(1.0000000000000002E+64)` prints `float(1.0E+64)` while the value
-   itself compares unequal to `1.0E+64`, so `10 ** 64` is computed right and printed wrong.
+   itself compares unequal to `1.0E+64`, so `10 ** 64` is computed right and printed wrong. And
+   an assignment from anything that throws clobbers its target on main: `$t = 7; try { $t = g(); }
+   catch (Exception $e) {}` leaves `$t` 0, where php leaves 7 -- the store happens before the
+   statement's unwinding check. The packed STORE is fixed here (the seventh review of #21); the
+   scalar assignment is the general road's and is not (a `$t = $x[0] * 3` that overflows leaves
+   the wrapped int in `$t` behind the ArithmeticError).
 
 2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
    through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
