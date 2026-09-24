@@ -6157,9 +6157,24 @@ uptr php_f_addcslashes(uptr sz, uptr cz) {
 uptr php_f_basename(uptr z, uptr sz) {
     uptr s = php_zv_str(z);
     i64 n = php_strlen(s);
-    loop { if (n <= 0) break; if (!php_is_sep(ld8(s + ZS_HDR + n - 1))) break; n = n - 1; }
+    // php_basename: a separator ends a name, and on Windows so does a drive's
+    // colon at the start of a name (php_base_colon, a host answer: "C:foo" is
+    // "foo" there and itself everywhere else)
+    uptr b = s + ZS_HDR;
+    loop {
+        if (n <= 0) break;
+        i64 c = ld8(b + n - 1);
+        if (!php_is_sep(c) && !(c == ':' && php_base_colon(b, n - 1))) break;
+        n = n - 1;
+    }
     i64 i = n;
-    loop { if (i <= 0) break; if (php_is_sep(ld8(s + ZS_HDR + i - 1))) break; i = i - 1; }
+    loop {
+        if (i <= 0) break;
+        i64 c = ld8(b + i - 1);
+        if (php_is_sep(c)) break;
+        if (c == ':' && php_base_colon(b, i - 1)) break;
+        i = i - 1;
+    }
     uptr r = php_str_new(s + ZS_HDR + i, n - i);
     if (php_zv_type(sz) != IS_NULL) {
         uptr suf = php_zv_str(sz);
@@ -6170,16 +6185,39 @@ uptr php_f_basename(uptr z, uptr sz) {
     return r;
 }
 
+// php's zend_dirname (Zend/zend_compile.c), step for step, with the three
+// answers that are the HOST's asked of the host layer: what separates
+// (php_is_sep), what a root is written as (php_dir_sep: DEFAULT_SLASH, so a
+// Windows root is "\\" whichever separator the path used), and how long a
+// drive spec is (php_drive_len: "C:" on Windows, never on POSIX). The drive
+// is kept as it is and the rest is a POSIX dirname; dirname("C:") is "C:".
+uptr php_dn_one(uptr p, i64 adj, i64 c) {
+    uptr r = php_str_alloc(adj + 1);
+    i64 i = 0;
+    loop { if (i >= adj) break; st8(r + ZS_HDR + i, ld8(p + i)); i = i + 1; }
+    st8(r + ZS_HDR + adj, c);
+    return r;
+}
+
 uptr php_f_dirname(uptr z, uptr _p2) {
     uptr s = php_zv_str(z);
-    i64 n = php_strlen(s);
-    loop { if (n <= 1) break; if (!php_is_sep(ld8(s + ZS_HDR + n - 1))) break; n = n - 1; }
-    i64 i = n;
-    loop { if (i <= 0) break; if (php_is_sep(ld8(s + ZS_HDR + i - 1))) break; i = i - 1; }
-    // the root is the separator the path HAS: "/" on every host, and "\" is
-    // one too on Windows
-    if (i <= 1) { if (i == 1) return php_str_new(s + ZS_HDR, 1); return php_str_new(".", 1); }
-    return php_str_new(s + ZS_HDR, i - 1);
+    uptr p = s + ZS_HDR;
+    i64 len = php_strlen(s);
+    i64 adj = php_drive_len(p, len);
+    if (adj && len == 2) return php_str_new(p, 2);
+    if (len == 0) return php_str_new("", 0);
+    uptr q = p + adj;
+    i64 end = len - adj - 1;
+    // trailing separators
+    loop { if (end < 0) break; if (!php_is_sep(ld8(q + end))) break; end = end - 1; }
+    if (end < 0) return php_dn_one(p, adj, php_dir_sep());
+    // the file name
+    loop { if (end < 0) break; if (php_is_sep(ld8(q + end))) break; end = end - 1; }
+    if (end < 0) return php_dn_one(p, adj, '.');
+    // the separators before it
+    loop { if (end < 0) break; if (!php_is_sep(ld8(q + end))) break; end = end - 1; }
+    if (end < 0) return php_dn_one(p, adj, php_dir_sep());
+    return php_str_new(p, adj + end + 1);
 }
 
 i64 php_f_crc32(uptr z) {

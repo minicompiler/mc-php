@@ -313,6 +313,31 @@ extern uptr setlocale(i64 category, uptr name);
 // Zend/zend_virtual_cwd.h), so basename() and dirname() split on both.
 i64 php_is_sep(i64 c) { return c == '/' || c == 92; }
 
+// DEFAULT_SLASH: the root dirname() writes, whichever separator the path used.
+i64 php_dir_sep() { return 92; }
+
+// php_basename's _is_basename_start (ext/standard/string.c): is the ':' at
+// `pos` a drive's, one letter after the start of a name? Then basename() cuts
+// there, so basename("C:foo") is "foo" and basename("C:") is "C".
+i64 php_base_colon(uptr s, i64 pos) {
+    if (pos < 1) return 0;
+    if (php_is_sep(ld8(s + pos - 1))) return 0;
+    if (pos == 1) return 1;
+    i64 c = ld8(s + pos - 2);
+    if (php_is_sep(c)) return 1;
+    if (c == ':') return php_base_colon(s, pos - 2);
+    return 0;
+}
+
+// "C:" -- zend_dirname keeps a drive spec as it is and dirnames the rest.
+i64 php_drive_len(uptr p, i64 n) {
+    if (n < 2) return 0;
+    if (ld8(p + 1) != ':') return 0;
+    i64 c = ld8(p) | 32;
+    if (c >= 'a' && c <= 'z') return 2;
+    return 0;
+}
+
 // php's setlocale on Windows (ext/standard/string.c): for backward
 // compatibility a name shaped /^[a-z]{2}_[A-Z]{2}($|\..*)/ is refused before
 // the C runtime sees it -- the C runtime would accept "zz_ZZ" -- except

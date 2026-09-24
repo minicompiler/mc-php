@@ -206,7 +206,6 @@ jobs:
       # MSYS rewrites an argument that looks like a path, and every dash-form
       # lld-link option does (mc's own Windows legs set the same).
       MSYS2_ARG_CONV_EXCL: "*"
-      LLVM_VERSION: "20.1.8"
     steps:
       # Before the checkout: a fixture is compared byte for byte with php, and
       # a CRLF checkout changes what a heredoc prints. .gitattributes says so
@@ -232,9 +231,7 @@ jobs:
           cygpath -w "$RUNNER_TEMP/mc" >> "$GITHUB_PATH"
 
       # lld-link is the only LLVM tool used: it writes the import libraries
-      # (`-lib -def:`) as well as linking. windows-latest carries LLVM; the
-      # Windows-on-ARM image may not, and then the WoA release is fetched --
-      # mc's own windows/arm64 leg does the same.
+      # (`-lib -def:`) as well as linking.
       - name: lld-link
         run: |
           set -eu
@@ -242,20 +239,12 @@ jobs:
           elif [ -x "/c/Program Files/LLVM/bin/lld-link.exe" ]; then
             printf '%s\n' 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
           else
-            base="https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION"
-            # the runner's own CPU: a tarball first, then the NSIS installer
-            case "${{ matrix.arch }}" in
-              aarch64) tgz=aarch64-pc-windows-msvc; nsis=woa64 ;;
-              *)       tgz=x86_64-pc-windows-msvc;  nsis=win64 ;;
-            esac
-            mkdir -p "$RUNNER_TEMP/llvm"
-            if curl -fSL -o "$RUNNER_TEMP/llvm.tar.xz" "$base/clang+llvm-$LLVM_VERSION-$tgz.tar.xz"; then
-              tar -xf "$RUNNER_TEMP/llvm.tar.xz" -C "$RUNNER_TEMP/llvm" --strip-components=1
-            else
-              curl -fSL -o "$RUNNER_TEMP/llvm.exe" "$base/LLVM-$LLVM_VERSION-$nsis.exe"
-              7z x -o"$RUNNER_TEMP/llvm" "$RUNNER_TEMP/llvm.exe" > /dev/null
-            fi
-            cygpath -w "$RUNNER_TEMP/llvm/bin" >> "$GITHUB_PATH"
+            # No download: an unverified toolchain put on PATH would run as
+            # the linker of a release. Both images carry LLVM today (measured:
+            # C:\Program Files\LLVM on windows-latest and windows-11-arm);
+            # an image that stops carrying it fails here, by name.
+            printf '%s\n' '::error::lld-link is not on this runner (looked on PATH and in C:\Program Files\LLVM\bin)'
+            exit 1
           fi
 
       - name: Install PHP ${{ env.PHP_VERSION }}

@@ -60,10 +60,13 @@ extern uptr setlocale(i64 category, uptr name);
 #define S_IFREG   0x8000
 #define S_IFDIR   0x4000
 
-// php's path separator test and php's setlocale, per host, because php's own
-// differ per host: on Windows a backslash separates too (IS_SLASH in
-// php-src), and setlocale refuses a name shaped like "xx_YY" before the C
-// library sees it (ext/standard/string.c, a BC rule). Here both are the plain
-// answer.
+// php's path answers and php's setlocale, per host, because php's own differ
+// per host: on Windows a backslash separates too (IS_SLASH in php-src), a
+// root is written "\\" and "C:" is a drive, and setlocale refuses a name
+// shaped like "xx_YY" before the C library sees it (ext/standard/string.c, a
+// BC rule). Here every one of them is the plain POSIX answer.
 i64 php_is_sep(i64 c) { return c == '/'; }
+i64 php_dir_sep() { return '/'; }
+i64 php_drive_len(uptr p, i64 n) { return 0; }
+i64 php_base_colon(uptr s, i64 pos) { return 0; }
 uptr php_setlocale(i64 cat, uptr name) { return setlocale(cat, name); }
