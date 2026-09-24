@@ -289,6 +289,10 @@ i64 ph_stmt_checked() {
     return st;
 }
 
+// the line of the `}` ph_block last consumed: where php reports a function
+// that falls off its end
+i64 ph_close_line;
+
 i64 ph_block() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
@@ -304,6 +308,7 @@ i64 ph_block() {
         tail = s;
         loop { if (!nd_next(tail)) break; tail = nd_next(tail); }
     }
+    ph_close_line = ph_tline;
     ph_next();
     i64 b = node_new(N_BLOCK, line, fl);
     set_nd_a(b, head);

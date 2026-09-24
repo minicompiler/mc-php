@@ -5100,6 +5100,14 @@ uptr php_param_err(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname)
     return php_znull();
 }
 
+// a function declared int/float/string/bool that fell off its end
+void php_ret_none(uptr fn, i64 want) {
+    uptr m = php_str_concat(fn, php_str_new("(): Return value must be of type ", 33));
+    m = php_str_concat(m, php_pc_name(want));
+    m = php_str_concat(m, php_str_new(", none returned", 15));
+    php_throw_str(php_str_new("TypeError", 9), m);
+}
+
 uptr php_param_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) {
     if (!z) return z;                          // not passed: the default fills it
     // a whole argument list is checked before its call, with ONE check after

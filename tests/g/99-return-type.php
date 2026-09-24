@@ -30,3 +30,16 @@ foreach ([7, "8", "nine", 1.0, true, null] as $v) {
         show($e->getMessage());
     }
 }
+
+// and a declared scalar function that falls off its end: php's "none
+// returned", at the closing brace (found by the review of #19)
+function r_none(bool $x): int { if ($x) { return 1; } }
+function r_nothing(): string { $a = 1; }
+function r_fnone(bool $x): float {
+    if ($x) {
+        return 1.5;
+    }
+}
+try { var_dump(r_none(true)); r_none(false); } catch (TypeError $e) { show($e->getMessage() . " (line " . $e->getLine() . ")"); }
+try { r_nothing(); } catch (TypeError $e) { show($e->getMessage() . " (line " . $e->getLine() . ")"); }
+try { var_dump(r_fnone(true)); r_fnone(false); } catch (TypeError $e) { show($e->getMessage() . " (line " . $e->getLine() . ")"); }
