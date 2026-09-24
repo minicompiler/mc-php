@@ -415,12 +415,7 @@ uptr phx_zstr(uptr s) {
     st32(z + 4, ZSX_GC_STRING);
     st64(z + 8, 0);
     st64(z + ZSX_LEN, n);
-    i64 i = 0;
-    loop {
-        if (i >= n) break;
-        st8(z + ZSX_VAL + i, ld8(s + ZSX_VAL + i));
-        i = i + 1;
-    }
+    php_memcpy(z + ZSX_VAL, s + ZSX_VAL, n);
     st8(z + ZSX_VAL + n, 0);
     return z;
 }

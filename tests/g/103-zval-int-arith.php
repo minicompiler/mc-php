@@ -28,3 +28,18 @@ $k = 2;
 $r[$k]++;
 $r[$k] .= "x";
 var_dump($r[$k]);
+
+// a zval against a NATIVE int, both orders: the box for the int is gone, the
+// answers and the messages are the zval operator's
+$ints = [1, -1, 0, 2, PHP_INT_MAX, PHP_INT_MIN];
+foreach ($v as $x) {
+    foreach ($ints as $n) {
+        $c = $n;
+        var_dump($x + $c, $c + $x, $x - $c, $c - $x, $x * $c, $c * $x);
+        if ($c !== 0) { var_dump($x % $c); }
+    }
+}
+try { var_dump($v[5] % 0); } catch (DivisionByZeroError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+$bad = "abc";
+$z = [$bad];
+try { var_dump($z[0] + 1); } catch (TypeError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }

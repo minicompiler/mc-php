@@ -1530,6 +1530,74 @@ uptr php_zv_div(uptr a, uptr b) {
     return php_zdouble((f64) x / (f64) y);
 }
 
+// A zval with a NATIVE int on one side (the compiler knows the other
+// operand's type): the int-and-int case in place, anything else is the
+// zval operator with the int boxed, so every message is that operator's.
+uptr php_zv_add_zi(uptr a, i64 y) {
+    if (ld8(a + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        i64 r = x + y;
+        if (((x ^ r) & (y ^ r)) >= 0) return php_zlong(r);
+    }
+    return php_zv_add(a, php_zlong(y));
+}
+
+uptr php_zv_add_iz(i64 x, uptr b) {
+    if (ld8(b + 8) == IS_LONG) {
+        i64 y = ld64(b);
+        i64 r = x + y;
+        if (((x ^ r) & (y ^ r)) >= 0) return php_zlong(r);
+    }
+    return php_zv_add(php_zlong(x), b);
+}
+
+uptr php_zv_sub_zi(uptr a, i64 y) {
+    if (ld8(a + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        i64 r = x - y;
+        if (((x ^ y) & (x ^ r)) >= 0) return php_zlong(r);
+    }
+    return php_zv_sub(a, php_zlong(y));
+}
+
+uptr php_zv_sub_iz(i64 x, uptr b) {
+    if (ld8(b + 8) == IS_LONG) {
+        i64 y = ld64(b);
+        i64 r = x - y;
+        if (((x ^ y) & (x ^ r)) >= 0) return php_zlong(r);
+    }
+    return php_zv_sub(php_zlong(x), b);
+}
+
+uptr php_zv_mul_zi(uptr a, i64 y) {
+    if (ld8(a + 8) == IS_LONG) {
+        i64 x = ld64(a);
+        if (x == 0 || y == 0) return php_zlong(0);
+        i64 r = x * y;
+        if (!(x == -1 && r == -9223372036854775807 - 1)) {
+            if (r / x == y) return php_zlong(r);
+        }
+    }
+    return php_zv_mul(a, php_zlong(y));
+}
+
+uptr php_zv_mul_iz(i64 x, uptr b) {
+    if (ld8(b + 8) == IS_LONG) {
+        i64 y = ld64(b);
+        if (x == 0 || y == 0) return php_zlong(0);
+        i64 r = x * y;
+        if (!(x == -1 && r == -9223372036854775807 - 1)) {
+            if (r / x == y) return php_zlong(r);
+        }
+    }
+    return php_zv_mul(php_zlong(x), b);
+}
+
+uptr php_zv_mod_zi(uptr a, i64 y) {
+    if (ld8(a + 8) == IS_LONG && y != 0) return php_zlong(php_mod(ld64(a), y));
+    return php_zv_mod(a, php_zlong(y));
+}
+
 uptr php_zv_mod(uptr a, uptr b) {
     i64 y = php_zv_ilong(b);
     if (y == 0) { php_throw_str(php_str_new("DivisionByZeroError", 19), php_str_new("Modulo by zero", 14)); return php_znull(); }

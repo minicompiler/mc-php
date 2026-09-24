@@ -28,7 +28,10 @@ i64 ph_zv_fresh(i64 v) {
         || str_eq(n, "php_znull") || str_eq(n, "php_zstr") || str_eq(n, "php_zv_val")
         || str_eq(n, "php_zv_add") || str_eq(n, "php_zv_sub") || str_eq(n, "php_zv_mul")
         || str_eq(n, "php_zv_div") || str_eq(n, "php_zv_mod") || str_eq(n, "php_zv_pow")
-        || str_eq(n, "php_zv_neg") || str_eq(n, "php_zv_concat");
+        || str_eq(n, "php_zv_neg") || str_eq(n, "php_zv_concat")
+        || str_eq(n, "php_zv_add_zi") || str_eq(n, "php_zv_add_iz") || str_eq(n, "php_zv_sub_zi")
+        || str_eq(n, "php_zv_sub_iz") || str_eq(n, "php_zv_mul_zi") || str_eq(n, "php_zv_mul_iz")
+        || str_eq(n, "php_zv_mod_zi");
 }
 
 // An INT key on the last subscript of an assignment's lvalue (the one caller

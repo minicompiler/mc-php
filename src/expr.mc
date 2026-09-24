@@ -836,6 +836,22 @@ i64 ph_arith_zv(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt) {
     if (op == ph_tok(">>", 2)) f = "php_zv_shr";
     if (!f) err_at(ph_tfile, ph_tline, "mc-php: this operator has no zval form");
     ph_ety = PT_MIXED;
+    // one side a NATIVE int: no box for it, and the int-and-int case in
+    // place (php_zv_add_zi and its siblings fall back to the zval operator)
+    uptr fi = 0;
+    if (lt == PT_MIXED && rt == PT_INT) {
+        if (op == ph_tok("+", 1)) fi = "php_zv_add_zi";
+        if (op == ph_tok("-", 1)) fi = "php_zv_sub_zi";
+        if (op == ph_tok("*", 1)) fi = "php_zv_mul_zi";
+        if (op == ph_tok("%", 1)) fi = "php_zv_mod_zi";
+        if (fi) return ph_c2(fi, lhs, rhs, ty_pzv);
+    }
+    if (lt == PT_INT && rt == PT_MIXED) {
+        if (op == ph_tok("+", 1)) fi = "php_zv_add_iz";
+        if (op == ph_tok("-", 1)) fi = "php_zv_sub_iz";
+        if (op == ph_tok("*", 1)) fi = "php_zv_mul_iz";
+        if (fi) return ph_c2(fi, lhs, rhs, ty_pzv);
+    }
     return ph_c2(f, ph_to_mixed(lhs, lt), ph_to_mixed(rhs, rt), ty_pzv);
 }
 
