@@ -275,5 +275,24 @@ else
 fi
 rm -rf "$tmp/build"
 
+# --- 9. a leading underscore is module-private -------------------------------
+# Published: every function without one. Not published: _helper, and _arr,
+# whose array signature an EXPORTED function could not have -- unpublished, it
+# is not the boundary's (docs/php-extension.md § What is published).
+printf '<?php\nfunction _helper(int $n): int { return $n * 2; }\nfunction _arr(array $a): array { return $a; }\nfunction pub(int $n): int { return _helper($n) + count(_arr([1, 2])); }\n' > "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/pv.build" 2>&1; then
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" \
+        -r 'printf("%d%d%d %d", function_exists("pub"), function_exists("_helper"), function_exists("_arr"), pub(4));' 2>&1 | tr -d '\r')
+    if [ "$got" = "100 10" ]; then
+        say "private: pub is published, _helper and _arr are not, and pub(4) calls both"
+    else
+        bad "private: want '100 10' (pub yes, _helper no, _arr no, pub(4)=10), got $got"
+    fi
+else
+    bad "private: it would not build"; sed 's/^/      /' "$tmp/pv.build"
+fi
+rm -rf "$tmp/build"
+
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }
 echo "  ext: the extension road is green"

@@ -17,9 +17,9 @@
 // It is ordinary PHP and nothing else: `require` it and the functions are
 // php's own; `mc-php build` beside mcphp.toml turns the same file into
 // decimal.so. The API is the six dec_* functions at the bottom. The _dec_*
-// helpers above them are published too, because every top-level function of
-// an extension source is (README.md: "What it cannot do yet"), and each takes
-// only scalars for the same reason.
+// helpers above them are module-private: a leading underscore is not
+// published (docs/php-extension.md § What is published), so php sees the six
+// and nothing else.
 
 // ---- a number: validated once, then read in three ways -----------------------
 // The canonical form is the input without a leading '+'. strspn and not a

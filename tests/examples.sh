@@ -135,6 +135,14 @@ dso=$rootn/$EX/build/decimal.$sx
 if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
     say "built: $(wc -c < "$dso" | tr -d ' ') bytes from $EX/decimal.php"
     differential check.php "$EX/check.php" -d extension="$dso"
+    # the _dec_* helpers are module-private (a leading underscore): php sees
+    # the six dec_* functions and nothing else
+    vis=$("$PHP" -d extension="$dso" -r '$f = get_extension_funcs("decimal"); sort($f); echo implode(" ", $f);' 2>&1 | tr -d '\r')
+    if [ "$vis" = "dec_add dec_cmp dec_div dec_mul dec_round dec_sub" ]; then
+        say "published: the six dec_* functions and none of the _dec_* helpers"
+    else
+        bad "published: want the six dec_* functions, got: $vis"
+    fi
     if "$PHP" -m | tr -d '\r' | grep -qix bcmath; then
         # the exit AND the exact summary: a weakened oracle that checked less
         # must not pass (the reviewer of #18)

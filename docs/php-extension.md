@@ -64,6 +64,26 @@ The body is the whole language. Classes, closures, `match`, exceptions, the 272-
 everything the program road compiles compiles here; it is the SIGNATURE that is narrow, because
 the signature is what crosses the boundary.
 
+## What is published
+
+**Every top-level function whose name does not begin with `_`.** A function named `_anything`
+is MODULE-PRIVATE: it compiles, the module's own functions call it, and it gets no handler and
+no function-table row, so from php `function_exists('_anything')` is false and
+`get_extension_funcs()` does not list it. Being unpublished, its signature is not the
+boundary's either -- it may take and return arrays, objects, `mixed`, anything the language
+compiles -- and the scalar-only rule above applies to the published functions alone.
+
+Why this rule and not an export list in `mcphp.toml` or an attribute: php has no private
+function at all, and the leading underscore is php's own long-standing spelling for "internal"
+(the PEAR and Zend coding standards), so a php author reads it the way the compiler does. It
+keeps the whole contract in the source, next to the declaration -- a second list in the project
+file is a second place to keep in sync, and a forgotten entry there is a function silently not
+published -- and the source stays php that runs unchanged. The one thing it gives up is a
+published name that begins with `_`; name it without one. Interpreted, php of course sees the
+helpers too: the differential therefore calls only published functions, and
+`tests/examples.sh` checks the published list of `examples/decimal` against the six `dec_*`
+names (`tests/ext.sh` step 9 is the general gate).
+
 ## What the compiler emits
 
 For `function hello_addone(int $n): int { return $n + 1; }`:

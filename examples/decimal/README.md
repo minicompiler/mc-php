@@ -61,12 +61,6 @@ item 1 is the road to the rest.
   divisions of a 30-digit number by a 21-digit one exhaust it, and the process ends with
   `mc-php: arena exhausted`. The gates are sized to fit; a server that calls it for ever is not.
   A request lifecycle (`RINIT`/`RSHUTDOWN`) is what answers it.
-* **Private helpers.** Every top-level function of an extension source is published, so the
-  `_dec_*` helpers are callable from php too, and each takes only scalars because an exported
-  signature must. A class would keep them private -- a class the source declares is not
-  published -- but its methods are dispatched by name through the runtime's class table, which
-  is slower, and their parameters and returns are `mixed`, which D4 then refuses to assign to a
-  typed local.
 * **A wrong TYPE** is an internal function's message in the module and a userland one
   interpreted (`docs/php-extension.md` § What a wrong call says), so `check.php` does not make
   one. The wrong VALUES it makes are the same in both runs, because the source throws them.
