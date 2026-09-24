@@ -18,7 +18,10 @@ function start(string $router, string $ext, string $log): array {
     $name = stream_socket_get_name($s, false);
     fclose($s);
     $port = (int) substr($name, strrpos($name, ':') + 1);
-    $cmd = [PHP_BINARY];
+    // output_buffering=0: a host's php.ini may open a default buffer (4096 on
+    // Homebrew), and what ob_get_length() says at the bottom level would then
+    // depend on the machine rather than on the source
+    $cmd = [PHP_BINARY, '-d', 'output_buffering=0'];
     if ($ext !== '') { array_push($cmd, '-d', "extension=$ext"); }
     array_push($cmd, '-S', "127.0.0.1:$port", basename($router));
     $p = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['file', $log, 'w'], 2 => ['file', $log, 'a']],
