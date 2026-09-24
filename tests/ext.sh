@@ -5,6 +5,8 @@
 #     sh tests/ext.sh                    # on the host it is on
 #     BIN=/path/to/mc-php sh tests/ext.sh
 #     LINUX=1 sh tests/ext.sh            # use examples/hello/mcphp.linux.toml
+#     WINDOWS=1 sh tests/ext.sh          # examples/hello/mcphp.windows.toml,
+#                                        # after tests/winsys.sh x86_64
 #
 # Six steps, and every one of them is a comparison against something php
 # produced rather than against a number written here:
@@ -19,7 +21,7 @@
 #      is to re-measure, never to loosen the comparison.
 #   3  the build: mc-php build, and the artefact is a real loadable module.
 #   4  the DIFFERENTIAL. examples/hello/check.php is run twice -- once with
-#      hello.so loaded, once with hello.php required -- and the two must print
+#      hello.$sx loaded, once with hello.php required -- and the two must print
 #      the same bytes on each stream and exit the same.
 #   5  the wrong-call behaviour, against examples/hello/errors.expect, which
 #      tests/ext/refx.c re-measures here wherever it can be built: an
@@ -39,6 +41,9 @@ CC=${CC:-cc}
 EX=examples/hello
 cfg=$EX/mcphp.toml
 [ "${LINUX:-0}" = 1 ] && cfg=$EX/mcphp.linux.toml
+# The artefact's suffix is the platform's: php loads a .dll on Windows.
+sx=so
+[ "${WINDOWS:-0}" = 1 ] && { cfg=$EX/mcphp.windows.toml; sx=dll; }
 fail=0
 
 [ -x "$BIN" ] || { echo "  no $BIN"; exit 1; }
@@ -78,7 +83,8 @@ else
 fi
 
 # --- 2. the project file names the php it is being graded against ----------
-pv() { "$PHP" -i | sed -n "s/^$1 => //p" | head -1; }
+# php -i writes CRLF on Windows; the values are compared without it.
+pv() { "$PHP" -i | tr -d '\r' | sed -n "s/^$1 => //p" | head -1; }
 tv() { sed -n "s/^$1 = *\(.*\)\$/\1/p" "$cfg" | head -1 | tr -d '"'; }
 api=$(pv 'PHP API'); bid=$(pv 'PHP Extension Build')
 zts=false; [ "$(pv 'Thread Safety')" = enabled ] && zts=true
@@ -91,16 +97,16 @@ done
 say "php: api $api, build $bid, zts $zts, debug $dbg -- and $cfg says so"
 
 # --- 3. the build ----------------------------------------------------------
-out=$tmp/hello.so
+out=$tmp/hello.$sx
 rm -f "$out"
 # The artefact named by [project].out, which is relative to the CONFIG's
 # directory -- removed before the build and not only after, or a build that
 # fails is graded on the .so an earlier run left there (found by the reviewer
 # of #15). mc's own driver unlinks its output for a different reason (the
 # cached-signature SIGKILL); this is the gate not trusting that.
-rm -f "$EX/build/hello.so"
+rm -f "$EX/build/hello.$sx"
 if "$BIN" build "$EX" --config "$cfg" > "$tmp/build.out" 2>&1; then
-    cp "$EX/build/hello.so" "$out" 2>/dev/null || bad "no $EX/build/hello.so"
+    cp "$EX/build/hello.$sx" "$out" 2>/dev/null || bad "no $EX/build/hello.$sx"
 else
     bad "mc-php build:"; sed 's/^/      /' "$tmp/build.out"
 fi
@@ -118,7 +124,7 @@ else
 fi
 
 # --- 4. the differential ---------------------------------------------------
-# NATIVE: hello.so loaded, so check.php's own `require` is skipped.
+# NATIVE: hello.$sx loaded, so check.php's own `require` is skipped.
 # INTERPRETED: no extension, so the same check.php requires hello.php and the
 # functions are php's. Same file, same php, same streams.
 "$PHP" -d extension="$out" "$EX/check.php" > "$tmp/n.out" 2> "$tmp/n.err"; nrc=$?
@@ -164,7 +170,12 @@ fi
 # --- 6. the refusals -------------------------------------------------------
 # Out of scope is NAMED, at the declaration's own position. A silent lowering
 # here would publish a signature php does not have.
-sed 's|^entry = .*|entry = "r.php"|; s|^out = .*|out = "build/r.so"|' "$cfg" > "$tmp/r.toml"
+# [sysroot] is relative to the config's own directory, and this copy lives in
+# $tmp: it is made absolute, in the form the NATIVE compiler reads (a
+# Windows mc-php does not understand an MSYS /d/a/... path).
+rootn=$root
+command -v cygpath >/dev/null 2>&1 && rootn=$(cygpath -m "$root")
+sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.$sx\"|; s|^path = \"\.\./\.\./|path = \"$rootn/|" "$cfg" > "$tmp/r.toml"
 nref=0
 # A refusal is three things and the gate checks all three: the build FAILS,
 # the last line names the reason, and it carries the classification. This
@@ -177,7 +188,7 @@ nref=0
 refuse() {
     nref=$((nref + 1))
     printf '<?php\ndeclare(strict_types=1);\n%s\n' "$1" > "$tmp/r.php"
-    rm -f "$tmp/build/r.so"
+    rm -f "$tmp/build/r.$sx"
     # NOT `got=$(... | tail -1); rc=$?` -- that reads tail's status, which is
     # always 0, and every refusal then reported "it BUILT".
     "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/r.out" 2>&1; rc=$?
@@ -214,9 +225,9 @@ say "refusals: $nref signatures outside the scope, each declined by name"
 #     php declares a nested function only when the outer RUNS, so the module
 #     must publish the outer and not the nested.
 printf '<?php\ndeclare(strict_types=1);\nfunction outer(int $n): int { function nested(int $m): int { return $m * 3; } return nested($n) + 1; }\n' > "$tmp/r.php"
-rm -f "$tmp/build/r.so"
+rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/n.build" 2>&1; then
-    got=$("$PHP" -d extension="$tmp/build/r.so" \
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" \
         -r 'printf("%d%d%d", function_exists("outer"), function_exists("nested"), outer(7));' 2>&1)
     [ "$got" = "1022" ] || bad "a nested function: want 1022 (outer yes, nested no, outer(7)=22), got $got"
 else
@@ -226,7 +237,7 @@ fi
 # (b) an [extension] table whose `name` is missing or misspelt used to fall
 #     through to the PROGRAM road in silence and write an executable.
 sed 's/^name = /nmae = /' "$tmp/r.toml" > "$tmp/noname.toml"
-rm -f "$tmp/build/r.so"
+rm -f "$tmp/build/r.$sx"
 "$BIN" build "$tmp" --config "$tmp/noname.toml" > "$tmp/nn.out" 2>&1; rc=$?
 got=$(tail -1 "$tmp/nn.out")
 case "$rc:$got" in
@@ -234,7 +245,7 @@ case "$rc:$got" in
     *"extension.name"*) ;;
     *) bad "a nameless [extension]: want ...extension.name..., got $got" ;;
 esac
-[ ! -f "$tmp/build/r.so" ] || bad "a nameless [extension]: it wrote an artefact"
+[ ! -f "$tmp/build/r.$sx" ] || bad "a nameless [extension]: it wrote an artefact"
 rm -rf "$tmp/build"
 say "the two of review #15: a nested function, and a nameless [extension]"
 

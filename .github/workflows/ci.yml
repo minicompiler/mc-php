@@ -11,8 +11,13 @@
 # Three legs, one per host that has been RUN: macOS arm64 builds and grades
 # itself; the two Linux compilers are CROSS-BUILT on the same macOS runner and
 # then each is graded on a Linux runner of its own architecture, by
-# tests/linux.sh, against a php 8.5 on that host. No Windows leg: the README's
-# *Install* section says what is missing there and why it is not a row.
+# tests/linux.sh, against a php 8.5 on that host.
+#
+# And two Windows legs, which are NOT cross-built: mc-php does not cross-compile
+# across operating systems, so each Windows compiler is built ON its runner by
+# that runner's own mc.exe (the object + lld-link road, docs/plan.md § 5) and
+# graded there by tests/windows.sh -- the fixture gate and the extension gate,
+# against a php 8.5 of that host.
 name: CI
 
 on:
@@ -31,8 +36,9 @@ env:
   # The toolchain is a PUBLISHED mc release, never mc built from source: this
   # repository is a CONSUMER of mc's 1.0 frozen surface and it should break the
   # way a consumer breaks. mc.toml's [package].mc says 1.1.0 is the floor;
-  # this is what is actually installed.
-  MC_VERSION: "1.1.0"
+  # this is what is actually installed, and the Windows legs were measured on
+  # it (docs/plan.md § 5).
+  MC_VERSION: "1.3.0"
   # 8.5 because the oracle is php-src at tag php-8.5.10 and every fixture is
   # BYTE FOR BYTE what php prints. The minor is pinned; the patch is not, so a
   # diagnostic reworded in an 8.5.x can fail a fixture -- that is the gate
@@ -176,3 +182,106 @@ jobs:
           # cross-built compiler and loaded by the php IN THE CONTAINER, so
           # the module header is graded against the php it is for.
           sh tests/linux.sh ${{ matrix.arch }}
+
+  # Built ON Windows and graded there. The compiler is mc-php's own source,
+  # compiled by the runner's mc.exe and linked by lld-link next to the three
+  # files tests/winsys.sh writes (two import libraries' worth of names and two
+  # mc objects) -- nothing comes from the macOS job. tests/windows.sh then runs
+  # the same fixture gate as the other hosts and the extension gate with a DLL
+  # the runner's php loads.
+  windows:
+    name: The fixture gate (windows/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64,  nick: x86_64, runner: windows-latest }
+          - { arch: aarch64, nick: arm64,  runner: windows-11-arm }
+    defaults:
+      run:
+        shell: bash
+    env:
+      # MSYS rewrites an argument that looks like a path, and every dash-form
+      # lld-link option does (mc's own Windows legs set the same).
+      MSYS2_ARG_CONV_EXCL: "*"
+      LLVM_VERSION: "20.1.8"
+    steps:
+      # Before the checkout: a fixture is compared byte for byte with php, and
+      # a CRLF checkout changes what a heredoc prints. .gitattributes says so
+      # too; this covers the checkout made before that file is read.
+      - name: Never translate line endings
+        run: git config --global core.autocrlf false
+
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install mc ${{ env.MC_VERSION }} (the Windows build)
+        run: |
+          set -eu
+          asset="mc-$MC_VERSION-windows-${{ matrix.nick }}.tar.gz"
+          base="https://github.com/minicompiler/mc/releases/download/v$MC_VERSION"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o "$asset"        "$base/$asset"
+          curl -fsSL -o "$asset.sha256" "$base/$asset.sha256"
+          sha256sum -c "$asset.sha256"
+          mkdir -p mc
+          tar -xzf "$asset" -C mc --strip-components=1
+          ls mc
+          cygpath -w "$RUNNER_TEMP/mc" >> "$GITHUB_PATH"
+
+      # lld-link is the only LLVM tool used: it writes the import libraries
+      # (`-lib -def:`) as well as linking. windows-latest carries LLVM; the
+      # Windows-on-ARM image may not, and then the WoA release is fetched --
+      # mc's own windows/arm64 leg does the same.
+      - name: lld-link
+        run: |
+          set -eu
+          if command -v lld-link >/dev/null 2>&1; then :
+          elif [ -x "/c/Program Files/LLVM/bin/lld-link.exe" ]; then
+            echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+          else
+            base="https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION"
+            mkdir -p "$RUNNER_TEMP/llvm"
+            if curl -fSL -o "$RUNNER_TEMP/llvm.tar.xz" "$base/clang+llvm-$LLVM_VERSION-aarch64-pc-windows-msvc.tar.xz"; then
+              tar -xf "$RUNNER_TEMP/llvm.tar.xz" -C "$RUNNER_TEMP/llvm" --strip-components=1
+            else
+              curl -fSL -o "$RUNNER_TEMP/llvm.exe" "$base/LLVM-$LLVM_VERSION-woa64.exe"
+              7z x -o"$RUNNER_TEMP/llvm" "$RUNNER_TEMP/llvm.exe" > /dev/null
+            fi
+            cygpath -w "$RUNNER_TEMP/llvm/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Install PHP ${{ env.PHP_VERSION }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          coverage: none
+
+      - name: Versions
+        run: |
+          uname -srm
+          mc --version
+          mc --host
+          lld-link --version
+          php --version | head -1
+          php -r 'echo php_uname("m"), " ", PHP_INT_SIZE, "\n";'
+          php -i | tr -d '\r' | grep -E '^(PHP API|PHP Extension Build|Thread Safety|Debug Build) '
+
+      - name: Build mc-php here
+        run: |
+          set -eu
+          sh tests/winsys.sh ${{ matrix.arch }}
+          [ "${{ matrix.arch }}" = x86_64 ] || sh tests/winsys.sh x86_64
+          mc build src --config src/mc-php.windows-${{ matrix.arch }}.toml
+          ls -l build/mc-php-windows-${{ matrix.arch }}.exe
+          build/mc-php-windows-${{ matrix.arch }}.exe --host
+
+      - name: It compiles, the fixtures agree, and the extension loads
+        run: |
+          # The native programs open temporary files by the path the shell
+          # hands them; MSYS's /tmp means nothing to them, the runner's temp
+          # in D:/a/_temp form means the same thing to both.
+          export TMPDIR="$(cygpath -m "$RUNNER_TEMP")"
+          sh tests/windows.sh ${{ matrix.arch }}

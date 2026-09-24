@@ -1,0 +1,39 @@
+# mc-php.windows-aarch64.toml -- mc-php for a windows/aarch64 HOST, built ON it.
+#
+#   sh tests/winsys.sh aarch64
+#   mc build src --config src/mc-php.windows-aarch64.toml
+#   -> build/mc-php-windows-aarch64.exe
+#
+# The object + lld-link road, and not mc's one-step PE writer: mc's core
+# declares the POSIX names `extern` and mc's <sys_windows_host> defines them,
+# and one translation unit cannot do both (docs/plan.md § 5, measured with mc
+# 1.3.0). So the compiler is an object, linked next to mcrt.obj (those
+# definitions, compiled on their own) and winstart.obj (mc_start) and an
+# import library -- the three files tests/winsys.sh writes into [sysroot]. It
+# is how mc builds its own Windows compiler (its scripts/link-windows.sh).
+#
+# Every path below is relative to THIS FILE's directory (src/).
+
+[project]
+name  = "mc-php-windows-aarch64"
+entry = "mc-php-windows-aarch64.mc"
+out   = "../build/mc-php-windows-aarch64.exe"
+kind  = "exe"
+
+[target]
+os   = "windows"
+arch = "aarch64"
+
+[sysroot]
+path = "../build/win-aarch64"
+
+[linker]
+cmd  = "lld-link"
+args = ["-machine:arm64", "-subsystem:console", "-entry:mc_start", "-nodefaultlib",
+        "-out:{out}", "{obj}",
+        "{sysroot}/winstart.obj", "{sysroot}/mcrt.obj", "{sysroot}/kernel32.lib"]
+
+# The compiler is by far the biggest source here; at the default 0.25 several
+# tables double mid-build.
+[limits]
+tolerance = 1.0

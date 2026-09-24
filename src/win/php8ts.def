@@ -1,0 +1,7 @@
+LIBRARY php8ts.dll
+EXPORTS
+_emalloc
+zend_argument_count_error
+zend_lookup_class
+zend_throw_exception
+zend_type_error

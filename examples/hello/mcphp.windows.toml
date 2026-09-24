@@ -1,0 +1,66 @@
+# hello -- a PHP extension, described by a file. The WINDOWS linker line.
+#
+# Everything but [target], [sysroot], [linker] and build_id is
+# examples/hello/mcphp.toml. mc's [linker] is flat and has no per-OS form yet
+# (docs/mcphp-toml.md), so the third host is a third file.
+#
+#     sh tests/winsys.sh x86_64
+#     mc-php build examples/hello --config examples/hello/mcphp.windows.toml
+#
+# and build/hello.dll is what `php -d extension=...` loads.
+#
+# The ARCHITECTURE is the target php's, not the machine's. php publishes no
+# arm64 Windows build (windows.php.net: x64 and x86 only), so on a Windows-on-
+# ARM machine php is the x64 build running emulated, and an emulated x64
+# process loads x64 DLLs -- which is why this file says x86_64 on both Windows
+# hosts, and why the arm64 mc-php writes it by cross-compiling ACROSS
+# ARCHITECTURES (never across operating systems).
+#
+# The link, and why each word is there:
+#   -dll -noentry     a DLL with no DllMain: there is no C runtime to start,
+#                     and php calls get_module, not an entry point
+#   -export:get_module  the one name php looks up (GetProcAddress); nothing
+#                     else is exported, so two mc-php modules in one php do
+#                     not see each other's runtime (docs/plan.md § 7 item 6
+#                     is macOS's and Linux's flat namespace, not this one's)
+#   php8.lib          the five php8.dll names lib/php_ext.mc calls. A
+#                     thread-safe php is php8ts.dll: php8ts.lib, and
+#                     thread_safety = true below
+#   kernel32.lib, ucrtbase.lib   the runtime's own (lib/rt_host_windows.mc)
+# Every one of them is an import library tests/winsys.sh writes from a list of
+# names: no php development pack and no Windows SDK.
+
+[project]
+entry = "hello.php"
+out = "build/hello.dll"
+kind = "exe"
+
+[target]
+os   = "windows"
+arch = "x86_64"
+
+[sysroot]
+path = "../../build/win-x86_64"
+
+[linker]
+cmd = "lld-link"
+args = ["-dll", "-noentry", "-machine:x64", "-nodefaultlib", "-export:get_module",
+        "-out:{out}", "{obj}",
+        "{sysroot}/php8.lib", "{sysroot}/kernel32.lib", "{sysroot}/ucrtbase.lib"]
+
+[extension]
+name = "hello"
+version = "0.1.0"
+
+# Read off the target php with `php -i`, as on the other two hosts. On Windows
+# the build id names the compiler php was built with as well.
+#
+#     PHP API             => 20250925             api
+#     PHP Extension Build => API20250925,NTS,VS17 build_id
+#     Thread Safety       => disabled             thread_safety = false
+#     Debug Build         => no                   debug = false
+[php]
+api = 20250925
+build_id = "API20250925,NTS,VS17"
+thread_safety = false
+debug = false

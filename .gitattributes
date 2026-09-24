@@ -1,0 +1,5 @@
+# Never translate line endings. Every fixture is compared BYTE FOR BYTE with
+# what php prints, and a checkout that turned `\n` into `\r\n` changes what a
+# heredoc, a multi-line string and inline html print -- and makes `#!/bin/sh\r`
+# a hard failure on the Windows runners (mc's own .gitattributes, its M38).
+* -text

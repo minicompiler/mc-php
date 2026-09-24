@@ -52,10 +52,21 @@ out=$tmp.out
 # reach it. The caller's timeout kills this wrapper; without this the
 # compiler kept going, kept writing the binary, and left exactly the orphan
 # the temporary-directory bound exists to prevent.
-"$MCPHP" --exe "$src" -o "$tmp" > "$out" 2> "$err" &
+# Windows: an executable is a `.exe` or the loader will not start it, and on
+# windows/aarch64 mc has no one-step PE writer (its exe slot is 0), so there
+# the compiler writes an OBJECT and lld-link makes the program -- the road
+# tests/windows.sh asks for by setting MCPHP_WINLINK to the directory
+# tests/winsys.sh filled. windows/x86_64 keeps the one-step --exe.
+exe=$tmp
+case $(uname -s) in MINGW*|MSYS*|CYGWIN*) exe=$tmp.exe ;; esac
+if [ -n "${MCPHP_WINLINK:-}" ]; then
+    "$MCPHP" "$src" -o "$tmp.obj" > "$out" 2> "$err" &
+else
+    "$MCPHP" --exe "$src" -o "$exe" > "$out" 2> "$err" &
+fi
 mcpid=$!
-trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp"; exit 143' TERM
-trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp"; exit 130' INT
+trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj"; exit 143' TERM
+trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj"; exit 130' INT
 wait $mcpid
 rc=$?
 trap - TERM INT
@@ -65,12 +76,20 @@ if [ "$rc" != 0 ]; then
     # 255 is a php compile-time fatal: php reports those while parsing too,
     # and exits 255. The text is already written; passing the code through is
     # what makes the grid compare it.
-    if [ "$rc" = 255 ]; then rm -f "$err" "$out" "$tmp"; exit 255; fi
-    if grep -q 'is refused by design' "$err"; then rm -f "$err" "$out" "$tmp"; exit 3; fi
-    rm -f "$err" "$out" "$tmp"
+    if [ "$rc" = 255 ]; then rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj"; exit 255; fi
+    if grep -q 'is refused by design' "$err"; then rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj"; exit 3; fi
+    rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj"
     exit 2
 fi
 
+if [ -n "${MCPHP_WINLINK:-}" ]; then
+    lld-link -machine:arm64 -subsystem:console -entry:mc_start -nodefaultlib \
+        -out:"$exe" "$tmp.obj" "$MCPHP_WINLINK/kernel32.lib" "$MCPHP_WINLINK/ucrtbase.lib" \
+        > "$out" 2> "$err"
+    lrc=$?
+    rm -f "$tmp.obj"
+    if [ "$lrc" != 0 ]; then cat "$err" >&2; cat "$out"; rm -f "$err" "$out" "$exe"; exit 2; fi
+fi
 rm -f "$err" "$out"
 # The wrapper's own scratch name is not the PROGRAM's business: the oracle
 # runs without it, so a .phpt that reads getenv('MCPHP_OUT') or enumerates
@@ -95,4 +114,4 @@ fi
 # process. Without the exec the timeout killed the shell and left the binary
 # spinning -- eleven of them had accumulated across three grid runs before
 # this was measured. The binary is left behind for the caller to sweep.
-exec "$tmp" "$@"
+exec "$exe" "$@"
