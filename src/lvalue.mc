@@ -570,13 +570,30 @@ void ph_require(i64 once, uptr fl, i64 line) {
     ph_next();
 }
 
-// every statement announces its position first; a declaration and an empty
-// statement lower to nothing and get none.
+// A statement announces its position only when something in it can raise a
+// diagnostic or throw; a declaration and an empty statement lower to nothing
+// and get none either way.
+//
+// The position exists so a diagnostic can name a line and a throw can carry
+// one, and the check after the statement exists so a throw can unwind. A
+// statement that contains no call can do neither: under
+// declare(strict_types=1) with declared scalar types `$s = $s + $i` is two
+// loads, an add and a store, and everything that can raise in this compiler
+// is a runtime call. So ph_call's mark is the test -- it is conservative in
+// the safe direction, since a call that cannot raise still asks for both --
+// and php_pos itself is the one call exempt from it, for the reason
+// ph_posstmt gives.
 i64 ph_stmt() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
+    i64 save = ph_can_throw;
+    ph_can_throw = 0;
     i64 s = ph_stmt_1();
+    i64 raises = ph_can_throw;
+    ph_can_throw = raises | save;
     if (nd_kind(s) == N_BLOCK && !nd_a(s) && !nd_next(s)) return s;
+    if (!raises) return s;
+    if (ph_is_pos_at(s, fl, line)) return s;
     i64 p = ph_posstmt(fl, line);
     set_nd_next(p, s);
     return p;
@@ -1053,18 +1070,62 @@ i64 ph_stmt_1() {
     if (ph_is("for")) {
         ph_next();
         ph_want("(", 1, "expected ( after for");
+        // Each of the three parts is checked on its OWN mark. T6's rule is
+        // that the check goes between computing a value and using it, and
+        // each part computes one the next part uses: the initializer's is
+        // read by the condition, the step's by the condition of the NEXT
+        // iteration. Before the rule above, every one of them was covered by
+        // accident -- php_pos set ph_can_throw for every statement, so
+        // ph_cond_checked always fired and the check it put in the loop head
+        // stood in for all three. The step is where that mattered: it is
+        // parsed AFTER the condition, so its mark cannot reach
+        // ph_cond_checked however the flag travels, and
+        // `for ($m = 0; $m < 3; $m = boom())` ran the body a second time
+        // with the exception pending (tests/g/94-for-init-throws.php, found
+        // by the reviewer of #16).
+        i64 fsave = ph_can_throw;
+        i64 fany = 0;       // any part can raise: the for announces its line
+        ph_can_throw = 0;
+        // ph_stmt() consumes the initializer's own `;`, so the separator is
+        // consumed here only when there is no initializer -- consuming it
+        // after one ate the EMPTY condition's `;` and refused valid php:
+        // `for ($i = 0;; $i++)` said "expected ; in for".
         i64 init = ph_empty();
-        if (!ph_at(";", 1)) init = ph_stmt();
         if (ph_at(";", 1)) ph_next();
+        else init = ph_stmt();
+        if (ph_can_throw) {
+            i64 it = init;
+            loop { if (!nd_next(it)) break; it = nd_next(it); }
+            set_nd_next(it, ph_check(line, fl));
+        }
+        fany = fany | ph_can_throw;
+        ph_can_throw = 0;
         i64 c = ph_bool(1);
         if (!ph_at(";", 1)) c = ph_cond_checked(ph_to_bool(ph_expr(0), ph_ety), line, fl);
         // the CONDITION's own statements run every iteration, not once
         i64 cpre2 = ph_take_pend();
         ph_want(";", 1, "expected ; in for");
+        fany = fany | ph_can_throw;
+        ph_can_throw = 0;
         i64 step = 0;
         if (!ph_at(")", 1)) {
             step = ph_assign_stmt(fl, line, 0);         // $i++ / $i += e, no ;
         }
+        // in a BLOCK, because ph_loop_of hangs the step off an N_IF's branch
+        // and a branch is one node, not a chain: appended with set_nd_next the
+        // check was silently dropped, which the probe of the same fixture said
+        // before this line was written.
+        if (ph_can_throw && step) {
+            i64 pt = step;
+            loop { if (!nd_next(pt)) break; pt = nd_next(pt); }
+            set_nd_next(pt, ph_check(line, fl));
+            step = ph_blk(step);
+        }
+        // Each part's own check is placed above; what goes up is whether ANY
+        // part can raise, so the statement still announces its position and a
+        // diagnostic from the condition names the for's line and not the
+        // previous statement's (found by the reviewer of #16).
+        ph_can_throw = fany | ph_can_throw | fsave;
         ph_want(")", 1, "expected ) after for");
         i64 fopre = ph_take_pend();
         i64 alt = ph_accept(":", 1);

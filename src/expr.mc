@@ -840,6 +840,16 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
     }
     if (op == ph_tok("%", 1)) {
         ph_ety = PT_INT;
+        // `%` throws DivisionByZeroError, and that is the ONLY thing it can
+        // do besides the remainder -- so a divisor the compiler can see is a
+        // positive literal takes mc's own `%`, which is one instruction and
+        // cannot raise. The statement around it then needs neither php_pos
+        // nor php_thrown, which is what `$s + $i % 7` in a loop was paying.
+        // The same shape as the literal exponent below, and positive rather
+        // than non-zero for the same reason C has: php answers 0 for
+        // `PHP_INT_MIN % -1` and a native sdiv is where that is not free.
+        if (nd_kind(rhs) == N_INT && nd_val(rhs) > 0)
+            return ph_bin(op, ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
         return ph_c2("php_mod", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
     }
     if (op == ph_tok("**", 2)) {

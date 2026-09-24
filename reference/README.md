@@ -34,18 +34,33 @@ excluded from `docs/plan.md` D8 for the same reason `probes/` is
 the same name, on the same host, the same php and the same `bench.php` (three interleaved runs,
 2026-09-23):
 
-| | interpreted | `reference/bench.mc`, by hand | `mc-php` |
-|---|---|---|---|
-| `fib(30)` | 31 ms | **2.8 ms (11.1x)** | 9.6 ms (3.3x) |
-| `sum(3000000)` | 9.1 ms | **1.8 ms (5.2x)** | 11.7 ms (**0.78x -- slower than php**) |
+`bench-steady.php` runs the same two functions with a warm-up and the best of nine, because
+`bench.php` times ONE cold call each and that carries a band this host can see: nine processes
+give `sum` a minimum of 2.26 ms and a maximum of 5.76 ms for the SAME binary, and two builds of
+the same source differing only in the module's NAME -- so in nothing but where the code lands --
+measured 5.9 and 1.9. The table below is nine processes, interleaved, at the minimum.
 
-Both answer the same values. The gap is not the boundary and not the module header -- it is the
-BODY, and `--dump-asm` names it in one look: the generated loop carries **two real calls per
-statement**, `php_pos` (T7's diagnostic position) and `php_thrown` (T6's unwinding check), and
-every local lives in the frame. A 3-million-iteration loop pays six million calls the hand-written
-mc does not make. `docs/plan.md` D7 and the D8 bench already record the same thing for the program
-road ("the generated code is 8x to 23x slower than php's VM"); this is that number seen from the
-extension road, where it matters more, because the whole point of a native extension is the work.
+| | interpreted | `reference/bench.mc`, by hand | `mc-php` before | `mc-php` today |
+|---|---|---|---|---|
+| `fib(30)` | 30.4 ms | **2.78 ms (11.0x)** | 9.62 ms (3.18x) | **4.82 ms (6.31x)** |
+| `sum(3000000)` | 9.05 ms | **1.65 ms (5.5x)** | 10.55 ms (**0.86x**) | **2.26 ms (4.00x)** |
+
+All three answer the same values. The "before" column is what this page recorded on 2026-09-23
+and it is reproduced here by a compiler built from that commit; `sum` was slower than the
+interpreter, and `--dump-asm` named the cause in one look: **two real calls per statement**,
+`php_pos` (T7's diagnostic position) and `php_thrown` (T6's unwinding check), so a
+3-million-iteration loop paid six million calls the hand-written mc does not make.
+
+Both calls are gone from that loop. A statement announces its position only when something in it
+can raise a diagnostic or throw, and is followed by the unwinding check only then -- under
+`declare(strict_types=1)` with declared scalar types `$i <= $n` and `$s += ...` can do neither --
+and `%` by a literal the compiler can see is positive lowers to `sdiv`/`msub` rather than to
+`php_mod`, which is the only call left in the body. `--dump-asm` of `mcb_sum` is now call-free.
+
+What is left, and it is the rest of the sentence this page has always carried: **every local
+lives in the frame**. The hand-written column keeps its values in registers, which is the whole
+of the remaining 1.4x on `sum` and most of the 1.7x on `fib`. `docs/plan.md` D7 and the D8 bench
+record the same thing for the program road.
 
 One more thing that fell out of the same measurement and is **not** the extension road's: a php
 ternary allocates per evaluation, so `function f(int $n): int { return $n < 2 ? $n : f($n-1) +
