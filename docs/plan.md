@@ -1283,11 +1283,14 @@ In the order the measurements put them, each with the number that says why:
    number (php's null is 0 to every arithmetic operator) and the zval php has anywhere else; a
    variable whose only assignment is `$v = $x[K];` keeps both halves native. The buffer comes from
    `php_alloc`: Zend's chunk on the extension road, the arena on the program road. Gated by
-   `tests/g/105` (seven functions the proof accepts, absent and sparse keys and `**` on a checked
-   operand included), `tests/g/106` (seventeen ways it must fail) and the end of
+   `tests/g/105` (eight functions the proof accepts, absent and sparse keys, `**` on a checked
+   operand and a key that throws included), `tests/g/106` (seventeen ways it must fail) and the end of
    `tests/fixtures.sh`, which reads the lowering back and checks which way each went, and that a
    store whose value overflows is not reached (`try { $x[] = $x[0] * 3; }` leaves `$x` as it was:
-   the value is computed and checked before `php_pk_push`/`php_pk_set`). Afterwards `_dec_umul` is 14.3% inclusive of a smaller whole,
+   the value is computed and checked before `php_pk_push`/`php_pk_set`, and a key that throws is
+   checked before the value is evaluated), and that `PHP_INT_MIN * -1` in either order is the
+   named error on every leg (the one product whose division test could trap on x86-64 -- it does
+   not: `x == -1` is tested before `r / x`, and `r / PHP_INT_MIN` cannot trap). Afterwards `_dec_umul` is 14.3% inclusive of a smaller whole,
    and its array work 3.5% of the module, from 12.9% (the buffer's own calls 135 samples of 6010,
    an element handed to `_dec_limb` as a zval 78).
 

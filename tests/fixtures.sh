@@ -179,12 +179,20 @@ function pks(int $n): string {
     return count($x) . " " . $x[0];
 }
 echo pko(5), "\n", pko(PHP_INT_MAX), "\n", pkn(5), " ", pkn(PHP_INT_MAX - 1), "\n";
+// PHP_INT_MIN * -1 in both orders: the one product whose DIVISION check
+// would trap on x86-64 (idiv of PHP_INT_MIN by -1); it must be the named error
+function pkm(int $n, int $o): string {
+    $x = [];
+    $x[] = $n;
+    try { if ($o) return (string) (-1 * $x[0]); return (string) ($x[0] * -1); } catch (ArithmeticError $e) { return "A"; }
+}
 echo pks(5), " ", pks(PHP_INT_MAX), "\n";
+echo pkm(5, 0), " ", pkm(5, 1), " ", pkm(PHP_INT_MIN, 0), " ", pkm(PHP_INT_MIN, 1), "\n";
 PKO
 lim $P/mcphp.sh "$tmp/pko.php" > "$tmp/pko.out" 2> "$tmp/pko.err"
 rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
 pko=$(tr -d '\r' < "$tmp/pko.out")
-pkw=$(printf '15\nArithmeticError: mc-php: an int overflowed in * on a packed array'"'"'s element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)\n-12 ArithmeticError\n2 10 1 9223372036854775807')
+pkw=$(printf '15\nArithmeticError: mc-php: an int overflowed in * on a packed array'"'"'s element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)\n-12 ArithmeticError\n2 10 1 9223372036854775807\n-5 -5 A A')
 if [ "$pko" = "$pkw" ]; then
     echo "  packed: an overflow on an element is the named ArithmeticError, not a wrapped int, and no store"
 else

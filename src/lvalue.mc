@@ -227,9 +227,17 @@ i64 ph_pk_store(uptr d, uptr fl, i64 line, i64 semi) {
     set_nd_name(base, ph_mangle(d, "v_"));
     set_nd_type(base, TY_UPTR);
     i64 k = 0;
+    i64 before = ph_can_throw;
     if (!ph_at("]", 1)) {
+        ph_can_throw = 0;
         k = ph_expr(0);
         if (ph_ety != PT_INT) ph_pk_disagree(fl, line, "a key that is not an int");
+        // a key that throws (`$x[intdiv(1, 0)] = 2`) stops the assignment
+        // before the value is evaluated, as php's does
+        if (ph_can_throw) {
+            k = ph_temp(k, TY_I64, "phk_");
+            ph_pending_stmt(ph_check(line, fl));
+        }
     }
     ph_want("]", 1, "expected ] in a php array assignment");
     ph_want("=", 1, "expected = after a php array index");
@@ -238,7 +246,6 @@ i64 ph_pk_store(uptr d, uptr fl, i64 line, i64 semi) {
     // $x as it was when the product overflows. The key is taken first so php's
     // order -- key, then value -- survives the value moving ahead of the store.
     if (k && nd_kind(k) != N_INT && nd_kind(k) != N_IDENT) k = ph_temp(k, TY_I64, "phk_");
-    i64 before = ph_can_throw;
     ph_can_throw = 0;
     i64 v = ph_pk_int(fl, line);
     if (ph_can_throw) {

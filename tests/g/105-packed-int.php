@@ -99,6 +99,14 @@ function pk_pow(int $n) {
     var_dump(($x[0] + 1) ** 2, $x[0] ** 2, -($x[0] + 1) ** 3);
 }
 
+// a key that throws stops the assignment before the value and the store
+function pk_key(int $d) {
+    $x = [];
+    $x[] = 1;
+    try { $x[intdiv(1, $d)] = 2; } catch (DivisionByZeroError $e) { echo get_class($e), "\n"; }
+    echo count($x), " ", $x[0], "\n";
+}
+
 echo pk_mul("123456789012345678", "98765432109876543210"), "\n";
 echo pk_mul("9999", "9999"), " ", pk_mul("0", "5"), " ", pk_mul("1", "1"), "\n";
 pk_absent();
@@ -111,3 +119,5 @@ echo pk_sum(10), "\n";
 echo pk_grow(100), "\n";
 pk_pow(3);
 pk_pow(PHP_INT_MAX - 1);
+pk_key(1);
+pk_key(0);
