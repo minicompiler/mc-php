@@ -102,6 +102,27 @@ the C twin is still 6.3x faster than the module, and the rest of that gap is nam
 `docs/plan.md` § 7. The project files now build with mc's optimizer (`[project].opt = 1`), which
 accounts for 1.7x of the 4.3x.
 
+**Three columns, the decimal-c batch** (2026-09-24, macos/arm64, php 8.5.10, one host, one
+sitting, five rounds interleaved; `decimal.php` byte for byte what it was, every gain in the
+compiler and its runtime -- `docs/plan.md` § 7 item 1 has the profile, the table of what each
+change bought, and what is left):
+
+| | interpreted | the module | the C twin | module / C |
+|---|---|---|---|---|
+| before (main) | 3.29 ms | 1.514 ms (2.17x) | 0.239 ms (13.77x) | 6.33 |
+| after | 3.29 ms | **0.990 ms (3.32x)** | 0.240 ms (13.71x) | **4.12** |
+
+`tests/examples.sh`'s own bench row on the final tree: 3.299 / 0.998 (3.31x) / 0.237 ms (13.92x).
+The largest single steps: `_dec_umul`'s arrays are native int buffers now (the compiler proves they
+hold only ints and never leave the function, `src/packed.mc`), `_dec_coef`'s two one-byte
+`str_replace` deletions are one pass, and a cast no longer swallows the `- $borrow` after it.
+
+What still separates the module from the twin is mostly the ALGORITHM both php and the module run:
+a number is a string, so every operation re-validates and re-parses its operands and makes new
+strings for its intermediate values, where the twin parses each operand once into digits and
+writes into one buffer; the rest is named in `docs/plan.md` § 7 (mc's code for a leaf function,
+§ 5; the call's memory zeroed on return; the result copied out to Zend).
+
 ## What it cannot do yet
 
 * **A wrong TYPE** is an internal function's message in the module and a userland one

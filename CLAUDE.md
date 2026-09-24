@@ -782,3 +782,29 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     17-digit shortest float's last digit, and `2 * "abc"`'s operand order in the TypeError.
   * The grid against a snapshot of main: `tests/lang` 104 = 104, `Zend/tests` 763 -> 766,
     strings 271 -> 272, no test out of green. `tests/run.sh` green; D8 (b) `heavy.php` 1.85x.
+- Decimal-c (2026-09-24, branch `decimal-c`), on **mc 1.1.0** here: **`examples/decimal` from 6.3x
+  the C twin's time to 4.1x** -- the module 1.514 -> **0.98 ms**, interpreted 3.29 ms (3.3x), the
+  twin 0.240 ms (13.7x), macos/arm64. `decimal.php` unchanged. Profile first (`sample`, 4262
+  samples): batch E's `_dec_umul` cause confirmed (12.9% of the module in array/zval calls) and
+  allocation confirmed (13.1%); the "prologue saves registers it does not use" cause CORRECTED --
+  805 of 805 functions save exactly what they use; what costs is that mc gives a leaf function
+  callee-saved registers and has no immediate operands (`docs/plan.md` § 5, reproducer).
+  * **A packed int array** (`src/packed.mc`): a token scan per plain function proves a local array
+    holds only ints under keys 0..n-1 and never leaves the function; it becomes `php_pk_*`, a
+    native i64 buffer from `php_alloc`. The scan predicts static types and the lowering checks each
+    prediction (a disagreement is a compile error). A missing key is php's warning and null; a
+    key past the end turns the buffer into php's hash in place. An element read (`PT_INULL`) is an
+    int beside a number and the zval php has elsewhere. `tests/g/105` (accepted), `tests/g/106`
+    (15 refusals of the proof), and `tests/fixtures.sh` reads the lowering back.
+  * Compiler: a cast binds as tightly as unary minus (`(int) "1.9" + 0.5` was int(2),
+    `tests/g/107`); byte maps built with the literals; `str_pad((string) $int)` fused; `===`
+    between strings is `php_str_eq`; two nested one-byte `str_replace` deletions are one pass
+    (`php_str_del2`); `$s[$i] === 'c'` in place; `strpos($s, 'c')` is `php_strpos1`; a
+    concatenation chain is one string (`php_str_cat3`/`cat4`, `tests/g/110`).
+  * Runtime: word-at-a-time `php_memchr`, one-pass one-byte `str_replace`, a copy's tail one word,
+    `php_str_alloc` bumps the chunk itself, `array_fill` with a negative count throws php's
+    ValueError (it returned `[]`).
+  * The grid: `tests/lang` 104, `Zend/tests` 766, strings 272, every one of the fifteen lists
+    identical to main's (`comm`). `tests/run.sh` green. Found and NOT fixed, on record in § 7:
+    native int arithmetic wraps on overflow (D10 says it promotes), and an array local assigned on
+    one path only is a SIGSEGV on the other.
