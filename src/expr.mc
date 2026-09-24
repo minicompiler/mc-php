@@ -1086,17 +1086,46 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
     if (minp <= 20 && ph_at("?", 1)) {
         i64 line3 = ph_tline;
         uptr fl3 = ph_tfile;
+        ph_next();
+        if (!ph_at(":", 1)) {
+            // The full a ? b : c. Its value is only ever one branch, so when
+            // both branches have one native type the temporary has it too and
+            // no zval is made: a zval per evaluation is an ALLOCATION, and a
+            // recursive `return $n < 2 ? $n : f($n-1) + f($n-2);` made one
+            // per call until the arena ran out (docs/plan.md § 7). Two
+            // different types keep the zval: php's value keeps its own type.
+            i64 cnd3 = ph_to_bool(lhs, lt);
+            i64 oc3 = ph_take_pend();
+            i64 b3 = ph_expr(0);
+            i64 bt3 = ph_ety;
+            i64 ib3 = ph_take_pend();
+            ph_want(":", 1, "expected : in a php conditional");
+            i64 c3 = ph_expr(20);
+            i64 ct3 = ph_ety;
+            i64 ic3 = ph_take_pend();
+            ph_put_pend(oc3);
+            i64 rt3 = PT_MIXED;
+            if (bt3 == ct3 && (bt3 == PT_INT || bt3 == PT_FLOAT || bt3 == PT_BOOL || bt3 == PT_STRING))
+                rt3 = bt3;
+            if (rt3 == PT_MIXED) { b3 = ph_to_mixed(b3, bt3); c3 = ph_to_mixed(c3, ct3); }
+            ph_nonce = ph_nonce + 1;
+            uptr tn3 = p_cat("phq_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+            ph_local(tn3, ph_mcty(rt3));
+            i64 iff3 = node_new(N_IF, line3, fl3);
+            set_nd_a(iff3, cnd3);
+            set_nd_b(iff3, ph_blk(ph_prefix_stmts(ib3, ph_set(tn3, b3))));
+            set_nd_c(iff3, ph_blk(ph_prefix_stmts(ic3, ph_set(tn3, c3))));
+            ph_pending_stmt(iff3);
+            ph_ety = rt3;
+            i64 r3 = node_new(N_IDENT, line3, fl3);
+            set_nd_name(r3, tn3);
+            set_nd_type(r3, ph_mcty(rt3));
+            return r3;
+        }
+        // a ?: c -- the condition IS the value, so it stays a zval
         i64 tmp2 = ph_temp(ph_to_mixed(lhs, lt), ty_pzv, "phq_");
         i64 cnd = ph_cast(TY_U8, ph_c1("php_zv_bool", ph_tref(tmp2), TY_I64));
-        ph_next();
         i64 oc = ph_take_pend();
-        i64 thenv = 0;
-        if (!ph_at(":", 1)) {                      // the full a ? b : c
-            i64 b = ph_expr(0);
-            i64 ic = ph_take_pend();
-            thenv = ph_blk(ph_prefix_stmts(ic,
-                ph_set(nd_name(tmp2), ph_to_mixed(b, ph_ety))));
-        }
         ph_want(":", 1, "expected : in a php conditional");
         i64 c = ph_expr(20);
         i64 ic2 = ph_take_pend();
@@ -1104,16 +1133,12 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
             ph_set(nd_name(tmp2), ph_to_mixed(c, ph_ety))));
         ph_put_pend(oc);
         i64 iff2 = node_new(N_IF, line3, fl3);
-        set_nd_a(iff2, cnd);
-        if (thenv) { set_nd_b(iff2, thenv); set_nd_c(iff2, elsev); }
-        if (!thenv) {                              // a ?: c
-            i64 nn2 = node_new(N_UNARY, line3, fl3);
-            set_nd_op(nn2, ph_tok("!", 1));
-            set_nd_a(nn2, cnd);
-            set_nd_type(nn2, TY_U8);
-            set_nd_a(iff2, nn2);
-            set_nd_b(iff2, elsev);
-        }
+        i64 nn2 = node_new(N_UNARY, line3, fl3);
+        set_nd_op(nn2, ph_tok("!", 1));
+        set_nd_a(nn2, cnd);
+        set_nd_type(nn2, TY_U8);
+        set_nd_a(iff2, nn2);
+        set_nd_b(iff2, elsev);
         ph_pending_stmt(iff2);
         ph_ety = PT_MIXED;
         return ph_tref(tmp2);
