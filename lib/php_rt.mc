@@ -2430,9 +2430,11 @@ uptr php_obj_new(uptr ce) {
 // `new` threw first (Zend/tests/try/catch_00{2,3,4}, exceptions/bug47771).
 void php_dt_arm(uptr o) {
     uptr ce = php_obj_ce(o);
-    php_pin();                                // ph_dt_head
     if (!ce) return;
     if (!php_ce_lookup(ce, 24, php_str_new("__destruct", 10))) return;
+    // only an object that HAS a destructor joins ph_dt_head: pinning before
+    // the lookup made every `new` keep its call's memory (the review of #19)
+    php_pin();
     uptr n = php_alloc(16);
     st64(n, o);
     st64(n + 8, ph_dt_head);

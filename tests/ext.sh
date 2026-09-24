@@ -294,6 +294,27 @@ else
 fi
 rm -rf "$tmp/build"
 
+# --- 9b. a call that makes an object keeps nothing ----------------------------
+# An object is call memory like any other unless it has a destructor (which
+# joins module state). 200 000 calls that each make a stdClass must leave
+# php's usage where it was; pinning every `new` kept each call's memory until
+# the request ended (the review of #19).
+printf '<?php\nfunction mk(int $n): int { $o = new stdClass; $o->v = $n; $a = [$o, $o]; return $a[1]->v; }\n' > "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/ob.build" 2>&1; then
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" \
+        -r '$u = memory_get_usage(); $s = 0; for ($i = 0; $i < 200000; $i++) { $s += mk($i); } printf("%d %d", $s, memory_get_usage() - $u);' 2>&1 | tr -d '\r')
+    set -- $got
+    if [ "${1:-}" = 19999900000 ] && [ "${2:-999999}" -lt 65536 ]; then
+        say "objects: 200000 calls that each make one, php's usage moved $2 bytes"
+    else
+        bad "objects: want 19999900000 and usage under 64 KiB, got $got"
+    fi
+else
+    bad "objects: it would not build"; sed 's/^/      /' "$tmp/ob.build"
+fi
+rm -rf "$tmp/build"
+
 # --- 10. a request lifecycle, through php's own built-in server -------------
 # Twenty requests to one php -S, each calling a static counter twice, a
 # `global` twice and a function that keeps 4 MiB in a static: php resets all
