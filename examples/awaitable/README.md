@@ -47,7 +47,7 @@ need what no PHP source can say today: a C library called with a C variadic (`#[
 
 | step | macOS, linux/aarch64, linux/x86_64 | windows/x86_64, windows/arm64 |
 |---|---|---|
-| `awaitable.mc` compiled by plain mc and linked; `check.php` against `check.expect`, byte for byte: 35 lines -- await, a throwing callable, a bad callback, parallel with six children (distinct pids, none of them php's own, the same sums as sequential), closures, methods and internal functions, a throwing child, `await(parallel)`, six `file://` fetches on threads under `Semaphore(2)` (bodies as written, peak concurrency within 2), and the sync primitives | yes | SKIPPED, the reason printed: pthreads, `fork`, `pipe` and `dlsym` are POSIX |
+| `awaitable.mc` compiled by plain mc and linked; `check.php` against `check.expect`, byte for byte: 37 lines -- await, a throwing callable, a bad callback, parallel with six children (distinct pids, none of them php's own, the same sums as sequential), closures, methods and internal functions, a throwing child, `await(parallel)`, six `file://` fetches on threads under `Semaphore(2)` (bodies as written, peak concurrency within 2), the sync primitives, and that the native handle is private | yes | SKIPPED, the reason printed: pthreads, `fork`, `pipe` and `dlsym` are POSIX |
 | `demo.php` (the owner's `reference/aw6.php`, translated) run, and its `same results: true` line required; its times are printed, not gated | yes | SKIPPED |
 | the build this example waits for, `mcphp.toml` over `awaitable.src.php`, refused with the first message above | yes | yes |
 

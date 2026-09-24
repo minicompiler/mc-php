@@ -935,7 +935,7 @@ its code is written.
      `extB.php` is refused -- `a php function mc-php does not have: a_add` -- because a call to a
      function the source does not declare is not lowered to a lookup in php's function table at
      call time, and the gate pins that refusal. On Windows the pair SKIPS by name (`dlsym`).
-   - `awaitable` -- DONE as **hand-written mc**: `awaitable.mc` from `reference/aw6.mc`, 35 lines
+   - `awaitable` -- DONE as **hand-written mc**: `awaitable.mc` from `reference/aw6.mc`, 37 lines
      against `check.expect` (await, forked `parallel` over any callable, libcurl on pthreads under
      a semaphore, the sync primitives), and `awaitable.src.php` refused at its first line, pinned.
      Its README lists the five refusals behind it. POSIX only; Windows SKIPS by name.

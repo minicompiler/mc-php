@@ -33,3 +33,5 @@ http_get_many: 6 bodies, all as written: true, completed() = 6, peak concurrency
 http_get: 3000 bytes
 http_get of a missing file throws Exception
 WaitGroup, Mutex and Semaphore: every call returned
+Error: Cannot access private property awaitable\Semaphore::$__h
+and the semaphore still works

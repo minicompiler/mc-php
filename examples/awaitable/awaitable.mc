@@ -93,6 +93,10 @@ extern i32 zend_call_function(uptr fci, uptr fcc);
 #define IS_STRING_EX 0x106
 #define ZSTR_TYPE_INFO 0x16   // IS_STRING | GC_NOT_COLLECTABLE, measured
 #define ACC_PUBLIC 1
+// the native handle is PRIVATE: a public one let `$s->__h = 0` hand pthread a
+// pointer of the caller's choosing (the reviewer of #18). The module reads and
+// writes it with the class itself as the scope, which private allows.
+#define ACC_PRIVATE 4
 #define OBJ_HANDLE 8
 
 #define CURLOPT_URL 10002
@@ -512,7 +516,7 @@ i64 minit(i64 ty, i64 num) {
     ent(m, 3, "bind",    &m_sem_bind, &ai_none, 0, ACC_PUBLIC);
     ent(m, 4, "unbind",  &m_sem_unbind, &ai_none, 0, ACC_PUBLIC);
     st64(&ce_sem, mkclass("awaitable\\Semaphore", 19, m));
-    zend_declare_property_long(ld64(&ce_sem), "__h", 3, 0, ACC_PUBLIC);
+    zend_declare_property_long(ld64(&ce_sem), "__h", 3, 0, ACC_PRIVATE);
 
     uptr w = &mwg;
     ent(w, 0, "__construct", &m_wg_ctor, &ai_none, 0, ACC_PUBLIC);
@@ -520,14 +524,14 @@ i64 minit(i64 ty, i64 num) {
     ent(w, 2, "done", &m_wg_done, &ai_none, 0, ACC_PUBLIC);
     ent(w, 3, "wait", &m_wg_wait, &ai_none, 0, ACC_PUBLIC);
     st64(&ce_wg, mkclass("awaitable\\WaitGroup", 19, w));
-    zend_declare_property_long(ld64(&ce_wg), "__h", 3, 0, ACC_PUBLIC);
+    zend_declare_property_long(ld64(&ce_wg), "__h", 3, 0, ACC_PRIVATE);
 
     uptr x = &mmx;
     ent(x, 0, "__construct", &m_mx_ctor, &ai_none, 0, ACC_PUBLIC);
     ent(x, 1, "lock",   &m_mx_lock,   &ai_none, 0, ACC_PUBLIC);
     ent(x, 2, "unlock", &m_mx_unlock, &ai_none, 0, ACC_PUBLIC);
     st64(&ce_mx, mkclass("awaitable\\Mutex", 15, x));
-    zend_declare_property_long(ld64(&ce_mx), "__h", 3, 0, ACC_PUBLIC);
+    zend_declare_property_long(ld64(&ce_mx), "__h", 3, 0, ACC_PRIVATE);
 
     st64(&ce_intent, mkclass("awaitable\\Intent", 16, 0));
     uptr ci = ld64(&ce_intent);

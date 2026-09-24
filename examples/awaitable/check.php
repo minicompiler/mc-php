@@ -106,3 +106,12 @@ $s = new Semaphore(1);
 $s->acquire();
 $s->release();
 echo "WaitGroup, Mutex and Semaphore: every call returned\n";
+// the native handle is not the caller's to write
+try {
+    $s->__h = 0;
+} catch (Error $e) {
+    echo get_class($e), ": ", $e->getMessage(), "\n";
+}
+$s->acquire();
+$s->release();
+echo "and the semaphore still works\n";
