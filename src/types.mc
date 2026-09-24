@@ -96,8 +96,9 @@ i64 ph_zkey(i64 n, i64 t) { return ph_to_mixed(n, t); }
 i64 ph_to_str(i64 n, i64 t) {
     if (t == PT_STRING) return n;
     if (t == PT_INULL)  return ph_to_str(ph_inull_zv(n), PT_MIXED);
-    if (t == PT_INT)    return ph_c1("php_itos", n, ty_pstr);
-    if (t == PT_IFALSE) return ph_c1("php_itos", n, ty_pstr);
+    // quiet: an int's digits raise nothing
+    if (t == PT_INT)    return ph_quiet("php_itos", 1, n, 0, 0, 0, ty_pstr);
+    if (t == PT_IFALSE) return ph_quiet("php_itos", 1, n, 0, 0, 0, ty_pstr);
     if (t == PT_FLOAT)  return ph_c1("php_ftos", n, ty_pstr);
     if (t == PT_BOOL)   return ph_c1("php_btos", n, ty_pstr);
     if (t == PT_MIXED || t == PT_NULL) return ph_c1("php_zv_str", n, ty_pstr);

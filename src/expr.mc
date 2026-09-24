@@ -1017,6 +1017,14 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
                 return ph_cast(TY_U8, ph_bin(eop, at, ph_int(0), TY_U8));
             }
         }
+        // === and !== ask only whether the bytes are the same: the lengths
+        // first, and no ordering (php_str_eq)
+        if (strict) {
+            ph_ety = PT_BOOL;
+            i64 eop2 = ph_tok("!=", 2);
+            if (neg) eop2 = ph_tok("==", 2);
+            return ph_cast(TY_U8, ph_bin(eop2, ph_quiet("php_str_eq", 2, lhs, rhs, 0, 0, TY_I64), ph_int(0), TY_U8));
+        }
         i64 c = ph_c2("php_str_cmp", lhs, rhs, TY_I64);
         if (t == ph_tok("<=>", 3)) { ph_ety = PT_INT; return c; }
         i64 op = t;

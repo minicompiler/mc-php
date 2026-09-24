@@ -128,6 +128,12 @@ i64 php_memchr(uptr p, i64 c, i64 n) {
         if (((x - 0x0101010101010101) & (x ^ 0xffffffffffffffff) & 0x8080808080808080) != 0) break;
         i = i + 8;
     }
+    // past the last whole word: the LAST eight bytes as one more word, when
+    // there are eight, so a miss costs no byte loop at all
+    if (i < n && n >= 8 && i + 8 > n) {
+        u64 y = ld64(p + n - 8) ^ pat;
+        if (((y - 0x0101010101010101) & (y ^ 0xffffffffffffffff) & 0x8080808080808080) == 0) return 0 - 1;
+    }
     loop { if (i >= n) break; if (ld8(p + i) == c) return i; i = i + 1; }
     return 0 - 1;
 }
@@ -181,30 +187,44 @@ i64 php_str_cmp(uptr a, uptr b) {
     return 0;
 }
 
-i64 php_str_eq(uptr a, uptr b) { if (php_str_cmp(a, b) == 0) return 1; return 0; }
-
-// ---- int and bool to string ------------------------------------------------
-uptr php_itos(i64 v) {
-    u8 t[24];
-    i64 k = 0;
-    i64 neg = 0;
-    u64 u = v;
-    if (v < 0) { neg = 1; u = 0 - u; }
-    loop {
-        st8(t + k, '0' + u % 10);
-        u = u / 10;
-        k = k + 1;
-        if (u == 0) break;
-    }
-    uptr s = php_str_alloc(k + neg);
-    if (neg) st8(s + ZS_HDR, '-');
+// === between two strings: the lengths first, then eight bytes a step
+i64 php_str_eq(uptr a, uptr b) {
+    if (a == b) return 1;
+    i64 n = ld64(a + 16);
+    if (n != ld64(b + 16)) return 0;
     i64 i = 0;
     loop {
-        if (i >= k) break;
-        st8(s + ZS_HDR + neg + i, ld8(t + k - 1 - i));
-        i = i + 1;
+        if (i + 8 > n) break;
+        if (ld64(a + ZS_HDR + i) != ld64(b + ZS_HDR + i)) return 0;
+        i = i + 8;
     }
-    return s;
+    loop { if (i >= n) break; if (ld8(a + ZS_HDR + i) != ld8(b + ZS_HDR + i)) return 0; i = i + 1; }
+    return 1;
+}
+
+// ---- int and bool to string ------------------------------------------------
+// The decimal digits of v written BACKWARDS from the end of the 24-byte t,
+// one division a digit (the remainder is a multiply and a subtract); answers
+// where they start. php_itos and str_pad's fused form (php_str_pad_i) share it.
+i64 php_itos_b(i64 v, uptr t) {
+    i64 k = 24;
+    u64 u = v;
+    if (v < 0) u = 0 - u;
+    loop {
+        u64 q = u / 10;
+        k = k - 1;
+        st8(t + k, '0' + (u - q * 10));
+        u = q;
+        if (u == 0) break;
+    }
+    if (v < 0) { k = k - 1; st8(t + k, '-'); }
+    return k;
+}
+
+uptr php_itos(i64 v) {
+    u8 t[24];
+    i64 k = php_itos_b(v, t);
+    return php_str_new(t + k, 24 - k);
 }
 
 uptr php_btos(u8 b) {
@@ -2325,9 +2345,9 @@ i64 php_strpos(uptr h, uptr nd, i64 off) {
     uptr nb = nd + ZS_HDR;
     i64 c0 = ld8(nb);
     if (nn == 1) {
-        i64 k = off;
-        loop { if (k >= hn) break; if (ld8(hb + k) == c0) return k; k = k + 1; }
-        return -1;
+        i64 k = php_memchr(hb + off, c0, hn - off);
+        if (k < 0) return -1;
+        return off + k;
     }
     i64 last = hn - nn;
     i64 i = off;
@@ -2697,24 +2717,44 @@ uptr php_strrev(uptr s) {
     return o;
 }
 
-uptr php_str_pad(uptr s, i64 len, uptr pad, i64 type) {    // php: 0 left, 1 right, 2 both
-    i64 n = php_strlen(s);
-    i64 pl = php_strlen(pad);
-    if (len <= n || pl == 0) return s;
+// str_pad of the n bytes at b, which is shorter than len and the pad not
+// empty: always a new string. The pad cycles by a counter, not `i % pl` --
+// a division a byte.
+uptr php_str_pad_b(uptr b, i64 n, i64 len, uptr pad, i64 type) {    // php: 0 left, 1 right, 2 both
+    i64 pl = ld64(pad + 16);
+    uptr pv = pad + ZS_HDR;
     i64 need = len - n;
     i64 left = 0;
     if (type == 0) left = need;
     if (type == 2) left = need / 2;
     i64 right = need - left;
     uptr o = php_str_alloc(len);
-    i64 w = 0;
+    uptr w = o + ZS_HDR;
     i64 i = 0;
-    loop { if (i >= left) break; st8(o + ZS_HDR + w, ld8(pad + ZS_HDR + i % pl)); w = w + 1; i = i + 1; }
-    php_memcpy(o + ZS_HDR + w, s + ZS_HDR, n);
-    w = w + n;
+    i64 j = 0;
+    loop { if (i >= left) break; st8(w + i, ld8(pv + j)); j = j + 1; if (j == pl) j = 0; i = i + 1; }
+    php_memcpy(w + left, b, n);
+    w = w + left + n;
     i = 0;
-    loop { if (i >= right) break; st8(o + ZS_HDR + w, ld8(pad + ZS_HDR + i % pl)); w = w + 1; i = i + 1; }
+    j = 0;
+    loop { if (i >= right) break; st8(w + i, ld8(pv + j)); j = j + 1; if (j == pl) j = 0; i = i + 1; }
     return o;
+}
+
+uptr php_str_pad(uptr s, i64 len, uptr pad, i64 type) {
+    i64 n = php_strlen(s);
+    if (len <= n || php_strlen(pad) == 0) return s;
+    return php_str_pad_b(s + ZS_HDR, n, len, pad, type);
+}
+
+// str_pad((string) $int, ...): the digits padded where they were written,
+// so the string the cast would have made is never built (the compiler
+// fuses the two, src/builtin.mc)
+uptr php_str_pad_i(i64 v, i64 len, uptr pad, i64 type) {
+    u8 t[24];
+    i64 k = php_itos_b(v, t);
+    if (len <= 24 - k || php_strlen(pad) == 0) return php_str_new(t + k, 24 - k);
+    return php_str_pad_b(t + k, 24 - k, len, pad, type);
 }
 
 u8 php_str_contains(uptr h, uptr n) { if (php_strlen(n) == 0) return 1; if (php_strpos(h, n, 0) >= 0) return 1; return 0; }

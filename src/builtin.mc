@@ -1134,7 +1134,12 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (na >= 3) pad = ph_to_str(ph_a(av, 2), ph_aty(av, 2));
         if (na >= 4) type = ph_to_int(ph_a(av, 3), ph_aty(av, 3));
         ph_ety = PT_STRING;
-        return ph_c4("php_str_pad", ph_to_str(a0, t0), ph_to_int(ph_a(av, 1), ph_aty(av, 1)), pad, type, ty_pstr);
+        i64 ps = ph_to_str(a0, t0);
+        // str_pad((string) $int, ...): the digits padded in place, the
+        // intermediate string never built (php_str_pad_i)
+        if (nd_kind(ps) == N_CALL && str_eq(nd_name(ps), "php_itos"))
+            return ph_c4("php_str_pad_i", nd_a(ps), ph_to_int(ph_a(av, 1), ph_aty(av, 1)), pad, type, ty_pstr);
+        return ph_c4("php_str_pad", ps, ph_to_int(ph_a(av, 1), ph_aty(av, 1)), pad, type, ty_pstr);
     }
     if (str_eq(name, "str_contains")) { ph_need(na, 2, name, fl, line); ph_ety = PT_BOOL; return ph_c2("php_str_contains", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), TY_U8); }
     if (str_eq(name, "str_starts_with")) { ph_need(na, 2, name, fl, line); ph_ety = PT_BOOL; return ph_c2("php_str_starts", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), TY_U8); }
