@@ -153,13 +153,10 @@ each stream and exit the same. These are the places where they would not:
 * **Destructors and `register_shutdown_function`** do not run. A program ends and D7's arena is
   released; a module does not end, and `module_shutdown_func` is 0 on purpose -- running
   `php_shutdown`'s destructors into a stdout the SAPI is tearing down would be worse than not.
-* **The type check is strict always**, as above -- and the RETURN is not checked at all. Measured
-  on 2026-09-23: `function f(): int { $s = "x"; return $s; }` answers `int(0)` in the module and
-  throws a `TypeError` interpreted. That is D4/D9's return coercion and it is the FRONT end's:
-  the program road gives `int(0)` for the same source, so a module and a `mc-php --exe` binary
-  agree with each other and not with php. Closing it means a return check in `ph_function`,
-  which moves the program road and the `.phpt` grid, so it is a step of its own with its own
-  re-measured numbers. Found by the reviewer of #15.
+* **The argument check is strict always**, as above. The RETURN is checked on both roads with
+  php's own rule and php's own `TypeError` (`f(): Return value must be of type int, string
+  returned`), the same check a declared parameter goes through on the program road; `tests/ext.sh`
+  step 8 compares the module's answer with the interpreted source's.
 
 ## Thread safety
 

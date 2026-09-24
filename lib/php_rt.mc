@@ -4991,6 +4991,16 @@ uptr php_param_err(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname)
         m = php_str_concat(m, php_str_new("::", 2));
     }
     m = php_str_concat(m, fn);
+    // argno 0 is the RETURN value: the same rules, php's other sentence
+    if (!argno) {
+        m = php_str_concat(m, php_str_new("(): Return value must be of type ", 33));
+        m = php_str_concat(m, php_pc_name(want));
+        m = php_str_concat(m, php_str_new(", ", 2));
+        m = php_str_concat(m, php_f_get_debug_type(z));
+        m = php_str_concat(m, php_str_new(" returned", 9));
+        php_throw_str(php_str_new("TypeError", 9), m);
+        return php_znull();
+    }
     m = php_str_concat(m, php_str_new("(): Argument #", 14));
     m = php_str_concat(m, php_itos(argno));
     // php names the parameter -- `Argument #1 ($x)` -- except on a variadic,

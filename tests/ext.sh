@@ -250,5 +250,30 @@ esac
 rm -rf "$tmp/build"
 say "the two of review #15: a nested function, and a nameless [extension]"
 
+# --- 8. a declared scalar RETURN is checked, in the module as interpreted -----
+# php throws its own TypeError for `return "x";` from `: int`; the module used
+# to answer int(0) (docs/plan.md § 7). The message crosses the boundary as a
+# TypeError because the engine has that class.
+printf '<?php\nfunction rbad(): int { $s = "x"; return $s; }\nfunction rnum(): int { $s = "7"; return $s; }\n' > "$tmp/r.php"
+cat > "$tmp/rcall.php" <<'EOF2'
+<?php
+if (!function_exists('rbad')) { require __DIR__ . '/r.php'; }
+var_dump(rnum());
+try { rbad(); } catch (TypeError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+EOF2
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/rb.build" 2>&1; then
+    rn=$("$PHP" -d extension="$tmp/build/r.$sx" "$tmp/rcall.php" 2>&1 | tr -d '\r')
+    ri=$("$PHP" "$tmp/rcall.php" 2>&1 | tr -d '\r')
+    if [ "$rn" = "$ri" ]; then
+        say "a return type: the module throws php's own TypeError, as interpreted"
+    else
+        bad "a return type: module and interpreted differ"; printf '      module:      %s\n      interpreted: %s\n' "$rn" "$ri"
+    fi
+else
+    bad "a return type: it would not build"; sed 's/^/      /' "$tmp/rb.build"
+fi
+rm -rf "$tmp/build"
+
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }
 echo "  ext: the extension road is green"
