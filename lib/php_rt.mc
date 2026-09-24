@@ -71,7 +71,8 @@ uptr php_alloc(i64 n) {
         return callp(ph_zalloc, n);
     }
     i64 a = (ph_top + 7) / 8 * 8;
-    if (n < 0 || a + n > PH_ARENA) php_die("mc-php: arena exhausted\n", 24);
+    // n against what is left, never `a + n`: a size near PHP_INT_MAX would wrap it
+    if (n < 0 || n > PH_ARENA - a) php_die("mc-php: arena exhausted\n", 24);
     ph_top = a + n;
     return ph_heap + a;
 }

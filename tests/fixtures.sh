@@ -198,4 +198,16 @@ if [ "$pko" = "$pkw" ]; then
 else
     echo "  FAIL  packed overflow: want [$pkw], got [$pko]"; fail=1
 fi
+# A size near PHP_INT_MAX on the program road is "arena exhausted", never a
+# bump past the arena: `a + n` wrapped and moved the top to a wild address
+# (SIGBUS on main). php answers with its memory-limit fatal, so this is not a
+# differential either -- the refusal's text is what is checked.
+printf '<?php\n$s = str_repeat("a", 100);\necho strlen(str_pad($s, PHP_INT_MAX - 100, "x")), "\\n";\n' > "$tmp/big.php"
+lim $P/mcphp.sh "$tmp/big.php" > "$tmp/big.out" 2> "$tmp/big.err"
+rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
+if tr -d '\r' < "$tmp/big.err" | grep -q '^mc-php: arena exhausted$'; then
+    echo "  arena: a size near PHP_INT_MAX is 'arena exhausted', not a wild bump"
+else
+    echo "  FAIL  arena: want 'mc-php: arena exhausted' on stderr, got [$(cat "$tmp/big.err")]"; fail=1
+fi
 exit $fail
