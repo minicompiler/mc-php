@@ -705,3 +705,46 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   examples found are fixed with a fixture each (a static method's arguments, an elseif with a
   string condition); `str_replace` with an array search is recorded, not fixed. The database
   example is the next part, and what it needs is in § 7.
+- Batch A (2026-09-24, branch `batch-a`), on **mc 1.1.0** here and 1.3.0 in CI: what an extension
+  needs to live inside a real, long-running php, seven items and a C twin, each with a gate that
+  fails on `main` and passes here.
+  * **The Zend Memory Manager on the extension road (owner's decision; D7 SUPERSEDED there,
+    `docs/plan.md` § 3).** One allocation seam, `php_alloc`, two implementations by road: the
+    arena (a program, and a module's MINIT) or a 32 KiB Zend chunk an extension call bumps
+    through, zeroed again and every extra block `efree`d when the call returns
+    (`lib/php_ext.mc` § the call's memory). A string argument is BORROWED (the runtime's string
+    is a `zend_string`, immutable here); a result in a block of its own is handed over, a small one
+    copied once. A call that writes module state (`static`, `global`, `define()`, a handler, a
+    class, a file, a destructor, an open ob level) PINS itself (`php_pin`, fifteen call sites): its
+    blocks stay until the request ends, and the new `request_shutdown_func` puts the state back as
+    MINIT left it -- statics reset, files closed, the runtime's roots and the MINIT arena (127 KB
+    for decimal) restored from a snapshot. Measured: `examples/decimal/soak.php`, **1 000 000
+    `dec_add` calls in one request, peak 515 336 -> 515 336 bytes** (before: `arena exhausted`
+    between 28 000 and 30 000); `tests/ext.sh` step 10, **20 requests through `php -S`** with a
+    static counter, a `global` and 4 MiB kept per request, every response the interpreted
+    source's (before: statics leaked across requests, the server died at the twelfth). A pinned
+    call costs 32 bytes a call until the request ends (a `static` counter, 100 000 calls).
+  * **Module-private functions**: a leading `_` is not published (`tests/ext.sh` step 9; before,
+    `function_exists("_dec_valid")` was true), and an unpublished function's signature is free.
+  * **A declared scalar RETURN is checked** on both roads through `php_param_coerce` with the
+    return-value sentence (`tests/g/99-return-type.php`, `tests/ext.sh` step 8; before, `int(0)`).
+  * **A php ternary allocates nothing** when both branches share a native type
+    (`tests/g/98-ternary.php`; before, `fib(30)` exhausted the arena).
+  * **`str_replace` takes php's whole signature** (`tests/g/100-str-replace-array.php`).
+  * **Output goes through `php_output_write`** on the extension road (one sink, `php_out1`), so
+    `ob_start()` captures a module's echo (`examples/hello/check.php`, 26 lines).
+  * **`declare(strict_types=0)` is refused by design** (D4; `tests/r/d4-strict-types-0.php`), `=1`
+    is a no-op, and mc-php sources no longer carry it; php CALLER files keep it.
+  * **The C twin**, `examples/decimal/c/decimal.c`: 60 lines byte for byte, bcmath 1219 / 0 wrong,
+    and the bench's third column (macos/arm64, one core held by another process throughout):
+    interpreted 3.29 ms, the module **6.48 ms (0.51x) before and 6.41 ms (0.51x) after**, the C
+    twin **0.238 ms (13.8x)**. The owner's acceptance rule is in `docs/plan.md` § 7: an example is
+    done only when compiled from PHP AND faster than interpreted, with its C twin beside it --
+    so `decimal` is not done yet; the string path is batch E.
+  * **The grid**, three directories against a snapshot of `main` measured the same day:
+    `tests/lang` 104 = 104; `Zend/tests` 762 -> 763 (+3 green; the two `strict_types=0` greens
+    and three `strict_types=0` wrongs are now refused by design, which is item 7); strings
+    265 -> 271 (+6, `str_replace` with arrays). `diff` of the five lists accounts for every move.
+  * **One mc gap recorded** (`docs/plan.md` § 5): `&name` of an `extern` is an `adrp`/`add` that
+    neither Apple's ld nor ld.lld links into a loadable module; `lib/php_ext.mc` takes the
+    address of a local wrapper instead.

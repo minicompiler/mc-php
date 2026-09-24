@@ -23,8 +23,8 @@
 
 // ---- a number: validated once, then read in three ways -----------------------
 // The canonical form is the input without a leading '+'. strspn and not a
-// loop over $s[$i]: every string an extension builds lives in D7's arena
-// until the process ends (README.md), so the fewer strings, the more calls.
+// loop over $s[$i]: every string is an allocation, so the fewer strings, the
+// faster the call.
 function _dec_valid(string $s, string $fn, int $argno, string $name): string {
     $n = strlen($s);
     $i = 0;

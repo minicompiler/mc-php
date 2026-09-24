@@ -3,8 +3,8 @@
 // allocator says before and after. Every string the module builds inside a
 // call is a Zend block the call frees when it returns, so the peak must not
 // grow with N (docs/php-extension.md § The memory). Before batch A the module
-// had a fixed arena instead and died with `mc-php: arena exhausted` at about
-// 31 000 calls.
+// had a fixed arena instead and died with `mc-php: arena exhausted` between
+// 28 000 and 30 000 calls.
 //
 //     php -d extension=build/decimal.so soak.php 1000000
 declare(strict_types=1);

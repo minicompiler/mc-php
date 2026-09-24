@@ -33,7 +33,10 @@ digit -- `dec_round("0.125", 2)` is `0.12`, `dec_round("0.135", 2)` is `0.14`,
 |---|---|
 | the differential | `check.php` runs twice -- with `decimal.so` loaded, and with `decimal.php` required -- and the two must print the same bytes on both streams and exit the same: 60 lines, every tie in both signs, the four operations at three scales, a ledger, and the seven wrong VALUES |
 | bcmath | `bccheck.php`, where the host php has bcmath: 1219 results of the module against bcmath's exact result rounded by `bcround(..., RoundingMode::HalfEven)` -- add, sub and mul exact at the sum of the scales, a quotient taken to 80 digits first. It ran, 0 wrong, on macos/arm64, windows/x86_64 and windows/arm64 in CI; the `php:8.5-alpine` image the Linux legs use has no bcmath, and the gate says `SKIPPED` there |
-| the bench row | `bench.php`: three ten-year loan schedules, ~1500 calls a run, a warm-up and the best of nine per process, the interpreted and compiled processes interleaved three times. The two answers must be equal; the ratio is printed and not gated |
+| what is published | `get_extension_funcs("decimal")` is the six `dec_*` names: the `_dec_*` helpers are module-private (a leading underscore, `docs/php-extension.md` § What is published) |
+| the soak | `soak.php`: **1 000 000** `dec_add` calls in ONE request, and `memory_get_peak_usage()` must not move (the answer must be `12500000.00`) |
+| the C twin | `c/decimal.c` -- the same six functions written as an ordinary C extension, built with `php-config` and `cc` where the host has both, and graded by the same `check.php` (and, by hand, `bccheck.php`: 1219, 0 wrong). Where there is no `php-config` or no `cc` -- the Linux containers, the Windows runners -- the gate says `SKIPPED` and the bench has two columns |
+| the bench row | `bench.php`: three ten-year loan schedules, ~1500 calls a run, a warm-up and the best of nine per process, the interpreted, compiled and C-twin processes interleaved three times. The answers must be equal; the ratios are printed and not gated |
 
 Measured on 2026-09-23 by `tests/examples.sh`, each host against its own php 8.5 (the CI rows are the pull request's first run):
 
@@ -49,18 +52,28 @@ Measured on 2026-09-23 by `tests/examples.sh`, each host against its own php 8.5
 **The compiled module is SLOWER than the interpreter on this workload**, and that is the honest
 number. A decimal is string work, and php's string functions -- `substr`, `str_pad`, `ltrim`,
 `strspn` -- are C inside the interpreter, where mc-php's are mc, and every string one of them
-builds is a new allocation in D7's arena. Built with mc's optimizer (`[project].opt = 1`,
-measured once and not adopted here) the compiled column is 2.4 ms, 0.74x. `docs/plan.md` § 7
-item 1 is the road to the rest.
+builds is a new allocation. Built with mc's optimizer (`[project].opt = 1`, measured once and not
+adopted here) the compiled column is 2.4 ms, 0.74x. `docs/plan.md` § 7 item 1 is the road to the
+rest.
+
+**Three columns, batch A** (2026-09-24, macos/arm64, php 8.5.10, all on one host in one sitting;
+another process held one core throughout, which is why every absolute number here is higher than
+the table above -- the ratios are what compare):
+
+| | interpreted | the module | the C twin |
+|---|---|---|---|
+| before batch A | 3.29 ms | 6.48 ms (0.51x) | 0.238 ms (13.8x) |
+| after batch A | 3.29 ms | 6.41 ms (0.51x) | 0.238 ms (13.8x) |
+
+The C twin is what a competent C extension does -- digit strings, schoolbook multiplication, long
+division by repeated subtraction, `emalloc` for every buffer -- and it is **27x faster than the
+module**. By `docs/plan.md` § 7's acceptance rule this example is therefore not done: it compiles
+from PHP, and it is not yet faster than the interpreter. Batch A did not aim at that number; it
+moved what the arena cost into Zend's allocator (the column did not move: the arena was a bump
+allocator too) and made a million calls possible.
 
 ## What it cannot do yet
 
-* **The arena.** D7 is one 48 MiB arena per PROCESS, never freed (`docs/php-extension.md` § The
-  memory), and a module outlives every request. Measured: about **31 000** `dec_add("12.5",
-  "7.25", 2)` calls, **13 000** `dec_mul` or `dec_div` at ordinary sizes, and **fewer than 1 000**
-  divisions of a 30-digit number by a 21-digit one exhaust it, and the process ends with
-  `mc-php: arena exhausted`. The gates are sized to fit; a server that calls it for ever is not.
-  A request lifecycle (`RINIT`/`RSHUTDOWN`) is what answers it.
 * **A wrong TYPE** is an internal function's message in the module and a userland one
   interpreted (`docs/php-extension.md` § What a wrong call says), so `check.php` does not make
   one. The wrong VALUES it makes are the same in both runs, because the source throws them.
@@ -75,5 +88,7 @@ refusal, so `_dec_coef` calls it twice with strings (`docs/plan.md` § 7).
 | `decimal.php` | the extension |
 | `mcphp.toml`, `mcphp.linux.toml`, `mcphp.windows.toml` | one per host, as `examples/hello` |
 | `check.php` | the differential |
+| `soak.php` | the memory gate: a million calls in one request |
+| `c/decimal.c` | the C twin |
 | `bccheck.php` | the bcmath cross-check |
 | `bench.php` | the bench row |
