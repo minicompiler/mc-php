@@ -1,0 +1,35 @@
+# two-extensions -- extB.php, the PHP form of extB.mc, described by a file.
+#
+#     mc-php build examples/two-extensions --config examples/two-extensions/mcphp.toml
+#
+# This is the build the example is WAITING for, and today it is refused by
+# name: extB.php calls a_add, which extA publishes and extB's own source does
+# not declare. tests/examples.sh runs it on every host and requires exactly
+# that refusal -- the day it builds, the gate says so and extB.mc retires.
+# Until then the example is the hand-written pair, which tests/examples.sh
+# compiles with plain mc and links itself (README.md).
+#
+# One file and not one per host: the refusal is raised while PARSING, before
+# any [linker] line is read, so the host's link does not matter to it.
+
+[project]
+entry = "extB.php"
+out = "build/extB.so"
+kind = "exe"
+
+[linker]
+cmd = "ld"
+args = ["-bundle", "-undefined", "dynamic_lookup",
+        "-arch", "arm64", "-platform_version", "macos", "13.0", "13.0",
+        "-syslibroot", "{sdk}", "-lSystem",
+        "-o", "{out}", "{obj}"]
+
+[extension]
+name = "extB"
+version = "0.1.0"
+
+[php]
+api = 20250925
+build_id = "API20250925,NTS"
+thread_safety = false
+debug = false

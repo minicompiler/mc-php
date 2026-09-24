@@ -162,8 +162,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: aarch64, runner: ubuntu-24.04-arm }
-          - { arch: x86_64,  runner: ubuntu-24.04 }
+          - { arch: aarch64, nick: arm64,  runner: ubuntu-24.04-arm }
+          - { arch: x86_64,  nick: x86_64, runner: ubuntu-24.04 }
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -174,13 +174,31 @@ jobs:
           name: mc-php-linux
           path: build
 
+      # mc itself, for the two HAND-WRITTEN examples (examples/two-extensions
+      # and examples/awaitable): they are plain mc, and every source mc-php
+      # compiles gets the php runtime pushed into it (tests/examples.sh). The
+      # release's Linux mc is a static binary, so tests/linux.sh runs it
+      # inside the php container as it is, from build/mc-linux-<nick>/.
+      - name: Install mc ${{ env.MC_VERSION }} (the Linux build)
+        run: |
+          set -eu
+          asset="mc-$MC_VERSION-linux-${{ matrix.nick }}.tar.gz"
+          base="https://github.com/minicompiler/mc/releases/download/v$MC_VERSION"
+          curl -fsSL -o "$RUNNER_TEMP/$asset"        "$base/$asset"
+          curl -fsSL -o "$RUNNER_TEMP/$asset.sha256" "$base/$asset.sha256"
+          ( cd "$RUNNER_TEMP" && sha256sum -c "$asset.sha256" )
+          mkdir -p "build/mc-linux-${{ matrix.nick }}"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "build/mc-linux-${{ matrix.nick }}" --strip-components=1
+          "build/mc-linux-${{ matrix.nick }}/mc" --version
+
       - name: It loads, it compiles, the fixtures agree, and the extension loads
         run: |
           set -eu
           chmod +x build/mc-php-linux-*
-          # tests/linux.sh ends with tests/ext.sh: the .so is built by the
-          # cross-built compiler and loaded by the php IN THE CONTAINER, so
-          # the module header is graded against the php it is for.
+          # tests/linux.sh ends with tests/ext.sh and tests/examples.sh: the
+          # .so is built by the cross-built compiler and loaded by the php IN
+          # THE CONTAINER, so the module header is graded against the php it
+          # is for.
           sh tests/linux.sh ${{ matrix.arch }}
 
   # Built ON Windows and graded there. The compiler is mc-php's own source,

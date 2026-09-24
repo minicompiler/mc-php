@@ -157,5 +157,37 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
     [ -n "$bc" ] && say "bench: interpreted $bi ms, compiled $bc ms -- $(awk -v i="$bi" -v c="$bc" 'BEGIN { printf "%.2fx", i / c }') (best of nine, three rounds interleaved; not gated)"
 fi
 
+# --- two-extensions -------------------------------------------------------------
+echo "  -- two-extensions"
+EX=examples/two-extensions
+if hand_ok "the hand-written pair"; then
+    a=$tmp/extA.$sx; b=$tmp/extB.$sx
+    if handbuild "$EX/extA.mc" "$a" && handbuild "$EX/extB.mc" "$b"; then
+        differential "check.php (A then B)" "$EX/check.php" -d extension="$a" -d extension="$b"
+        differential "check.php (B then A)" "$EX/check.php" -d extension="$b" -d extension="$a"
+        got=$("$PHP" -d extension="$b" -r 'echo b_use(2, 3);' 2>&1)
+        [ "$got" = -1 ] && say "B alone: b_use answers -1, found nothing to call" \
+            || bad "B alone: want -1, got $got"
+    fi
+fi
+# (b) two mc-php extensions in one php: each carries the whole runtime, and
+# each must keep using its own.
+hso=$rootn/examples/hello/build/hello.$sx
+# Built here and not reused: a .so an earlier run left behind may be another
+# host's (the checkout is shared with the Linux container).
+if build examples/hello "examples/hello/mcphp$suf.toml" "hello.$sx" && [ -f "$dso" ]; then
+    for order in "$hso $dso" "$dso $hso"; do
+        set -- $order
+        got=$("$PHP" -d extension="$1" -d extension="$2" -r \
+            'echo hello_greet(dec_add("40", "2.5", 1)), " ", dec_mul(hello_greet("x") === "hi x" ? "3" : "0", "7", 0);' 2>&1)
+        if [ "$got" = "hi 42.5 21" ]; then
+            say "hello and decimal in one php, $(basename "$1") first: both answer"
+        else
+            bad "hello and decimal in one php, $(basename "$1") first: want 'hi 42.5 21', got '$got'"
+        fi
+    done
+fi
+pin "$EX" "extB.php:8: mc-php: a php function mc-php does not have: a_add is not implemented yet"
+
 [ "$fail" = 0 ] || { echo "  examples: something failed"; exit 1; }
 echo "  examples: green"
