@@ -334,6 +334,12 @@ i64 ph_index(i64 base, i64 bt) {
     i64 kt = ph_ety;
     ph_want("]", 1, "expected ] after a php array index");
     ph_ety = PT_MIXED;
+    if (bt == PT_PK) {
+        if (kt != PT_INT) ph_pk_disagree(ph_tfile, ph_tline, "a key that is not an int");
+        if (ph_at("??", 2)) return ph_c2("php_pk_getq", base, kx, ty_pzv);
+        ph_ety = PT_INULL;
+        return ph_c2("php_pk_get", base, kx, TY_I64);
+    }
     // an int key on an array needs no key zval: php_arr_iget(_w) is the
     // IS_LONG arm of php_arr_zget(_w), word for word
     if (bt == PT_ARR && kt == PT_INT) {
@@ -357,11 +363,15 @@ i64 ph_index(i64 base, i64 bt) {
 // get the same one.
 i64 ph_postfix(i64 v, i64 vt) {
     loop {
+        if (vt == PT_INULL && (ph_at("[", 1) || ph_at("->", 2) || ph_at("?->", 3) || ph_at("(", 1))) {
+            v = ph_inull_zv(v);
+            vt = PT_MIXED;
+        }
         if (ph_at("[", 1)) {
             // php reads an offset of a scalar as null with a warning; D4
             // knows the static type, so the conversion to a zval is the
             // compiler's and the warning is the runtime's.
-            if (vt != PT_ARR && vt != PT_MIXED && vt != PT_STRING) {
+            if (vt != PT_ARR && vt != PT_MIXED && vt != PT_STRING && vt != PT_PK) {
                 v = ph_to_mixed(v, vt);
                 vt = PT_MIXED;
             }
@@ -518,7 +528,11 @@ i64 ph_primary() {
                 if (q < e && ld8(q) == 41) {
                     ph_next();
                     ph_next();                     // the )
-                    i64 v = ph_expr(55);
+                    // a cast binds as tightly as unary minus: `(int) $s - 1`
+                    // is ((int) $s) - 1 in php. This read 55, which took the
+                    // `+ - * / %` after the operand INTO the cast --
+                    // `(int) "1.9" + 0.5` was int(2), php's float(1.5).
+                    i64 v = ph_expr(70);
                     i64 vt = ph_ety;
                     ph_ety = ct;
                     // (int) substr(...): the window read as an int in
@@ -544,8 +558,12 @@ i64 ph_primary() {
     if (ph_at("[", 1)) { ph_next(); return ph_array_lit("]"); }
     if (ph_at("-", 1)) {
         ph_next();
+        ph_inull_ok = 1;
         i64 v = ph_expr(70);
         i64 t = ph_ety;
+        // -null is int(0); -PHP_INT_MIN is php's float, so an element's
+        // negation is the checked subtraction
+        if (t == PT_INULL || (t == PT_INT && ph_is_ck(v))) { ph_ety = PT_INT; return ph_c2("php_sub_ck", ph_int(0), v, TY_I64); }
         if (t == PT_FLOAT) return ph_c1("php_fneg", v, ty_f64);
         // -"1.2" is float(-1.2) and -"abc" is a TypeError: a zval keeps its
         // own rules, and converting to int first threw the fraction away.
@@ -861,6 +879,21 @@ i64 ph_numeric(i64 t) {
 }
 
 i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
+    // a packed element beside another NUMBER is an int: php's null is 0 to
+    // every operator here, and with a number on the other side neither the
+    // value nor an error message can tell the two apart (src/packed.mc).
+    // Beside anything else it is the zval php has.
+    // `**` keeps its zval road for an element: php_pow_i has no overflow test.
+    i64 ck = ph_is_ck(lhs) || ph_is_ck(rhs);
+    if (op == ph_tok("**", 2)) {
+        if (lt == PT_INULL) { lhs = ph_inull_zv(lhs); lt = PT_MIXED; }
+        if (rt == PT_INULL) { rhs = ph_inull_zv(rhs); rt = PT_MIXED; }
+    }
+    if (lt == PT_INULL) { if (ph_numeric(rt) || rt == PT_INULL) { lt = PT_INT; ck = 1; } else { lhs = ph_inull_zv(lhs); lt = PT_MIXED; } }
+    if (rt == PT_INULL) { if (ph_numeric(lt)) { rt = PT_INT; ck = 1; } else { rhs = ph_inull_zv(rhs); rt = PT_MIXED; } }
+    // ... and so does `**` on what a checked operation answered:
+    // `($x[0] + 1) ** 2` is php's float when it overflows
+    if (ck && op == ph_tok("**", 2)) return ph_arith_zv(op, lhs, lt, rhs, rt);
     // anything a static type cannot answer exactly goes to the zval
     if (!ph_numeric(lt) || !ph_numeric(rt)) return ph_arith_zv(op, lhs, lt, rhs, rt);
     if (lt == PT_BOOL) { lhs = ph_to_int(lhs, lt); lt = PT_INT; }
@@ -921,7 +954,22 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         return ph_bin(op, ph_to_float(lhs, lt), ph_to_float(rhs, rt), ty_f64);
     }
     ph_ety = PT_INT;
+    // + - * on a packed element, or on what such an operation answered: php's
+    // overflow test, and a named ArithmeticError where php would make a float
+    // (php_add_ck and its two siblings, lib/php_rt.mc) -- never a wrapped int
+    if (ck) {
+        if (op == ph_tok("+", 1)) return ph_c2("php_add_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
+        if (op == ph_tok("-", 1)) return ph_c2("php_sub_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
+        if (op == ph_tok("*", 1)) return ph_c2("php_mul_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
+    }
     return ph_bin(op, lhs, rhs, TY_I64);
+}
+
+// a node one of the checked operations built
+i64 ph_is_ck(i64 n) {
+    if (nd_kind(n) != N_CALL) return 0;
+    uptr nm = nd_name(n);
+    return str_eq(nm, "php_add_ck") || str_eq(nm, "php_sub_ck") || str_eq(nm, "php_mul_ck");
 }
 
 i64 ph_cmp_zv(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt) {
@@ -988,12 +1036,52 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
                 i64 sb = nd_a(off);
                 i64 ix = nd_next(sb);
                 set_nd_next(sb, 0);
-                i64 at = ph_c3("php_str_at_is", sb, ix, ph_int(by), TY_I64);
+                i64 at = 0;
+                // a variable and a variable or literal index: the in-range
+                // byte compared right here, and the call only outside the
+                // string, where php_str_at_is warns (both operands are read
+                // twice, so only names and literals qualify)
+                if ((nd_kind(sb) == N_IDENT) && (nd_kind(ix) == N_IDENT || nd_kind(ix) == N_INT)) {
+                    i64 len = ph_strlen_of(ph_tref(sb));
+                    i64 ix1 = ph_tref(ix);
+                    if (nd_kind(ix) == N_INT) ix1 = ph_int(nd_val(ix));
+                    i64 ix2 = ph_tref(ix);
+                    if (nd_kind(ix) == N_INT) ix2 = ph_int(nd_val(ix));
+                    i64 ix3 = ph_tref(ix);
+                    if (nd_kind(ix) == N_INT) ix3 = ph_int(nd_val(ix));
+                    // a literal index at or above 0 needs only the upper bound
+                    // (mc folds no comparison of two constants)
+                    i64 lit0 = nd_kind(ix) == N_INT && nd_val(ix) >= 0;
+                    i64 inr = ph_bin(ph_tok("<", 1), ix2, len, TY_U8);
+                    if (!lit0) inr = ph_bin(ph_tok("&&", 2), ph_bin(ph_tok(">=", 2), ix1, ph_int(0), TY_U8), inr, TY_U8);
+                    i64 bp = ph_bin(ph_tok("+", 1), ph_bin(ph_tok("+", 1), ph_tref(sb), ph_int(24), TY_UPTR), ix3, TY_UPTR);
+                    i64 hit = ph_bin(ph_tok("&&", 2), inr,
+                                     ph_bin(ph_tok("==", 2), ph_quiet("ld8", 1, bp, 0, 0, 0, TY_I64), ph_int(by), TY_U8), TY_U8);
+                    i64 len2 = ph_strlen_of(ph_tref(sb));
+                    i64 iy1 = ph_tref(ix);
+                    if (nd_kind(ix) == N_INT) iy1 = ph_int(nd_val(ix));
+                    i64 iy2 = ph_tref(ix);
+                    if (nd_kind(ix) == N_INT) iy2 = ph_int(nd_val(ix));
+                    i64 outr = ph_bin(ph_tok(">=", 2), iy2, len2, TY_U8);
+                    if (!lit0) outr = ph_bin(ph_tok("||", 2), ph_bin(ph_tok("<", 1), iy1, ph_int(0), TY_U8), outr, TY_U8);
+                    i64 miss = ph_bin(ph_tok("&&", 2), outr,
+                                      ph_bin(ph_tok("!=", 2), ph_c3("php_str_at_is", sb, ix, ph_int(by), TY_I64), ph_int(0), TY_U8), TY_U8);
+                    at = ph_bin(ph_tok("||", 2), hit, miss, TY_U8);
+                }
+                if (!at) at = ph_c3("php_str_at_is", sb, ix, ph_int(by), TY_I64);
                 ph_ety = PT_BOOL;
                 i64 eop = ph_tok("!=", 2);
                 if (neg) eop = ph_tok("==", 2);
                 return ph_cast(TY_U8, ph_bin(eop, at, ph_int(0), TY_U8));
             }
+        }
+        // === and !== ask only whether the bytes are the same: the lengths
+        // first, and no ordering (php_str_eq)
+        if (strict) {
+            ph_ety = PT_BOOL;
+            i64 eop2 = ph_tok("!=", 2);
+            if (neg) eop2 = ph_tok("==", 2);
+            return ph_cast(TY_U8, ph_bin(eop2, ph_quiet("php_str_eq", 2, lhs, rhs, 0, 0, TY_I64), ph_int(0), TY_U8));
         }
         i64 c = ph_c2("php_str_cmp", lhs, rhs, TY_I64);
         if (t == ph_tok("<=>", 3)) { ph_ety = PT_INT; return c; }
@@ -1031,9 +1119,23 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
 }
 
 i64 ph_expr(i64 minp) {
+    // a packed element (PT_INULL) leaves only when the caller asked for it:
+    // an arithmetic operand, and the two statements src/packed.mc names.
+    // Everywhere else it is the zval php has, as it was before that file.
+    i64 keep = ph_inull_ok;
+    ph_inull_ok = 0;
     ph_efresh = 0;
     i64 lhs0 = ph_postfix(ph_primary(), ph_ety);
-    return ph_expr_tail(lhs0, ph_ety, minp);
+    i64 r = ph_expr_tail(lhs0, ph_ety, minp);
+    if (ph_ety == PT_INULL && !keep) { r = ph_inull_zv(r); ph_ety = PT_MIXED; }
+    return r;
+}
+
+// the operators php's null takes as 0: + - * / % ** & | ^ << >>
+i64 ph_arith_op(i64 t) {
+    return t == ph_tok("+", 1) || t == ph_tok("-", 1) || t == ph_tok("*", 1) || t == ph_tok("/", 1)
+        || t == ph_tok("%", 1) || t == ph_tok("**", 2) || t == ph_tok("&", 1) || t == ph_tok("|", 1)
+        || t == ph_tok("^", 1) || t == ph_tok("<<", 2) || t == ph_tok(">>", 2);
 }
 
 // the operator half of ph_expr, on a left-hand side somebody else already
@@ -1043,6 +1145,7 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
     loop {
         if (ph_is("instanceof")) {
             if (minp > 65) break;
+            if (lt == PT_INULL) { lhs = ph_inull_zv(lhs); lt = PT_MIXED; }
             ph_next();
             ph_accept("\\", 1);
             uptr cn = ph_tname;
@@ -1059,6 +1162,8 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
         i64 line = ph_tline;
         uptr fl = ph_tfile;
         ph_next();
+        i64 arop = ph_arith_op(t);
+        if (!arop && lt == PT_INULL) { lhs = ph_inull_zv(lhs); lt = PT_MIXED; }
         // php SHORT-CIRCUITS && and ||: the right operand is not evaluated at
         // all when the left already decides the answer. An mc expression has
         // no branch, so the value is a u8 temporary and the right side is an
@@ -1098,10 +1203,27 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
         // is 2 ** 9, not (2 ** 3) ** 2 (found while fixing `2 ** -1`).
         i64 rp = pr + 1;
         if (t == ph_tok("**", 2)) rp = pr;
+        if (arop) ph_inull_ok = 1;
         i64 rhs = ph_expr(rp);
         i64 rt = ph_ety;
         if (t == ph_tok(".", 1)) {
-            lhs = ph_c2("php_str_concat", ph_to_str(lhs, lt), ph_to_str(rhs, rt), ty_pstr);
+            i64 rs = ph_to_str(rhs, rt);
+            // `a . b . c` is ONE string: the chain php_str_concat just built
+            // takes the next part instead of being copied into a new string
+            // (php_str_cat3, then php_str_cat4) -- php's own rope, in short
+            if (lt == PT_STRING && nd_kind(lhs) == N_CALL && str_eq(nd_name(lhs), "php_str_concat")) {
+                i64 p0 = nd_a(lhs);
+                set_nd_next(nd_next(p0), rs);
+                set_nd_name(lhs, "php_str_cat3");
+                continue;
+            }
+            if (lt == PT_STRING && nd_kind(lhs) == N_CALL && str_eq(nd_name(lhs), "php_str_cat3")) {
+                i64 q0 = nd_a(lhs);
+                set_nd_next(nd_next(nd_next(q0)), rs);
+                set_nd_name(lhs, "php_str_cat4");
+                continue;
+            }
+            lhs = ph_c2("php_str_concat", ph_to_str(lhs, lt), rs, ty_pstr);
             lt = PT_STRING;
             continue;
         }
@@ -1112,6 +1234,10 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
         }
         lhs = ph_arith(t, lhs, lt, rhs, rt, fl, line);
         lt = ph_ety;
+    }
+    if (lt == PT_INULL && ((minp <= 26 && ph_at("??", 2)) || (minp <= 20 && ph_at("?", 1)))) {
+        lhs = ph_inull_zv(lhs);
+        lt = PT_MIXED;
     }
     ph_ety = lt;
     // ?? and the conditional, both right-associative and both short-circuiting.

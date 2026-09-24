@@ -64,11 +64,15 @@ void php_pin() { if (ph_zalloc) ph_pin = 1; }
 uptr php_alloc(i64 n) {
     if (ph_zalloc) {
         i64 z = (ph_zpos + 7) / 8 * 8;
-        if (n <= PH_ZBIG && z + n <= ph_zlim) { ph_zpos = z + n; return ph_zcur + z; }
+        // n >= 0: a size that wrapped (a string of PHP_INT_MAX bytes plus its
+        // header) is not a small block -- it goes to Zend, whose memory limit
+        // refuses it by name
+        if (n >= 0 && n <= PH_ZBIG && z + n <= ph_zlim) { ph_zpos = z + n; return ph_zcur + z; }
         return callp(ph_zalloc, n);
     }
     i64 a = (ph_top + 7) / 8 * 8;
-    if (a + n > PH_ARENA) php_die("mc-php: arena exhausted\n", 24);
+    // n against what is left, never `a + n`: a size near PHP_INT_MAX would wrap it
+    if (n < 0 || n > PH_ARENA - a) php_die("mc-php: arena exhausted\n", 24);
     ph_top = a + n;
     return ph_heap + a;
 }
@@ -78,7 +82,16 @@ uptr php_alloc(i64 n) {
 #define ZS_HDR 24
 
 uptr php_str_alloc(i64 n) {
-    uptr s = php_alloc(ZS_HDR + n + 1);
+    // php_alloc's bump inlined for the one allocation every string makes:
+    // a call less per string on the extension road (the arena road, and a
+    // block that does not fit, take php_alloc)
+    uptr s = 0;
+    if (ph_zalloc) {
+        i64 z = (ph_zpos + 7) & (0 - 8);
+        i64 e = z + ZS_HDR + n + 1;
+        if (n >= 0 && n <= PH_ZBIG - ZS_HDR - 1 && e <= ph_zlim) { ph_zpos = e; s = ph_zcur + z; }
+    }
+    if (!s) s = php_alloc(ZS_HDR + n + 1);
     st32(s, 1);
     st32(s + 4, 22);                          // GC_STRING
     st64(s + 8, 0);                           // h: not computed
@@ -93,10 +106,60 @@ uptr php_str_val(uptr s) { return s + ZS_HDR; }
 // Eight bytes a step and then the tail. Every host this runtime targets
 // (arm64, x86-64) loads and stores unaligned words; a forward copy is also
 // right for d < s overlapping, which is the only overlap a caller makes.
+// The tail of a copy of at least eight bytes is ONE more word, the last
+// eight bytes, read before the loop writes anything (so a forward overlap
+// still gets the source's own bytes); under eight it is two overlapping
+// halves of four, or single bytes. A decimal's strings are ten to twenty
+// bytes long, and the byte loop for the tail was most of what a copy cost.
 void php_memcpy(uptr d, uptr s, i64 n) {
+    if (n >= 8) {
+        u64 t = ld64(s + n - 8);
+        i64 i = 0;
+        loop { if (i + 8 > n) break; st64(d + i, ld64(s + i)); i = i + 8; }
+        st64(d + n - 8, t);
+        return;
+    }
+    if (n >= 4) {
+        i64 a = ld32(s);
+        i64 b = ld32(s + n - 4);
+        st32(d, a);
+        st32(d + n - 4, b);
+        return;
+    }
+    i64 j = 0;
+    loop { if (j >= n) break; st8(d + j, ld8(s + j)); j = j + 1; }
+}
+
+// the first byte c in p[0..n), or -1: eight bytes a step, the has-a-zero-byte
+// test on the word xor'ed with c in every byte, then the byte itself
+i64 php_memchr_w(uptr p, i64 c, i64 n) {
+    u64 pat = c * 0x0101010101010101;
     i64 i = 0;
-    loop { if (i + 8 > n) break; st64(d + i, ld64(s + i)); i = i + 8; }
-    loop { if (i >= n) break; st8(d + i, ld8(s + i)); i = i + 1; }
+    loop {
+        if (i + 8 > n) break;
+        u64 x = ld64(p + i) ^ pat;
+        if (((x - 0x0101010101010101) & (x ^ 0xffffffffffffffff) & 0x8080808080808080) != 0) break;
+        i = i + 8;
+    }
+    // past the last whole word: the LAST eight bytes as one more word, so a
+    // miss costs no byte loop at all
+    if (i + 8 > n) {
+        u64 y = ld64(p + n - 8) ^ pat;
+        if (((y - 0x0101010101010101) & (y ^ 0xffffffffffffffff) & 0x8080808080808080) == 0) return 0 - 1;
+    }
+    loop { if (i >= n) break; if (ld8(p + i) == c) return i; i = i + 1; }
+    return 0 - 1;
+}
+
+// Under sixteen bytes a byte loop, in a function whose few locals cost few
+// saved registers: the word scan above needs three 64-bit constants and nine
+// registers, which mc's optimizer materialises and saves at entry whatever
+// the length, and a decimal's strings are ten to twenty bytes long.
+i64 php_memchr(uptr p, i64 c, i64 n) {
+    if (n >= 16) return php_memchr_w(p, c, n);
+    i64 i = 0;
+    loop { if (i >= n) break; if (ld8(p + i) == c) return i; i = i + 1; }
+    return 0 - 1;
 }
 
 uptr php_str_new(uptr b, i64 n) {
@@ -129,6 +192,32 @@ uptr php_str_concat(uptr a, uptr b) {
     return s;
 }
 
+// `a . b . c` and `a . b . c . d` in one allocation (the compiler folds a
+// concatenation chain into these)
+uptr php_str_cat3(uptr a, uptr b, uptr c) {
+    i64 la = ld64(a + 16);
+    i64 lb = ld64(b + 16);
+    i64 lc = ld64(c + 16);
+    uptr s = php_str_alloc(la + lb + lc);
+    php_memcpy(s + ZS_HDR, a + ZS_HDR, la);
+    php_memcpy(s + ZS_HDR + la, b + ZS_HDR, lb);
+    php_memcpy(s + ZS_HDR + la + lb, c + ZS_HDR, lc);
+    return s;
+}
+
+uptr php_str_cat4(uptr a, uptr b, uptr c, uptr d) {
+    i64 la = ld64(a + 16);
+    i64 lb = ld64(b + 16);
+    i64 lc = ld64(c + 16);
+    i64 ld = ld64(d + 16);
+    uptr s = php_str_alloc(la + lb + lc + ld);
+    php_memcpy(s + ZS_HDR, a + ZS_HDR, la);
+    php_memcpy(s + ZS_HDR + la, b + ZS_HDR, lb);
+    php_memcpy(s + ZS_HDR + la + lb, c + ZS_HDR, lc);
+    php_memcpy(s + ZS_HDR + la + lb + lc, d + ZS_HDR, ld);
+    return s;
+}
+
 // memcmp over the bytes, then the length: PHP's own strcmp ordering.
 i64 php_str_cmp(uptr a, uptr b) {
     i64 la = ld64(a + 16);
@@ -148,30 +237,44 @@ i64 php_str_cmp(uptr a, uptr b) {
     return 0;
 }
 
-i64 php_str_eq(uptr a, uptr b) { if (php_str_cmp(a, b) == 0) return 1; return 0; }
-
-// ---- int and bool to string ------------------------------------------------
-uptr php_itos(i64 v) {
-    u8 t[24];
-    i64 k = 0;
-    i64 neg = 0;
-    u64 u = v;
-    if (v < 0) { neg = 1; u = 0 - u; }
-    loop {
-        st8(t + k, '0' + u % 10);
-        u = u / 10;
-        k = k + 1;
-        if (u == 0) break;
-    }
-    uptr s = php_str_alloc(k + neg);
-    if (neg) st8(s + ZS_HDR, '-');
+// === between two strings: the lengths first, then eight bytes a step
+i64 php_str_eq(uptr a, uptr b) {
+    if (a == b) return 1;
+    i64 n = ld64(a + 16);
+    if (n != ld64(b + 16)) return 0;
     i64 i = 0;
     loop {
-        if (i >= k) break;
-        st8(s + ZS_HDR + neg + i, ld8(t + k - 1 - i));
-        i = i + 1;
+        if (i + 8 > n) break;
+        if (ld64(a + ZS_HDR + i) != ld64(b + ZS_HDR + i)) return 0;
+        i = i + 8;
     }
-    return s;
+    loop { if (i >= n) break; if (ld8(a + ZS_HDR + i) != ld8(b + ZS_HDR + i)) return 0; i = i + 1; }
+    return 1;
+}
+
+// ---- int and bool to string ------------------------------------------------
+// The decimal digits of v written BACKWARDS from the end of the 24-byte t,
+// one division a digit (the remainder is a multiply and a subtract); answers
+// where they start. php_itos and str_pad's fused form (php_str_pad_i) share it.
+i64 php_itos_b(i64 v, uptr t) {
+    i64 k = 24;
+    u64 u = v;
+    if (v < 0) u = 0 - u;
+    loop {
+        u64 q = u / 10;
+        k = k - 1;
+        st8(t + k, '0' + (u - q * 10));
+        u = q;
+        if (u == 0) break;
+    }
+    if (v < 0) { k = k - 1; st8(t + k, '-'); }
+    return k;
+}
+
+uptr php_itos(i64 v) {
+    u8 t[24];
+    i64 k = php_itos_b(v, t);
+    return php_str_new(t + k, 24 - k);
 }
 
 uptr php_btos(u8 b) {
@@ -1287,6 +1390,152 @@ uptr php_arr_copy(uptr src) {
     return a;
 }
 
+// ---- a packed int array: the lowering of a php array the compiler PROVED --
+// holds only ints and never escapes (src/packed.mc says what the proof is).
+// Its elements are a native i64 buffer, keys 0..len-1, with no zval and no
+// hash anywhere. A store the dense shape cannot hold -- a key past the end or
+// below zero -- turns it into php's own ordered hash, once, keys 0..len-1
+// first and the new key after them, which is the order php would have; from
+// then on every operation takes the hash. The elements are ints either way,
+// so what a read answers never changes, only where it was found.
+//  0 len i64 | 8 cap i64 | 16 data uptr | 24 hash uptr (0 while dense)
+// A read that finds nothing is php's warning and null. The null cannot
+// travel in an i64, so the read answers 0 and leaves ph_pkabs set: the
+// compiler reads the flag right after the call wherever a null and a 0 would
+// differ (php_zinull), and nowhere else -- `null + 1` and `0 + 1` do not.
+i64 ph_pkabs;
+
+uptr php_pk_new(i64 cap) {
+    if (cap < 8) cap = 8;
+    uptr p = php_alloc(32);
+    st64(p, 0);
+    st64(p + 8, cap);
+    st64(p + 16, php_alloc(cap * 8));
+    st64(p + 24, 0);
+    return p;
+}
+
+// array_fill's two ValueErrors: below zero, and at php's own table limit
+// (HT_MAX_SIZE, 2^31 on a 64-bit php: measured, 2^31 - 1 is the memory
+// limit's fatal and 2^31 this error). Under it n * 8 cannot overflow, and a
+// buffer too big for memory is Zend's memory-limit fatal on the extension
+// road and the arena's own on the program road.
+i64 php_fill_count_ok(i64 n) {
+    if (n < 0) {
+        php_throw_str(php_str_new("ValueError", 10),
+            php_str_new("array_fill(): Argument #2 ($count) must be greater than or equal to 0", 69));
+        return 0;
+    }
+    if (n >= 2147483648) {
+        php_throw_str(php_str_new("ValueError", 10),
+            php_str_new("array_fill(): Argument #2 ($count) is too large", 47));
+        return 0;
+    }
+    return 1;
+}
+
+// array_fill(0, n, v)
+uptr php_pk_fill(i64 n, i64 v) {
+    if (!php_fill_count_ok(n)) return php_pk_new(8);
+    uptr p = php_pk_new(n);
+    uptr d = ld64(p + 16);
+    i64 i = 0;
+    loop { if (i >= n) break; st64(d + i * 8, v); i = i + 1; }
+    st64(p, n);
+    return p;
+}
+
+void php_pk_hash(uptr p) {
+    i64 n = ld64(p);
+    uptr d = ld64(p + 16);
+    uptr a = php_arr_new(n);
+    i64 i = 0;
+    loop { if (i >= n) break; php_arr_iset(a, i, php_zlong(ld64(d + i * 8))); i = i + 1; }
+    st64(p + 24, a);
+}
+
+void php_pk_push(uptr p, i64 v) {
+    if (ld64(p + 24)) { php_arr_push(ld64(p + 24), php_zlong(v)); return; }
+    i64 n = ld64(p);
+    uptr d = ld64(p + 16);
+    if (n == ld64(p + 8)) {
+        uptr nd = php_alloc(n * 16);
+        php_memcpy(nd, d, n * 8);
+        st64(p + 8, n * 2);
+        st64(p + 16, nd);
+        d = nd;
+    }
+    st64(d + n * 8, v);
+    st64(p, n + 1);
+}
+
+void php_pk_set(uptr p, i64 k, i64 v) {
+    if (!ld64(p + 24)) {
+        i64 n = ld64(p);
+        if (k >= 0 && k < n) { st64(ld64(p + 16) + k * 8, v); return; }
+        if (k == n) { php_pk_push(p, v); return; }
+        php_pk_hash(p);
+    }
+    php_arr_iset(ld64(p + 24), k, php_zlong(v));
+}
+
+i64 php_pk_get(uptr p, i64 k) {
+    if (!ld64(p + 24)) {
+        if (k >= 0 && k < ld64(p)) { ph_pkabs = 0; return ld64(ld64(p + 16) + k * 8); }
+        php_undef_ikey(k);
+        ph_pkabs = 1;
+        return 0;
+    }
+    uptr b = php_ht_find(ld64(p + 24), k, 0);
+    if (!b) { php_undef_ikey(k); ph_pkabs = 1; return 0; }
+    ph_pkabs = 0;
+    return ld64(b);
+}
+
+// `$x[$k] ?? d`: php's quiet read, a zval
+uptr php_pk_getq(uptr p, i64 k) {
+    if (!ld64(p + 24)) {
+        if (k >= 0 && k < ld64(p)) return php_zlong(ld64(ld64(p + 16) + k * 8));
+        return php_znull();
+    }
+    return php_arr_iget(ld64(p + 24), k);
+}
+
+i64 php_pk_count(uptr p) {
+    if (ld64(p + 24)) return php_count(ld64(p + 24));
+    return ld64(p);
+}
+
+// Arithmetic on a packed element is native (src/packed.mc), and php
+// promotes an int that overflows to a float, which a native int cannot hold.
+// So + - * on an element (and on what such an operation answered) are these:
+// the operation, php's overflow test, and on overflow an ArithmeticError
+// that says so -- a named refusal at run time, never a wrapped int.
+void php_pk_overflow(i64 op) {
+    php_mreset();
+    php_mc("mc-php: an int overflowed in ");
+    if (op == 0) php_mc("+");
+    if (op == 1) php_mc("-");
+    if (op == 2) php_mc("*");
+    php_mc(" on a packed array's element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)");
+    php_throw_str(php_str_new("ArithmeticError", 15), php_str_new(ph_msg, ph_msgn));
+}
+i64 php_add_ck(i64 x, i64 y) { i64 r = x + y; if (((x ^ r) & (y ^ r)) < 0) php_pk_overflow(0); return r; }
+i64 php_sub_ck(i64 x, i64 y) { i64 r = x - y; if (((x ^ y) & (x ^ r)) < 0) php_pk_overflow(1); return r; }
+i64 php_mul_ck(i64 x, i64 y) {
+    i64 r = x * y;
+    // both within 32 bits cannot overflow: no division on the common path
+    if (x + 2147483648 >= 0 && x + 2147483648 < 4294967296 && y + 2147483648 >= 0 && y + 2147483648 < 4294967296) return r;
+    if (x == 0) return 0;
+    if (x == -1 && r == -9223372036854775807 - 1) { php_pk_overflow(2); return r; }
+    if (r / x != y) php_pk_overflow(2);
+    return r;
+}
+
+// an element read where null and 0 differ: the value php has
+uptr php_zinull(i64 v) { if (ph_pkabs) return php_znull(); return php_zlong(v); }
+uptr php_zinull2(i64 v, i64 abs) { if (abs) return php_znull(); return php_zlong(v); }
+
 // ---- the zval conversions, php's own rules ---------------------------------
 i64 php_zv_bool(uptr z) {
     i64 t = php_zv_type(z);
@@ -1604,11 +1853,44 @@ uptr php_zv_mod(uptr a, uptr b) {
     return php_zlong(php_mod(php_zv_ilong(a), y));
 }
 
+extern f64 pow(f64 x, f64 y);       // libm, as php's safe_pow is
+
+// 1 when x * y does not fit an i64
+i64 php_mul_ovf(i64 x, i64 y) {
+    if (x + 2147483648 >= 0 && x + 2147483648 < 4294967296 && y + 2147483648 >= 0 && y + 2147483648 < 4294967296) return 0;
+    if (x == 0) return 0;
+    i64 r = x * y;
+    if (x == -1 && r == -9223372036854775807 - 1) return 1;
+    if (r / x != y) return 1;
+    return 0;
+}
+
+// int ** int, php's pow_function_base (Zend/zend_operators.c) step for step:
+// square-and-multiply, and the FIRST product that overflows becomes a float
+// times what is left of the power. It wrapped here (`PHP_INT_MAX ** 2` was
+// int(1)), found by the review of #21.
 uptr php_zv_pow(uptr a, uptr b) {
     if (!php_arith_ok(a, b, php_str_new("**", 2))) return php_znull();
     if (php_zv_isdouble(a) || php_zv_isdouble(b) || php_zv_long(b) < 0)
         return php_zdouble(php_pow_f(php_zv_double(a), php_zv_long(b)));
-    return php_zlong(php_pow_i(php_zv_long(a), php_zv_long(b)));
+    i64 l1 = 1;
+    i64 l2 = php_zv_long(a);
+    i64 i = php_zv_long(b);
+    if (i == 0) return php_zlong(1);
+    if (l2 == 0) return php_zlong(0);
+    loop {
+        if (i < 1) break;
+        if (i % 2) {
+            i = i - 1;
+            if (php_mul_ovf(l1, l2)) return php_zdouble(((f64) l1) * ((f64) l2) * pow((f64) l2, (f64) i));
+            l1 = l1 * l2;
+        } else {
+            i = i / 2;
+            if (php_mul_ovf(l2, l2)) return php_zdouble(((f64) l1) * pow(((f64) l2) * ((f64) l2), (f64) i));
+            l2 = l2 * l2;
+        }
+    }
+    return php_zlong(l1);
 }
 
 uptr php_zv_neg(uptr a) {
@@ -2187,9 +2469,9 @@ i64 php_strpos(uptr h, uptr nd, i64 off) {
     uptr nb = nd + ZS_HDR;
     i64 c0 = ld8(nb);
     if (nn == 1) {
-        i64 k = off;
-        loop { if (k >= hn) break; if (ld8(hb + k) == c0) return k; k = k + 1; }
-        return -1;
+        i64 k = php_memchr(hb + off, c0, hn - off);
+        if (k < 0) return -1;
+        return off + k;
     }
     i64 last = hn - nn;
     i64 i = off;
@@ -2204,6 +2486,9 @@ i64 php_strpos(uptr h, uptr nd, i64 off) {
     }
     return -1;
 }
+
+// strpos($h, 'c') from the start: the byte scan alone
+i64 php_strpos1(uptr h, i64 c) { return php_memchr(h + ZS_HDR, c, ld64(h + 16)); }
 
 uptr php_str_repeat(uptr s, i64 times) {
     if (times <= 0) return php_str_new("", 0);
@@ -2220,11 +2505,35 @@ uptr php_str_repeat(uptr s, i64 times) {
 uptr php_str_replace1(i64 c, uptr repl, uptr subj) {
     i64 hn = ld64(subj + 16);
     uptr v = subj + ZS_HDR;
-    i64 cnt = 0;
-    i64 i = 0;
-    loop { if (i >= hn) break; if (ld8(v + i) == c) cnt = cnt + 1; i = i + 1; }
-    if (cnt == 0) return subj;
+    i64 f = php_memchr(v, c, hn);
+    if (f < 0) return subj;
     i64 rn = ld64(repl + 16);
+    // a replacement of at most one byte cannot grow the string: ONE pass,
+    // copying the runs between occurrences, into a buffer the size of the
+    // subject whose length is then what was written
+    if (rn <= 1) {
+        uptr o = php_str_alloc(hn);
+        uptr w = o + ZS_HDR;
+        i64 j = 0;
+        loop {
+            php_memcpy(w, v + j, f - j);
+            w = w + (f - j);
+            if (rn == 1) { st8(w, ld8(repl + ZS_HDR)); w = w + 1; }
+            j = f + 1;
+            i64 g = php_memchr(v + j, c, hn - j);
+            if (g < 0) break;
+            f = j + g;
+        }
+        php_memcpy(w, v + j, hn - j);
+        w = w + (hn - j);
+        i64 wn = w - (o + ZS_HDR);
+        st64(o + 16, wn);
+        st8(o + ZS_HDR + wn, 0);
+        return o;
+    }
+    i64 cnt = 0;
+    i64 i = f;
+    loop { if (i >= hn) break; if (ld8(v + i) == c) cnt = cnt + 1; i = i + 1; }
     uptr o = php_str_alloc(hn + cnt * (rn - 1));
     uptr w = o + ZS_HDR;
     i = 0;
@@ -2238,6 +2547,31 @@ uptr php_str_replace1(i64 c, uptr repl, uptr subj) {
         if (b != c) { st8(w, b); w = w + 1; }
         i = i + 1;
     }
+    return o;
+}
+
+// str_replace(c2, '', str_replace(c1, '', $s)) of two single bytes: both
+// deleted in ONE pass (the compiler fuses the two calls). Deleting a byte
+// joins its neighbours and cannot make a new c2, so the order of the two
+// never mattered.
+uptr php_str_del2(uptr subj, i64 c1, i64 c2) {
+    i64 hn = ld64(subj + 16);
+    uptr v = subj + ZS_HDR;
+    i64 f = 0;
+    loop { if (f >= hn) return subj; i64 b = ld8(v + f); if (b == c1 || b == c2) break; f = f + 1; }
+    uptr o = php_str_alloc(hn);
+    uptr w = o + ZS_HDR;
+    php_memcpy(w, v, f);
+    i64 k = f;
+    i64 i = f + 1;
+    loop {
+        if (i >= hn) break;
+        i64 d = ld8(v + i);
+        if (d != c1 && d != c2) { st8(w + k, d); k = k + 1; }
+        i = i + 1;
+    }
+    st64(o + 16, k);
+    st8(w + k, 0);
     return o;
 }
 
@@ -2535,24 +2869,44 @@ uptr php_strrev(uptr s) {
     return o;
 }
 
-uptr php_str_pad(uptr s, i64 len, uptr pad, i64 type) {    // php: 0 left, 1 right, 2 both
-    i64 n = php_strlen(s);
-    i64 pl = php_strlen(pad);
-    if (len <= n || pl == 0) return s;
+// str_pad of the n bytes at b, which is shorter than len and the pad not
+// empty: always a new string. The pad cycles by a counter, not `i % pl` --
+// a division a byte.
+uptr php_str_pad_b(uptr b, i64 n, i64 len, uptr pad, i64 type) {    // php: 0 left, 1 right, 2 both
+    i64 pl = ld64(pad + 16);
+    uptr pv = pad + ZS_HDR;
     i64 need = len - n;
     i64 left = 0;
     if (type == 0) left = need;
     if (type == 2) left = need / 2;
     i64 right = need - left;
     uptr o = php_str_alloc(len);
-    i64 w = 0;
+    uptr w = o + ZS_HDR;
     i64 i = 0;
-    loop { if (i >= left) break; st8(o + ZS_HDR + w, ld8(pad + ZS_HDR + i % pl)); w = w + 1; i = i + 1; }
-    php_memcpy(o + ZS_HDR + w, s + ZS_HDR, n);
-    w = w + n;
+    i64 j = 0;
+    loop { if (i >= left) break; st8(w + i, ld8(pv + j)); j = j + 1; if (j == pl) j = 0; i = i + 1; }
+    php_memcpy(w + left, b, n);
+    w = w + left + n;
     i = 0;
-    loop { if (i >= right) break; st8(o + ZS_HDR + w, ld8(pad + ZS_HDR + i % pl)); w = w + 1; i = i + 1; }
+    j = 0;
+    loop { if (i >= right) break; st8(w + i, ld8(pv + j)); j = j + 1; if (j == pl) j = 0; i = i + 1; }
     return o;
+}
+
+uptr php_str_pad(uptr s, i64 len, uptr pad, i64 type) {
+    i64 n = php_strlen(s);
+    if (len <= n || php_strlen(pad) == 0) return s;
+    return php_str_pad_b(s + ZS_HDR, n, len, pad, type);
+}
+
+// str_pad((string) $int, ...): the digits padded where they were written,
+// so the string the cast would have made is never built (the compiler
+// fuses the two, src/builtin.mc)
+uptr php_str_pad_i(i64 v, i64 len, uptr pad, i64 type) {
+    u8 t[24];
+    i64 k = php_itos_b(v, t);
+    if (len <= 24 - k || php_strlen(pad) == 0) return php_str_new(t + k, 24 - k);
+    return php_str_pad_b(t + k, 24 - k, len, pad, type);
 }
 
 u8 php_str_contains(uptr h, uptr n) { if (php_strlen(n) == 0) return 1; if (php_strpos(h, n, 0) >= 0) return 1; return 0; }
@@ -3226,6 +3580,7 @@ uptr php_f_array_fill(uptr st, uptr num, uptr v) {
     uptr r = php_arr_new(8);
     i64 s = php_zv_long(st);
     i64 n = php_zv_long(num);
+    if (!php_fill_count_ok(n)) return r;
     i64 i = 0;
     loop { if (i >= n) break; php_zv_cpv(php_arr_islot(r, s + i), v); i = i + 1; }
     return r;

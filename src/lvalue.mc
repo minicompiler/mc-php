@@ -54,6 +54,15 @@ i64 ph_temp(i64 v, i64 mcty, uptr pfx) {
     return r;
 }
 
+// compute-then-check: v into a temporary, and the unwinding check pending
+// BEFORE the statement that consumes it -- for a value whose own evaluation
+// can throw, so the consumer (a store, `throw`) never sees the fallback value
+i64 ph_checked_now(i64 v, i64 mcty, i64 line, uptr fl) {
+    i64 t = ph_temp(v, mcty, "phc_");
+    ph_pending_stmt(ph_check(line, fl));
+    return t;
+}
+
 i64 ph_tref(i64 n) {
     i64 r = node_new(N_IDENT, nd_line(n), nd_file(n));
     set_nd_name(r, nd_name(n));
@@ -181,6 +190,86 @@ i64 ph_ref_into(i64 cell, uptr fl, i64 line, i64 semi) {
     return ph_wrap(ph_set(ph_mangle(sv, "v_"), ph_c2("php_ref_bind", cell, cv, ty_pzv)));
 }
 
+// ---- the packed int array (src/packed.mc) ------------------------------------
+// the value a packed store is given: an int, which the scan predicted
+i64 ph_pk_int(uptr fl, i64 line) {
+    i64 v = ph_expr(0);
+    if (ph_ety != PT_INT) ph_pk_disagree(fl, line, "a stored value that is not an int");
+    return v;
+}
+
+// `$x = [];`, `$x = array();`, `$x = array_fill(0, N, V);` on a packed $x
+i64 ph_pk_init(uptr d, uptr fl, i64 line, i64 semi) {
+    i64 v = 0;
+    if (ph_accept("[", 1)) {
+        ph_want("]", 1, "expected ] in a php array");
+        v = ph_quiet("php_pk_new", 1, ph_int(8), 0, 0, 0, TY_UPTR);
+    } else if (ph_is("array_fill")) {
+        ph_next();
+        ph_want("(", 1, "expected ( in a php call");
+        i64 z = ph_expr(0);
+        if (nd_kind(z) != N_INT || nd_val(z) != 0) ph_pk_disagree(fl, line, "array_fill's start");
+        ph_want(",", 1, "expected , in a php call");
+        // php's order, each step checked before the next: the count, the
+        // value, then array_fill's own ValueError -- and only then the store,
+        // so `try { $x = array_fill(0, -1, 1); }` leaves $x as it was
+        i64 before = ph_can_throw;
+        ph_can_throw = 0;
+        i64 n = ph_pk_int(fl, line);
+        if (ph_can_throw) n = ph_checked_now(n, TY_I64, line, fl);
+        ph_want(",", 1, "expected , in a php call");
+        ph_can_throw = 0;
+        i64 fv = ph_pk_int(fl, line);
+        if (ph_can_throw) fv = ph_checked_now(fv, TY_I64, line, fl);
+        ph_want(")", 1, "expected ) in a php call");
+        v = ph_checked_now(ph_c2("php_pk_fill", n, fv, TY_UPTR), TY_UPTR, line, fl);
+        ph_can_throw = before;
+    } else if (ph_is("array")) {
+        ph_next();
+        ph_want("(", 1, "expected ( in a php array");
+        ph_want(")", 1, "expected ) in a php array");
+        v = ph_quiet("php_pk_new", 1, ph_int(8), 0, 0, 0, TY_UPTR);
+    } else {
+        ph_pk_disagree(fl, line, "an initialisation");
+    }
+    if (semi) ph_semi("expected ; after a php assignment");
+    if (ph_var_find(d) < 0) ph_var_bind(d, PT_PK);
+    return ph_wrap(ph_set(ph_mangle(d, "v_"), v));
+}
+
+// `$x[] = E;` and `$x[K] = E;` on a packed $x; the parser is on the [
+i64 ph_pk_store(uptr d, uptr fl, i64 line, i64 semi) {
+    if (ph_var_type(d) != PT_PK) ph_pk_disagree(fl, line, "a store before the initialisation");
+    ph_next();
+    i64 base = node_new(N_IDENT, line, fl);
+    set_nd_name(base, ph_mangle(d, "v_"));
+    set_nd_type(base, TY_UPTR);
+    i64 k = 0;
+    i64 before = ph_can_throw;
+    if (!ph_at("]", 1)) {
+        ph_can_throw = 0;
+        k = ph_expr(0);
+        if (ph_ety != PT_INT) ph_pk_disagree(fl, line, "a key that is not an int");
+        // a key that throws (`$x[intdiv(1, 0)] = 2`) stops the assignment
+        // before the value is evaluated, as php's does
+        if (ph_can_throw) k = ph_checked_now(k, TY_I64, line, fl);
+    }
+    ph_want("]", 1, "expected ] in a php array assignment");
+    ph_want("=", 1, "expected = after a php array index");
+    // a value that can throw (a checked `+ - *` on an element) is computed
+    // and checked BEFORE the store: `try { $x[] = $x[0] * 3; }` must leave
+    // $x as it was when the product overflows. The key is taken first so php's
+    // order -- key, then value -- survives the value moving ahead of the store.
+    if (k && nd_kind(k) != N_INT && nd_kind(k) != N_IDENT) k = ph_temp(k, TY_I64, "phk_");
+    ph_can_throw = 0;
+    i64 v = ph_pk_int(fl, line);
+    if (ph_can_throw) v = ph_checked_now(v, TY_I64, line, fl);
+    ph_can_throw = before;
+    if (semi) ph_semi("expected ; after a php assignment");
+    if (!k) return ph_expr_stmt_of(ph_quiet("php_pk_push", 2, base, v, 0, 0, TY_VOID));
+    return ph_expr_stmt_of(ph_quiet("php_pk_set", 3, base, k, v, 0, TY_VOID));
+}
+
 // $v = expr / $v[i] = expr / $v[] = expr, and the compound forms
 i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
     u8 kbr[8];
@@ -194,6 +283,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         return ph_obj_stmt(d, fl, line, semi);
     }
+    if (ph_at("[", 1) && ph_pk_has(d)) return ph_pk_store(d, fl, line, semi);
     if (ph_at("[", 1)) {
         // a php array springs into existence on its first [] write
         if (ph_var_find(d) < 0) {
@@ -368,6 +458,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         i64 lv = node_new(N_IDENT, line, fl);
         set_nd_name(lv, ph_mangle(d, "v_"));
         set_nd_type(lv, ph_mcty(lt));
+        ph_inull_ok = 1;                      // `$v += $x[$i]`: ph_arith's to answer
         i64 r = ph_expr(0);
         i64 rt = ph_ety;
         if (semi) ph_semi("expected ; after a php assignment");
@@ -495,6 +586,21 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         set_nd_name(sr, ph_mangle(src, "v_"));
         set_nd_type(sr, ty_pzv);
         return ph_wrap(ph_set(ph_mangle(d, "v_"), sr));
+    }
+    if (ph_pk_has(d)) return ph_pk_init(d, fl, line, semi);
+    if (ph_pin_has(d)) {
+        // `$v = $x[$k];` (src/packed.mc): the value and php's null, kept
+        ph_inull_ok = 1;
+        i64 iv = ph_expr(0);
+        if (ph_ety != PT_INULL || ph_var_find(d) >= 0) ph_pk_disagree(fl, line, "a packed element variable");
+        if (semi) ph_semi("expected ; after a php assignment");
+        ph_var_bind(d, PT_INULL);
+        i64 s1 = ph_set(ph_mangle(d, "v_"), iv);
+        i64 fr = node_new(N_IDENT, line, fl);
+        set_nd_name(fr, "ph_pkabs");
+        set_nd_type(fr, TY_I64);
+        set_nd_next(s1, ph_set(ph_mangle(d, "vn_"), fr));
+        return ph_wrap(s1);
     }
     i64 v = ph_expr(0);
     i64 vt = ph_ety;
@@ -1495,10 +1601,20 @@ i64 ph_stmt_1() {
     if (ph_is("match"))  ph_todo(fl, line, "match");
     if (ph_is("throw")) {
         ph_next();
+        i64 tsave = ph_can_throw;
+        ph_can_throw = 0;
         i64 e = ph_expr(0);
         i64 et = ph_ety;
         ph_semi("expected ; after throw");
+        // a scalar operand that throws (`throw $x[0] * 3` on a packed
+        // element) is that exception, not php_throw's "Can only throw
+        // objects" over the fallback value: computed and checked first. Not
+        // for an object: `new` and a call answering an object may run inside a
+        // finally whose pending exception the check would take for theirs
+        // (a finally does not set it aside -- docs/plan.md section 7)
+        if (ph_can_throw && et != PT_OBJ && et != PT_MIXED) e = ph_checked_now(e, ph_mcty(et), line, fl);
         ph_can_throw = 1;
+        if (tsave) ph_can_throw = 1;
         return ph_expr_stmt_of(ph_c1("php_throw", ph_recv(e, et), ty_pzv));
     }
     if (ph_is("try")) {

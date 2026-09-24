@@ -102,6 +102,39 @@ the C twin is still 6.3x faster than the module, and the rest of that gap is nam
 `docs/plan.md` § 7. The project files now build with mc's optimizer (`[project].opt = 1`), which
 accounts for 1.7x of the 4.3x.
 
+**Three columns, the decimal-c batch** (2026-09-24, macos/arm64, php 8.5.10, one host, one
+sitting, five rounds interleaved; `decimal.php` byte for byte what it was, every gain in the
+compiler and its runtime -- `docs/plan.md` § 7 item 1 has the profile, the table of what each
+change bought, and what is left):
+
+| | interpreted | the module | the C twin | module / C |
+|---|---|---|---|---|
+| before (main) | 3.29 ms | 1.514 ms (2.17x) | 0.239 ms (13.77x) | 6.33 |
+| after | 3.29 ms | **0.990 ms (3.32x)** | 0.240 ms (13.71x) | **4.12** |
+
+`tests/examples.sh`'s own bench row on the final tree: 3.299 / 0.998 (3.31x) / 0.237 ms (13.92x).
+
+and on every CI leg, main's run after batch E (the merge of #20) against this pull request's final
+run, 36052255981 (runners differ between runs by up to ~40% in absolute time, so the ratio is what compares;
+only `macos-15` has `php-config` and `cc` for the C column):
+
+| host | main: interpreted / module | ratio | decimal-c: interpreted / module | ratio |
+|---|---|---|---|---|
+| macos/arm64 (`macos-15`) | 2.099 / 1.248 ms, twin 0.172 | 1.68x, module/C 7.3 | 2.060 / 0.803 ms, twin 0.171 | **2.57x**, module/C **4.7** |
+| linux/aarch64 (`ubuntu-24.04-arm`, container) | 3.091 / 1.775 ms | 1.74x | 3.088 / 1.167 ms | **2.65x** |
+| linux/x86_64 (`ubuntu-24.04`, container) | 2.980 / 2.194 ms | 1.36x | 3.693 / 1.482 ms | **2.49x** |
+| windows/aarch64 (`windows-11-arm`, x64 php emulated) | 8.778 / 2.942 ms | 2.98x | 8.759 / 1.897 ms | **4.62x** |
+| windows/x86_64 (`windows-latest`) | 6.510 / 2.349 ms | 2.77x | 5.541 / 1.530 ms | **3.62x** |
+The largest single steps: `_dec_umul`'s arrays are native int buffers now (the compiler proves they
+hold only ints and never leave the function, `src/packed.mc`), `_dec_coef`'s two one-byte
+`str_replace` deletions are one pass, and a cast no longer swallows the `- $borrow` after it.
+
+What still separates the module from the twin is mostly the ALGORITHM both php and the module run:
+a number is a string, so every operation re-validates and re-parses its operands and makes new
+strings for its intermediate values, where the twin parses each operand once into digits and
+writes into one buffer; the rest is named in `docs/plan.md` § 7 (mc's code for a leaf function,
+§ 5; the call's memory zeroed on return; the result copied out to Zend).
+
 ## What it cannot do yet
 
 * **A wrong TYPE** is an internal function's message in the module and a userland one

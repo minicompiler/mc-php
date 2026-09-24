@@ -211,7 +211,15 @@ i64 ph_function() {
     ph_frv = 0;
     ph_frf = 0;
     if (pre) pre = ph_prefix_stmts(pre, ph_check(line, fl));
+    // src/packed.mc: which arrays of this body are provably packed ints --
+    // scanned before the body is compiled, and put back after it for the
+    // body a nested declaration interrupted
+    uptr spk = pkx_names;
+    uptr spi = pkx_inames;
+    if (ph_at("{", 1)) ph_pk_scan();
     i64 body = ph_block();
+    pkx_names = spk;
+    pkx_inames = spi;
     ph_in_try = sit;
     ph_frv = sfv;
     ph_frf = sff;

@@ -879,6 +879,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "strlen"))   { ph_need(na, 1, name, fl, line); ph_ety = PT_INT; return ph_strlen_of(ph_to_str(a0, t0)); }
     if (str_eq(name, "count") || str_eq(name, "sizeof")) {
         ph_need(na, 1, name, fl, line);
+        if (t0 == PT_PK) { ph_ety = PT_INT; return ph_quiet("php_pk_count", 1, a0, 0, 0, 0, TY_I64); }
         if (t0 == PT_MIXED) { ph_ety = PT_INT; return ph_c1("php_count", ph_c1("php_zv_arr_r", a0, ty_parr), TY_I64); }
         if (!ph_is_arr(t0)) ph_todo2(fl, line, "count() of", ph_tyname(t0));
         ph_ety = PT_INT;
@@ -902,7 +903,12 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         i64 off = ph_int(0);
         if (na == 3) off = ph_to_int(ph_a(av, 2), ph_aty(av, 2));
         ph_ety = PT_IFALSE;
-        return ph_c3("php_strpos", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), off, TY_I64);
+        i64 nd = ph_to_str(ph_a(av, 1), ph_aty(av, 1));
+        // strpos($s, 'c'): one byte from the start is a scan and nothing
+        // else, and raises nothing (php_strpos1)
+        if (na == 2 && ph_lit_len(nd) == 1)
+            return ph_quiet("php_strpos1", 2, ph_to_str(a0, t0), ph_int(ph_lit_byte(nd)), 0, 0, TY_I64);
+        return ph_c3("php_strpos", ph_to_str(a0, t0), nd, off, TY_I64);
     }
     if (str_eq(name, "str_replace")) {
         if (na < 3 || na > 4) ph_todo2(fl, line, "the wrong number of arguments for", name);
@@ -924,9 +930,24 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         }
         // no $count: the replacement itself, with no wrapper call around it,
         // and quiet -- over three strings str_replace raises nothing
-        if (na == 3)
-            return ph_quiet("php_str_replace", 3, ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)),
-                            ph_to_str(ph_a(av, 2), ph_aty(av, 2)), 0, ty_pstr);
+        if (na == 3) {
+            i64 rs = ph_to_str(a0, t0);
+            i64 rr = ph_to_str(ph_a(av, 1), ph_aty(av, 1));
+            i64 rj = ph_to_str(ph_a(av, 2), ph_aty(av, 2));
+            // str_replace('a', '', str_replace('b', '', $s)), two single
+            // bytes deleted: one pass (php_str_del2)
+            if (ph_lit_len(rs) == 1 && ph_lit_len(rr) == 0 && nd_kind(rj) == N_CALL
+                && str_eq(nd_name(rj), "php_str_replace")) {
+                i64 is = nd_a(rj);
+                i64 ir = nd_next(is);
+                i64 isj = nd_next(ir);
+                if (ph_lit_len(is) == 1 && ph_lit_len(ir) == 0) {
+                    set_nd_next(isj, 0);
+                    return ph_quiet("php_str_del2", 3, isj, ph_int(ph_lit_byte(is)), ph_int(ph_lit_byte(rs)), 0, ty_pstr);
+                }
+            }
+            return ph_quiet("php_str_replace", 3, rs, rr, rj, 0, ty_pstr);
+        }
         return ph_c4("php_str_replace_c", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)),
                      ph_to_str(ph_a(av, 2), ph_aty(av, 2)), cnt, ty_pstr);
     }
@@ -1083,9 +1104,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             ph_ety = PT_STRING;
             i64 mk = ph_a(av, 1);
             if (ph_is_strlit(mk))
-                return ph_quiet("php_trim_m", 3, a0,
-                    ph_quiet("php_bmap_lit", 3, ph_cache_slot("phm_"), mk, ph_int(1), 0, TY_UPTR),
-                    ph_int(tmode), 0, ty_pstr);
+                return ph_quiet("php_trim_m", 3, a0, ph_bmap_of(mk, 1), ph_int(tmode), 0, ty_pstr);
             return ph_quiet("php_trim_s", 3, a0, mk, ph_int(tmode), 0, ty_pstr);
         }
         uptr f = "php_f_trim";
@@ -1119,7 +1138,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         uptr sf = "php_spn_s";
         if (ph_is_strlit(set)) {
             sf = "php_spn";
-            set = ph_quiet("php_bmap_lit", 3, ph_cache_slot("phm_"), set, ph_int(0), 0, TY_UPTR);
+            set = ph_bmap_of(set, 0);
         }
         st64(sa + 8, set);
         i64 save = ph_can_throw;
@@ -1135,7 +1154,12 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (na >= 3) pad = ph_to_str(ph_a(av, 2), ph_aty(av, 2));
         if (na >= 4) type = ph_to_int(ph_a(av, 3), ph_aty(av, 3));
         ph_ety = PT_STRING;
-        return ph_c4("php_str_pad", ph_to_str(a0, t0), ph_to_int(ph_a(av, 1), ph_aty(av, 1)), pad, type, ty_pstr);
+        i64 ps = ph_to_str(a0, t0);
+        // str_pad((string) $int, ...): the digits padded in place, the
+        // intermediate string never built (php_str_pad_i)
+        if (nd_kind(ps) == N_CALL && str_eq(nd_name(ps), "php_itos"))
+            return ph_c4("php_str_pad_i", nd_a(ps), ph_to_int(ph_a(av, 1), ph_aty(av, 1)), pad, type, ty_pstr);
+        return ph_c4("php_str_pad", ps, ph_to_int(ph_a(av, 1), ph_aty(av, 1)), pad, type, ty_pstr);
     }
     if (str_eq(name, "str_contains")) { ph_need(na, 2, name, fl, line); ph_ety = PT_BOOL; return ph_c2("php_str_contains", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), TY_U8); }
     if (str_eq(name, "str_starts_with")) { ph_need(na, 2, name, fl, line); ph_ety = PT_BOOL; return ph_c2("php_str_starts", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)), TY_U8); }

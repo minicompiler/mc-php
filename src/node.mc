@@ -138,6 +138,9 @@ i64 ph_strlit(uptr bytes, i64 len) {
 uptr ph_lits;
 i64  ph_nlits;
 i64  ph_litcap;
+uptr ph_bmaps;             // ph_bmap_of's sites, built beside the literals
+i64  ph_nbmaps;
+i64  ph_bmapcap;
 
 // The end of the unit: one function that builds every literal the unit
 // uses, called first thing by main (or MINIT), and every USE turned into a
@@ -171,6 +174,38 @@ i64 ph_lit_finish(uptr fl, i64 line) {
         set_nd_next(cache, 0);
         i = i + 1;
     }
+    // the byte maps, AFTER the literals they are built from; the literal
+    // argument is already a load of its cache by now
+    i = 0;
+    loop {
+        if (i >= ph_nbmaps) break;
+        i64 m = ld64(ph_bmaps + i * 8);
+        i64 mc = nd_a(m);
+        i64 lit = nd_next(mc);
+        i64 tr = nd_next(lit);
+        i64 m2 = node_new(N_IDENT, nd_line(m), nd_file(m));
+        set_nd_name(m2, nd_name(mc));
+        i64 l2 = node_new(N_IDENT, nd_line(m), nd_file(m));
+        set_nd_name(l2, nd_name(nd_a(lit)));
+        i64 lc = node_new(N_CALL, nd_line(m), nd_file(m));
+        set_nd_name(lc, "ld64");
+        set_nd_a(lc, l2);
+        set_nd_type(lc, ty_pstr);
+        set_nd_next(m2, lc);
+        set_nd_next(lc, ph_int(nd_val(tr)));
+        i64 bc2 = node_new(N_CALL, nd_line(m), nd_file(m));
+        set_nd_name(bc2, "php_bmap_lit");
+        set_nd_a(bc2, m2);
+        set_nd_type(bc2, TY_UPTR);
+        i64 st2 = node_new(N_EXPRSTMT, nd_line(m), nd_file(m));
+        set_nd_a(st2, bc2);
+        if (tail) set_nd_next(tail, st2);
+        if (!tail) head = st2;
+        tail = st2;
+        set_nd_name(m, "ld64");
+        set_nd_next(mc, 0);
+        i = i + 1;
+    }
     i64 b = node_new(N_BLOCK, line, fl);
     set_nd_a(b, head);
     i64 f = node_new(N_FUNC, line, fl);
@@ -198,10 +233,36 @@ i64 ph_cache_slot(uptr pfx) {
     return cache;
 }
 
+// the byte map of a LITERAL set (strspn/strcspn, trim's mask): built with
+// the literals, before the first statement, and a use is one load -- it was
+// a php_bmap_lit call and a cache test per use (examples/decimal: 2.6%)
+i64 ph_bmap_of(i64 lit, i64 trim) {
+    i64 c = ph_quiet("php_bmap_lit", 3, ph_cache_slot("phm_"), lit, ph_int(trim), 0, TY_UPTR);
+    if (ph_nbmaps == ph_bmapcap) {
+        i64 cap = ph_bmapcap * 2;
+        if (cap == 0) cap = 64;
+        uptr nb = xalloc(cap * 8);
+        i64 i = 0;
+        loop { if (i >= ph_nbmaps) break; st64(nb + i * 8, ld64(ph_bmaps + i * 8)); i = i + 1; }
+        ph_bmaps = nb;
+        ph_bmapcap = cap;
+    }
+    st64(ph_bmaps + ph_nbmaps * 8, c);
+    ph_nbmaps = ph_nbmaps + 1;
+    return c;
+}
+
 // is `n` a php string literal (ph_strlit's node)?
 i64 ph_is_strlit(i64 n) {
     return nd_kind(n) == N_CALL && str_eq(nd_name(n), "php_str_lit");
 }
+
+// a literal's length, -1 when `n` is not one; and its first byte
+i64 ph_lit_len(i64 n) {
+    if (!ph_is_strlit(n)) return 0 - 1;
+    return nd_val(nd_next(nd_a(n)));
+}
+i64 ph_lit_byte(i64 n) { return ld8(nd_name(nd_next(nd_a(n)))); }
 
 uptr php_dec(i64 v) {
     uptr o = xalloc(24);

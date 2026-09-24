@@ -135,4 +135,87 @@ for f in $P/r/*.php; do
     esac
 done
 echo "  refusals: $nrok / $nr parse under php and are named by mc-php, exit 3"
+# The packed int array (src/packed.mc) is a LOWERING, and a differential only
+# says the answers are php's -- a proof that silently never fires would pass
+# it too. So the lowering is read back: every pk_* function of g/105 must
+# hold its $x as the native buffer (an mc `uptr` local), and no esc_* function
+# of g/106 may, each of those being one thing the proof must refuse.
+"$MCPHP_BIN" --dump-ast $P/g/105-packed-int.php > "$tmp/pk.ast" 2>&1
+"$MCPHP_BIN" --dump-ast $P/g/106-packed-fallback.php > "$tmp/pe.ast" 2>&1
+pk=$(awk '/^FUNC.* name=f_pk_/ { f = $NF } /^FUNC/ && !/name=f_pk_/ { f = "" }
+          f != "" && /VAR type=uptr name=v_x$/ { print f }' "$tmp/pk.ast" | sort -u | wc -l | tr -d ' ')
+pn=$(grep -c '^FUNC.* name=f_pk_' "$tmp/pk.ast")
+pe=$(awk '/^FUNC.* name=f_esc_/ { f = $NF } /^FUNC/ && !/name=f_esc_/ { f = "" }
+          f != "" && /VAR type=uptr name=v_x$/ { print f }' "$tmp/pe.ast" | sort -u | tr '\n' ' ')
+en=$(grep -c '^FUNC.* name=f_esc_' "$tmp/pe.ast")
+if [ "$pn" -gt 0 ] && [ "$pk" = "$pn" ] && [ -z "$pe" ] && [ "$en" -gt 0 ]; then
+    echo "  packed: $pk / $pn accepted in g/105, 0 / $en lowered in g/106"
+else
+    echo "  FAIL  packed: $pk / $pn accepted in g/105; lowered in g/106 where the proof must fail: ${pe:-none}"
+    fail=1
+fi
+# The one place the packed lowering is NOT php: an int that overflows on an
+# element. php makes a float; a native int cannot hold one, so it is a named
+# ArithmeticError and never a wrapped int. Not a differential -- php's answer
+# is the float -- so the refusal's text is what is checked.
+cat > "$tmp/pko.php" <<'PKO'
+<?php
+function pko(int $n): string {
+    $x = [];
+    $x[] = $n;
+    try { return (string) ($x[0] * 3); } catch (ArithmeticError $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function pkn(int $n): string {
+    $x = [];
+    $x[] = $n;
+    try { return (string) (-($x[0] + 1) * 2); } catch (ArithmeticError $e) { return get_class($e); }
+}
+// the store is not reached when the value throws: $x is as it was
+function pks(int $n): string {
+    $x = [];
+    $x[] = $n;
+    try { $x[] = $x[0] * 3; } catch (ArithmeticError $e) { }
+    try { $x[0] = $x[0] + $x[0]; } catch (ArithmeticError $e) { }
+    return count($x) . " " . $x[0];
+}
+echo pko(5), "\n", pko(PHP_INT_MAX), "\n", pkn(5), " ", pkn(PHP_INT_MAX - 1), "\n";
+// PHP_INT_MIN * -1 in both orders: the one product whose DIVISION check
+// would trap on x86-64 (idiv of PHP_INT_MIN by -1); it must be the named error
+function pkm(int $n, int $o): string {
+    $x = [];
+    $x[] = $n;
+    try { if ($o) return (string) (-1 * $x[0]); return (string) ($x[0] * -1); } catch (ArithmeticError $e) { return "A"; }
+}
+// `throw` of an element product that overflows is that ArithmeticError,
+// not "Can only throw objects" over the wrapped value
+function pkt(int $n): string {
+    $x = [];
+    $x[] = $n;
+    try { throw $x[0] * 3; } catch (ArithmeticError $e) { return "A"; } catch (Error $e) { return "E"; }
+}
+echo pks(5), " ", pks(PHP_INT_MAX), "\n";
+echo pkt(5), " ", pkt(PHP_INT_MAX), "\n";
+echo pkm(5, 0), " ", pkm(5, 1), " ", pkm(PHP_INT_MIN, 0), " ", pkm(PHP_INT_MIN, 1), "\n";
+PKO
+lim $P/mcphp.sh "$tmp/pko.php" > "$tmp/pko.out" 2> "$tmp/pko.err"
+rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
+pko=$(tr -d '\r' < "$tmp/pko.out")
+pkw=$(printf '15\nArithmeticError: mc-php: an int overflowed in * on a packed array'"'"'s element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)\n-12 ArithmeticError\n2 10 1 9223372036854775807\nE A\n-5 -5 A A')
+if [ "$pko" = "$pkw" ]; then
+    echo "  packed: an overflow on an element is the named ArithmeticError, not a wrapped int, and no store"
+else
+    echo "  FAIL  packed overflow: want [$pkw], got [$pko]"; fail=1
+fi
+# A size near PHP_INT_MAX on the program road is "arena exhausted", never a
+# bump past the arena: `a + n` wrapped and moved the top to a wild address
+# (SIGBUS on main). php answers with its memory-limit fatal, so this is not a
+# differential either -- the refusal's text is what is checked.
+printf '<?php\n$s = str_repeat("a", 100);\necho strlen(str_pad($s, PHP_INT_MAX - 100, "x")), "\\n";\n' > "$tmp/big.php"
+lim $P/mcphp.sh "$tmp/big.php" > "$tmp/big.out" 2> "$tmp/big.err"
+rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
+if tr -d '\r' < "$tmp/big.err" | grep -q '^mc-php: arena exhausted$'; then
+    echo "  arena: a size near PHP_INT_MAX is 'arena exhausted', not a wild bump"
+else
+    echo "  FAIL  arena: want 'mc-php: arena exhausted' on stderr, got [$(cat "$tmp/big.err")]"; fail=1
+fi
 exit $fail

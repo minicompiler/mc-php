@@ -938,6 +938,66 @@ the workaround: `lib/php_ext.mc` takes the address of a one-line local function,
 (`ARM64_RELOC_GOT_LOAD_PAGE21`/`PAGEOFF12`, `R_AARCH64_ADR_GOT_PAGE`/`LD64_GOT_LO12_NC`, and the
 x86-64 `GOTPCREL` form) for `&name` when `name` is an `extern` and the output is an object.
 
+### Open: under `-O` a leaf function's locals take callee-saved registers, and a constant operand is a register (mc 1.1.0, macos/aarch64)
+
+Found by the decimal-c batch (2026-09-24), measured on the extension build of `examples/decimal`
+with `[project].opt = 1`, and reported rather than worked around.
+
+Batch E's reading of the profile was that mc "saves every callee-saved register in each prologue
+whether or not the function uses them". **That is not what happens, and the correction is
+measured**: over the disassembly (`otool -tV`) of the final module, every function saves exactly
+the `x19..x28` registers its body names -- **805 functions, 0 with a saved register the body does
+not use** (`php_strpos` saved ten because it used ten). mc's own `docs/reference/machine.md` § What the arm64
+allocator does says the same.
+
+What costs is different: **the allocator's only registers are `x19..x28`, so a LEAF function pays a
+store and a load per register it allocates** -- where a C compiler would put the same locals in the
+caller-saved `x0..x15` for nothing. Reduced to plain mc:
+
+```mc
+i64 leaf(uptr p, i64 n) {
+    i64 s = 0;
+    i64 i = 0;
+    loop { if (i >= n) break; s = s + ld8(p + i); i = i + 1; }
+    return s;
+}
+```
+
+```
+$ mc --dump-asm --opt=1 leaf.mc
+_leaf:
+  stp x29, x30, [sp, #-16]!
+  mov x29, sp
+  sub sp, sp, #32
+  str x19, [sp, #24]            <- four callee-saved registers, in a function
+  str x20, [sp, #16]               that calls nothing
+  str x21, [sp, #8]
+  str x22, [sp]
+  mov x21, x0
+  mov x22, x1
+  ...
+  movz x10, #1                  <- the step is a register, not `add x19, x19, #1`
+  add x19, x19, x10
+  ...
+  ldr x22, [sp]
+  ldr x21, [sp, #8]
+  ldr x20, [sp, #16]
+  ldr x19, [sp, #24]
+```
+
+Eight memory operations and two moves per call that a leaf does not need, and a second
+instruction for every constant operand (`mov` + `add`, `mov` + `add` + `ldr` for a field at a
+constant offset, where AArch64 has `add #imm` and `ldr [xN, #imm]`). In the runtime of this
+repository the leaf string routines are exactly this shape: `php_memcpy` saves 5, `php_str_eq` 4,
+`php_itos_b` 5, `php_stoi_b` 7, `php_spn` 10 -- `php_spn` is 92 instructions, 20 of them the saves
+and restores. On the final decimal build those routines are 36.6% of the module's time
+(the § 7 table), so the saving is a few percent of it, estimated from instruction counts and not
+measured: mc cannot emit the other form, so there is nothing to time it against.
+
+What would close it in mc: let the allocator use caller-saved registers in a function that makes
+no call (a leaf has `x0..x7` free once its parameters are read, and `x16`/`x17`), and give the
+walker immediate forms for `add`/`sub`/`cmp` and a constant offset in `ldr`/`str`.
+
 ### Still unmeasured
 
 - The ELF half of everything above: `probes/t2/run.sh` has never run on Linux. What HAS: the
@@ -973,7 +1033,8 @@ its code is written.
    and `awaitable` get theirs when they are compiled from PHP. By that rule `decimal` is
    DONE since batch E -- compiled from PHP and faster than interpreted on all five legs, 1.52x to
    2.99x (macos/arm64 2.19x here, the twin 13.8x; § 7 item 1 below has the profile and the
-   table) -- and the other two are not. What already has code moves into
+   table) -- and the other two are not. The decimal-c batch took the module from 6.3x the C twin's
+   time to 4.1x (1.51 -> 0.98 ms here), § 7 item 1. What already has code moves into
    `examples/`, each with a gate that compiles it and compares it with php. Four of the five parts
    are DONE (the examples branch, 2026-09-23), gated by `tests/ext.sh` and `tests/examples.sh`
    inside `tests/run.sh`, `tests/linux.sh` and `tests/windows.sh`, **green on all five CI legs**
@@ -1159,6 +1220,147 @@ In the order the measurements put them, each with the number that says why:
    own, not a tuning: a typed int array, inlining small php functions, and a "can this function
    throw" fixpoint -- the last now worth little, since the position and the check it would remove
    are three instructions each.
+
+   **The decimal-c batch (2026-09-24): closing on the C twin.** The profile came first again --
+   `sample`, 8 s over the bench workload in a loop, on main's build (4262 samples on php's
+   thread). Batch E's three causes, checked:
+
+   | batch E's cause | measured | verdict |
+   |---|---|---|
+   | `_dec_umul`'s int array is zvals | `_dec_umul` 21.7% inclusive, **12.9% of the module in array and zval calls** (`php_f_array_fill` 121, `php_arr_iget_w` 102, `php_arr_push` 77, `php_arr_iset` 59, `php_arr_new` 52, the zval arithmetic and boxes 137) | confirmed |
+   | allocation | `php_alloc` 280 + `php_str_alloc` 123 + `phx_zero` 157 = **13.1%** self | confirmed |
+   | the php functions' own bodies, "mc saves every callee-saved register whether or not it uses them" | 10.9% self; **but 805 of 805 functions save exactly the registers they use** | the size confirmed, the cause **corrected**: mc saves what it assigns, and what costs is that a LEAF function's registers are callee-saved too, and that a constant operand is a register -- § 5, with a reproducer |
+
+   and what batch E did not name: `str_replace` 11.4% inclusive (`_dec_coef`'s two one-byte
+   deletions, 15.2%), `php_memcpy`'s byte tail 8.1%, `$s[$i] === 'c'` as a call 4.4%, `strpos`
+   5.1%.
+
+   Every change is in the compiler or its runtime; `decimal.php` is byte for byte what it was.
+   The module's column of `examples/decimal/bench.php`, every build re-measured in ONE sitting on
+   this Mac (three rounds interleaved with the interpreter and the C twin; rows move by about 2%
+   between sittings, which is the band the "str_pad" row falls in):
+
+   | change | ms |
+   |---|---|
+   | main | 1.516 |
+   | **a packed int array** (`src/packed.mc`, below) | 1.371 |
+   | a cast binds as tightly as unary minus -- `(int) substr(...) - $borrow` took the subtraction INTO the cast, through zvals (and `(int) "1.9" + 0.5` was int(2)) | 1.298 |
+   | one-byte `str_replace` in one pass; `php_memchr` eight bytes a step; a copy's tail one word | 1.258 |
+   | a literal set's byte map built with the literals | 1.205 |
+   | `str_pad((string) $int, ...)` fused; `===` between strings is lengths-then-words and quiet; strpos of one byte scans | 1.223 |
+   | `php_memchr`'s word scan only from sixteen bytes | 1.169 |
+   | **`str_replace('a', '', str_replace('b', '', $s))` of single bytes is one pass** (`_dec_coef`) | 1.058 |
+   | `php_str_alloc` bumps the chunk itself | 1.056 |
+   | `$s[$i] === 'c'` compares the byte in place, the call only outside the string | 1.050 |
+   | `strpos($s, 'c')` from the start is `php_strpos1` | 1.017 |
+   | a concatenation chain is one string (`php_str_cat3`/`cat4`) | 0.994 |
+   | a literal index needs only the upper bound | 0.975 |
+
+   Head to head, main against the final build, five rounds: the module **1.514 -> 0.990 ms and
+   1.513 -> 0.977 ms** (twice), php interpreting the same source 3.26-3.34 ms, the C twin 0.239-0.240
+   ms. **The three columns: interpreted 3.29 ms, the module 0.98 ms (3.3x), the C twin 0.240 ms
+   (13.7x); module/C 6.3 -> 4.1.** `tests/examples.sh`'s own row on the final tree: 3.299 / 0.998
+   (3.31x) / 0.237 (13.92x). On the pull request's final CI run, against main's run after batch E
+   (the ratio is what compares; runners differ by up to ~40% in absolute time): macos/arm64
+   1.68x -> **2.57x** with the twin at 12.0x (module/C 7.3 -> 4.7), linux/aarch64 1.74x -> **2.65x**,
+   linux/x86_64 1.36x -> **2.49x**, windows/aarch64 2.98x -> **4.62x**, windows/x86_64 2.77x ->
+   **3.62x** (`examples/decimal/README.md` has the milliseconds).
+
+   **The packed int array** (`src/packed.mc`) is a proof and a lowering. Per plain function, a token
+   scan of the body before it is compiled proves that a local array holds only ints under keys
+   0..n-1 and never leaves the function: its first occurrence is `$x = []`, `array()` or
+   `array_fill(0, N, V)` with N and V ints, every later occurrence is in the same block and is one
+   of `$x[] = int;`, `$x[int] = int;`, a read `$x[int]` or `count($x)` -- nothing else, so passing
+   it to any other function, returning it, storing it, copying it, iterating it, interpolating it,
+   capturing it, `isset`/`unset`/`list`/destructuring/`&`/a compound assignment on it, a string
+   key, a non-int value, all keep php's array. A body that contains `function`, `fn(`, `class`,
+   `yield`, `goto`, `switch`, `eval`, `include`, `compact`, `extract`, `get_defined_vars`, `$$`, a
+   heredoc or a backtick proves nothing at all. "An int" is the STATIC type the lowering will give,
+   predicted by the scan and checked by the lowering where it builds each call -- a disagreement is
+   a compile error naming the file, never a wrong answer. Keys are not proved in range and do not
+   need to be: a missing key is php's warning and null, and a key past the end or below zero turns
+   the buffer into php's ordered hash in the same handle. An element read is an int beside another
+   number (php's null is 0 to every arithmetic operator) and the zval php has anywhere else; a
+   variable whose only assignment is `$v = $x[K];` keeps both halves native. The buffer comes from
+   `php_alloc`: Zend's chunk on the extension road, the arena on the program road. Gated by
+   `tests/g/105` (ten functions the proof accepts, absent and sparse keys, `**` on a checked
+   operand, a key that throws and a reinitialisation that throws included), `tests/g/106` (seventeen ways it must fail) and the end of
+   `tests/fixtures.sh`, which reads the lowering back and checks which way each went, and that a
+   store whose value overflows is not reached (`try { $x[] = $x[0] * 3; }` leaves `$x` as it was:
+   the value is computed and checked before `php_pk_push`/`php_pk_set`, and a key that throws is
+   checked before the value is evaluated; `array_fill`'s count, value and ValueError likewise
+   before `$x = array_fill(...)` stores), that `throw $x[0] * 3` is the ArithmeticError and not
+   "Can only throw objects", and that `PHP_INT_MIN * -1` in either order is the
+   named error on every leg (the one product whose division test could trap on x86-64 -- it does
+   not: `x == -1` is tested before `r / x`, and `r / PHP_INT_MIN` cannot trap). Afterwards `_dec_umul` is 14.3% inclusive of a smaller whole,
+   and its array work 3.5% of the module, from 12.9% (the buffer's own calls 135 samples of 6010,
+   an element handed to `_dec_limb` as a zval 78).
+
+   **The grid does not move a test.** The three directories against a snapshot of main measured
+   the same day, `comm` over the five lists of each: `tests/lang` 104 = 104, `Zend/tests` 766 = 766,
+   `ext/standard/tests/strings` 272 = 272, and every list -- green, wrong, refused, skip, php-fail
+   -- identical, 0 tests in and 0 out. Re-run on the final tree (after the review's fixes): the
+   same, and the same test names in every list; three WRONG tests changed only how they fail,
+   from a silent wild allocation to `mc-php: arena exhausted` (exit 255) -- `str_pad_variation1`
+   was a SIGBUS, `bug72146` and `warning_float_does_not_fit_zend_long_strings` ran on after a
+   size near PHP_INT_MAX wrapped `a + n` (the latter printed `string(4971973988617027584) ""`).
+
+   **What is left between the module (0.98 ms) and the C twin (0.24 ms)**, from a profile of the
+   final build (6010 samples), self time by kind:
+
+   | where | share | why it is still there |
+   |---|---|---|
+   | scanning and converting digits: strspn, trim, memchr, the one-pass deletion, stoi, itos, `===` | 40.6% | `decimal.php`'s algorithm, the one php interprets: a number is a STRING, so every operation re-validates each operand, re-derives its coefficient and re-parses and re-prints its limbs; the C twin parses each operand once into digits. The byte loops themselves also pay for § 5's mc code (a leaf's callee-saved registers, no immediate operands). |
+   | the php functions' own bodies | 17.6% | a call frame for every helper, the position and the unwinding check php's semantics need wherever a warning or an exception can come from, and mc's instruction selection (§ 5) |
+   | copying bytes into new strings | 13.8% | a php string is an immutable VALUE: substr, concat and ltrim each make one, where C writes into one buffer; an in-place `.=` needs the string ownership php's own engine tracks with a refcount, which this runtime does not |
+   | allocation, and the call's chunk zeroed on return | 13.7% | one allocation per string, for the reason above; `phx_zero` alone is 4.1% -- the runtime's allocations assume zeroed memory, and the 54 `php_str_alloc` sites were not audited to lift that |
+   | the extension boundary | 7.7% | argument checks, and the result copied out of the call's chunk into a Zend string (`phx_ret_str`); the C twin allocates its result in Zend memory to begin with |
+   | php itself | 3.3% | |
+   | arrays and zvals | 2.6% | from 12.9%: what remains is the buffer's own calls and an element passed to a USER function's int parameter (`_dec_limb($r[$i])`), which still goes through a zval because a null there must stay php's TypeError |
+
+   None of these is a tuning of the lowering left undone; each is either php's semantics (an
+   immutable string, a position per statement) or a named limit (§ 5 in mc; the chunk's zeroing;
+   inlining small php functions, which is not built because it would drop the callee's frame from a
+   trace unless restricted to bodies that cannot raise).
+
+   **Algorithmic redundancy in `decimal.php`, reported and not acted on** (the gain has to come from
+   the compiler): `_dec_addsub` computes `_dec_sc` of each operand, then `_dec_at` computes it again
+   along with the coefficient; `dec_cmp` computes each `_dec_sc` twice. A php author would hoist
+   them; the module pays for them exactly as php does.
+
+   **Found on the way and fixed**, each with a fixture: `(int) "1.9" + 0.5` was int(2) and
+   `(bool) 0 + 1` bool(true) (the cast took the operator into its operand, `tests/g/107`); and
+   `array_fill(0, -1, 0)` returned `[]` where php throws its ValueError (`tests/g/105`).
+   **Found and NOT fixed**, pre-existing on main: native int arithmetic WRAPS on overflow
+   (`$b = $a * 3` with `$a = PHP_INT_MAX` is `int(9223372036854775805)`, php's
+   `float(2.7670116110564327E+19)`) although D10's table above says overflow to float is
+   implemented. The packed array's element arithmetic does NOT inherit it silently (the review of
+   #21): `+ - *` on an element, and on what such an operation answered in the same expression, is
+   php's overflow test and, where php would make a float, a named `ArithmeticError` -- a refusal
+   at run time, never a wrapped int (`tests/fixtures.sh` checks the text; no measurable cost,
+   0.977 against 0.976 ms); an int VARIABLE assigned from one is the native road's again. And
+   `function f(bool $c) { if ($c) { $x = []; } $x[] = 1; }` called with false is a SIGSEGV (an
+   array local that was never assigned), measured on main's compiler; and `abs(PHP_INT_MIN)` is
+   `int(-9223372036854775808)` where php says `float(9.223372036854776E+18)` (the lowering types
+   `abs` of an int as an int; found by the third review of #21, which is why `abs` is not on the
+   packed proof's list of int-valued calls). `$a ** $b` on two ints WRAPPED on main
+   (`PHP_INT_MAX - 1` squared was `int(4)`): `php_zv_pow` is php's `pow_function_base` now
+   (the first product that overflows becomes a float times libm's `pow` of what is left, which
+   is php's `safe_pow`), and a checked operand of `**` goes there too (the sixth review of #21,
+   `tests/g/105`'s `pk_pow`). Also found and NOT fixed: the float printer is not the shortest
+   round trip -- `var_dump(1.0000000000000002E+64)` prints `float(1.0E+64)` while the value
+   itself compares unequal to `1.0E+64`, so `10 ** 64` is computed right and printed wrong. And
+   an assignment from anything that throws clobbers its target on main: `$t = 7; try { $t = g(); }
+   catch (Exception $e) {}` leaves `$t` 0, where php leaves 7 -- the store happens before the
+   statement's unwinding check. The packed STORE is fixed here (the seventh review of #21); the
+   scalar assignment is the general road's and is not (a `$t = $x[0] * 3` that overflows leaves
+   the wrapped int in `$t` behind the ArithmeticError). Likewise `throw E`: a SCALAR operand that
+   throws is checked first now (the eighth review of #21), but an object operand is not --
+   `function f(): Exception { throw new RuntimeException("inner"); }` then `throw f();` reaches
+   `Error: Can only throw objects` where php unwinds with "inner", because a `finally` here does
+   not set a pending exception aside: checking before `throw new B` inside `try { throw A; }
+   finally { throw new B; }` would unwind with A where php throws B (measured). Setting the
+   pending exception aside in `finally` is the fix for both, and is not done here.
 
 2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
    through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
