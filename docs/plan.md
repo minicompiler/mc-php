@@ -844,7 +844,7 @@ on macOS with mc 1.3.0's release binary:
   generated code, not `<mc/core>`, so `lib/rt_host_windows.mc` DEFINES the runtime's system calls
   over kernel32 (nothing declares them `extern` first) and windows/x86_64 programs use mc's
   one-step PE writer. Measured: the one-step PE imports only names kernel32.dll and ucrtbase.dll
-  export (19 and 18 of them), and it runs -- 93 of 93 fixtures on `windows-latest`.
+  export (19 and 18 of them), and it runs -- 94 of 94 fixtures on `windows-latest`.
 
 - **windows/aarch64 has no direct executable in mc** (its exe slot is 0; mc's
   `docs/build.md` § A direct PE, no lld-link: an arm64 PE needs `DYNAMICBASE` and `.reloc`,
