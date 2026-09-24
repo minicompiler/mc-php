@@ -165,12 +165,17 @@ function pko(int $n): string {
     $x[] = $n;
     try { return (string) ($x[0] * 3); } catch (ArithmeticError $e) { return get_class($e) . ": " . $e->getMessage(); }
 }
-echo pko(5), "\n", pko(PHP_INT_MAX), "\n";
+function pkn(int $n): string {
+    $x = [];
+    $x[] = $n;
+    try { return (string) (-($x[0] + 1) * 2); } catch (ArithmeticError $e) { return get_class($e); }
+}
+echo pko(5), "\n", pko(PHP_INT_MAX), "\n", pkn(5), " ", pkn(PHP_INT_MAX - 1), "\n";
 PKO
 lim $P/mcphp.sh "$tmp/pko.php" > "$tmp/pko.out" 2> "$tmp/pko.err"
 rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
 pko=$(tr -d '\r' < "$tmp/pko.out")
-pkw=$(printf '15\nArithmeticError: mc-php: an int overflowed in * on a packed array'"'"'s element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)')
+pkw=$(printf '15\nArithmeticError: mc-php: an int overflowed in * on a packed array'"'"'s element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)\n-12 ArithmeticError')
 if [ "$pko" = "$pkw" ]; then
     echo "  packed: an overflow on an element is the named ArithmeticError, not a wrapped int"
 else

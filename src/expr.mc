@@ -563,7 +563,7 @@ i64 ph_primary() {
         i64 t = ph_ety;
         // -null is int(0); -PHP_INT_MIN is php's float, so an element's
         // negation is the checked subtraction
-        if (t == PT_INULL) { ph_ety = PT_INT; return ph_c2("php_sub_ck", ph_int(0), v, TY_I64); }
+        if (t == PT_INULL || (t == PT_INT && ph_is_ck(v))) { ph_ety = PT_INT; return ph_c2("php_sub_ck", ph_int(0), v, TY_I64); }
         if (t == PT_FLOAT) return ph_c1("php_fneg", v, ty_f64);
         // -"1.2" is float(-1.2) and -"abc" is a TypeError: a zval keeps its
         // own rules, and converting to int first threw the fraction away.

@@ -596,9 +596,13 @@ i64 pkx_read_prev(i64 i) {
     return 0;
 }
 
-// the later occurrence j is after the first one f and inside f's block
+// the later occurrence j is after the first one f's STATEMENT -- the `;`
+// that ends it, so a use inside its own initialiser (`$x = array_fill(0,
+// count($x), 0);`) is not after it -- and inside f's block
 i64 pkx_dominated(i64 f, i64 j) {
-    if (j <= f) return 0;
+    i64 e = f;
+    loop { if (e >= pkx_n) break; if (pkx_isp(e, ";")) break; e = e + 1; }
+    if (j <= e) return 0;
     i64 b = ld64(pkx_b + f * 8);
     if (b < 0) return 1;
     return j < pkx_mat(b);
