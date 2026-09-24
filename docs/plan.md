@@ -917,16 +917,17 @@ its code is written.
 2. **Examples first, and they are the first gates.** What already has code moves into
    `examples/`, each with a gate that compiles it and compares it with php. Four of the five parts
    are DONE (the examples branch, 2026-09-23), gated by `tests/ext.sh` and `tests/examples.sh`
-   inside `tests/run.sh`, `tests/linux.sh` and `tests/windows.sh`, green on macos/arm64,
-   linux/aarch64 and linux/x86_64 before the pull request:
+   inside `tests/run.sh`, `tests/linux.sh` and `tests/windows.sh`, **green on all five CI legs**
+   (macos/arm64, linux/aarch64, linux/x86_64, windows/x86_64, windows/arm64; the hand-written
+   halves SKIP by name on the two Windows legs):
    - `hello` -- DONE, the extension gate (`tests/ext.sh`).
    - `decimal` -- DONE, and **compiled from PHP**: `examples/decimal/decimal.php`, six functions
      over strings (`dec_add`, `dec_sub`, `dec_mul`, `dec_div`, `dec_cmp`, `dec_round`), exact,
      no float anywhere, half-even rounding in every function. The differential is 60 lines byte
-     for byte on every host; **1219 results agree with bcmath** where the host php has it (macOS;
-     the `php:8.5-alpine` image does not, and the gate says `SKIPPED`); and the bench row --
+     for byte on every host; **1219 results agree with bcmath** where the host php has it (macOS
+     and both Windows legs; the `php:8.5-alpine` image does not, and the gate says `SKIPPED`); and the bench row --
      three loan schedules, the best of nine, three rounds interleaved -- is **0.51x on
-     macos/arm64** (1.72 ms interpreted, 3.41 ms compiled), 0.40x on linux/aarch64: string work
+     macos/arm64** (1.72 ms interpreted, 3.41 ms compiled), 0.46x to 0.81x on the CI legs: string work
      is C inside php and mc inside mc-php, and every intermediate string is an arena allocation.
      `[project].opt = 1` measured once gives 2.4 ms, 0.74x; not adopted.
    - `two-extensions` -- DONE as **hand-written mc**: `extA.mc`/`extB.mc` from `reference/`,

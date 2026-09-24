@@ -32,16 +32,19 @@ digit -- `dec_round("0.125", 2)` is `0.12`, `dec_round("0.135", 2)` is `0.14`,
 | step | |
 |---|---|
 | the differential | `check.php` runs twice -- with `decimal.so` loaded, and with `decimal.php` required -- and the two must print the same bytes on both streams and exit the same: 60 lines, every tie in both signs, the four operations at three scales, a ledger, and the seven wrong VALUES |
-| bcmath | `bccheck.php`, where the host php has bcmath: 1219 results of the module against bcmath's exact result rounded by `bcround(..., RoundingMode::HalfEven)` -- add, sub and mul exact at the sum of the scales, a quotient taken to 80 digits first. The macOS php carries it; the `php:8.5-alpine` image the Linux legs use does not, and the gate says `SKIPPED` there |
+| bcmath | `bccheck.php`, where the host php has bcmath: 1219 results of the module against bcmath's exact result rounded by `bcround(..., RoundingMode::HalfEven)` -- add, sub and mul exact at the sum of the scales, a quotient taken to 80 digits first. It ran, 0 wrong, on macos/arm64, windows/x86_64 and windows/arm64 in CI; the `php:8.5-alpine` image the Linux legs use has no bcmath, and the gate says `SKIPPED` there |
 | the bench row | `bench.php`: three ten-year loan schedules, ~1500 calls a run, a warm-up and the best of nine per process, the interpreted and compiled processes interleaved three times. The two answers must be equal; the ratio is printed and not gated |
 
-Measured on 2026-09-23 by `tests/examples.sh`, each host against its own php 8.5.10:
+Measured on 2026-09-23 by `tests/examples.sh`, each host against its own php 8.5 (the CI rows are the pull request's first run):
 
 | host | interpreted | compiled | ratio |
 |---|---|---|---|
-| macos/arm64 | 1.72 ms | 3.41 ms | **0.51x** |
-| linux/aarch64 (container) | 1.61 ms | 4.01 ms | 0.40x |
-| linux/x86_64 (container, emulated) | 3.34 ms | 5.48 ms | 0.61x |
+| macos/arm64, this repository's own Mac | 1.72 ms | 3.41 ms | **0.51x** |
+| macos/arm64, CI (`macos-15`) | 2.03 ms | 4.10 ms | 0.50x |
+| linux/aarch64, CI (`ubuntu-24.04-arm`, container) | 3.08 ms | 6.71 ms | 0.46x |
+| linux/x86_64, CI (`ubuntu-24.04`, container) | 3.76 ms | 7.33 ms | 0.51x |
+| windows/x86_64, CI (`windows-latest`) | 4.19 ms | 7.24 ms | 0.58x |
+| windows/arm64, CI (`windows-11-arm`, x64 php emulated) | 8.68 ms | 10.70 ms | 0.81x |
 
 **The compiled module is SLOWER than the interpreter on this workload**, and that is the honest
 number. A decimal is string work, and php's string functions -- `substr`, `str_pad`, `ltrim`,
