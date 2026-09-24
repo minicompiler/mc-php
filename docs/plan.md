@@ -1119,7 +1119,7 @@ In the order the measurements put them, each with the number that says why:
    | every literal built once before the first statement (`ph_lit_init`); a use is one load | 3.36 |
    | `$s[$i] === 'c'` compares the byte in place; `(int) substr(...)` reads the window without building it | 2.92 |
    | an int key reads and writes an array with no key zval; a fresh zval is not copied again when stored | 2.79 |
-   | **`[project].opt = 1` in every extension's project file** (mc's `-O`, proven on the five targets) | 1.64 |
+   | **`[project].opt = 1` in the project file of every extension built from php** (hello, decimal; mc's `-O`, proven on the five targets) | 1.64 |
    | a one-byte `str_replace` scans in place | 1.61 |
    | zval `+ - *` between two ints in place, and the boxes written without two more calls | 1.52 |
    | `$s[$i]` out of range warns again on the native road (it did not; now `tests/g/102`) | 1.53 |
