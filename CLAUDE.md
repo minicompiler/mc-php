@@ -659,7 +659,7 @@ changed what the compiler does. The hosts branch is that commit and it is delete
 - Windows done (2026-09-23, branch `windows`), on **mc 1.3.0** -- CI and release moved from 1.1.0
   to 1.3.0 on every leg, with the macOS gates re-run green on it first. **mc-php built ON
   windows/x86_64 (`windows-latest`) and windows/arm64 (`windows-11-arm`), never cross-built
-  across operating systems**, and graded there by `tests/windows.sh`: **93/93 fixtures, 6/6
+  across operating systems**, and graded there by `tests/windows.sh`: **94/94 fixtures, 6/6
   refusals, the extension gate green (check.php 24 lines byte for byte, errors.php 14 wrong calls,
   8 refusals)** on both, against the runner's own php 8.5 (8.5.10 x64 and 8.5.11 x64-emulated).
   * **The compiler is the object + `lld-link` road**: `src/mc-php-windows-*.mc` compiled by the
@@ -678,8 +678,10 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     program road only (an extension has no `main`).
   * **What the first run found (90/93, and the module refused)**, each fixed at its root: a
     drive-letter path is absolute; php PRINTS backslashes, so the compiler keeps '/' and
-    `ph_disp` converts at the five places a path is printed; `basename`/`dirname` split on both
-    separators (`php_is_sep`, a host answer) and `setlocale` applies php's Windows-only `xx_YY`
+    `ph_disp` converts at the five places a path is printed; `dirname`/`basename` are ports of
+    zend_dirname/php_basename asking the host what separates, how a root is written and whether
+    `C:` is a drive (`tests/g/95-paths.php`, 22 paths, 94/94 on all five hosts; the rewrite also
+    fixed `dirname("")` and `dirname("a//b")` on POSIX) and `setlocale` applies php's Windows-only `xx_YY`
     refusal (`php_setlocale`, a host answer); `PHP_EOL` is `"\r\n"`; `_emalloc` is `__vectorcall`
     in an MSVC php and exported as `_emalloc@@8` (`_emalloc == _emalloc@@8` in `src/win/php8.def`).
   * **The extension is an x64 `.dll` on both Windows hosts**: php publishes no arm64 Windows build,
