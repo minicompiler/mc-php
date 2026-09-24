@@ -528,7 +528,11 @@ i64 ph_primary() {
                 if (q < e && ld8(q) == 41) {
                     ph_next();
                     ph_next();                     // the )
-                    i64 v = ph_expr(55);
+                    // a cast binds as tightly as unary minus: `(int) $s - 1`
+                    // is ((int) $s) - 1 in php. This read 55, which took the
+                    // `+ - * / %` after the operand INTO the cast --
+                    // `(int) "1.9" + 0.5` was int(2), php's float(1.5).
+                    i64 v = ph_expr(70);
                     i64 vt = ph_ety;
                     ph_ety = ct;
                     // (int) substr(...): the window read as an int in
