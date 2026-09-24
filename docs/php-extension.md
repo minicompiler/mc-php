@@ -169,9 +169,10 @@ each stream and exit the same. These are the places where they would not:
   every built-in does, so `throw new InvalidArgumentException(...)` arrives as itself. A class
   the SOURCE declares is not in the engine's class table (the back end registers no class yet),
   and the fallback is a plain `Exception` whose message names it.
-* **Destructors and `register_shutdown_function`** do not run. A program ends and D7's arena is
-  released; a module does not end, and `module_shutdown_func` is 0 on purpose -- running
-  `php_shutdown`'s destructors into a stdout the SAPI is tearing down would be worse than not.
+* **Destructors and `register_shutdown_function`** do not run. A program runs them when it ends;
+  a module's request end (RSHUTDOWN) restores state and does not call back into php code, and
+  `module_shutdown_func` is 0 on purpose -- running `php_shutdown`'s destructors into a stdout
+  the SAPI is tearing down would be worse than not.
 * **The argument check is strict always**, as above. The RETURN is checked on both roads with
   php's own rule and php's own `TypeError` (`f(): Return value must be of type int, string
   returned`), the same check a declared parameter goes through on the program road; `tests/ext.sh`
@@ -180,18 +181,54 @@ each stream and exit the same. These are the places where they would not:
 ## Thread safety
 
 `[php].thread_safety` is carried into the module header because the loader compares it, and a ZTS
-php refuses an NTS module by name. It is **not** a claim that the runtime is thread safe: D7's
-arena, the class table and the pending-exception flag are process globals, and a ZTS php running
-two requests in two threads through one loaded module would share all three. Nothing here has
+php refuses an NTS module by name. It is **not** a claim that the runtime is thread safe: the
+module's arena, the call's chunk, the class table and the pending-exception flag are process
+globals, and a ZTS php running two requests in two threads through one loaded module would share
+all four. Nothing here has
 been run under a ZTS php. Build for the php you have, and until that measurement exists, that
 php should be NTS.
 
 ## The memory
 
-`docs/plan.md` D7 is unchanged: one 48 MiB arena per PROCESS, never freed. That is a program's
-model and a module lives longer than a program, so a long-running php that calls an mc-php
-extension in a loop will exhaust it. Nothing here bounds it; it is the first thing a request
-lifecycle (`RINIT`/`RSHUTDOWN`) would answer, and it is not built.
+`docs/plan.md` D7 -- one arena per process, never freed -- is the PROGRAM road's model, and on
+the extension road it is **superseded**: a module allocates the way a C extension does, through
+the Zend Memory Manager. The runtime has ONE allocation seam, `php_alloc`, with two
+implementations chosen by road: the arena (a program, and a module's MINIT) or the Zend chunk an
+extension call bumps through ([`lib/php_ext.mc`](../lib/php_ext.mc) § the call's memory).
+
+| lives for | what | where |
+|---|---|---|
+| the module | what MINIT builds -- the bootstrap classes, the source's classes and top-level constants -- and every string literal's cache | the module's own static arena, never freed |
+| one call | everything the call allocates | a 32 KiB Zend chunk the request reuses: zeroed again, and every other block the call took `efree`d, when the call returns |
+| the request | what a call that writes MODULE STATE kept -- a `static`, a `global`, `define()`, an error or exception handler, a class, a file, a destructor, an output buffer left open | the call PINS itself: its blocks stay, and RSHUTDOWN puts the state back as MINIT left it |
+
+**Strings cross without a copy where they can.** The runtime's string IS a `zend_string`
+(`docs/php-abi.md`), and strings are immutable here, so a string ARGUMENT is borrowed: the engine
+keeps it alive for the call, the runtime only ever writes the hash into it (the same DJBX33A
+`zend_string_hash_val` stores, and never into an interned string, whose hash is set). A result the
+call built in a block of its own is handed to php as it is; a small one lives inside the chunk and
+is copied once; an argument returned unchanged gains a reference.
+
+**RSHUTDOWN is the request's end, as php has one.** It is the `request_shutdown_func` slot of the
+module entry (`docs/php-abi.md`). Statics a request initialised go back to "never run", files it
+opened are closed, an output buffer it left open is written out, the runtime's roots (the global
+table, constants, handlers, the class table, the pending exception, `error_reporting()`) are
+restored from the copy taken when MINIT ended -- and, if a call pinned, the arena itself. Then the
+request's blocks are freed. `RINIT` is 0: a request starts from the state the last RSHUTDOWN
+restored, so there is nothing to set up.
+
+Measured (2026-09-24, macos/arm64, php 8.5.10, `examples/decimal/soak.php`): **1 000 000
+`dec_add` calls in one request**, `memory_get_usage()` 513 888 -> 513 928 bytes (the 40 are the
+accumulator growing) and `memory_get_peak_usage()` 515 336 -> 515 336. Before batch A the same
+loop died with `mc-php: arena exhausted` between 28 000 and 30 000 calls. Through `php -S`, 20
+requests each keeping 4 MiB in a `static` answer the same line every time, as interpreted
+(`tests/ext.sh` step 10); before, the statics survived from one request into the next and the
+server ran out of arena at the twelfth.
+
+What a pinned call costs, measured: a function with a `static $n` called 100 000 times in one
+request keeps **32 bytes a call** until the request ends (3.2 MB); the next request starts clean.
+That is the one shape whose memory grows with the call count inside a request, and it is php's
+own shape too -- php frees what refcounting frees, and a module has no refcount.
 
 ## Two extensions in one process
 

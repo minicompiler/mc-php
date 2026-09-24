@@ -17,7 +17,11 @@
 //   array  -> a packed vector of 8-byte slots, HOMOGENEOUS (T5's own limit,
 //             named at the refusal, not silently coerced)
 //
-// D7 is the memory model: one arena, never freed, released by exit.
+// D7 is the PROGRAM road's memory model: one arena, never freed, released by
+// exit. An EXTENSION allocates through Zend's own allocator inside a call and
+// frees it when the call returns (php_alloc below is the one seam; the other
+// half is lib/php_ext.mc, and docs/php-extension.md § The memory says what
+// lives where).
 //
 // The system layer is NOT here. `#include <sys>` is libSystem's, and a runtime
 // that names it writes macOS programs and nothing else; since the hosts branch
@@ -36,7 +40,32 @@ i64 ph_top;
 void php_flush();
 void php_die(uptr msg, i64 n) { php_flush(); write(2, msg, n); exit(255); }
 
+// ---- the allocation seam --------------------------------------------------
+// ONE entry and two implementations, chosen by road. A program -- and an
+// extension's MINIT -- bumps the arena. An extension CALL sets ph_zalloc to
+// its Zend allocator (lib/php_ext.mc), which the call frees in one sweep when
+// it returns: that is what keeps a million calls in one request bounded, and
+// the program road never names a Zend symbol.
+//
+// A call that writes state which outlives it -- a static, a global, a
+// constant, a handler, a class, a file table row -- PINS itself: its blocks
+// are kept until the request ends (Zend frees them then) and the request's
+// state is put back as MINIT left it (php_request_reset). Every such write
+// calls php_pin; a write that does not is a use-after-free, which is why the
+// list of them is short and each one says so.
+uptr ph_zalloc;                     // the slow path; set = inside an extension call
+uptr ph_zcur;                       // the Zend chunk the call is bumping through
+i64  ph_zpos;
+i64  ph_zlim;
+i64  ph_pin;
+void php_pin() { if (ph_zalloc) ph_pin = 1; }
+
 uptr php_alloc(i64 n) {
+    if (ph_zalloc) {
+        i64 z = (ph_zpos + 7) / 8 * 8;
+        if (z + n <= ph_zlim) { ph_zpos = z + n; return ph_zcur + z; }
+        return callp(ph_zalloc, n);
+    }
     i64 a = (ph_top + 7) / 8 * 8;
     if (a + n > PH_ARENA) php_die("mc-php: arena exhausted\n", 24);
     ph_top = a + n;
@@ -77,7 +106,11 @@ uptr php_str_new(uptr b, i64 n) {
 uptr php_str_lit(uptr cache, uptr b, i64 n) {
     uptr s = ld64(cache);
     if (s) return s;
+    // module memory, whatever the road: the cache outlives every call
+    uptr za = ph_zalloc;
+    ph_zalloc = 0;
     s = php_str_new(b, n);
+    ph_zalloc = za;
     st64(cache, s);
     return s;
 }
@@ -2365,6 +2398,7 @@ uptr php_obj_new(uptr ce) {
 // `new` threw first (Zend/tests/try/catch_00{2,3,4}, exceptions/bug47771).
 void php_dt_arm(uptr o) {
     uptr ce = php_obj_ce(o);
+    php_pin();                                // ph_dt_head
     if (!ce) return;
     if (!php_ce_lookup(ce, 24, php_str_new("__destruct", 10))) return;
     uptr n = php_alloc(16);
@@ -4042,6 +4076,7 @@ uptr php_enum_from(uptr ce, uptr v, i64 try);
 uptr ph_classes;
 
 uptr php_ce_reg() {
+    php_pin();                                // ph_classes
     if (!ph_classes) ph_classes = php_arr_new(16);
     return ph_classes;
 }
@@ -4730,6 +4765,7 @@ void php_ce_ovr(uptr ce, uptr what, uptr name, i64 kind, uptr file, i64 line) {
 // (docs/review-backlog.md section 2). A refused access answers a throw-away
 // slot, so the assignment that may follow writes nowhere.
 uptr php_ce_sslot_s(uptr ce, uptr name, uptr scope) {
+    php_pin();                                // a static property is module state
     uptr c = ce;
     loop {
         if (!c) break;
@@ -5378,6 +5414,7 @@ f64 php_inf(i64 ignored) { return ph_unbits(0x7ff0000000000000); }
 uptr ph_globals;
 
 uptr php_gvar(uptr name) {
+    php_pin();                                // the global table
     if (!ph_globals) ph_globals = php_arr_new(16);
     uptr b = php_ht_find(ph_globals, php_str_hash(name), name);
     if (b) return ld64(b);
@@ -5387,11 +5424,21 @@ uptr php_gvar(uptr name) {
 }
 
 // a function `static`: one zval per declaration, initialised on the first call
+// A static set inside an extension call is reset when the request ends, as
+// php does: its slot joins ph_rsl, which php_request_reset clears.
+uptr ph_rsl;
 uptr php_static(uptr slot, uptr init) {
+    php_pin();
     uptr z = ld64(slot);
     if (z) return z;
     z = php_zv_val(init);
     st64(slot, z);
+    if (ph_zalloc) {
+        uptr r = php_alloc(16);
+        st64(r, slot);
+        st64(r + 8, ph_rsl);
+        ph_rsl = r;
+    }
     return z;
 }
 
@@ -5399,14 +5446,17 @@ uptr php_static(uptr slot, uptr init) {
 uptr ph_consts;
 
 void php_const_set(uptr name, uptr v) {
+    php_pin();
     if (!ph_consts) ph_consts = php_arr_new(16);
     php_zv_cpv(php_arr_sslot(ph_consts, name), v);
 }
 
 uptr php_const_get(uptr name) {
-    if (!ph_consts) ph_consts = php_arr_new(16);
+    if (!ph_consts) { php_pin(); ph_consts = php_arr_new(16); }
     uptr b = php_ht_find(ph_consts, php_str_hash(name), name);
-    if (b) return b;
+    // an object in a constant is a HANDLE: what the caller writes into it is
+    // module state
+    if (b) { if (php_zv_type(b) == IS_OBJECT) php_pin(); return b; }
     uptr m = php_str_concat(php_str_new("Undefined constant \"", 20), name);
     m = php_str_concat(m, php_str_new("\"", 1));
     php_throw_cls(php_str_new("Error", 5), m);
@@ -5989,6 +6039,7 @@ i64  ph_nsdfn;
 // count comes from the CALL SITE, which is the only place that knows it:
 // ph_call special-cases the name, exactly as it does for array_push.
 u8 php_f_reg_shutdown(uptr f, uptr a1, uptr a2, uptr a3) {
+    php_pin();                                // ph_sdfn
     if (!ph_sdfn) ph_sdfn = php_arr_new(8);
     uptr row = php_arr_new(8);
     php_zv_cpv(php_arr_islot(row, 0), f);
@@ -6026,6 +6077,7 @@ i64 php_tok_in(uptr set, i64 c) {
 uptr php_f_strtok(uptr a, uptr b) {
     uptr set = 0;
     if (php_zv_type(b) != IS_NULL) {
+        php_pin();                            // ph_tok_s outlives the call
         ph_tok_s = php_zv_str(a);
         ph_tok_i = 0;
         set = php_zv_str(b);
@@ -6846,6 +6898,7 @@ i64 php_res_id(uptr z) {
 }
 
 i64 php_fh_new(i64 fd, uptr name, i64 own) {
+    php_pin();                                // the file table
     if (ph_nfh >= PH_MAXFH) return 0 - 1;
     st64(ph_fh_fd + ph_nfh * 8, fd);
     st64(ph_fh_eof + ph_nfh * 8, 0);
@@ -7237,6 +7290,7 @@ u8 php_f_is_file(uptr pz) {
 // set_error_handler(callable, levels) -> the previous handler or null.
 // register/restore is a one-deep stack, which is what the corpus uses.
 uptr php_f_set_error_handler(uptr hz, uptr lz) {
+    php_pin();                                // the handler outlives the call
     uptr old = ph_ehz;
     ph_ehprev = old;
     ph_ehmask = 32767;
@@ -7249,6 +7303,7 @@ uptr php_f_set_error_handler(uptr hz, uptr lz) {
 }
 
 u8 php_f_restore_error_handler() {
+    php_pin();                                // the handler outlives the call
     ph_ehz = ph_ehprev;
     ph_ehprev = 0;
     return 1;
@@ -7259,6 +7314,7 @@ uptr ph_xhz;
 uptr ph_xhprev;
 
 uptr php_f_set_exception_handler(uptr hz) {
+    php_pin();                                // the handler outlives the call
     uptr old = ph_xhz;
     ph_xhprev = old;
     ph_xhz = 0;
@@ -7268,6 +7324,7 @@ uptr php_f_set_exception_handler(uptr hz) {
 }
 
 u8 php_f_restore_exception_handler() {
+    php_pin();                                // the handler outlives the call
     ph_xhz = ph_xhprev;
     ph_xhprev = 0;
     return 1;
@@ -9358,4 +9415,91 @@ uptr php_str_replace_c(uptr search, uptr repl, uptr subj, uptr cz) {
         php_zv_settype(cz, IS_LONG);
     }
     return o;
+}
+
+// ---- the end of a request, on the extension road ----------------------------
+// A module outlives its requests; what a request CHANGED must not. These are
+// the runtime's roots -- every global that holds request state or a pointer a
+// pinned call may have written (php_pin's list) -- and lib/php_ext.mc saves
+// them when MINIT ends and puts them back in RSHUTDOWN, together with the
+// arena MINIT built. A program never calls either: it ends instead.
+u8 ph_rsnap[184];
+
+void php_roots(i64 save) {
+    if (save) {
+        st64(ph_rsnap,       ph_ehz);
+        st64(ph_rsnap + 8,   ph_ehprev);
+        st64(ph_rsnap + 16,  ph_ehmask);
+        st64(ph_rsnap + 24,  ph_xhz);
+        st64(ph_rsnap + 32,  ph_xhprev);
+        st64(ph_rsnap + 40,  ph_classes);
+        st64(ph_rsnap + 48,  ph_ce_closure);
+        st64(ph_rsnap + 56,  ph_globals);
+        st64(ph_rsnap + 64,  ph_consts);
+        st64(ph_rsnap + 72,  ph_sdfn);
+        st64(ph_rsnap + 80,  ph_tok_s);
+        st64(ph_rsnap + 88,  ph_tok_i);
+        st64(ph_rsnap + 96,  ph_dt_head);
+        st64(ph_rsnap + 104, ph_nob);
+        st64(ph_rsnap + 112, ph_objid);
+        st64(ph_rsnap + 120, ph_erep);
+        st64(ph_rsnap + 128, ph_disp);
+        st64(ph_rsnap + 136, ph_log);
+        st64(ph_rsnap + 144, ph_exc);
+        st64(ph_rsnap + 152, ph_lsb);
+        st64(ph_rsnap + 160, ph_nfh);
+        st64(ph_rsnap + 168, ph_msgn);
+        st64(ph_rsnap + 176, ph_seed);
+        return;
+    }
+    ph_ehz        = ld64(ph_rsnap);
+    ph_ehprev     = ld64(ph_rsnap + 8);
+    ph_ehmask     = ld64(ph_rsnap + 16);
+    ph_xhz        = ld64(ph_rsnap + 24);
+    ph_xhprev     = ld64(ph_rsnap + 32);
+    ph_classes    = ld64(ph_rsnap + 40);
+    ph_ce_closure = ld64(ph_rsnap + 48);
+    ph_globals    = ld64(ph_rsnap + 56);
+    ph_consts     = ld64(ph_rsnap + 64);
+    ph_sdfn       = ld64(ph_rsnap + 72);
+    ph_tok_s      = ld64(ph_rsnap + 80);
+    ph_tok_i      = ld64(ph_rsnap + 88);
+    ph_dt_head    = ld64(ph_rsnap + 96);
+    ph_nob        = ld64(ph_rsnap + 104);
+    ph_objid      = ld64(ph_rsnap + 112);
+    ph_erep       = ld64(ph_rsnap + 120);
+    ph_disp       = ld64(ph_rsnap + 128);
+    ph_log        = ld64(ph_rsnap + 136);
+    ph_exc        = ld64(ph_rsnap + 144);
+    ph_lsb        = ld64(ph_rsnap + 152);
+    ph_nfh        = ld64(ph_rsnap + 160);
+    ph_msgn       = ld64(ph_rsnap + 168);
+    ph_seed       = ld64(ph_rsnap + 176);
+}
+
+// What a request left behind that the roots alone do not undo, then the
+// roots: the statics it initialised go back to "never run" (php resets them
+// per request too), the files it opened are closed, and an output buffer it
+// left open is written out, as php flushes one at the end of a request.
+void php_request_reset() {
+    loop {
+        if (!ph_rsl) break;
+        st64(ld64(ph_rsl), 0);
+        ph_rsl = ld64(ph_rsl + 8);
+    }
+    i64 keep = ld64(ph_rsnap + 160);
+    i64 i = ph_nfh;
+    loop {
+        if (i <= keep) break;
+        i = i - 1;
+        if (ld64(ph_fh_own + i * 8) && ld64(ph_fh_fd + i * 8) >= 0) close(ld64(ph_fh_fd + i * 8));
+    }
+    i64 lv = ld64(ph_rsnap + 104);
+    loop {
+        if (lv >= ph_nob) break;
+        i64 n = ld64(ph_obn + lv * 8);
+        if (n) { php_flush(); php_out1(ld64(ph_obb + lv * 8), n); }
+        lv = lv + 1;
+    }
+    php_roots(0);
 }

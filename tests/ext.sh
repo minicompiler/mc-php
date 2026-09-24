@@ -294,5 +294,31 @@ else
 fi
 rm -rf "$tmp/build"
 
+# --- 10. a request lifecycle, through php's own built-in server -------------
+# Twenty requests to one php -S, each calling a static counter twice, a
+# `global` twice and a function that keeps 4 MiB in a static: php resets all
+# three per request, so every response is the same line. The module used to
+# keep its statics and globals across requests and to allocate out of one
+# 48 MiB arena for the life of the server (docs/plan.md § 7).
+printf '<?php\nfunction counter(): int { static $n = 0; $n++; return $n; }\nfunction remember(string $s): string { global $last; $prev = $last ?? ""; $last = $s; return $prev; }\nfunction big(): int { static $keep = ""; $keep = str_repeat("x", 4 << 20); return strlen($keep); }\n' > "$tmp/r.php"
+printf '<?php\nif (!function_exists("counter")) { require __DIR__ . "/r.php"; }\necho counter(), counter(), " [", remember("a"), remember("b"), "] ", big(), "\\n";\n' > "$tmp/router.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/rq.build" 2>&1; then
+    tmpn=$(cygpath -m "$tmp" 2>/dev/null || echo "$tmp")
+    "$PHP" tests/ext/requests.php "$tmpn/router.php" 20 "$tmpn/build/r.$sx" > "$tmp/rq.n" 2>&1; qn=$?
+    "$PHP" tests/ext/requests.php "$tmpn/router.php" 20 > "$tmp/rq.i" 2>&1; qi=$?
+    want=$(awk 'NR <= 20' "$tmp/rq.i" | sort -u | tr -d '\r')
+    if [ "$qn" = 0 ] && [ "$qi" = 0 ] && cmp -s "$tmp/rq.n" "$tmp/rq.i" && [ "$want" = "12 [a] 4194304" ] \
+       && [ "$(wc -l < "$tmp/rq.n" | tr -d ' ')" = 20 ]; then
+        say "requests: 20 through php -S, every one '12 [a] 4194304' in the module as interpreted"
+    else
+        bad "requests: the module's 20 responses are not the interpreted source's"
+        diff "$tmp/rq.i" "$tmp/rq.n" | head -8 | sed 's/^/      /'
+    fi
+else
+    bad "requests: it would not build"; sed 's/^/      /' "$tmp/rq.build"
+fi
+rm -rf "$tmp/build"
+
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }
 echo "  ext: the extension road is green"

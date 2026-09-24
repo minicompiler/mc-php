@@ -178,6 +178,27 @@ D7. DECIDED (owner, 2026-09-15): no VM and no GC -- "teko already proves automat
     name holds a reference to (`&int(99)`), and D7 has no refcount, so nothing at run time tells
     the mark from the value. The values agree; the mark is a documented difference
     (`probes/t8/g/42-string-offset-ref.php` compares the values with `echo` and says why).
+    **SUPERSEDED on the EXTENSION road (owner, 2026-09-24, batch A).** A module outlives every
+    request, so one arena per process -- never freed -- is a program's model and not a module's:
+    `examples/decimal` died with `mc-php: arena exhausted` near 29 000 calls in one php. On the
+    extension road the runtime now allocates the way a C extension does, through the Zend Memory
+    Manager, and D7 stays exactly as written for the PROGRAM road (a standalone binary has no
+    Zend). The runtime keeps ONE allocation seam, `php_alloc`, with two implementations chosen by
+    road -- the arena, or the Zend chunk an extension call bumps through (`lib/php_ext.mc`) --
+    rather than two runtimes. What lives where:
+    * **module lifetime** -- what MINIT builds (the class table, top-level constants, the bootstrap
+      hierarchy) and every string literal's cache: the module's own static arena, never freed,
+      which is `pemalloc`'s role taken by the module's own data;
+    * **call lifetime** -- everything a call allocates: a Zend chunk the request reuses, zeroed
+      and every extra block `efree`d when the call returns, so a million calls in one request
+      keep one chunk (measured below);
+    * **request lifetime** -- what a call that WRITES module state kept (a `static`, a `global`, a
+      `define()`, a handler, a class, a file): the call PINS itself, its blocks stay until the
+      request ends, and RSHUTDOWN puts the state back as MINIT left it -- statics reset, files
+      closed, the arena restored from a snapshot -- which is php's own rule for a request.
+    A string ARGUMENT is borrowed (the runtime's string IS a `zend_string`, and strings are
+    immutable here); a result the call built in a block of its own is handed over, a small one is
+    copied once. `docs/php-extension.md` § The memory has the rules and the numbers.
 
 D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixtures, any part of
     the runtime or standard library written in PHP, examples -- carries TESTS that run in BOTH

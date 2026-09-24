@@ -58,6 +58,7 @@ INSTRUMENTS = {
     'bench/shim.php': 'the TestCase shim D8 (a) names (phpunit cannot run on mc-php)',
     'bench/WorkloadTest.php': 'the PHPUnit test class itself',
     'bench/run.php': 'the mc-php runner that NAMES the test methods (D6: no reflection)',
+    'ext/requests.php': 'the php -S driver tests/ext.sh step 10 runs: it grades a module and is never compiled',
 }
 
 

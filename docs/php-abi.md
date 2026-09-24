@@ -32,6 +32,8 @@ not a dependency of the thing it grades.
 | 40 | ptr | `functions` | the `zend_function_entry` table |
 | 48 | ptr | `module_startup_func` | `mc_php_minit`, which is the source's top-level statements |
 | 56 | ptr | `module_shutdown_func` | 0 |
+| 64 | ptr | `request_startup_func` | 0 -- a request starts from the state the last RSHUTDOWN restored |
+| 72 | ptr | `request_shutdown_func` | `phx_rshutdown`: the request's state back to MINIT's, its blocks freed (`docs/php-extension.md` § The memory) |
 | 88 | ptr | `version` | `[extension].version` |
 | 160 | ptr | `build_id` | `[php].build_id` |
 
@@ -103,21 +105,31 @@ Tags: `IS_UNDEF` 0, `IS_NULL` 1, `IS_FALSE` 2, `IS_TRUE` 3, `IS_LONG` 4, `IS_DOU
 
 `refcount` u32 at 0, `type_info` u32 at 4, `h` u64 at 8, `len` u64 at 16, `val[]` at 24, NUL
 after. That is **the same record the runtime's own strings use** (`lib/php_rt.mc`, from
-`probes/t3`), which is why a php string can be read where it stands -- and why it is nevertheless
-COPIED into the arena on the way in: the engine frees its own when the call returns.
+`probes/t3`), which is why a php string argument is BORROWED where it stands: the engine keeps it
+alive for the call, the runtime never writes into a string it did not make except the hash, and
+its hash is zend's own (DJBX33A from 5381, the top bit set) -- which is exactly what
+`zend_string_hash_val` stores. An INTERNED string carries `IS_STR_INTERNED` (64, `GC_IMMUTABLE`)
+in `type_info` and has its hash set already, so nothing is ever written into one, and it has no
+count: a reference to it is taken by copying the pointer and tagging the zval `IS_STRING` (6),
+not `IS_STRING_EX`. A call that pins keeps a reference on every string it borrowed.
 
 **Returning one**: `zend_string_alloc` is inline and unexported, so the header is laid by hand
-over `_emalloc` -- refcount 1, `type_info` `0x16` (`GC_STRING`, not interned), hash 0, the length,
-the bytes, a NUL -- and the zval's `type_info` is `0x106`. Anything else and the engine either
-leaks it or frees something it does not own.
+-- refcount 1, `type_info` `0x16` (`GC_STRING`, not interned), hash 0 or the hash, the length, the
+bytes, a NUL -- and the zval's `type_info` is `0x106`. A string the call built in a Zend block of
+its own IS that already and is handed over with no copy; a small one lives inside the call's chunk
+and is copied into an `_emalloc` block. Anything else and the engine either leaks it or frees
+something it does not own.
 
-## The four symbols an extension reaches out to
+## The symbols an extension reaches out to
 
 All exported from the php binary, all reached as ordinary `extern`s:
 
 | | |
 |---|---|
 | `void *_emalloc(size_t)` | the engine's allocator, for a returned `zend_string` |
+| `void *_ecalloc(size_t, size_t)` | a call's chunk and any block too big for one, zeroed as the arena was |
+| `void _efree(void *)` | the call's blocks, when it returns |
+| `size_t php_output_write(const char *, size_t)` | php's output layer: what a module echoes passes every `ob_start()` level |
 | `void zend_type_error(const char *fmt, ...)` | a `TypeError` |
 | `void zend_argument_count_error(const char *fmt, ...)` | an `ArgumentCountError` -- **not** a `TypeError`; php distinguishes them and so does the gate |
 | `zend_object *zend_throw_exception(zend_class_entry *, const char *, zend_long)` | with a null class entry it is `Exception` |
