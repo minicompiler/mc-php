@@ -1084,9 +1084,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             ph_ety = PT_STRING;
             i64 mk = ph_a(av, 1);
             if (ph_is_strlit(mk))
-                return ph_quiet("php_trim_m", 3, a0,
-                    ph_quiet("php_bmap_lit", 3, ph_cache_slot("phm_"), mk, ph_int(1), 0, TY_UPTR),
-                    ph_int(tmode), 0, ty_pstr);
+                return ph_quiet("php_trim_m", 3, a0, ph_bmap_of(mk, 1), ph_int(tmode), 0, ty_pstr);
             return ph_quiet("php_trim_s", 3, a0, mk, ph_int(tmode), 0, ty_pstr);
         }
         uptr f = "php_f_trim";
@@ -1120,7 +1118,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         uptr sf = "php_spn_s";
         if (ph_is_strlit(set)) {
             sf = "php_spn";
-            set = ph_quiet("php_bmap_lit", 3, ph_cache_slot("phm_"), set, ph_int(0), 0, TY_UPTR);
+            set = ph_bmap_of(set, 0);
         }
         st64(sa + 8, set);
         i64 save = ph_can_throw;
