@@ -186,13 +186,21 @@ function pkm(int $n, int $o): string {
     $x[] = $n;
     try { if ($o) return (string) (-1 * $x[0]); return (string) ($x[0] * -1); } catch (ArithmeticError $e) { return "A"; }
 }
+// `throw` of an element product that overflows is that ArithmeticError,
+// not "Can only throw objects" over the wrapped value
+function pkt(int $n): string {
+    $x = [];
+    $x[] = $n;
+    try { throw $x[0] * 3; } catch (ArithmeticError $e) { return "A"; } catch (Error $e) { return "E"; }
+}
 echo pks(5), " ", pks(PHP_INT_MAX), "\n";
+echo pkt(5), " ", pkt(PHP_INT_MAX), "\n";
 echo pkm(5, 0), " ", pkm(5, 1), " ", pkm(PHP_INT_MIN, 0), " ", pkm(PHP_INT_MIN, 1), "\n";
 PKO
 lim $P/mcphp.sh "$tmp/pko.php" > "$tmp/pko.out" 2> "$tmp/pko.err"
 rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
 pko=$(tr -d '\r' < "$tmp/pko.out")
-pkw=$(printf '15\nArithmeticError: mc-php: an int overflowed in * on a packed array'"'"'s element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)\n-12 ArithmeticError\n2 10 1 9223372036854775807\n-5 -5 A A')
+pkw=$(printf '15\nArithmeticError: mc-php: an int overflowed in * on a packed array'"'"'s element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)\n-12 ArithmeticError\n2 10 1 9223372036854775807\nE A\n-5 -5 A A')
 if [ "$pko" = "$pkw" ]; then
     echo "  packed: an overflow on an element is the named ArithmeticError, not a wrapped int, and no store"
 else

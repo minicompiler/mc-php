@@ -107,6 +107,21 @@ function pk_key(int $d) {
     echo count($x), " ", $x[0], "\n";
 }
 
+// array_fill's ValueError, or an argument that throws, stops the
+// reinitialisation before the store: $x keeps what it had
+function pk_re(int $c) {
+    $x = [];
+    $x[] = 9;
+    try { $x = array_fill(0, $c, 1); } catch (ValueError $e) { echo get_class($e), "\n"; }
+    echo count($x), " ", $x[0], "\n";
+}
+function pk_arg(int $d) {
+    $x = [];
+    $x[] = 9;
+    try { $x = array_fill(0, intdiv(4, $d), strlen(str_repeat("a", 3))); } catch (DivisionByZeroError $e) { echo get_class($e), "\n"; }
+    echo count($x), " ", $x[0], "\n";
+}
+
 echo pk_mul("123456789012345678", "98765432109876543210"), "\n";
 echo pk_mul("9999", "9999"), " ", pk_mul("0", "5"), " ", pk_mul("1", "1"), "\n";
 pk_absent();
@@ -121,3 +136,7 @@ pk_pow(3);
 pk_pow(PHP_INT_MAX - 1);
 pk_key(1);
 pk_key(0);
+pk_re(2);
+pk_re(-1);
+pk_arg(2);
+pk_arg(0);
