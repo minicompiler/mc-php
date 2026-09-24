@@ -32,6 +32,8 @@ int main(void) {
     P("MEX_FUNCTIONS",       offsetof(zend_module_entry, functions));
     P("MEX_MODULE_STARTUP",  offsetof(zend_module_entry, module_startup_func));
     P("MEX_MODULE_SHUTDOWN", offsetof(zend_module_entry, module_shutdown_func));
+    P("MEX_REQUEST_STARTUP", offsetof(zend_module_entry, request_startup_func));
+    P("MEX_REQUEST_SHUTDOWN", offsetof(zend_module_entry, request_shutdown_func));
     P("MEX_VERSION",         offsetof(zend_module_entry, version));
     P("MEX_BUILD_ID",        offsetof(zend_module_entry, build_id));
 
@@ -65,6 +67,7 @@ int main(void) {
     P("ZSX_LEN",             offsetof(zend_string, len));
     P("ZSX_VAL",             offsetof(zend_string, val));
     P("ZSX_GC_STRING",       GC_STRING);
+    P("ZSX_INTERNED",        IS_STR_INTERNED);
 
     /* the type tags, and the two flags a zval's type_info carries */
     P("IZ_UNDEF",            IS_UNDEF);

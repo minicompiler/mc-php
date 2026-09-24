@@ -945,15 +945,45 @@ i64 ph_stmt_1() {
             i64 sctr = ph_can_throw;
             ph_can_throw = 0;
             e = ph_expr(0);
-            rthrow = ph_can_throw;
-            ph_can_throw = ph_can_throw | sctr;
             if (ph_fn_ret == PT_MIXED && ph_fn_retref) e = ph_to_mixed(e, ph_ety);
             if (ph_fn_ret == PT_MIXED && !ph_fn_retref) e = ph_to_mixed(ph_own(e, ph_ety), ph_ety);
-            if (ph_fn_ret == PT_STRING && ph_ety != PT_STRING) e = ph_to_str(e, ph_ety);
-            if (ph_fn_ret == PT_INT && ph_ety != PT_INT) e = ph_to_int(e, ph_ety);
-            if (ph_fn_ret == PT_FLOAT && ph_ety != PT_FLOAT) e = ph_to_float(e, ph_ety);
-            if (ph_fn_ret == PT_BOOL && ph_ety != PT_BOOL) e = ph_to_bool(e, ph_ety);
+            // A declared scalar return is CHECKED: php's own rule and php's
+            // own TypeError, the same php_param_coerce every declared
+            // parameter goes through (argno 0 is its return-value sentence).
+            // It used to be a conversion and nothing else, so
+            // `function f(): int { return "x"; }` answered int(0). The one
+            // mismatch that is never an error, int where float is declared,
+            // stays a plain widening.
+            i64 rw = 0;
+            if (ph_fn_ret == PT_INT)    rw = 1;
+            if (ph_fn_ret == PT_FLOAT)  rw = 2;
+            if (ph_fn_ret == PT_STRING) rw = 3;
+            if (ph_fn_ret == PT_BOOL)   rw = 4;
+            if (rw && ph_ety != ph_fn_ret) {
+                if (rw == 2 && ph_ety == PT_INT) e = ph_to_float(e, ph_ety);
+                if (!(rw == 2 && ph_ety == PT_INT)) {
+                    u8 rca[48];
+                    st64(rca, ph_to_mixed(e, ph_ety));
+                    st64(rca + 8, ph_int(rw));
+                    st64(rca + 16, ph_strlit("", 0));
+                    st64(rca + 24, ph_strlit(ph_cur_fn, cstrlen(ph_cur_fn)));
+                    st64(rca + 32, ph_int(0));
+                    st64(rca + 40, ph_strlit("", 0));
+                    e = ph_calln("php_param_coerce", rca, 6, ty_pzv);
+                    if (rw == 1) e = ph_to_int(e, PT_MIXED);
+                    if (rw == 2) e = ph_to_float(e, PT_MIXED);
+                    if (rw == 3) e = ph_to_str(e, PT_MIXED);
+                    if (rw == 4) e = ph_to_bool(e, PT_MIXED);
+                }
+            }
+            rthrow = ph_can_throw;
+            ph_can_throw = ph_can_throw | sctr;
         }
+        // `return;` in a function with a declared return type is php's
+        // COMPILE-TIME fatal, not a value: the native return had nothing to
+        // carry and answered whatever the register held (the review of #19)
+        if (!e && ph_fn_ret != PT_MIXED && ph_fn_ret != PT_VOID && ph_fn_ret != PT_NULL)
+            ph_phpfatal_x(fl, line, "A function with return type must return a value", 1);
         if (!e && ph_fn_ret == PT_MIXED) e = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
         ph_semi("expected ; after return");
         // T8: the unwinding check has to go BETWEEN computing the value and
@@ -1162,7 +1192,20 @@ i64 ph_stmt_1() {
     if (ph_is("declare")) {
         ph_next();
         ph_want("(", 1, "expected ( after declare");
-        loop { if (ph_at(")", 1)) break; if (ph_tid == T_EOF) break; ph_next(); }
+        // mc-php is strict by definition (D4): strict_types=1 says what it
+        // already does and is a no-op; strict_types=0 asks for the coercions
+        // D4 rules out, so it is refused rather than ignored. `st` counts the
+        // tokens since `strict_types`: the value is the third, after `=`.
+        i64 st = 0;
+        loop {
+            if (ph_at(")", 1)) break;
+            if (ph_tid == T_EOF) break;
+            if (ph_tid == T_IDENT && str_eq(ph_tname, "strict_types")) st = 1;
+            if (st == 3 && ph_tid == T_INT && ph_tval == 0)
+                ph_refuse(fl, line, "declare(strict_types=0)", "D4");
+            if (st) st = st + 1;
+            ph_next();
+        }
         ph_want(")", 1, "expected ) after declare");
         ph_accept(";", 1);
         return ph_empty();

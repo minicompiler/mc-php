@@ -231,6 +231,32 @@ i64 ph_function() {
         set_nd_next(ph_hoist_tail, nd_a(body));
         set_nd_a(body, ph_hoist_head);
     }
+    // A function declared int, float, string or bool that falls off its end
+    // is php's TypeError, `f(): Return value must be of type int, none
+    // returned`, reported at the closing brace -- not the zero the native
+    // return would otherwise carry (found by the review of #19). A body
+    // whose every path returns never reaches it.
+    i64 rw = 0;
+    if (rt == PT_INT)    rw = 1;
+    if (rt == PT_FLOAT)  rw = 2;
+    if (rt == PT_STRING) rw = 3;
+    if (rt == PT_BOOL)   rw = 4;
+    if (rw) {
+        i64 cl = ph_close_line;
+        i64 ps = ph_posstmt(fl, cl);
+        i64 nr = ph_stmt_of(ph_c2("php_ret_none", ph_strlit(name, cstrlen(name)), ph_int(rw), TY_VOID));
+        set_nd_next(ps, nr);
+        i64 zr = node_new(N_RETURN, cl, fl);
+        i64 zv = ph_int(0);
+        if (rw == 2) zv = ph_cast(ty_f64, ph_int(0));
+        if (rw == 3) zv = ph_strlit("", 0);
+        if (rw == 4) zv = ph_cast(TY_U8, ph_int(0));
+        set_nd_a(zr, zv);
+        set_nd_next(nr, zr);
+        i64 t3 = nd_a(body);
+        if (!t3) set_nd_a(body, ps);
+        if (t3) { loop { if (!nd_next(t3)) break; t3 = nd_next(t3); } set_nd_next(t3, ps); }
+    }
     // a php function that falls off the end answers null
     if (rt == PT_MIXED) {
         i64 t2 = nd_a(body);

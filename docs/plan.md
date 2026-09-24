@@ -178,6 +178,27 @@ D7. DECIDED (owner, 2026-09-15): no VM and no GC -- "teko already proves automat
     name holds a reference to (`&int(99)`), and D7 has no refcount, so nothing at run time tells
     the mark from the value. The values agree; the mark is a documented difference
     (`probes/t8/g/42-string-offset-ref.php` compares the values with `echo` and says why).
+    **SUPERSEDED on the EXTENSION road (owner, 2026-09-24, batch A).** A module outlives every
+    request, so one arena per process -- never freed -- is a program's model and not a module's:
+    `examples/decimal` died with `mc-php: arena exhausted` near 29 000 calls in one php. On the
+    extension road the runtime now allocates the way a C extension does, through the Zend Memory
+    Manager, and D7 stays exactly as written for the PROGRAM road (a standalone binary has no
+    Zend). The runtime keeps ONE allocation seam, `php_alloc`, with two implementations chosen by
+    road -- the arena, or the Zend chunk an extension call bumps through (`lib/php_ext.mc`) --
+    rather than two runtimes. What lives where:
+    * **module lifetime** -- what MINIT builds (the class table, top-level constants, the bootstrap
+      hierarchy) and every string literal's cache: the module's own static arena, never freed,
+      which is `pemalloc`'s role taken by the module's own data;
+    * **call lifetime** -- everything a call allocates: a Zend chunk the request reuses, zeroed
+      and every extra block `efree`d when the call returns, so a million calls in one request
+      keep one chunk (measured below);
+    * **request lifetime** -- what a call that WRITES module state kept (a `static`, a `global`, a
+      `define()`, a handler, a class, a file): the call PINS itself, its blocks stay until the
+      request ends, and RSHUTDOWN puts the state back as MINIT left it -- statics reset, files
+      closed, the arena restored from a snapshot -- which is php's own rule for a request.
+    A string ARGUMENT is borrowed (the runtime's string IS a `zend_string`, and strings are
+    immutable here); a result the call built in a block of its own is handed over, a small one is
+    copied once. `docs/php-extension.md` § The memory has the rules and the numbers.
 
 D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixtures, any part of
     the runtime or standard library written in PHP, examples -- carries TESTS that run in BOTH
@@ -887,6 +908,36 @@ The alternative, if the answer is no, is a second TOML reader inside mc-php, whi
 `docs/mcphp-toml.md` argues against in its own second section: the schema was chosen to stay
 inside what mc already parses precisely so that no parser has to be written here.
 
+### Open: `&name` of an `extern` cannot be linked into a loadable module (macos/aarch64, linux/aarch64)
+
+Found by batch A (2026-09-24), on **mc 1.1.0** here, and worked around in one line rather than
+patched: the runtime's output sink wanted `ph_osink = &php_output_write;`, and `php_output_write`
+is resolved from the php binary when the module loads. mc materialises the address of any symbol
+with `adrp` + `add` (M10's rule: "an undefined symbol when extern"), and a symbol a shared object
+resolves at load time cannot be reached that way -- it needs the GOT. Reduced to three lines:
+
+```mc
+extern i64 some_host_fn(i64 x);
+uptr fp;
+uptr take() { fp = &some_host_fn; return fp; }
+```
+
+```
+$ mc a.mc -o a.o && ld -bundle -undefined dynamic_lookup -arch arm64 \
+      -platform_version macos 13.0 13.0 -syslibroot $(xcrun --show-sdk-path) -lSystem -o a.so a.o
+ld: fixup error (kind=arm64_adrp_lo12) at '_take'+0x8 from a.o, target '_some_host_fn' does not have address
+
+$ mc build . --config b.toml          # the same a.mc, [target] linux/aarch64, kind = "obj"
+$ ld.lld -shared -Bsymbolic -o a-linux.so a-linux.o
+ld.lld: error: relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol 'some_host_fn'; recompile with -fPIC
+```
+
+A CALL to the same extern links on both (a `bl` goes through a stub the linker makes), which is
+the workaround: `lib/php_ext.mc` takes the address of a one-line local function,
+`phx_owrite`, that calls `php_output_write`. What would close it in mc: a GOT load
+(`ARM64_RELOC_GOT_LOAD_PAGE21`/`PAGEOFF12`, `R_AARCH64_ADR_GOT_PAGE`/`LD64_GOT_LO12_NC`, and the
+x86-64 `GOTPCREL` form) for `&name` when `name` is an `extern` and the output is an object.
+
 ### Still unmeasured
 
 - The ELF half of everything above: `probes/t2/run.sh` has never run on Linux. What HAS: the
@@ -914,7 +965,13 @@ its code is written.
    (`lib/rt_host_windows.mc`), the fixture gate and the extension gate graded against the
    runner's own php 8.5 (`tests/windows.sh`), and a release archive per architecture built on
    those runners. What it cost mc-php and what it left open in mc is § 5.
-2. **Examples first, and they are the first gates.** What already has code moves into
+2. **Examples first, and they are the first gates.** **Acceptance (owner, 2026-09-24): an
+   example is DONE only when it is compiled from its PHP source AND it is faster than the same
+   PHP interpreted (> 1x), and each one has a C TWIN -- the same functions written as an ordinary
+   C extension -- measured beside it on the same harness, because the target is to come as close
+   as possible to C.** `decimal` has its twin (`examples/decimal/c/`, batch A); `two-extensions`
+   and `awaitable` get theirs when they are compiled from PHP. By that rule none of the three is
+   done yet: `decimal` compiles from PHP and is 0.51x interpreted against the twin's 13.8x (below). What already has code moves into
    `examples/`, each with a gate that compiles it and compares it with php. Four of the five parts
    are DONE (the examples branch, 2026-09-23), gated by `tests/ext.sh` and `tests/examples.sh`
    inside `tests/run.sh`, `tests/linux.sh` and `tests/windows.sh`, **green on all five CI legs**
@@ -928,8 +985,13 @@ its code is written.
      and both Windows legs; the `php:8.5-alpine` image does not, and the gate says `SKIPPED`); and the bench row --
      three loan schedules, the best of nine, three rounds interleaved -- is **0.51x on
      macos/arm64** (1.72 ms interpreted, 3.41 ms compiled), 0.46x to 0.81x on the CI legs: string work
-     is C inside php and mc inside mc-php, and every intermediate string is an arena allocation.
-     `[project].opt = 1` measured once gives 2.4 ms, 0.74x; not adopted.
+     is C inside php and mc inside mc-php. `[project].opt = 1` measured once gives 2.4 ms, 0.74x;
+     not adopted. **Batch A** (2026-09-24) added the C twin and re-measured all three columns on
+     one host (macos/arm64, with another process holding one core, so the absolute numbers are
+     higher than above and the ratios are what compare): interpreted 3.29 ms; the module 6.48 ms
+     (0.51x) before batch A and **6.41 ms (0.51x)** after; the C twin **0.238 ms (13.8x)**. The
+     allocator change did not move the ratio -- the arena was a bump allocator too -- and the soak
+     did: a million calls in one request, where the module used to die near 29 000.
    - `two-extensions` -- DONE as **hand-written mc**: `extA.mc`/`extB.mc` from `reference/`,
      loaded in both orders and compared byte for byte with `extA.php` + `extB.php` interpreted.
      `extB.php` is refused -- `a php function mc-php does not have: a_add` -- because a call to a
@@ -945,15 +1007,15 @@ its code is written.
        `awaitable.src.php`'s `#[Extern('lib')]` with its `variadic:` field: where a C variadic
        argument travels is the ABI's (on the stack after eight registers on Apple arm64, in the
        next register on AAPCS64 and SysV x86-64 -- measured, `awaitable.mc` needs both forms);
-     * **a request lifecycle for the arena** -- D7's 48 MiB is exhausted by about 31 000
-       `dec_add` calls in ONE process (`examples/decimal/README.md`), and a large-volume example
-       is a long process by definition;
+     * **a request lifecycle for the arena** -- DONE in batch A: D7 is superseded on the
+       extension road (§ 3 D7), a call's memory is Zend's and freed when it returns, and
+       RSHUTDOWN restores what a request changed (`docs/php-extension.md` § The memory);
      * **signatures past the scalars**: rows come back as arrays or objects, and a connection is
        a resource or an object the module declares -- today a class the source declares compiles
        and is NOT published, with no refusal (measured on `awaitable.src.php`);
-     * **module-private functions**: every top-level function of an extension source is published
-       (the `_dec_*` helpers of `examples/decimal` are), and a class's methods, which are private,
-       are dispatched by name and typed `mixed`.
+     * **module-private functions** -- DONE in batch A: a leading underscore is not published
+       (`docs/php-extension.md` § What is published); a class's methods, which are private, are
+       still dispatched by name and typed `mixed`.
 
    **Found while writing them**, and fixed at the root with a fixture each:
    - a STATIC method with parameters read its first argument out of the receiver slot, because
@@ -963,9 +1025,9 @@ its code is written.
      was DROPPED: its if came back as a statement list and the else branch keeps one node
      (`tests/g/97-elseif-string.php`).
 
-   And one recorded, not fixed: **`str_replace` with an ARRAY search is a wrong answer** --
-   `Array to string conversion` and the array's text searched for -- where the convention here is
-   a named refusal. `examples/decimal` calls it twice with strings instead.
+   And one recorded then, **fixed in batch A**: `str_replace` with an ARRAY search was a wrong
+   answer -- `Array to string conversion` and the array's text searched for. It takes php's whole
+   signature now (`tests/g/100-str-replace-array.php`).
 3. **Port ctype.** php-src's `ext/ctype` written in php and compiled by mc-php, graded against
    php's own `ctype.so` (T1 measured it at 7 Zend functions and no data global).
 4. **Port bcmath.**
@@ -1014,20 +1076,20 @@ In the order the measurements put them, each with the number that says why:
    whitelist whose wrong entry is a silently wrong line, so it is named rather than guessed.
    On a program road that starts 38 ms behind php none of this showed; an extension is called
    from inside a process that is already warm, so it is the whole claim.
-2. **A php ternary allocates per evaluation**, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
-   exhausts the 48 MiB arena at `f(30)`. The `if` form of the same function does not. On the
-   PROGRAM road too, measured with `mc-php --exe` -- so it is a front-end finding and not the
-   back end's.
-3. **A declared scalar RETURN is not checked.** `function f(): int { return "x"; }` answers
-   `int(0)` where php throws a `TypeError` -- on the PROGRAM road too, so it is D4/D9's return
-   coercion and not the back end's. It matters more here, because the extension road's headline
-   claim is byte-for-byte agreement with the interpreted source. Found by the reviewer of #15.
-4. **The arena has no request lifecycle.** D7 is one arena per PROCESS, never freed; a module
-   outlives a request. `RINIT`/`RSHUTDOWN` is where that is answered.
-5. **Output buffering.** The runtime writes to fd 1 and php's `ob_start()` never sees it.
-   `php_output_write` is exported and routing `php_flush`'s one write through a sink the
-   extension road sets is the whole fix -- it touches the runtime's hot path, so it is a step
-   with its own bench row.
+2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
+   through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
+   exhausted the arena at `f(30)`; the condition is native now and so is the value when both
+   branches share a type (`tests/g/98-ternary.php`).
+3. **A declared scalar RETURN was not checked** -- DONE in batch A, on both roads, with php's own
+   rule and `TypeError` (`tests/g/99-return-type.php`, `tests/ext.sh` step 8), including a
+   function that falls off its end (`none returned`) and a bare `return;`, which php refuses
+   while compiling (`tests/g/101-return-bare.php`). Methods and closures still lower their
+   return as `mixed` and are not checked.
+4. **The arena had no request lifecycle** -- DONE in batch A by the owner's decision: the
+   extension road allocates through the Zend Memory Manager (§ 3 D7), with RSHUTDOWN
+   (`tests/ext.sh` step 10, `examples/decimal/soak.php`).
+5. **Output buffering** -- DONE in batch A: one sink, `php_out1`, which is `php_output_write` on
+   the extension road (`examples/hello/check.php`'s last two lines).
 6. **Two mc-php extensions in one process** both EXPORT every runtime symbol -- but measured
    by `tests/examples.sh` (examples/hello and examples/decimal, both load orders, every host),
    each keeps using its OWN: mc calls and takes addresses with direct `bl`/`adrp`, and the Linux

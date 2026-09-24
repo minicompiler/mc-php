@@ -6,14 +6,15 @@
 // processes interleaved, three times each, and divides the minimums.
 //
 //     php -d extension=build/decimal.so bench.php     # compiled
+//     php -d extension=c-twin.so bench.php c          # the C twin (c/)
 //     php bench.php                                   # interpreted
 //
 // The workload is three ten-year loan schedules: each month's interest is
 // rounded to the cent and paid off against a fixed instalment. ~1500 calls a
-// run, and ten runs are what fits in D7's arena (README.md).
+// run.
 declare(strict_types=1);
 
-$mode = 'compiled';
+$mode = $argv[1] ?? 'compiled';
 if (!extension_loaded('decimal')) {
     require __DIR__ . '/decimal.php';
     $mode = 'interpreted';

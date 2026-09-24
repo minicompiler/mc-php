@@ -105,8 +105,17 @@ void ph_ext_config() {
     ph_ext_dbg = ph_ext_bool("php.debug", "php.debug");
 }
 
+// A function whose name begins with `_` is MODULE-PRIVATE: it compiles, the
+// module's own code calls it, and it is not published -- no handler, no
+// function-table row, so `function_exists` is false from php. php has no
+// private function of its own; the leading underscore is php's established
+// spelling for "internal", it needs no second list to keep in sync, and the
+// source stays php that runs unchanged (docs/php-extension.md § What is
+// published). Unpublished, its signature is not the boundary's either: it
+// may take and return anything the language does.
 void ph_ext_export(i64 fi, uptr fl, i64 line) {
     if (!ph_ext) return;
+    if (ld8(ld64(ph_fname + fi * 8)) == 95) return;
     if (ph_nexp >= PH_MAXEXP) err_at("mcphp.toml", 1, "mc-php: too many exported functions");
     st64(ph_expi + ph_nexp * 8, fi);
     st64(ph_expf + ph_nexp * 8, fl);

@@ -135,6 +135,14 @@ dso=$rootn/$EX/build/decimal.$sx
 if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
     say "built: $(wc -c < "$dso" | tr -d ' ') bytes from $EX/decimal.php"
     differential check.php "$EX/check.php" -d extension="$dso"
+    # the _dec_* helpers are module-private (a leading underscore): php sees
+    # the six dec_* functions and nothing else
+    vis=$("$PHP" -d extension="$dso" -r '$f = get_extension_funcs("decimal"); sort($f); echo implode(" ", $f);' 2>&1 | tr -d '\r')
+    if [ "$vis" = "dec_add dec_cmp dec_div dec_mul dec_round dec_sub" ]; then
+        say "published: the six dec_* functions and none of the _dec_* helpers"
+    else
+        bad "published: want the six dec_* functions, got: $vis"
+    fi
     if "$PHP" -m | tr -d '\r' | grep -qix bcmath; then
         # the exit AND the exact summary: a weakened oracle that checked less
         # must not pass (the reviewer of #18)
@@ -147,8 +155,35 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
     else
         skip "the bcmath cross-check: this php has no bcmath"
     fi
-    # the bench row: three rounds, the two processes interleaved, minimums
-    bi=; bc=; ai=; ac=
+    # 1 000 000 calls in ONE request: every string a call builds is a Zend
+    # block the call frees, so php's own peak does not move. The module used
+    # to allocate out of a fixed arena and died near 29 000 calls.
+    set -- $("$PHP" -d extension="$dso" "$EX/soak.php" 1000000 2>&1 | tr -d '\r')
+    if [ "${2:-}" = 1000000 ] && [ "${4:-}" = 12500000.00 ] && [ "${10:-x}" = "${12:-y}" ]; then
+        say "soak: 1000000 dec_add calls in one request, usage $6 -> $8 bytes, peak ${10} -> ${12}"
+    else
+        bad "soak.php: want 1000000 calls, 12500000.00 and an unmoved peak, got: $*"
+    fi
+    # the C twin (c/decimal.c): the same six functions written the ordinary
+    # way, graded by the same check.php, and the reference the bench compares
+    # against. It needs php-config and a C compiler; the COMPILER needs
+    # neither, so without them this says so and the bench has two columns.
+    cso=
+    CC=${CC:-cc}
+    if command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; then
+        inc=$(php-config --includes)
+        if "$CC" -O2 -bundle -undefined dynamic_lookup -o "$tmp/c-decimal.so" "$EX/c/decimal.c" $inc 2>"$tmp/c.err" ||
+           "$CC" -O2 -shared -fPIC -o "$tmp/c-decimal.so" "$EX/c/decimal.c" $inc 2>>"$tmp/c.err"; then
+            cso=$tmp/c-decimal.so
+            differential "check.php (the C twin)" "$EX/check.php" -d extension="$cso"
+        else
+            bad "the C twin would not build:"; sed 's/^/      /' "$tmp/c.err"
+        fi
+    else
+        skip "the C twin: no php-config or no $CC here -- the bench has no C column"
+    fi
+    # the bench row: three rounds, the processes interleaved, minimums
+    bi=; bc=; bt=; ai=; ac=
     for r in 1 2 3; do
         set -- $("$PHP" "$EX/bench.php" | tr -d '\r')
         [ "$1" = interpreted ] || { bad "bench.php (interpreted): $*"; break; }
@@ -157,8 +192,18 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
         [ "$1" = compiled ] || { bad "bench.php (compiled): $*"; break; }
         bc=$(awk -v a="$bc" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2; ac=$*
         [ "$ai" = "$ac" ] || bad "bench.php: the two answers differ: $ai / $ac"
+        if [ -n "$cso" ]; then
+            set -- $("$PHP" -d extension="$cso" "$EX/bench.php" c | tr -d '\r')
+            [ "$1" = c ] || { bad "bench.php (the C twin): $*"; break; }
+            bt=$(awk -v a="$bt" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2
+            [ "$ai" = "$*" ] || bad "bench.php: the C twin's answer differs: $*"
+        fi
     done
-    [ -n "$bc" ] && say "bench: interpreted $bi ms, compiled $bc ms -- $(awk -v i="$bi" -v c="$bc" 'BEGIN { printf "%.2fx", i / c }') (best of nine, three rounds interleaved; not gated)"
+    if [ -n "$bc" ]; then
+        row="interpreted $bi ms, compiled $bc ms $(awk -v i="$bi" -v c="$bc" 'BEGIN { printf "(%.2fx)", i / c }')"
+        [ -n "$bt" ] && row="$row, C twin $bt ms $(awk -v i="$bi" -v c="$bt" 'BEGIN { printf "(%.2fx)", i / c }')"
+        say "bench: $row -- best of nine, three rounds interleaved; not gated"
+    fi
 fi
 
 # --- two-extensions -------------------------------------------------------------

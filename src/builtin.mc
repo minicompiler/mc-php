@@ -910,6 +910,18 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         // the fourth argument is php's by-reference $count
         i64 cnt = ph_int(0);
         if (na == 4) cnt = ph_a(av, 3);
+        // an array anywhere -- or a zval that may hold one -- is php's whole
+        // signature, and the answer is an array when the SUBJECT is one
+        i64 t1 = ph_aty(av, 1);
+        i64 t2 = ph_aty(av, 2);
+        i64 anyarr = ph_is_arr(t0) || ph_is_arr(t1) || ph_is_arr(t2);
+        if (t0 == PT_MIXED || t1 == PT_MIXED || t2 == PT_MIXED) anyarr = 1;
+        if (anyarr) {
+            i64 z = ph_c4("php_f_str_replace", ph_to_mixed(a0, t0), ph_to_mixed(ph_a(av, 1), t1),
+                          ph_to_mixed(ph_a(av, 2), t2), cnt, ty_pzv);
+            if (t2 == PT_MIXED || ph_is_arr(t2)) { ph_ety = PT_MIXED; return z; }
+            return ph_c1("php_zv_str", z, ty_pstr);
+        }
         return ph_c4("php_str_replace_c", ph_to_str(a0, t0), ph_to_str(ph_a(av, 1), ph_aty(av, 1)),
                      ph_to_str(ph_a(av, 2), ph_aty(av, 2)), cnt, ty_pstr);
     }

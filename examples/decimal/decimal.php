@@ -17,14 +17,14 @@
 // It is ordinary PHP and nothing else: `require` it and the functions are
 // php's own; `mc-php build` beside mcphp.toml turns the same file into
 // decimal.so. The API is the six dec_* functions at the bottom. The _dec_*
-// helpers above them are published too, because every top-level function of
-// an extension source is (README.md: "What it cannot do yet"), and each takes
-// only scalars for the same reason.
+// helpers above them are module-private: a leading underscore is not
+// published (docs/php-extension.md § What is published), so php sees the six
+// and nothing else.
 
 // ---- a number: validated once, then read in three ways -----------------------
 // The canonical form is the input without a leading '+'. strspn and not a
-// loop over $s[$i]: every string an extension builds lives in D7's arena
-// until the process ends (README.md), so the fewer strings, the more calls.
+// loop over $s[$i]: every string is an allocation, so the fewer strings, the
+// faster the call.
 function _dec_valid(string $s, string $fn, int $argno, string $name): string {
     $n = strlen($s);
     $i = 0;
@@ -55,8 +55,8 @@ function _dec_sc(string $v): int {
 
 // the coefficient: "-012.30" is "1230". Zero is "0".
 function _dec_coef(string $v): string {
-    // two calls, not str_replace(['-', '.'], ...): mc-php's str_replace takes
-    // strings only today (docs/plan.md § 7)
+    // two calls, not str_replace(['-', '.'], ...): both forms compile, and
+    // three strings lower to a native call where an array goes through zvals
     $c = ltrim(str_replace('.', '', str_replace('-', '', $v)), '0');
     if ($c === '') { return '0'; }
     return $c;

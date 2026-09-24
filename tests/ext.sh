@@ -188,7 +188,7 @@ nref=0
 # contain the phrase passed).
 refuse() {
     nref=$((nref + 1))
-    printf '<?php\ndeclare(strict_types=1);\n%s\n' "$1" > "$tmp/r.php"
+    printf '<?php\n%s\n' "$1" > "$tmp/r.php"
     rm -f "$tmp/build/r.$sx"
     # NOT `got=$(... | tail -1); rc=$?` -- that reads tail's status, which is
     # always 0, and every refusal then reported "it BUILT".
@@ -225,7 +225,7 @@ say "refusals: $nref signatures outside the scope, each declined by name"
 #     the module published the nested declaration and lost the outer one.
 #     php declares a nested function only when the outer RUNS, so the module
 #     must publish the outer and not the nested.
-printf '<?php\ndeclare(strict_types=1);\nfunction outer(int $n): int { function nested(int $m): int { return $m * 3; } return nested($n) + 1; }\n' > "$tmp/r.php"
+printf '<?php\nfunction outer(int $n): int { function nested(int $m): int { return $m * 3; } return nested($n) + 1; }\n' > "$tmp/r.php"
 rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/n.build" 2>&1; then
     got=$("$PHP" -d extension="$tmp/build/r.$sx" \
@@ -249,6 +249,100 @@ esac
 [ ! -f "$tmp/build/r.$sx" ] || bad "a nameless [extension]: it wrote an artefact"
 rm -rf "$tmp/build"
 say "the two of review #15: a nested function, and a nameless [extension]"
+
+# --- 8. a declared scalar RETURN is checked, in the module as interpreted -----
+# php throws its own TypeError for `return "x";` from `: int`; the module used
+# to answer int(0) (docs/plan.md § 7). The message crosses the boundary as a
+# TypeError because the engine has that class.
+printf '<?php\nfunction rbad(): int { $s = "x"; return $s; }\nfunction rnum(): int { $s = "7"; return $s; }\n' > "$tmp/r.php"
+cat > "$tmp/rcall.php" <<'EOF2'
+<?php
+if (!function_exists('rbad')) { require __DIR__ . '/r.php'; }
+var_dump(rnum());
+try { rbad(); } catch (TypeError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+EOF2
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/rb.build" 2>&1; then
+    rn=$("$PHP" -d extension="$tmp/build/r.$sx" "$tmp/rcall.php" 2>&1 | tr -d '\r')
+    ri=$("$PHP" "$tmp/rcall.php" 2>&1 | tr -d '\r')
+    if [ "$rn" = "$ri" ]; then
+        say "a return type: the module throws php's own TypeError, as interpreted"
+    else
+        bad "a return type: module and interpreted differ"; printf '      module:      %s\n      interpreted: %s\n' "$rn" "$ri"
+    fi
+else
+    bad "a return type: it would not build"; sed 's/^/      /' "$tmp/rb.build"
+fi
+rm -rf "$tmp/build"
+
+# --- 9. a leading underscore is module-private -------------------------------
+# Published: every function without one. Not published: _helper, and _arr,
+# whose array signature an EXPORTED function could not have -- unpublished, it
+# is not the boundary's (docs/php-extension.md § What is published).
+printf '<?php\nfunction _helper(int $n): int { return $n * 2; }\nfunction _arr(array $a): array { return $a; }\nfunction pub(int $n): int { return _helper($n) + count(_arr([1, 2])); }\n' > "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/pv.build" 2>&1; then
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" \
+        -r 'printf("%d%d%d %d", function_exists("pub"), function_exists("_helper"), function_exists("_arr"), pub(4));' 2>&1 | tr -d '\r')
+    if [ "$got" = "100 10" ]; then
+        say "private: pub is published, _helper and _arr are not, and pub(4) calls both"
+    else
+        bad "private: want '100 10' (pub yes, _helper no, _arr no, pub(4)=10), got $got"
+    fi
+else
+    bad "private: it would not build"; sed 's/^/      /' "$tmp/pv.build"
+fi
+rm -rf "$tmp/build"
+
+# --- 9b. a call that makes an object keeps nothing ----------------------------
+# An object is call memory like any other unless it has a destructor (which
+# joins module state). 200 000 calls that each make a stdClass must leave
+# php's usage where it was; pinning every `new` kept each call's memory until
+# the request ended (the review of #19).
+printf '<?php\nfunction mk(int $n): int { $o = new stdClass; $o->v = $n; $a = [$o, $o]; return $a[1]->v; }\n' > "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/ob.build" 2>&1; then
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" \
+        -r '$u = memory_get_usage(); $s = 0; for ($i = 0; $i < 200000; $i++) { $s += mk($i); } printf("%d %d", $s, memory_get_usage() - $u);' 2>&1 | tr -d '\r')
+    set -- $got
+    if [ "${1:-}" = 19999900000 ] && [ "${2:-999999}" -lt 65536 ]; then
+        say "objects: 200000 calls that each make one, php's usage moved $2 bytes"
+    else
+        bad "objects: want 19999900000 and usage under 64 KiB, got $got"
+    fi
+else
+    bad "objects: it would not build"; sed 's/^/      /' "$tmp/ob.build"
+fi
+rm -rf "$tmp/build"
+
+# --- 10. a request lifecycle, through php's own built-in server -------------
+# Twenty requests to one php -S, each calling a static counter twice, a
+# `global` twice and a function that keeps 4 MiB in a static: php resets all
+# three per request, so every response is the same line. The module used to
+# keep its statics and globals across requests and to allocate out of one
+# 48 MiB arena for the life of the server (docs/plan.md § 7). The second line
+# of each response is an output buffer the MODULE opens and leaves open, which
+# is php's own stack: the script's echo after the call goes into it too.
+printf '<?php\nfunction counter(): int { static $n = 0; $n++; return $n; }\nfunction remember(string $s): string { global $last; $prev = $last ?? ""; $last = $s; return $prev; }\nfunction big(): int { static $keep = ""; $keep = str_repeat("x", 4 << 20); return strlen($keep); }\nfunction open_ob(): int { echo "0"; ob_start(); echo "A"; ob_start(); echo "B"; return 1; }\nfunction inner_ob(): string { ob_start(); echo "in"; return ob_get_clean() . "!"; }\nfunction lens(): string { ob_start(); echo "abcd"; $n = ob_get_length(); ob_end_clean(); return var_export($n, true) . " " . var_export(ob_get_length(), true); }\n' > "$tmp/r.php"
+printf '<?php\nif (!function_exists("counter")) { require __DIR__ . "/r.php"; }\necho counter(), counter(), " [", remember("a"), remember("b"), "] ", big(), " ", inner_ob(), "\\n";\necho lens(), "\\n";\n$n = open_ob();\necho "C$n\\n";\n' > "$tmp/router.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/rq.build" 2>&1; then
+    tmpn=$(cygpath -m "$tmp" 2>/dev/null || echo "$tmp")
+    "$PHP" tests/ext/requests.php "$tmpn/router.php" 20 "$tmpn/build/r.$sx" > "$tmp/rq.n" 2>&1; qn=$?
+    "$PHP" tests/ext/requests.php "$tmpn/router.php" 20 > "$tmp/rq.i" 2>&1; qi=$?
+    want=$(sort -u "$tmp/rq.i" | tr -d '\r' | tr '\n' '|')
+    if [ "$qn" = 0 ] && [ "$qi" = 0 ] && cmp -s "$tmp/rq.n" "$tmp/rq.i" \
+       && [ "$want" = "0ABC1|12 [a] 4194304 in!|4 false|" ] \
+       && [ "$(wc -l < "$tmp/rq.n" | tr -d ' ')" = 60 ]; then
+        say "requests: 20 through php -S, every one the interpreted source's (statics reset, ob levels php's own)"
+    else
+        bad "requests: the module's 20 responses are not the interpreted source's"
+        diff "$tmp/rq.i" "$tmp/rq.n" | head -8 | sed 's/^/      /'
+    fi
+else
+    bad "requests: it would not build"; sed 's/^/      /' "$tmp/rq.build"
+fi
+rm -rf "$tmp/build"
 
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }
 echo "  ext: the extension road is green"

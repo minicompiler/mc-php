@@ -50,3 +50,18 @@ echo $r->getNumberOfParameters(), " ",
 $n = 0;
 foreach (["a", "bb", "ccc"] as $s) { $n += strlen(hello_greet($s)); }
 echo $n, "\n";
+
+// output buffering: what the module echoes goes through php's own output
+// layer, so ob_start() captures it in order with php's own echo
+ob_start();
+echo "A";
+hello_say("B");
+echo "C";
+$x = ob_get_clean();
+echo "captured: ", json_encode($x), "\n";
+ob_start();
+ob_start();
+hello_say("inner");
+$in = ob_get_clean();
+$out = ob_get_clean();
+echo "nested: ", json_encode($in), " ", json_encode($out), "\n";
