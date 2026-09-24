@@ -103,6 +103,15 @@ void ph_program() {
         set_nd_next(m0, m1);
         set_nd_a(f, m0);
     }
+    // MCPHP_RC=check (src/rc.mc): the program counts its strings and poisons
+    // one that reaches zero, `main` included; the first statement says so to
+    // the runtime, before any string is built
+    if (!ph_ext && ph_rcchk_mode) {
+        i64 on = ph_set("ph_rcchk", ph_int(1));
+        set_nd_next(on, nd_a(b));
+        set_nd_a(b, on);
+        ph_rc_fn(f);
+    }
     top_add(f);
     if (ph_ext) ph_ext_emit(fl, line);
     top_add(ph_lit_finish(fl, line));
@@ -426,6 +435,7 @@ i64 ph_dollar_expr() {
 }
 
 #embed ph_rt "../lib/php_rt.mc"
+#embed ph_prog_rt "../lib/php_prog.mc"
 
 // The runtime's own system layer, one file per host: what a PROGRAM this
 // compiler writes calls, which is not what the compiler calls. All four are
@@ -498,6 +508,7 @@ void ph_push_rt_host() {
 
 void user_init() {
     ph_ext_config();
+    ph_rc_env();
     float_init();
     machine_arm64_float_init();
     machine_x86_64_float_init();
@@ -519,6 +530,7 @@ void user_init() {
     // globals (ph_exc) -- a call binds after the whole unit is parsed, a
     // GLOBAL has to be declared before the line that names it.
     if (ph_ext) p_push_source("php extension runtime", ph_ext_rt, ph_ext_rt_size);
+    if (!ph_ext) p_push_source("php program allocator", ph_prog_rt, ph_prog_rt_size);
     p_push_source("php runtime", ph_rt, ph_rt_size);
     ph_push_rt_host();
 }

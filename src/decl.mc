@@ -292,6 +292,7 @@ i64 ph_function() {
     set_nd_type(f, ph_mcty(rt));
     set_nd_a(f, head);
     set_nd_b(f, body);
+    ph_rc_fn(f);
     return f;
 }
 

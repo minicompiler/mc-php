@@ -63,6 +63,7 @@
 #define ZSX_VAL             24
 #define ZSX_GC_STRING       22      // GC_STRING: refcounted, not interned
 #define ZSX_INTERNED        64      // IS_STR_INTERNED (GC_IMMUTABLE) in type_info
+#define ZSX_PERSIST         128     // IS_STR_PERSISTENT (GC_PERSISTENT): pefree, i.e. free(3)
 
 // Zend/zend_types.h: the type tags, and the two flags a zval carries
 #define IZ_UNDEF            0
@@ -101,9 +102,17 @@
 // named argument travels in a register. The messages below are built whole by
 // the runtime and every part of one is an identifier or a decimal, so a `%`
 // cannot appear in one.
-extern uptr _emalloc(i64 n);
-extern uptr _ecalloc(i64 nmemb, i64 size);
-extern void _efree(uptr p);
+// Zend/zend_alloc.h: in a php built with --enable-debug each of the three
+// takes the caller's file and line twice more (ZEND_FILE_LINE_DC and
+// ZEND_FILE_LINE_ORIG_DC), and the debug allocator keeps them in the block to
+// name a leak at request end. So the module always passes them: a release
+// php's function takes only the first argument(s) and never reads the rest,
+// which travel in registers the callee does not look at, and a debug php gets
+// "mc-php" where a C extension's would say its source file.
+extern uptr _emalloc(i64 n, uptr f, i64 l, uptr of, i64 ol);
+extern uptr _erealloc(uptr p, i64 n, uptr f, i64 l, uptr of, i64 ol);
+extern void _efree(uptr p, uptr f, i64 l, uptr of, i64 ol);
+extern void free(uptr p);
 extern void zend_type_error(uptr fmt);
 extern void zend_argument_count_error(uptr fmt);
 extern uptr zend_throw_exception(uptr ce, uptr msg, i64 code);
@@ -120,9 +129,59 @@ extern i32 php_output_end();
 extern i32 php_output_flush();
 
 // defined further down; mc reads a unit once
-i64  phx_take(uptr p);
-i64  phx_isbor(uptr p);
 i64  phx_rshutdown(i64 mtype, i64 mnum);
+
+// Zend's allocator, as the runtime calls it (php_rt.mc § who owns a string, and
+// the call's chunk below). lib/php_prog.mc defines the same four names on the
+// program road, where nothing reaches them.
+uptr phx_em(i64 n) { return _emalloc(n, "mc-php", 0, 0, 0); }
+
+// Every string the runtime builds inside a call: php's zend_string_alloc laid
+// by hand over _emalloc -- refcount 1 and GC_STRING in one store, hash 0, the
+// length, the NUL -- and pushed on the pool as a temporary. The n bytes are
+// the caller's to write. Outside a call (MINIT) it is module memory, the
+// arena's, as on the program road.
+uptr php_str_alloc(i64 n) {
+    if (!ph_zalloc) return php_str_mk(n, 1);
+    // a size that wrapped negative is a huge size_t to _emalloc, which php's
+    // memory limit refuses by name
+    uptr s = _emalloc(ZSX_HDR + n + 1, "mc-php", 0, 0, 0);
+    st64(s, 94489280513);                       // refcount 1 | GC_STRING (22) << 32
+    st64(s + 8, 0);
+    st64(s + ZSX_LEN, n);
+    st8(s + ZSX_VAL + n, 0);
+    i64 k = ph_pn;
+    if (k < ph_pcap) { st64(ph_pool + (k << 3), s); ph_pn = k + 1; return s; }
+    php_pool_push(s);
+    return s;
+}
+
+// php's pefree for a string whose count reached zero
+void php_str_free(uptr s) {
+    if (ld32(s + 4) & ZSX_PERSIST) { free(s); return; }
+    _efree(s, "mc-php", 0, 0, 0);
+}
+
+// The temporaries above mark m die (php_rt.mc § who owns a string): every
+// return and every loop iteration of the compiled code comes here, so the
+// free is in the loop itself. A pool entry is never 0 and never interned.
+void php_rc_drain(i64 m) {
+    i64 i = ph_pn;
+    uptr p = ph_pool;
+    loop {
+        if (i <= m) break;
+        i = i - 1;
+        uptr s = ld64(p + (i << 3));
+        i64 rc = ld32(s);
+        if (rc > 1) { st32(s, rc - 1); continue; }
+        if (ld32(s + 4) & ZSX_PERSIST) { free(s); continue; }
+        _efree(s, "mc-php", 0, 0, 0);
+    }
+    if (ph_pn > m) ph_pn = m;
+}
+void phx_ef(uptr p) { _efree(p, "mc-php", 0, 0, 0); }
+uptr phx_er(uptr p, i64 n) { return _erealloc(p, n, "mc-php", 0, 0, 0); }
+void phx_pf(uptr p) { free(p); }
 
 // ---- the tables the module entry points at ---------------------------------
 // Filled by get_module() at CALL time rather than laid out as initialised
@@ -169,7 +228,7 @@ i64 phx_ob(i64 op) {
     uptr r = php_str_new(zs + ZSX_VAL, ld64(zs + ZSX_LEN));
     if (!(ld32(zs + 4) & ZSX_INTERNED)) {
         st32(zs, ld32(zs) - 1);
-        if (!ld32(zs)) _efree(zs);
+        if (!ld32(zs)) phx_ef(zs);
     }
     if (op == PHOB_GET_CLEAN) php_output_discard();
     if (op == PHOB_GET_FLUSH) php_output_end();
@@ -359,26 +418,16 @@ f64 phx_f(uptr ex, i64 k) {
 }
 
 // BORROWED, not copied: the runtime's string IS a zend_string (probes/t3
-// measured the layout, docs/php-abi.md records it), strings are immutable
-// here, and the engine keeps the argument alive until the call returns. The
-// runtime may write the hash into it -- the same DJBX33A, top bit set, that
-// zend_string_hash_val stores, and never into an interned string, whose hash
-// is already there. A call that PINS may have stored it somewhere that
-// outlives the call, so phx_leave takes a reference on each one then.
-u8  phx_bor[96];                    // the current call's borrowed strings
-i64 phx_nbor;
-
-uptr phx_s(uptr ex, i64 k) {
-    uptr z = ld64(phx_argz(ex, k) + ZVX_VALUE);
-    // at most 12: one per string parameter (mc's MAXPARAMS), read once by
-    // the handler, and a handler is never re-entered -- a module's code cannot
-    // call php code (examples/two-extensions pins that refusal). Loud, not
-    // silent, if that ever stops being true.
-    if (phx_nbor >= 12) php_die("mc-php: too many borrowed strings in one call\n", 46);
-    st64(phx_bor + phx_nbor * 8, z);
-    phx_nbor = phx_nbor + 1;
-    return z;
-}
+// measured the layout, docs/php-abi.md records it), and the engine keeps the
+// argument alive until the call returns. A php function whose body never
+// assigns the parameter reads the engine's string where it stands; one that
+// assigns it takes a reference at entry and drops it on the way out
+// (src/rc.mc), and anything that stores it where it outlives a statement
+// takes its own (php_str_esc) -- so nothing here needs to remember which
+// strings were borrowed. The runtime may write the hash into it -- the same
+// DJBX33A, top bit set, that zend_string_hash_val stores, and never into an
+// interned string, whose hash is already there.
+uptr phx_s(uptr ex, i64 k) { return ld64(phx_argz(ex, k) + ZVX_VALUE); }
 
 // one more reference to an engine string (not to an interned one, which has
 // no count)
@@ -405,12 +454,11 @@ void phx_ret_float(uptr rv, f64 v) {
     st32(rv + ZVX_TYPE_INFO, IZ_DOUBLE);
 }
 
-// A zend_string the ENGINE owns: laid by hand over _emalloc, because
-// zend_string_alloc is inline and unexported. refcount 1 and GC_STRING with
-// no interned bit, so the engine's own release frees it.
+// A zend_string the ENGINE owns, copied from one of ours: only for the class
+// name phx_throw looks up (the lookup may keep the key).
 uptr phx_zstr(uptr s) {
     i64 n = ld64(s + ZSX_LEN);
-    uptr z = _emalloc(ZSX_HDR + n + 1);
+    uptr z = phx_em(ZSX_HDR + n + 1);
     st32(z, 1);
     st32(z + 4, ZSX_GC_STRING);
     st64(z + 8, 0);
@@ -420,42 +468,38 @@ uptr phx_zstr(uptr s) {
     return z;
 }
 
-// A string the call built in a block of its own -- anything over PH_ZBIG --
-// is HANDED OVER, not copied: it is one Zend block already, laid as a
-// zend_string with refcount 1 and GC_STRING, so it leaves the call's list and
-// the engine owns it. A small one lives inside a chunk and is copied, which
-// costs one allocation the size of the answer. So is a literal (module
-// memory), and anything a PINNED call returns, which the state that pinned it
-// may hold too. An argument handed straight back is the engine's own string
-// and gains a reference.
+// The answer is the SAME zend_string, never a copy: every string a call
+// builds is already a Zend block laid as php's, so return_value takes a
+// reference to it -- the one the answer carried as the call's temporary when
+// it is that (the common case: the php function's return pushed it), else a
+// new one (an argument handed straight back, a string a zval holds). A
+// string of the module's -- a literal, a one-byte string, anything MINIT
+// built -- is IS_STR_INTERNED, and goes out the way php hands out an
+// interned string: tagged IS_STRING, with no reference taken.
 void phx_ret_str(uptr rv, uptr s) {
-    if (!ph_pin && phx_take(s)) {
-        st64(rv + ZVX_VALUE, s);
-        st32(rv + ZVX_TYPE_INFO, IZ_STRING_EX);
-        return;
-    }
-    if (phx_isbor(s)) {
-        phx_addref(s);
-        st64(rv + ZVX_VALUE, s);
-        if (ld32(s + 4) & ZSX_INTERNED) st32(rv + ZVX_TYPE_INFO, IZ_STRING);
-        if (!(ld32(s + 4) & ZSX_INTERNED)) st32(rv + ZVX_TYPE_INFO, IZ_STRING_EX);
-        return;
-    }
-    st64(rv + ZVX_VALUE, phx_zstr(s));
+    st64(rv + ZVX_VALUE, s);
+    if (ld32(s + 4) & ZSX_INTERNED) { st32(rv + ZVX_TYPE_INFO, IZ_STRING); return; }
+    php_rc_take(s);
     st32(rv + ZVX_TYPE_INFO, IZ_STRING_EX);
 }
 
 // ---- the call's memory -----------------------------------------------------
-// Inside a call the runtime bumps through a Zend chunk (php_rt.mc's php_alloc
-// seam); this file is the slow path and the bookkeeping. Every chunk comes
-// from Zend's allocator, zeroed as the arena it replaces was. The request has
-// one HOME chunk the calls reuse: when a call returns, the part of it the
-// call used is zeroed again and every other block the call took -- a second
-// chunk, a block too big for one -- is freed. A PINNED call's part stays:
-// the next call starts above it (phx_floor). So a call's memory is released
-// when it returns, and a million calls in one request use the same 32 KiB.
-// The list is [phx_keep, phx_cn) for the call and [0, phx_keep) for what the
-// request's PINNED calls kept; RSHUTDOWN frees all of it.
+// STRINGS are not here: each one is a zend_string of its own with php's
+// refcount (php_rt.mc § who owns a string), and a call returns with none of
+// its temporaries left (the pool drained to zero) and its escaped ones
+// released. What IS here is everything else a call builds -- the zvals, the
+// arrays, the objects, the class entries -- which have no count in this
+// runtime (docs/php-extension.md § The memory says why), so they live in a
+// Zend chunk the call bumps through (php_rt.mc's php_alloc seam); this file
+// is the slow path and the bookkeeping. The request has one HOME chunk the
+// calls reuse: when a call returns, every other block the call took -- a
+// second chunk, a block too big for one -- is freed, and the next call bumps
+// through the home chunk again from where the request's pinned calls left it.
+// Nothing is zeroed: every allocation site writes what it reads. A PINNED
+// call's part stays: the next call starts above it (phx_floor), and its
+// escaped strings stay with it. The list is [phx_keep, phx_cn) for the call
+// and [0, phx_keep) for what the request's PINNED calls kept; RSHUTDOWN frees
+// all of it.
 #define PHX_CK   32768
 
 uptr phx_cl;
@@ -465,17 +509,17 @@ i64  phx_keep;
 i64  phx_depth;
 uptr phx_home;                      // the request's reusable chunk
 i64  phx_floor;                     // below it: what pinned calls kept
-i64  phx_hused;                     // what the call used of it, once it moved on
+i64  phx_efloor;                    // the escaped strings pinned calls kept
 i64  phx_dirty;                     // a call of this request pinned
 i64  phx_mark;                      // the arena's top when MINIT ended
 uptr phx_snap;                      // and a copy of the arena below it
 
 void phx_grow() {
     i64 nc = phx_cc * 2 + 256;
-    uptr nl = _ecalloc(nc, 8);
+    uptr nl = phx_em(nc * 8);
     i64 i = 0;
     loop { if (i >= phx_cn) break; st64(nl + i * 8, ld64(phx_cl + i * 8)); i = i + 1; }
-    if (phx_cl) _efree(phx_cl);
+    if (phx_cl) phx_ef(phx_cl);
     phx_cl = nl;
     phx_cc = nc;
 }
@@ -492,12 +536,11 @@ uptr phx_zalloc(i64 n) {
     // a size that wrapped negative (PHP_INT_MAX bytes and a header) is a
     // huge one: Zend's allocator refuses it with php's own memory fatal
     if (n > PH_ZBIG || n < 0) {
-        uptr b = _ecalloc(n, 1);
+        uptr b = phx_em(n);
         phx_track(b);
         return b;
     }
-    if (ph_zcur == phx_home) phx_hused = ph_zpos;
-    uptr c = _ecalloc(PHX_CK, 1);
+    uptr c = phx_em(PHX_CK);
     phx_track(c);
     ph_zcur = c;
     ph_zlim = PHX_CK;
@@ -505,23 +548,7 @@ uptr phx_zalloc(i64 n) {
     return c;
 }
 
-// Zero n bytes of a chunk: 64 at a time while a whole 64 fits, then 8, then
-// bytes. `p` is where the call started (a pinned call's end, not 64-aligned),
-// so no store may pass p + n (found by the review of #19). Written out rather
-// than a call to memset, which is not in every host's import list here.
-void phx_zero(uptr p, i64 n) {
-    uptr e = p + n;
-    loop {
-        if (p + 64 > e) break;
-        st64(p, 0); st64(p + 8, 0); st64(p + 16, 0); st64(p + 24, 0);
-        st64(p + 32, 0); st64(p + 40, 0); st64(p + 48, 0); st64(p + 56, 0);
-        p = p + 64;
-    }
-    loop { if (p + 8 > e) break; st64(p, 0); p = p + 8; }
-    loop { if (p >= e) break; st8(p, 0); p = p + 1; }
-}
-
-// a block this call made: taken OUT of the list (the engine owns it now)
+// a block this call made: taken OUT of the list
 i64 phx_take(uptr p) {
     i64 i = phx_cn;
     loop {
@@ -532,22 +559,27 @@ i64 phx_take(uptr p) {
     return 0;
 }
 
-i64 phx_isbor(uptr p) {
-    i64 i = 0;
-    loop { if (i >= phx_nbor) break; if (ld64(phx_bor + i * 8) == p) return 1; i = i + 1; }
-    return 0;
-}
-
 // free every block of the list from `from` up
 void phx_free_from(i64 from) {
     i64 i = from;
     loop {
         if (i >= phx_cn) break;
         uptr b = ld64(phx_cl + i * 8);
-        if (b) _efree(b);
+        if (b) phx_ef(b);
         i = i + 1;
     }
     phx_cn = from;
+}
+
+// the escaped strings from `from` up lose the reference the chunk held
+void phx_esc_from(i64 from) {
+    i64 i = ph_en;
+    loop {
+        if (i <= from) break;
+        i = i - 1;
+        php_str_release(ld64(ph_esc + i * 8));
+    }
+    if (ph_en > from) ph_en = from;
 }
 
 // the arena and its copy are 8-aligned, and the copy has 8 bytes to spare
@@ -565,6 +597,40 @@ void phx_snapshot() {
     php_roots(1);
 }
 
+// MCPHP_STATS=1 in php's environment: at the end of each request, what the
+// string discipline did -- the in-place gate reads it (tests/ext.sh). Written
+// from a byte buffer: RSHUTDOWN runs outside a call, where a string would be
+// the module's arena and stay for good.
+i64 phx_stats = 0 - 1;
+i64 phx_put_n(uptr b, i64 w, i64 v) {
+    u8 t[24];
+    i64 k = 0;
+    loop { st8(t + k, 48 + v % 10); v = v / 10; k = k + 1; if (!v) break; }
+    loop { if (!k) break; k = k - 1; st8(b + w, ld8(t + k)); w = w + 1; }
+    return w;
+}
+void phx_put_s(uptr b, uptr w, uptr s) {
+    i64 i = 0;
+    loop { i64 c = ld8(s + i); if (!c) break; st8(b + ld64(w), c); st64(w, ld64(w) + 1); i = i + 1; }
+}
+void phx_stat_line() {
+    if (phx_stats < 0) {
+        phx_stats = 0;
+        uptr v = getenv("MCPHP_STATS");
+        if (v) { if (ld8(v) == '1') phx_stats = 1; }
+    }
+    if (!phx_stats) return;
+    u8 b[96];
+    u8 w[8];
+    st64(w, 0);
+    phx_put_s(b, w, "mc-php stats: in place ");
+    st64(w, phx_put_n(b, ld64(w), ph_rc_inplace));
+    phx_put_s(b, w, ", copied ");
+    st64(w, phx_put_n(b, ld64(w), ph_rc_copied));
+    phx_put_s(b, w, "\n");
+    write(2, b, ld64(w));
+}
+
 // RSHUTDOWN: the request's state goes back to what MINIT left, and what the
 // request's pinned calls kept is freed -- Zend would free it anyway at the
 // end of the request; freeing it here keeps a debug php's leak report quiet.
@@ -575,11 +641,25 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) {
         phx_copy(ph_heap, phx_snap, phx_mark);
         phx_dirty = 0;
     }
+    phx_stat_line();
+    ph_rc_inplace = 0;
+    ph_rc_copied = 0;
+    // the kept strings go while their holders are still readable, then the
+    // blocks that held them
+    phx_esc_from(0);
+    phx_efloor = 0;
+    if (ph_esc) phx_ef(ph_esc);
+    ph_esc = 0;
+    ph_ecap = 0;
+    if (ph_pool) phx_ef(ph_pool);
+    ph_pool = 0;
+    ph_pcap = 0;
+    ph_pn = 0;
     phx_free_from(0);
-    if (phx_home) _efree(phx_home);
+    if (phx_home) phx_ef(phx_home);
     phx_home = 0;
     phx_floor = 0;
-    if (phx_cl) _efree(phx_cl);
+    if (phx_cl) phx_ef(phx_cl);
     phx_cl = 0;
     phx_cc = 0;
     phx_keep = 0;
@@ -591,12 +671,10 @@ void phx_enter() {
     php_bootstrap();
     if (!phx_depth) {
         ph_pin = 0;
-        phx_nbor = 0;
-        if (!phx_home) phx_home = _ecalloc(PHX_CK, 1);
+        if (!phx_home) phx_home = phx_em(PHX_CK);
         ph_zcur = phx_home;
         ph_zpos = phx_floor;
         ph_zlim = PHX_CK;
-        phx_hused = 0 - 1;
     }
     phx_depth = phx_depth + 1;
     ph_zalloc = &phx_zalloc;
@@ -628,7 +706,7 @@ void phx_throw() {
     uptr cz = phx_zstr(cn);
     uptr ce = zend_lookup_class(cz);
     st32(cz, ld32(cz) - 1);
-    if (!ld32(cz)) _efree(cz);
+    if (!ld32(cz)) phx_ef(cz);
     uptr s = m;
     if (!ce) {
         s = cn;
@@ -647,8 +725,9 @@ void phx_leave() {
     if (!phx_depth) { if (!phx_mark) phx_snapshot(); return; }
     phx_depth = phx_depth - 1;
     if (phx_depth) return;
-    i64 used = phx_hused;
-    if (ph_zcur == phx_home) used = ph_zpos;
+    // the call's temporaries die: whatever it answered, return_value has its
+    // own reference by now (phx_ret_str)
+    php_rc_drain(0);
     uptr cur = ph_zcur;
     i64 pos = ph_zpos;
     ph_zalloc = 0;
@@ -657,11 +736,9 @@ void phx_leave() {
     // an output buffer the call left open is made of the call's blocks
     if (ph_nob) ph_pin = 1;
     if (ph_pin) {
-        i64 i = 0;
-        loop { if (i >= phx_nbor) break; phx_addref(ld64(phx_bor + i * 8)); i = i + 1; }
-        // what the call used is kept; the chunk it ended in is where the
-        // next call goes on bumping, so a pinned call costs its own bytes
-        // and not a chunk
+        // what the call used is kept, and the strings its blocks hold with it;
+        // the chunk it ended in is where the next call goes on bumping, so a
+        // pinned call costs its own bytes and not a chunk
         if (cur != phx_home) {
             phx_take(cur);
             phx_track(phx_home);
@@ -669,10 +746,12 @@ void phx_leave() {
         }
         phx_floor = pos;
         phx_keep = phx_cn;
+        phx_efloor = ph_en;
         phx_dirty = 1;
         return;
     }
-    // the home chunk is zeroed for the next call, as the arena was fresh
-    phx_zero(phx_home + phx_floor, used - phx_floor);
+    // the strings the call's zvals, keys and rows held are released while
+    // those blocks are still there, then the blocks go
+    phx_esc_from(phx_efloor);
     phx_free_from(phx_keep);
 }
