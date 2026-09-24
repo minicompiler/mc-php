@@ -181,6 +181,64 @@ i64 ph_ref_into(i64 cell, uptr fl, i64 line, i64 semi) {
     return ph_wrap(ph_set(ph_mangle(sv, "v_"), ph_c2("php_ref_bind", cell, cv, ty_pzv)));
 }
 
+// ---- the packed int array (src/packed.mc) ------------------------------------
+// the value a packed store is given: an int, which the scan predicted
+i64 ph_pk_int(uptr fl, i64 line) {
+    i64 v = ph_expr(0);
+    if (ph_ety != PT_INT) ph_pk_disagree(fl, line, "a stored value that is not an int");
+    return v;
+}
+
+// `$x = [];`, `$x = array();`, `$x = array_fill(0, N, V);` on a packed $x
+i64 ph_pk_init(uptr d, uptr fl, i64 line, i64 semi) {
+    i64 v = 0;
+    if (ph_accept("[", 1)) {
+        ph_want("]", 1, "expected ] in a php array");
+        v = ph_quiet("php_pk_new", 1, ph_int(8), 0, 0, 0, TY_UPTR);
+    } else if (ph_is("array_fill")) {
+        ph_next();
+        ph_want("(", 1, "expected ( in a php call");
+        i64 z = ph_expr(0);
+        if (nd_kind(z) != N_INT || nd_val(z) != 0) ph_pk_disagree(fl, line, "array_fill's start");
+        ph_want(",", 1, "expected , in a php call");
+        i64 n = ph_pk_int(fl, line);
+        ph_want(",", 1, "expected , in a php call");
+        i64 fv = ph_pk_int(fl, line);
+        ph_want(")", 1, "expected ) in a php call");
+        v = ph_c2("php_pk_fill", n, fv, TY_UPTR);
+    } else if (ph_is("array")) {
+        ph_next();
+        ph_want("(", 1, "expected ( in a php array");
+        ph_want(")", 1, "expected ) in a php array");
+        v = ph_quiet("php_pk_new", 1, ph_int(8), 0, 0, 0, TY_UPTR);
+    } else {
+        ph_pk_disagree(fl, line, "an initialisation");
+    }
+    if (semi) ph_semi("expected ; after a php assignment");
+    if (ph_var_find(d) < 0) ph_var_bind(d, PT_PK);
+    return ph_wrap(ph_set(ph_mangle(d, "v_"), v));
+}
+
+// `$x[] = E;` and `$x[K] = E;` on a packed $x; the parser is on the [
+i64 ph_pk_store(uptr d, uptr fl, i64 line, i64 semi) {
+    if (ph_var_type(d) != PT_PK) ph_pk_disagree(fl, line, "a store before the initialisation");
+    ph_next();
+    i64 base = node_new(N_IDENT, line, fl);
+    set_nd_name(base, ph_mangle(d, "v_"));
+    set_nd_type(base, TY_UPTR);
+    i64 k = 0;
+    if (!ph_at("]", 1)) {
+        k = ph_expr(0);
+        if (ph_ety != PT_INT) ph_pk_disagree(fl, line, "a key that is not an int");
+    }
+    ph_want("]", 1, "expected ] in a php array assignment");
+    ph_want("=", 1, "expected = after a php array index");
+    i64 v = ph_pk_int(fl, line);
+    if (semi) ph_semi("expected ; after a php assignment");
+    if (!k) return ph_expr_stmt_of(ph_quiet("php_pk_push", 2, base, v, 0, 0, TY_VOID));
+    return ph_expr_stmt_of(ph_quiet("php_pk_set", 3, base, k, v, 0, TY_VOID));
+}
+
 // $v = expr / $v[i] = expr / $v[] = expr, and the compound forms
 i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
     u8 kbr[8];
@@ -194,6 +252,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         return ph_obj_stmt(d, fl, line, semi);
     }
+    if (ph_at("[", 1) && ph_pk_has(d)) return ph_pk_store(d, fl, line, semi);
     if (ph_at("[", 1)) {
         // a php array springs into existence on its first [] write
         if (ph_var_find(d) < 0) {
@@ -368,6 +427,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         i64 lv = node_new(N_IDENT, line, fl);
         set_nd_name(lv, ph_mangle(d, "v_"));
         set_nd_type(lv, ph_mcty(lt));
+        ph_inull_ok = 1;                      // `$v += $x[$i]`: ph_arith's to answer
         i64 r = ph_expr(0);
         i64 rt = ph_ety;
         if (semi) ph_semi("expected ; after a php assignment");
@@ -495,6 +555,21 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         set_nd_name(sr, ph_mangle(src, "v_"));
         set_nd_type(sr, ty_pzv);
         return ph_wrap(ph_set(ph_mangle(d, "v_"), sr));
+    }
+    if (ph_pk_has(d)) return ph_pk_init(d, fl, line, semi);
+    if (ph_pin_has(d)) {
+        // `$v = $x[$k];` (src/packed.mc): the value and php's null, kept
+        ph_inull_ok = 1;
+        i64 iv = ph_expr(0);
+        if (ph_ety != PT_INULL || ph_var_find(d) >= 0) ph_pk_disagree(fl, line, "a packed element variable");
+        if (semi) ph_semi("expected ; after a php assignment");
+        ph_var_bind(d, PT_INULL);
+        i64 s1 = ph_set(ph_mangle(d, "v_"), iv);
+        i64 fr = node_new(N_IDENT, line, fl);
+        set_nd_name(fr, "ph_pkabs");
+        set_nd_type(fr, TY_I64);
+        set_nd_next(s1, ph_set(ph_mangle(d, "vn_"), fr));
+        return ph_wrap(s1);
     }
     i64 v = ph_expr(0);
     i64 vt = ph_ety;

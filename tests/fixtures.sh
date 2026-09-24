@@ -135,4 +135,23 @@ for f in $P/r/*.php; do
     esac
 done
 echo "  refusals: $nrok / $nr parse under php and are named by mc-php, exit 3"
+# The packed int array (src/packed.mc) is a LOWERING, and a differential only
+# says the answers are php's -- a proof that silently never fires would pass
+# it too. So the lowering is read back: every pk_* function of g/105 must
+# hold its $x as the native buffer (an mc `uptr` local), and no esc_* function
+# of g/106 may, each of those being one thing the proof must refuse.
+"$MCPHP_BIN" --dump-ast $P/g/105-packed-int.php > "$tmp/pk.ast" 2>&1
+"$MCPHP_BIN" --dump-ast $P/g/106-packed-fallback.php > "$tmp/pe.ast" 2>&1
+pk=$(awk '/^FUNC.* name=f_pk_/ { f = $NF } /^FUNC/ && !/name=f_pk_/ { f = "" }
+          f != "" && /VAR type=uptr name=v_x$/ { print f }' "$tmp/pk.ast" | sort -u | wc -l | tr -d ' ')
+pn=$(grep -c '^FUNC.* name=f_pk_' "$tmp/pk.ast")
+pe=$(awk '/^FUNC.* name=f_esc_/ { f = $NF } /^FUNC/ && !/name=f_esc_/ { f = "" }
+          f != "" && /VAR type=uptr name=v_x$/ { print f }' "$tmp/pe.ast" | sort -u | tr '\n' ' ')
+en=$(grep -c '^FUNC.* name=f_esc_' "$tmp/pe.ast")
+if [ "$pn" -gt 0 ] && [ "$pk" = "$pn" ] && [ -z "$pe" ] && [ "$en" -gt 0 ]; then
+    echo "  packed: $pk / $pn accepted in g/105, 0 / $en lowered in g/106"
+else
+    echo "  FAIL  packed: $pk / $pn accepted in g/105; lowered in g/106 where the proof must fail: ${pe:-none}"
+    fail=1
+fi
 exit $fail

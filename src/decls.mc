@@ -20,6 +20,8 @@
 #define PT_MIXED   7      // a zval: php's own 16-byte value (T6)
 #define PT_ARR     8      // php's ordered hash; every element is a zval
 #define PT_OBJ     9      // a raw object handle: $this, and nothing else
+#define PT_PK      10     // a PACKED int array src/packed.mc proved: php_pk_*, never a zval
+#define PT_INULL   11     // a packed array's element READ: an i64, and ph_pkabs says null
 
 // the visibility codes, shared with php_rt.txt
 #define V_PUBLIC    0
@@ -187,6 +189,12 @@ i64  ph_type_tail(i64 t);
 i64  ph_vd(i64 v, i64 t, uptr fl, i64 line);
 i64  ph_echo_of(i64 v, i64 t, uptr fl, i64 line);
 i64  ph_inline_html(uptr fl, i64 line);
+i64  ph_inull_zv(i64 n);
+i64  ph_pk_has(uptr d);
+i64  ph_pin_has(uptr d);
+void ph_pk_scan();
+void ph_pk_disagree(uptr fl, i64 line, uptr what);
+i64  ph_inull_ok;          // src/packed.mc: the next ph_expr may answer PT_INULL
 
 i64 ph_is_arr(i64 t) { if (t == PT_ARR) return 1; return 0; }
 
@@ -201,6 +209,7 @@ i64 ph_mcty(i64 t) {
     if (t == PT_MIXED)  return ty_pzv;
     if (t == PT_ARR)    return ty_parr;
     if (t == PT_OBJ)    return TY_UPTR;
+    if (t == PT_PK)     return TY_UPTR;
     return TY_I64;
 }
 
@@ -215,6 +224,8 @@ uptr ph_tyname(i64 t) {
     if (t == PT_MIXED)  return "mixed";
     if (t == PT_ARR)    return "array";
     if (t == PT_OBJ)    return "object";
+    if (t == PT_PK)     return "array";
+    if (t == PT_INULL)  return "?int";
     return "?";
 }
 

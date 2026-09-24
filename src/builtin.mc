@@ -879,6 +879,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "strlen"))   { ph_need(na, 1, name, fl, line); ph_ety = PT_INT; return ph_strlen_of(ph_to_str(a0, t0)); }
     if (str_eq(name, "count") || str_eq(name, "sizeof")) {
         ph_need(na, 1, name, fl, line);
+        if (t0 == PT_PK) { ph_ety = PT_INT; return ph_quiet("php_pk_count", 1, a0, 0, 0, 0, TY_I64); }
         if (t0 == PT_MIXED) { ph_ety = PT_INT; return ph_c1("php_count", ph_c1("php_zv_arr_r", a0, ty_parr), TY_I64); }
         if (!ph_is_arr(t0)) ph_todo2(fl, line, "count() of", ph_tyname(t0));
         ph_ety = PT_INT;

@@ -1287,6 +1287,111 @@ uptr php_arr_copy(uptr src) {
     return a;
 }
 
+// ---- a packed int array: the lowering of a php array the compiler PROVED --
+// holds only ints and never escapes (src/packed.mc says what the proof is).
+// Its elements are a native i64 buffer, keys 0..len-1, with no zval and no
+// hash anywhere. A store the dense shape cannot hold -- a key past the end or
+// below zero -- turns it into php's own ordered hash, once, keys 0..len-1
+// first and the new key after them, which is the order php would have; from
+// then on every operation takes the hash. The elements are ints either way,
+// so what a read answers never changes, only where it was found.
+//  0 len i64 | 8 cap i64 | 16 data uptr | 24 hash uptr (0 while dense)
+// A read that finds nothing is php's warning and null. The null cannot
+// travel in an i64, so the read answers 0 and leaves ph_pkabs set: the
+// compiler reads the flag right after the call wherever a null and a 0 would
+// differ (php_zinull), and nowhere else -- `null + 1` and `0 + 1` do not.
+i64 ph_pkabs;
+
+uptr php_pk_new(i64 cap) {
+    if (cap < 8) cap = 8;
+    uptr p = php_alloc(32);
+    st64(p, 0);
+    st64(p + 8, cap);
+    st64(p + 16, php_alloc(cap * 8));
+    st64(p + 24, 0);
+    return p;
+}
+
+// array_fill(0, n, v): php's own ValueError below zero
+uptr php_pk_fill(i64 n, i64 v) {
+    if (n < 0) {
+        php_throw_str(php_str_new("ValueError", 10),
+            php_str_new("array_fill(): Argument #2 ($count) must be greater than or equal to 0", 69));
+        return php_pk_new(8);
+    }
+    uptr p = php_pk_new(n);
+    uptr d = ld64(p + 16);
+    i64 i = 0;
+    loop { if (i >= n) break; st64(d + i * 8, v); i = i + 1; }
+    st64(p, n);
+    return p;
+}
+
+void php_pk_hash(uptr p) {
+    i64 n = ld64(p);
+    uptr d = ld64(p + 16);
+    uptr a = php_arr_new(n);
+    i64 i = 0;
+    loop { if (i >= n) break; php_arr_iset(a, i, php_zlong(ld64(d + i * 8))); i = i + 1; }
+    st64(p + 24, a);
+}
+
+void php_pk_push(uptr p, i64 v) {
+    if (ld64(p + 24)) { php_arr_push(ld64(p + 24), php_zlong(v)); return; }
+    i64 n = ld64(p);
+    uptr d = ld64(p + 16);
+    if (n == ld64(p + 8)) {
+        uptr nd = php_alloc(n * 16);
+        php_memcpy(nd, d, n * 8);
+        st64(p + 8, n * 2);
+        st64(p + 16, nd);
+        d = nd;
+    }
+    st64(d + n * 8, v);
+    st64(p, n + 1);
+}
+
+void php_pk_set(uptr p, i64 k, i64 v) {
+    if (!ld64(p + 24)) {
+        i64 n = ld64(p);
+        if (k >= 0 && k < n) { st64(ld64(p + 16) + k * 8, v); return; }
+        if (k == n) { php_pk_push(p, v); return; }
+        php_pk_hash(p);
+    }
+    php_arr_iset(ld64(p + 24), k, php_zlong(v));
+}
+
+i64 php_pk_get(uptr p, i64 k) {
+    if (!ld64(p + 24)) {
+        if (k >= 0 && k < ld64(p)) { ph_pkabs = 0; return ld64(ld64(p + 16) + k * 8); }
+        php_undef_ikey(k);
+        ph_pkabs = 1;
+        return 0;
+    }
+    uptr b = php_ht_find(ld64(p + 24), k, 0);
+    if (!b) { php_undef_ikey(k); ph_pkabs = 1; return 0; }
+    ph_pkabs = 0;
+    return ld64(b);
+}
+
+// `$x[$k] ?? d`: php's quiet read, a zval
+uptr php_pk_getq(uptr p, i64 k) {
+    if (!ld64(p + 24)) {
+        if (k >= 0 && k < ld64(p)) return php_zlong(ld64(ld64(p + 16) + k * 8));
+        return php_znull();
+    }
+    return php_arr_iget(ld64(p + 24), k);
+}
+
+i64 php_pk_count(uptr p) {
+    if (ld64(p + 24)) return php_count(ld64(p + 24));
+    return ld64(p);
+}
+
+// an element read where null and 0 differ: the value php has
+uptr php_zinull(i64 v) { if (ph_pkabs) return php_znull(); return php_zlong(v); }
+uptr php_zinull2(i64 v, i64 abs) { if (abs) return php_znull(); return php_zlong(v); }
+
 // ---- the zval conversions, php's own rules ---------------------------------
 i64 php_zv_bool(uptr z) {
     i64 t = php_zv_type(z);
@@ -3226,6 +3331,11 @@ uptr php_f_array_fill(uptr st, uptr num, uptr v) {
     uptr r = php_arr_new(8);
     i64 s = php_zv_long(st);
     i64 n = php_zv_long(num);
+    if (n < 0) {
+        php_throw_str(php_str_new("ValueError", 10),
+            php_str_new("array_fill(): Argument #2 ($count) must be greater than or equal to 0", 69));
+        return r;
+    }
     i64 i = 0;
     loop { if (i >= n) break; php_zv_cpv(php_arr_islot(r, s + i), v); i = i + 1; }
     return r;

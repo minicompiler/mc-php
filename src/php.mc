@@ -29,6 +29,7 @@
 #include "consts.mc"
 #include "tables.mc"
 #include "types.mc"
+#include "packed.mc"
 #include "expr.mc"
 #include "builtin.mc"
 #include "stmt.mc"
