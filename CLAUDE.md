@@ -748,3 +748,11 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   * **One mc gap recorded** (`docs/plan.md` § 5): `&name` of an `extern` is an `adrp`/`add` that
     neither Apple's ld nor ld.lld links into a loadable module; `lib/php_ext.mc` takes the
     address of a local wrapper instead.
+  * **The review of #19**, seven rounds, each finding reproduced before it was fixed or refuted
+    with a measurement: `phx_zero` could store past a chunk's end; a scalar function that FALLS
+    OFF its end is php's `none returned` at the closing brace, and a bare `return;` in a typed
+    function is php's compile-time fatal with its `#0 {main}` trace (`tests/g/99`, `101`);
+    `php_dt_arm` pinned every `new`, so 200 000 calls making a `stdClass` exhausted php's 128 MiB
+    limit (`tests/ext.sh` step 9b, now 32 768 bytes); and a module's `ob_start()` was the
+    runtime's private stack, so the script's echo after the call escaped it -- the ob_* functions
+    are php's own output layer on this road now (step 10's second and third lines).

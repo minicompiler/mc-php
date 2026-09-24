@@ -1081,7 +1081,10 @@ In the order the measurements put them, each with the number that says why:
    exhausted the arena at `f(30)`; the condition is native now and so is the value when both
    branches share a type (`tests/g/98-ternary.php`).
 3. **A declared scalar RETURN was not checked** -- DONE in batch A, on both roads, with php's own
-   rule and `TypeError` (`tests/g/99-return-type.php`, `tests/ext.sh` step 8).
+   rule and `TypeError` (`tests/g/99-return-type.php`, `tests/ext.sh` step 8), including a
+   function that falls off its end (`none returned`) and a bare `return;`, which php refuses
+   while compiling (`tests/g/101-return-bare.php`). Methods and closures still lower their
+   return as `mixed` and are not checked.
 4. **The arena had no request lifecycle** -- DONE in batch A by the owner's decision: the
    extension road allocates through the Zend Memory Manager (§ 3 D7), with RSHUTDOWN
    (`tests/ext.sh` step 10, `examples/decimal/soak.php`).
