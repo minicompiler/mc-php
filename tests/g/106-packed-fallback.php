@@ -96,6 +96,13 @@ function esc_arrow(): int {              // an arrow function captures every loc
     return $f() + $x[0];
 }
 
+function esc_alt(bool $c): int {         // php's alternative syntax: a block with no braces
+    $n = 0;
+    if ($c): $n = 1; $x = []; endif;
+    if ($c) { $x[] = 5; $n = $n + count($x); }
+    return $n;
+}
+
 function esc_interp(): string {          // interpolated in a string
     $x = [];
     $x[] = 4;
@@ -118,4 +125,4 @@ echo esc_implode(), "\n", esc_user(), "\n";
 var_dump(esc_return());
 echo esc_string_key(), " ", esc_float(), " ", esc_string_value(), " ", esc_null(), "\n";
 echo esc_copy(), " ", esc_foreach(), " ", esc_isset(), " ", esc_compound(), " ", esc_capture(), "\n";
-echo esc_interp(), " ", esc_arrow(), " ", esc_cond_init(true), " ", esc_param([1, 2]), "\n";
+echo esc_interp(), " ", esc_arrow(), " ", esc_alt(true), esc_alt(false), " ", esc_cond_init(true), " ", esc_param([1, 2]), "\n";

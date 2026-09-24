@@ -39,4 +39,4 @@ function at(string $s, int $i): string {
 foreach (["", ".", "a.", "abcdefgh.", "abcdefghijklmnopq.", "no dot here at all"] as $t) {
     echo find_dot($t), " ";
 }
-echo "\n", at("1.5", 1), at("-1.5", 2), at("x", -1), at(".", 3), "\n";
+echo "\n", at("1.5", 1), at("-1.5", 2), at("x", -1), at(".", 3), at("x", PHP_INT_MAX), "\n";

@@ -9,11 +9,12 @@
 //   * it is not a parameter, and no source anywhere names it `&$x`, `global
 //     $x` or passes it to a by-reference parameter (the whole-source scans in
 //     program.mc, the same sets that already make such a name a zval);
-//   * the body contains none of `function`, `fn(`, `class`, `interface`,
+//   * the body contains none of `function`, `fn`, `class`, `interface`,
 //     `trait`, `yield`, `goto`, `switch`, `eval`, `include`/`require`,
-//     `compact`, `extract`, `get_defined_vars`, `$$`, `${`, a heredoc or a
-//     backtick -- anything that can reach a local by name, share it with
-//     another scope or jump over its initialisation;
+//     `compact`, `extract`, `get_defined_vars`, `$$`, `${`, a heredoc, a
+//     backtick, `?>` or php's alternative syntax (`endif`, `endwhile`, ...)
+//     -- anything that can reach a local by name, share it with another
+//     scope, jump over its initialisation or open a block with no braces;
 //   * its FIRST occurrence is a statement `$x = [];`, `$x = array();` or
 //     `$x = array_fill(0, N, V);` with N and V ints, and every other
 //     occurrence comes after it in the same block (so the initialisation has
@@ -203,7 +204,11 @@ i64 pkx_badword(uptr w) {
         || str_eq(w, "trait") || str_eq(w, "yield") || str_eq(w, "goto") || str_eq(w, "switch")
         || str_eq(w, "eval") || str_eq(w, "include") || str_eq(w, "include_once")
         || str_eq(w, "require") || str_eq(w, "require_once") || str_eq(w, "compact")
-        || str_eq(w, "extract") || str_eq(w, "get_defined_vars");
+        || str_eq(w, "extract") || str_eq(w, "get_defined_vars")
+        // php's alternative syntax: a block with no braces, which the
+        // dominance test below cannot see (`if ($c): ...; $x = []; endif;`)
+        || str_eq(w, "endif") || str_eq(w, "endwhile") || str_eq(w, "endfor")
+        || str_eq(w, "endforeach") || str_eq(w, "endswitch") || str_eq(w, "enddeclare");
 }
 
 // Tokenise the body after the `{` at src[0..len). Answers the offset of the

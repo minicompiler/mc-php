@@ -97,5 +97,7 @@ pk_absent();
 pk_sparse();
 echo pk_fill(3), "\n";
 try { echo pk_fill(-1), "\n"; } catch (ValueError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+try { echo pk_fill(PHP_INT_MAX), "\n"; } catch (ValueError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+try { echo pk_fill(1 << 31), "\n"; } catch (ValueError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
 echo pk_sum(10), "\n";
 echo pk_grow(100), "\n";

@@ -1411,13 +1411,28 @@ uptr php_pk_new(i64 cap) {
     return p;
 }
 
-// array_fill(0, n, v): php's own ValueError below zero
-uptr php_pk_fill(i64 n, i64 v) {
+// array_fill's two ValueErrors: below zero, and at php's own table limit
+// (HT_MAX_SIZE, 2^31 on a 64-bit php: measured, 2^31 - 1 is the memory
+// limit's fatal and 2^31 this error). Under it n * 8 cannot overflow, and a
+// buffer too big for memory is Zend's memory-limit fatal on the extension
+// road and the arena's own on the program road.
+i64 php_fill_count_ok(i64 n) {
     if (n < 0) {
         php_throw_str(php_str_new("ValueError", 10),
             php_str_new("array_fill(): Argument #2 ($count) must be greater than or equal to 0", 69));
-        return php_pk_new(8);
+        return 0;
     }
+    if (n >= 2147483648) {
+        php_throw_str(php_str_new("ValueError", 10),
+            php_str_new("array_fill(): Argument #2 ($count) is too large", 47));
+        return 0;
+    }
+    return 1;
+}
+
+// array_fill(0, n, v)
+uptr php_pk_fill(i64 n, i64 v) {
+    if (!php_fill_count_ok(n)) return php_pk_new(8);
     uptr p = php_pk_new(n);
     uptr d = ld64(p + 16);
     i64 i = 0;
@@ -3528,11 +3543,7 @@ uptr php_f_array_fill(uptr st, uptr num, uptr v) {
     uptr r = php_arr_new(8);
     i64 s = php_zv_long(st);
     i64 n = php_zv_long(num);
-    if (n < 0) {
-        php_throw_str(php_str_new("ValueError", 10),
-            php_str_new("array_fill(): Argument #2 ($count) must be greater than or equal to 0", 69));
-        return r;
-    }
+    if (!php_fill_count_ok(n)) return r;
     i64 i = 0;
     loop { if (i >= n) break; php_zv_cpv(php_arr_islot(r, s + i), v); i = i + 1; }
     return r;
