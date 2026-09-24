@@ -370,7 +370,13 @@ i64 phx_nbor;
 
 uptr phx_s(uptr ex, i64 k) {
     uptr z = ld64(phx_argz(ex, k) + ZVX_VALUE);
-    if (phx_nbor < 16) { st64(phx_bor + phx_nbor * 8, z); phx_nbor = phx_nbor + 1; }
+    // at most 12: one per string parameter (mc's MAXPARAMS), read once by
+    // the handler, and a handler is never re-entered -- a module's code cannot
+    // call php code (examples/two-extensions pins that refusal). Loud, not
+    // silent, if that ever stops being true.
+    if (phx_nbor >= 16) php_die("mc-php: too many borrowed strings in one call\n", 46);
+    st64(phx_bor + phx_nbor * 8, z);
+    phx_nbor = phx_nbor + 1;
     return z;
 }
 

@@ -125,6 +125,7 @@ i64  ph_var_type(uptr d);
 i64  ph_var_bind(uptr d, i64 ty);
 void ph_refuse(uptr fl, i64 line, uptr what, uptr dref);
 void ph_phpfatal(uptr fl, i64 line, uptr msg);
+void ph_phpfatal_x(uptr fl, i64 line, uptr msg, i64 st);
 uptr ph_absfile(uptr fl);
 uptr ph_disp(uptr p);
 i64  ph_scan_hop(uptr src, i64 len, i64 i);
@@ -234,7 +235,10 @@ void ph_refuse(uptr fl, i64 line, uptr what, uptr dref) {
 // probes/t8/mcphp.sh passes 255 through instead of calling it a compile
 // error. It is neither a refusal (the grid's third column) nor an mc
 // diagnostic: it is php's answer, produced where php produces it.
-void ph_phpfatal(uptr fl, i64 line, uptr msg) {
+// `st`: php 8.5 prints a stack trace (`#0 {main}`) under a fatal raised while
+// COMPILING a function body -- `return;` in a typed function -- and none
+// under one raised while PARSING -- a duplicate modifier. Both measured.
+void ph_phpfatal_x(uptr fl, i64 line, uptr msg, i64 st) {
     uptr a = ph_disp(ph_absfile(fl));
     uptr d0 = php_dec(line);
     // a plain `php file.php` has log_errors=On and writes the stderr form
@@ -246,6 +250,7 @@ void ph_phpfatal(uptr fl, i64 line, uptr msg) {
     write(2, " on line ", 9);
     write(2, d0, cstrlen(d0));
     write(2, "\n", 1);
+    if (st) write(2, "Stack trace:\n#0 {main}\n", 23);
     write(1, "\nFatal error: ", 14);
     write(1, msg, cstrlen(msg));
     write(1, " in ", 4);
@@ -254,8 +259,11 @@ void ph_phpfatal(uptr fl, i64 line, uptr msg) {
     uptr d = php_dec(line);
     write(1, d, cstrlen(d));
     write(1, "\n", 1);
+    if (st) write(1, "Stack trace:\n#0 {main}\n", 23);
     exit(255);
 }
+
+void ph_phpfatal(uptr fl, i64 line, uptr msg) { ph_phpfatal_x(fl, line, msg, 0); }
 
 // NOT a refusal: something T5 has not built yet. It is an ordinary compile
 // error (the grid counts it `wrong`), because inflating the refused column

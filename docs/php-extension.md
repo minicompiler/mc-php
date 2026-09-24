@@ -231,6 +231,10 @@ server ran out of arena at the twelfth.
 
 What a pinned call costs, measured: a function with a `static $n` called 100 000 times in one
 request keeps **32 bytes a call** until the request ends (3.2 MB); the next request starts clean.
+A pinned call also keeps a reference on each string ARGUMENT it borrowed, because nothing tells
+which of its writes retained one: `tally(string $s)` adding `strlen($s)` into a static, called
+100 000 times with a fresh 105-byte string each time, keeps **240 bytes a call** (24 MB) until the
+request ends. A call that pins nothing keeps nothing.
 That is the one shape whose memory grows with the call count inside a request, and it is php's
 own shape too -- php frees what refcounting frees, and a module has no refcount.
 

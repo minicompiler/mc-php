@@ -979,6 +979,11 @@ i64 ph_stmt_1() {
             rthrow = ph_can_throw;
             ph_can_throw = ph_can_throw | sctr;
         }
+        // `return;` in a function with a declared return type is php's
+        // COMPILE-TIME fatal, not a value: the native return had nothing to
+        // carry and answered whatever the register held (the review of #19)
+        if (!e && ph_fn_ret != PT_MIXED && ph_fn_ret != PT_VOID && ph_fn_ret != PT_NULL)
+            ph_phpfatal_x(fl, line, "A function with return type must return a value", 1);
         if (!e && ph_fn_ret == PT_MIXED) e = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
         ph_semi("expected ; after return");
         // T8: the unwinding check has to go BETWEEN computing the value and
