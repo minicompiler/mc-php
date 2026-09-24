@@ -43,3 +43,12 @@ try { var_dump($v[5] % 0); } catch (DivisionByZeroError $e) { echo get_class($e)
 $bad = "abc";
 $z = [$bad];
 try { var_dump($z[0] + 1); } catch (TypeError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+// a bitwise or shift result is a fresh box too: stored without a copy, and
+// still a value -- the second variable moves alone
+$b = $v[3] | 5;
+$b2 = $b;
+$b2++;
+$s = $v[3] << 3;
+$s2 = $s;
+$s2 += 1;
+var_dump($b, $b2, $s, $s2, $v[3] & 6, $v[3] ^ 1, $v[3] >> 1);

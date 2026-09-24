@@ -31,7 +31,8 @@ i64 ph_zv_fresh(i64 v) {
         || str_eq(n, "php_zv_neg") || str_eq(n, "php_zv_concat")
         || str_eq(n, "php_zv_add_zi") || str_eq(n, "php_zv_add_iz") || str_eq(n, "php_zv_sub_zi")
         || str_eq(n, "php_zv_sub_iz") || str_eq(n, "php_zv_mul_zi") || str_eq(n, "php_zv_mul_iz")
-        || str_eq(n, "php_zv_mod_zi");
+        || str_eq(n, "php_zv_mod_zi") || str_eq(n, "php_zv_band") || str_eq(n, "php_zv_bor")
+        || str_eq(n, "php_zv_bxor") || str_eq(n, "php_zv_shl") || str_eq(n, "php_zv_shr");
 }
 
 // An INT key on the last subscript of an assignment's lvalue (the one caller

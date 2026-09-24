@@ -293,9 +293,10 @@ What `mc-php build` reads today, of the schema in [`docs/mcphp-toml.md`](mcphp-t
 and mc's own `[project]`, `[linker]`, `[target]` and `[include]` carry the rest, because
 `mc-php build` IS `mc build` and mc's driver ignores a table it does not know. One of mc's keys
 matters here more than on the program road: **`[project].opt = 1`**, mc's optimizer (its register
-allocator, branch peephole and loop hoisting), which every extension's project file in this
-repository carries. An extension is called from a php that is already warm, so the generated code
-is the whole cost: `examples/decimal` measured 2.78 ms without it and 1.64 ms with it
+allocator, branch peephole and loop hoisting), which the project file of every extension this
+repository BUILDS from php carries (`examples/hello`, `examples/decimal`; the files of
+`two-extensions` and `awaitable` exist to pin a refusal and compile nothing). An extension is called from a php that is already warm, so the generated code
+is the whole cost: `examples/decimal` measured 2.79 ms without it and 1.64 ms with it
 (`docs/plan.md` § 7). A taught compiler cannot set it for you -- mc applies its optimizer level
 after the module's `user_init` has run -- so it is a line in the file. What is in the
 schema and **not** implemented: `extension.prefix` (nothing but `get_module` needs a name, see
