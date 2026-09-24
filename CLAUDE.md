@@ -806,6 +806,7 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     `php_str_alloc` bumps the chunk itself, `array_fill` with a negative count throws php's
     ValueError (it returned `[]`).
   * The grid: `tests/lang` 104, `Zend/tests` 766, strings 272, every one of the fifteen lists
-    identical to main's (`comm`). `tests/run.sh` green. Found and NOT fixed, on record in § 7:
-    native int arithmetic wraps on overflow (D10 says it promotes), and an array local assigned on
-    one path only is a SIGSEGV on the other.
+    identical to main's (`comm`). `tests/run.sh` green. The one deviation, named: `+ - *` on a
+    packed element that overflows is an `ArithmeticError` saying php would make a float (never a
+    wrapped int). Found and NOT fixed, on record in § 7: native int arithmetic wraps on overflow
+    (D10 says it promotes), and an array local assigned on one path only is a SIGSEGV on the other.

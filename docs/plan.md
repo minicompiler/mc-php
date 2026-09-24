@@ -1324,9 +1324,13 @@ In the order the measurements put them, each with the number that says why:
    **Found and NOT fixed**, pre-existing on main: native int arithmetic WRAPS on overflow
    (`$b = $a * 3` with `$a = PHP_INT_MAX` is `int(9223372036854775805)`, php's
    `float(2.7670116110564327E+19)`) although D10's table above says overflow to float is
-   implemented -- the packed array's element arithmetic inherits it, where the zval road it
-   replaces promoted correctly; and `function f(bool $c) { if ($c) { $x = []; } $x[] = 1; }` called
-   with false is a SIGSEGV (an array local that was never assigned), measured on main's compiler.
+   implemented. The packed array's element arithmetic does NOT inherit it silently (the review of
+   #21): `+ - *` on an element, and on what such an operation answered in the same expression, is
+   php's overflow test and, where php would make a float, a named `ArithmeticError` -- a refusal
+   at run time, never a wrapped int (`tests/fixtures.sh` checks the text; no measurable cost,
+   0.977 against 0.976 ms); an int VARIABLE assigned from one is the native road's again. And
+   `function f(bool $c) { if ($c) { $x = []; } $x[] = 1; }` called with false is a SIGSEGV (an
+   array local that was never assigned), measured on main's compiler.
 
 2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
    through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
