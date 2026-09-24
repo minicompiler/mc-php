@@ -1023,8 +1023,11 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
                     if (nd_kind(ix) == N_INT) ix2 = ph_int(nd_val(ix));
                     i64 ix3 = ph_tref(ix);
                     if (nd_kind(ix) == N_INT) ix3 = ph_int(nd_val(ix));
-                    i64 inr = ph_bin(ph_tok("&&", 2), ph_bin(ph_tok(">=", 2), ix1, ph_int(0), TY_U8),
-                                     ph_bin(ph_tok("<", 1), ix2, len, TY_U8), TY_U8);
+                    // a literal index at or above 0 needs only the upper bound
+                    // (mc folds no comparison of two constants)
+                    i64 lit0 = nd_kind(ix) == N_INT && nd_val(ix) >= 0;
+                    i64 inr = ph_bin(ph_tok("<", 1), ix2, len, TY_U8);
+                    if (!lit0) inr = ph_bin(ph_tok("&&", 2), ph_bin(ph_tok(">=", 2), ix1, ph_int(0), TY_U8), inr, TY_U8);
                     i64 bp = ph_bin(ph_tok("+", 1), ph_bin(ph_tok("+", 1), ph_tref(sb), ph_int(24), TY_UPTR), ix3, TY_UPTR);
                     i64 hit = ph_bin(ph_tok("&&", 2), inr,
                                      ph_bin(ph_tok("==", 2), ph_quiet("ld8", 1, bp, 0, 0, 0, TY_I64), ph_int(by), TY_U8), TY_U8);
@@ -1033,8 +1036,8 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
                     if (nd_kind(ix) == N_INT) iy1 = ph_int(nd_val(ix));
                     i64 iy2 = ph_tref(ix);
                     if (nd_kind(ix) == N_INT) iy2 = ph_int(nd_val(ix));
-                    i64 outr = ph_bin(ph_tok("||", 2), ph_bin(ph_tok("<", 1), iy1, ph_int(0), TY_U8),
-                                      ph_bin(ph_tok(">=", 2), iy2, len2, TY_U8), TY_U8);
+                    i64 outr = ph_bin(ph_tok(">=", 2), iy2, len2, TY_U8);
+                    if (!lit0) outr = ph_bin(ph_tok("||", 2), ph_bin(ph_tok("<", 1), iy1, ph_int(0), TY_U8), outr, TY_U8);
                     i64 miss = ph_bin(ph_tok("&&", 2), outr,
                                       ph_bin(ph_tok("!=", 2), ph_c3("php_str_at_is", sb, ix, ph_int(by), TY_I64), ph_int(0), TY_U8), TY_U8);
                     at = ph_bin(ph_tok("||", 2), hit, miss, TY_U8);
