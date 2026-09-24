@@ -49,12 +49,10 @@ Measured on 2026-09-23 by `tests/examples.sh`, each host against its own php 8.5
 | windows/x86_64, CI (`windows-latest`) | 4.19 ms | 7.24 ms | 0.58x |
 | windows/arm64, CI (`windows-11-arm`, x64 php emulated) | 8.68 ms | 10.70 ms | 0.81x |
 
-**The compiled module is SLOWER than the interpreter on this workload**, and that is the honest
-number. A decimal is string work, and php's string functions -- `substr`, `str_pad`, `ltrim`,
-`strspn` -- are C inside the interpreter, where mc-php's are mc, and every string one of them
-builds is a new allocation. Built with mc's optimizer (`[project].opt = 1`, measured once and not
-adopted here) the compiled column is 2.4 ms, 0.74x. `docs/plan.md` § 7 item 1 is the road to the
-rest.
+**On 2026-09-23 the compiled module was SLOWER than the interpreter on this workload.** A decimal
+is string work, and php's string functions -- `substr`, `str_pad`, `ltrim`, `strspn` -- are C
+inside the interpreter, where mc-php's were mc calling mc one byte at a time, and every string one
+of them built was a new allocation. Batch E (below) is what changed that.
 
 **Three columns, batch A** (2026-09-24, macos/arm64, php 8.5.10, all on one host in one sitting;
 another process held one core throughout, which is why every absolute number here is higher than
@@ -71,11 +69,25 @@ The other four CI legs have no C column (no `php-config` or no `cc`) and measure
 0.88x (windows/x86_64) on the pull request's run.
 
 The C twin is what a competent C extension does -- digit strings, schoolbook multiplication, long
-division by repeated subtraction, `emalloc` for every buffer -- and it is **27x faster than the
-module**. By `docs/plan.md` § 7's acceptance rule this example is therefore not done: it compiles
-from PHP, and it is not yet faster than the interpreter. Batch A did not aim at that number; it
-moved what the arena cost into Zend's allocator (the column did not move: the arena was a bump
-allocator too) and made a million calls possible.
+division by repeated subtraction, `emalloc` for every buffer -- and after batch A it was **27x
+faster than the module**. Batch A did not aim at that number; it moved what the arena cost into
+Zend's allocator (the column did not move: the arena was a bump allocator too) and made a million
+calls possible.
+
+**Three columns, batch E** (2026-09-24, macos/arm64, php 8.5.10, one host, one sitting,
+`tests/examples.sh`'s own bench row). The same `decimal.php`, byte for byte: every gain is in the
+compiler and its runtime, and `docs/plan.md` § 7 item 1 has the profile it was chosen from and
+what each change bought:
+
+| | interpreted | the module | the C twin |
+|---|---|---|---|
+| before batch E | 3.29 ms | 6.46 ms (0.51x) | 0.240 ms (13.7x) |
+| after batch E | 3.31 ms | **1.51 ms (2.19x)** | 0.241 ms (13.8x) |
+
+The module is **4.3x faster than it was and 2.2x faster than php interpreting the same source**;
+the C twin is still 6.3x faster than the module, and the rest of that gap is named in
+`docs/plan.md` § 7. The project files now build with mc's optimizer (`[project].opt = 1`), which
+accounts for 1.7x of the 4.3x.
 
 ## What it cannot do yet
 
