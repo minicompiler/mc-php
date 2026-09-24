@@ -115,16 +115,16 @@ change bought, and what is left):
 `tests/examples.sh`'s own bench row on the final tree: 3.299 / 0.998 (3.31x) / 0.237 ms (13.92x).
 
 and on every CI leg, main's run after batch E (the merge of #20) against this pull request's final
-run, 36049157163 (runners differ between runs by up to ~40% in absolute time, so the ratio is what compares;
+run, 36052255981 (runners differ between runs by up to ~40% in absolute time, so the ratio is what compares;
 only `macos-15` has `php-config` and `cc` for the C column):
 
 | host | main: interpreted / module | ratio | decimal-c: interpreted / module | ratio |
 |---|---|---|---|---|
-| macos/arm64 (`macos-15`) | 2.099 / 1.248 ms, twin 0.172 | 1.68x, module/C 7.3 | 2.144 / 0.814 ms, twin 0.172 | **2.63x**, module/C **4.7** |
-| linux/aarch64 (`ubuntu-24.04-arm`, container) | 3.091 / 1.775 ms | 1.74x | 3.084 / 1.166 ms | **2.64x** |
-| linux/x86_64 (`ubuntu-24.04`, container) | 2.980 / 2.194 ms | 1.36x | 3.655 / 1.453 ms | **2.52x** |
-| windows/aarch64 (`windows-11-arm`, x64 php emulated) | 8.778 / 2.942 ms | 2.98x | 8.789 / 1.899 ms | **4.63x** |
-| windows/x86_64 (`windows-latest`) | 6.510 / 2.349 ms | 2.77x | 6.921 / 1.616 ms | **4.28x** |
+| macos/arm64 (`macos-15`) | 2.099 / 1.248 ms, twin 0.172 | 1.68x, module/C 7.3 | 2.060 / 0.803 ms, twin 0.171 | **2.57x**, module/C **4.7** |
+| linux/aarch64 (`ubuntu-24.04-arm`, container) | 3.091 / 1.775 ms | 1.74x | 3.088 / 1.167 ms | **2.65x** |
+| linux/x86_64 (`ubuntu-24.04`, container) | 2.980 / 2.194 ms | 1.36x | 3.693 / 1.482 ms | **2.49x** |
+| windows/aarch64 (`windows-11-arm`, x64 php emulated) | 8.778 / 2.942 ms | 2.98x | 8.759 / 1.897 ms | **4.62x** |
+| windows/x86_64 (`windows-latest`) | 6.510 / 2.349 ms | 2.77x | 5.541 / 1.530 ms | **3.62x** |
 The largest single steps: `_dec_umul`'s arrays are native int buffers now (the compiler proves they
 hold only ints and never leave the function, `src/packed.mc`), `_dec_coef`'s two one-byte
 `str_replace` deletions are one pass, and a cast no longer swallows the `- $borrow` after it.

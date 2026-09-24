@@ -1262,9 +1262,9 @@ In the order the measurements put them, each with the number that says why:
    (13.7x); module/C 6.3 -> 4.1.** `tests/examples.sh`'s own row on the final tree: 3.299 / 0.998
    (3.31x) / 0.237 (13.92x). On the pull request's final CI run, against main's run after batch E
    (the ratio is what compares; runners differ by up to ~40% in absolute time): macos/arm64
-   1.68x -> **2.63x** with the twin at 12.5x (module/C 7.3 -> 4.7), linux/aarch64 1.74x -> **2.64x**,
-   linux/x86_64 1.36x -> **2.52x**, windows/aarch64 2.98x -> **4.63x**, windows/x86_64 2.77x ->
-   **4.28x** (`examples/decimal/README.md` has the milliseconds).
+   1.68x -> **2.57x** with the twin at 12.0x (module/C 7.3 -> 4.7), linux/aarch64 1.74x -> **2.65x**,
+   linux/x86_64 1.36x -> **2.49x**, windows/aarch64 2.98x -> **4.62x**, windows/x86_64 2.77x ->
+   **3.62x** (`examples/decimal/README.md` has the milliseconds).
 
    **The packed int array** (`src/packed.mc`) is a proof and a lowering. Per plain function, a token
    scan of the body before it is compiled proves that a local array holds only ints under keys
@@ -1283,12 +1283,14 @@ In the order the measurements put them, each with the number that says why:
    number (php's null is 0 to every arithmetic operator) and the zval php has anywhere else; a
    variable whose only assignment is `$v = $x[K];` keeps both halves native. The buffer comes from
    `php_alloc`: Zend's chunk on the extension road, the arena on the program road. Gated by
-   `tests/g/105` (eight functions the proof accepts, absent and sparse keys, `**` on a checked
-   operand and a key that throws included), `tests/g/106` (seventeen ways it must fail) and the end of
+   `tests/g/105` (ten functions the proof accepts, absent and sparse keys, `**` on a checked
+   operand, a key that throws and a reinitialisation that throws included), `tests/g/106` (seventeen ways it must fail) and the end of
    `tests/fixtures.sh`, which reads the lowering back and checks which way each went, and that a
    store whose value overflows is not reached (`try { $x[] = $x[0] * 3; }` leaves `$x` as it was:
    the value is computed and checked before `php_pk_push`/`php_pk_set`, and a key that throws is
-   checked before the value is evaluated), and that `PHP_INT_MIN * -1` in either order is the
+   checked before the value is evaluated; `array_fill`'s count, value and ValueError likewise
+   before `$x = array_fill(...)` stores), that `throw $x[0] * 3` is the ArithmeticError and not
+   "Can only throw objects", and that `PHP_INT_MIN * -1` in either order is the
    named error on every leg (the one product whose division test could trap on x86-64 -- it does
    not: `x == -1` is tested before `r / x`, and `r / PHP_INT_MIN` cannot trap). Afterwards `_dec_umul` is 14.3% inclusive of a smaller whole,
    and its array work 3.5% of the module, from 12.9% (the buffer's own calls 135 samples of 6010,
@@ -1297,8 +1299,11 @@ In the order the measurements put them, each with the number that says why:
    **The grid does not move a test.** The three directories against a snapshot of main measured
    the same day, `comm` over the five lists of each: `tests/lang` 104 = 104, `Zend/tests` 766 = 766,
    `ext/standard/tests/strings` 272 = 272, and every list -- green, wrong, refused, skip, php-fail
-   -- identical, 0 tests in and 0 out. (The grid snapshot is the tree before the last row of the
-   table, a literal index's bound test, which changes no answer: `tests/g/102` and `108` cover it.)
+   -- identical, 0 tests in and 0 out. Re-run on the final tree (after the review's fixes): the
+   same, and the same test names in every list; three WRONG tests changed only how they fail,
+   from a silent wild allocation to `mc-php: arena exhausted` (exit 255) -- `str_pad_variation1`
+   was a SIGBUS, `bug72146` and `warning_float_does_not_fit_zend_long_strings` ran on after a
+   size near PHP_INT_MAX wrapped `a + n` (the latter printed `string(4971973988617027584) ""`).
 
    **What is left between the module (0.98 ms) and the C twin (0.24 ms)**, from a profile of the
    final build (6010 samples), self time by kind:
@@ -1349,7 +1354,13 @@ In the order the measurements put them, each with the number that says why:
    catch (Exception $e) {}` leaves `$t` 0, where php leaves 7 -- the store happens before the
    statement's unwinding check. The packed STORE is fixed here (the seventh review of #21); the
    scalar assignment is the general road's and is not (a `$t = $x[0] * 3` that overflows leaves
-   the wrapped int in `$t` behind the ArithmeticError).
+   the wrapped int in `$t` behind the ArithmeticError). Likewise `throw E`: a SCALAR operand that
+   throws is checked first now (the eighth review of #21), but an object operand is not --
+   `function f(): Exception { throw new RuntimeException("inner"); }` then `throw f();` reaches
+   `Error: Can only throw objects` where php unwinds with "inner", because a `finally` here does
+   not set a pending exception aside: checking before `throw new B` inside `try { throw A; }
+   finally { throw new B; }` would unwind with A where php throws B (measured). Setting the
+   pending exception aside in `finally` is the fix for both, and is not done here.
 
 2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
    through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`
