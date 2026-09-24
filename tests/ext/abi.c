@@ -68,6 +68,16 @@ int main(void) {
     P("ZSX_VAL",             offsetof(zend_string, val));
     P("ZSX_GC_STRING",       GC_STRING);
     P("ZSX_INTERNED",        IS_STR_INTERNED);
+    P("ZSX_PERSIST",         IS_STR_PERSISTENT);
+
+    /* the same string, as lib/php_rt.mc counts it (its § who owns a string):
+       the runtime cannot include php_ext.mc, so it spells these itself and
+       they are graded here too */
+    P("ZS_HDR",              offsetof(zend_string, val));
+    P("ZS_GC_STRING",        GC_STRING);
+    P("ZS_INTERNED",         IS_STR_INTERNED);
+    P("ZS_PERSIST",          IS_STR_PERSISTENT);
+    P("ZS_MODULE",           GC_STRING | IS_STR_INTERNED);
 
     /* the type tags, and the two flags a zval's type_info carries */
     P("IZ_UNDEF",            IS_UNDEF);
