@@ -220,7 +220,7 @@ def project_sweep():
 
     There is one such place, and it is the SEVENTH regime: `extension`. An
     `examples/<name>/` directory is a PHP extension's source, and its
-    obligation is `tests/ext.sh` -- which builds it into a `.so`, loads it
+    obligation is `tests/ext.sh` or `tests/examples.sh` -- which builds it into a `.so`, loads it
     under `php` and compares its answers with php's own, on both streams and
     the exit code. That is a differential and a stronger one than a bench
     row, which is the same exemption `docs/plan.md` D8 already gives a
@@ -233,9 +233,13 @@ def project_sweep():
     # substring of the script: `examples/hell` is a substring of
     # `examples/hello`, so an unbuilt directory beside a built one would
     # have passed (found by the reviewer of #15, and reproduced).
-    ext = set(re.findall(r'^EX=examples/([A-Za-z0-9_.-]+)\s*$',
-                         open(os.path.join(HERE, 'ext.sh'),
-                              encoding='latin-1').read(), re.M))
+    # Two gates build examples: tests/ext.sh (hello) and tests/examples.sh
+    # (every other one).
+    ext = set()
+    for gate in ('ext.sh', 'examples.sh'):
+        ext |= set(re.findall(r'^EX=examples/([A-Za-z0-9_.-]+)\s*$',
+                              open(os.path.join(HERE, gate),
+                                   encoding='latin-1').read(), re.M))
     for root, dirs, names in os.walk(REPO):
         # `reference/` is excluded for the reason `probes/` is: it is a
         # RECORD of what was measured by hand, in mc, before the compiler
@@ -257,8 +261,8 @@ def project_sweep():
             if top[0] == 'examples' and len(top) == 3 and top[1] in ext:
                 continue
             if top[0] == 'examples':
-                bad.append(f'{rp}: under examples/ but tests/ext.sh does not '
-                           f'build examples/{top[1]} (docs/plan.md D8)')
+                bad.append(f'{rp}: under examples/ but neither tests/ext.sh nor '
+                           f'tests/examples.sh builds examples/{top[1]} (docs/plan.md D8)')
             else:
                 bad.append(f'{rp}: outside tests/, so no regime and no gate '
                            f'runs it (docs/plan.md D8)')

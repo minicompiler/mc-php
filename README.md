@@ -33,10 +33,25 @@ php -d extension=examples/hello/build/hello.so -r 'echo hello_greet("world"), "\
 # hi world
 ```
 
-Green on all three hosts, each against a php 8.5.10 of its own
+Green on all five hosts, each against a php 8.5 of its own
 ([`tests/ext.sh`](tests/ext.sh)). [`docs/php-extension.md`](docs/php-extension.md) is what it
 compiles and what it refuses by name; [`docs/php-abi.md`](docs/php-abi.md) is every Zend number
 it rests on, with what each was measured against.
+
+**The examples are the first gates.** Each directory under [`examples/`](examples/) is built
+and compared with something php produced on every host, by [`tests/ext.sh`](tests/ext.sh) and
+[`tests/examples.sh`](tests/examples.sh):
+
+| example | | the gate |
+|---|---|---|
+| [`hello`](examples/hello/) | compiled from PHP | seven scalar functions; `check.php` byte for byte the interpreted source, the wrong calls against a C extension of the same signatures |
+| [`decimal`](examples/decimal/) | compiled from PHP | exact fixed-point decimals, half-even; the differential, 1219 results against bcmath, and a bench row -- **0.51x**, the compiled module is slower on string work, and its README says why |
+| [`two-extensions`](examples/two-extensions/) | **hand-written mc** | two extensions calling each other, loaded in both orders; two mc-php extensions in one php; and the refusal of `extB.php`, pinned |
+| [`awaitable`](examples/awaitable/) | **hand-written mc** | `await`, `parallel` over forked children, libcurl on pthreads under a semaphore; and the refusal of `awaitable.src.php`, pinned |
+
+A hand-written example says so on its README's first line, and the PHP source it stands for sits
+beside it with the compiler's refusal pinned by the gate: the day that build succeeds, the gate
+says so.
 
 **What does not work yet.**
 
@@ -369,7 +384,7 @@ src/mc-php*.mc       one entry per host, and src/mc-php.<target>.toml beside eac
 lib/php_rt.mc        the runtime, #embed'ed into the compiler and pushed into every program
 lib/rt_host_*.mc     the runtime's system layer, one file per host, pushed ahead of it
 tests/               the fixtures, the .phpt grid driver, the gates and tests/linux.sh
-examples/            empty until the extension road can build one
+examples/            one directory per extension, each with its gate (tests/ext.sh, tests/examples.sh)
 docs/                the plan, the decisions, the mcphp.toml schema
 probes/              the measurement record, T0..T10 -- FROZEN, never edited
 php-src/             php's own source, cloned, not committed

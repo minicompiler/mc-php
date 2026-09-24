@@ -88,5 +88,9 @@ echo ""
 echo "== the extension road, on this host =="
 WINDOWS=1 sh tests/ext.sh || fail=1
 
+echo ""
+echo "== the examples, on this host =="
+WINDOWS=1 sh tests/examples.sh || fail=1
+
 [ "$fail" = 0 ] || { echo "windows: something failed"; exit 1; }
 echo "windows/$arch: green"

@@ -5,7 +5,10 @@ compiler does not yet produce any of it.** They are the measured proof that the 
 [`lib/php_ext.mc`](../lib/php_ext.mc) implements is right, and they are the artefact the back
 end has to grow into. `examples/` is for what mc-php compiles; when the back end can emit one of
 these from a `.php`, that one moves there and the copy here becomes the golden it is checked
-against.
+against. Three of them are ALSO in `examples/` already, by the owner's rule that what has code
+is a gate first: `extA.mc`/`extB.mc` as `examples/two-extensions` and `aw6.mc` as
+`examples/awaitable`, each labelled hand-written on its README's first line and each beside the
+PHP source whose refusal its gate pins. The copies here stay the record.
 
 Measured by the owner on **macOS 26 / arm64, PHP 8.5.10 (cli, NTS, `API20250925,NTS`), September
 2026**, with **mc 1.1.0**. `tmpl.mc` and `aw6.mc` are TEMPLATES: the four `@API@`/`@ZTS@`/

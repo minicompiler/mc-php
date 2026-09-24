@@ -1627,6 +1627,17 @@ i64 ph_if(uptr fl, i64 line) {
     }
     // the chain's OUTERMOST if closes it: an elseif recursion already did
     if (alt && ph_is("endif")) ph_alt_end("endif");
+    // An elseif is an N_IF whose ELSE is the next if -- and ph_wrap hands that
+    // one back as a statement LIST when its condition needed statements of
+    // its own (a string comparison, any call). The else branch is ONE node,
+    // so the list's tail -- the if itself -- was dropped: `if ($c === ".")
+    // {} elseif ($c === "1") { ... }` never took the second branch (found by
+    // examples/decimal). A block keeps the whole list.
+    if (e && nd_next(e)) {
+        i64 eb = node_new(N_BLOCK, line, fl);
+        set_nd_a(eb, e);
+        e = eb;
+    }
     i64 n = node_new(N_IF, line, fl);
     set_nd_a(n, c);
     set_nd_b(n, t);

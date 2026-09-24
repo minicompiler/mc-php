@@ -504,14 +504,15 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     i64 sls = ph_nls;
     ph_nls = 0;
 
-    i64 head = 0;
-    i64 tail = 0;
-    if (!stat) {
-        i64 tp = param_new(TY_UPTR, "v_this");
-        head = tp;
-        tail = tp;
-        ph_var_bind_raw("$this", PT_OBJ);
-    }
+    // EVERY method takes the receiver first, a static one too: every caller
+    // in the runtime -- php_scall, php_mcall, __callStatic -- passes it
+    // first, and a static method declared without the slot read its first
+    // argument out of it, so `C::f($x)` said "Too few arguments" (found by
+    // examples/decimal). Only the $this VARIABLE depends on `static`.
+    i64 tp = param_new(TY_UPTR, "v_this");
+    i64 head = tp;
+    i64 tail = tp;
+    if (!stat) ph_var_bind_raw("$this", PT_OBJ);
     ph_want("(", 1, "expected ( in a php method");
     i64 pre = 0;
     i64 pret = 0;

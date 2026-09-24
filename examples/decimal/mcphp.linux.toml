@@ -1,0 +1,57 @@
+# decimal -- a PHP extension written in PHP, described by a file. The LINUX linker line.
+#
+# Everything but [linker] is examples/decimal/mcphp.toml, byte for byte: mc's
+# [linker] is flat and has no per-OS form yet (docs/mcphp-toml.md names the
+# one the schema wants), so the second host is a second file -- which is how
+# this repository already spells its own cross-builds (src/mc-php.linux-*.toml).
+#
+#     mc-php build examples/decimal --config examples/decimal/mcphp.linux.toml
+#
+# and build/decimal.so is what `php -d extension=...` loads. No make, no cmake,
+# no phpize, no ./configure, no php development headers -- the four numbers in
+# [php] are everything this compiler knows about the php it is targeting, and
+# `php -i` prints all four.
+#
+# The keys under [project], [linker] and [target] are mc's own and mc's driver
+# reads them (docs/reference/toml.md in THAT repository). The two tables below
+# them are mc-php's, and mc ignores what it does not know -- which is what lets
+# one file drive the whole road with no second parser.
+#
+# docs/mcphp-toml.md is the full schema. What is implemented today is
+# [extension].name, [extension].version and the four [php] values; the rest of
+# that page is still the design.
+
+[project]
+entry = "decimal.php"
+out = "build/decimal.so"
+kind = "exe"
+
+# The escape hatch, and on Linux it is the only road: mc writes an ELF
+# EXECUTABLE by itself and php loads a shared object.
+#
+# `-Bsymbolic` is not optional. mc takes the address of its own functions with
+# adrp/add (and lea on x86-64), and in a shared object a default-visibility
+# symbol is preemptible, so without it the link is refused outright.
+[linker]
+cmd = "ld.lld"
+args = ["-shared", "-Bsymbolic", "-o", "{out}", "{obj}"]
+
+[extension]
+name = "decimal"
+version = "0.1.0"
+
+# Read off the target php with `php -i`, and nothing else about it is
+# consulted. Stating them rather than pointing at a binary is what makes a
+# cross-build need no php on the machine; it is also what makes this file go
+# stale when the target php's minor moves, which tests/ext.sh checks on every
+# run and names.
+#
+#     PHP API             => 20250925        api
+#     PHP Extension Build => API20250925,NTS build_id
+#     Thread Safety       => disabled        thread_safety = false
+#     Debug Build         => no              debug = false
+[php]
+api = 20250925
+build_id = "API20250925,NTS"
+thread_safety = false
+debug = false

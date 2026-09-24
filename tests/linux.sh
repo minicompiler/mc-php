@@ -44,6 +44,11 @@ bin=build/mc-php-linux-$nick
     exit 2
 }
 img=${MCPHP_LINUX_IMAGE:-php:8.5-alpine}
+# mc itself, for the hand-written examples: a released mc for this host,
+# unpacked where CI unpacks it (build/mc-linux-<nick>/mc). It is a static
+# binary and runs in the container as it is.
+mc=$root/build/mc-linux-$nick/mc
+[ -x "$mc" ] || mc=mc-not-installed
 
 echo "== linux/$arch: $bin in $img =="
 file "$bin" 2>/dev/null | sed 's/^/  /'
@@ -54,7 +59,7 @@ file "$bin" 2>/dev/null | sed 's/^/  /'
 # binaries it writes land somewhere the gate does not sweep.
 exec docker run --rm --platform "$plat" \
     -v "$root:$root" -w "$root" \
-    -e BIN="$bin" -e MCPHP_TMP=/tmp/mcphp-linux \
+    -e BIN="$bin" -e MC="$mc" -e MCPHP_TMP=/tmp/mcphp-linux \
     "$img" sh -c '
 set -u
 mkdir -p /tmp/mcphp-linux
@@ -92,5 +97,11 @@ echo "== the extension road, on this host =="
 # The same six steps the macOS gate runs, with examples/hello/mcphp.linux.toml
 # for the [linker]. The .so is loaded by the php IN THIS CONTAINER and graded
 # against that php -- which is the whole reason this script exists.
-LINUX=1 sh tests/ext.sh
+LINUX=1 sh tests/ext.sh || exit 1
+
+echo ""
+echo "== the examples, on this host =="
+# The hand-written halves are PLAIN mc (tests/examples.sh says why) and want
+# an mc for this host beside the compiler; without one they skip by name.
+LINUX=1 sh tests/examples.sh
 '
