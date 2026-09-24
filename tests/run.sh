@@ -13,13 +13,14 @@
 # -- the same script, the same comparison, the host the binary is for -- and
 # tests/windows.sh does the same on a Windows host, with a compiler built there.
 #
-# These five are:
+# These are:
 #
 #   d8check      every .php in the project is in a regime with an obligation
 #   lencheck     every hand-counted string length in src/ and lib/ is right
 #   aritycheck   every library row's callee exists with that many parameters
 #   ext          examples/hello compiled into a .so that php LOADS, and its
 #                answers compared with php's own for the same source
+#   examples     every other examples/ directory, by tests/examples.sh
 #   fixtures     tests/g/*.php byte for byte php's, on BOTH streams and the
 #                exit code
 #   refusals     tests/r/*.php parse under php and are refused BY NAME by
@@ -80,6 +81,14 @@ echo "== the extension road =="
 # .so loaded and once with the .php required, and the two must print the same
 # bytes. tests/ext.sh says what each of its six steps measures.
 sh tests/ext.sh || fail=1
+
+echo ""
+echo "== the examples =="
+# Every other examples/ directory, each with a gate of its own: the decimal
+# extension compiled from PHP (differential, bcmath, the bench row), the two
+# hand-written ones with the build each is waiting for pinned by name, and
+# two mc-php extensions in one php. tests/examples.sh says what each measures.
+sh tests/examples.sh || fail=1
 
 echo ""
 echo "== D8 (a): the workload's tests, RUN in both worlds =="
