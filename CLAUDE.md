@@ -784,7 +784,8 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     strings 271 -> 272, no test out of green. `tests/run.sh` green; D8 (b) `heavy.php` 1.85x.
 - Decimal-c (2026-09-24, branch `decimal-c`), on **mc 1.1.0** here: **`examples/decimal` from 6.3x
   the C twin's time to 4.1x** -- the module 1.514 -> **0.98 ms**, interpreted 3.29 ms (3.3x), the
-  twin 0.240 ms (13.7x), macos/arm64. `decimal.php` unchanged. Profile first (`sample`, 4262
+  twin 0.240 ms (13.7x), macos/arm64; on the five CI legs 2.57x to 4.73x interpreted (main after
+  batch E: 1.36x to 2.98x), macos-15's module/C 7.3 -> 4.6. `decimal.php` unchanged. Profile first (`sample`, 4262
   samples): batch E's `_dec_umul` cause confirmed (12.9% of the module in array/zval calls) and
   allocation confirmed (13.1%); the "prologue saves registers it does not use" cause CORRECTED --
   805 of 805 functions save exactly what they use; what costs is that mc gives a leaf function

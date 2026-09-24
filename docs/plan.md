@@ -1260,7 +1260,11 @@ In the order the measurements put them, each with the number that says why:
    1.513 -> 0.977 ms** (twice), php interpreting the same source 3.26-3.34 ms, the C twin 0.239-0.240
    ms. **The three columns: interpreted 3.29 ms, the module 0.98 ms (3.3x), the C twin 0.240 ms
    (13.7x); module/C 6.3 -> 4.1.** `tests/examples.sh`'s own row on the final tree: 3.299 / 0.998
-   (3.31x) / 0.237 (13.92x).
+   (3.31x) / 0.237 (13.92x). On the pull request's CI run, against main's run after batch E
+   (the ratio is what compares; runners differ by up to ~40% in absolute time): macos/arm64
+   1.68x -> **2.62x** with the twin at 12.1x (module/C 7.3 -> 4.6), linux/aarch64 1.74x -> **2.65x**,
+   linux/x86_64 1.36x -> **2.57x**, windows/aarch64 2.98x -> **4.73x**, windows/x86_64 2.77x ->
+   **3.91x** (`examples/decimal/README.md` has the milliseconds).
 
    **The packed int array** (`src/packed.mc`) is a proof and a lowering. Per plain function, a token
    scan of the body before it is compiled proves that a local array holds only ints under keys
