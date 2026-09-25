@@ -429,13 +429,6 @@ f64 phx_f(uptr ex, i64 k) {
 // interned string, whose hash is already there.
 uptr phx_s(uptr ex, i64 k) { return ld64(phx_argz(ex, k) + ZVX_VALUE); }
 
-// one more reference to an engine string (not to an interned one, which has
-// no count)
-void phx_addref(uptr z) {
-    if (ld32(z + 4) & ZSX_INTERNED) return;
-    st32(z, ld32(z) + 1);
-}
-
 // ---- the return value ------------------------------------------------------
 // return_value arrives IS_NULL, so a void function writes nothing.
 void phx_ret_int(uptr rv, i64 v) {
