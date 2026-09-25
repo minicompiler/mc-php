@@ -329,6 +329,13 @@ i64 ph_rc_return(i64 r) {
     // then, like any borrowed string. examples/decimal's _dec_valid answers
     // its argument on every valid call.
     if (str && nd_kind(e) == N_IDENT && ph_rc_is_param(nd_name(e))) str = 0;
+    // a `return EXPR;` in a VOID function (php refuses it; the lowering
+    // reports that at run time): the value is still evaluated, and dropped
+    if (e && ph_rc_fty == TY_VOID) {
+        h = ph_rc_stmt(e);
+        t = h;
+        e = 0;
+    }
     if (e) {
         h = ph_rc_set("ph_rv", e);
         t = h;
