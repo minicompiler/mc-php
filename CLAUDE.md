@@ -854,8 +854,8 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     exit code moved are programs php refuses at compile time, for which mc-php prints nothing and
     exits with a register's leftovers, main and this branch alike for the same layout.
 - Core-strings (2026-09-25, branch `core-strings`), on **mc 1.1.0** here: **`examples/decimal`
-  from 0.609 to 0.425 ms, module/C 4.87 -> 3.40** (interpreted 1.737, the twin 0.125, one sitting,
-  seven rounds interleaved), `decimal.php` unchanged -- the owner's reading of zend-mm: the core
+  from 0.608 to 0.434 ms, module/C 4.86 -> 3.47** (interpreted 1.744, the twin 0.125, one sitting,
+  nine rounds interleaved; inlining off 0.479, the machine off 0.510), `decimal.php` unchanged -- the owner's reading of zend-mm: the core
   lacked optimisation. Profile first (`sample`, and `xctrace` mapped to instructions), and a count
   the runtime now keeps (`MCPHP_STATS=1` prints `strings built N`): per call `dec_add` 8 -> 5,
   `dec_sub` 10 -> 7, `dec_mul` 13 -> 11, `dec_cmp` 2 -> 1, `dec_div` 34 -> 14, gated by

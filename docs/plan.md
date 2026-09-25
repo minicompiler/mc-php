@@ -1073,7 +1073,7 @@ its code is written.
    own refcount and Zend's allocator, the owner's direction, and paid for it on this workload:
    0.524 -> 0.606 ms on a quiet run of this Mac with the interpreter at 1.70-1.79 ms and the C
    twin at 0.125 (module/C 4.19 -> 4.85, still 2.8x php interpreted), § 7 item 1. The
-core-strings batch took it to 0.425 ms (module/C 3.40, 4.1x interpreted) with the same
+core-strings batch took it to 0.434 ms (module/C 3.47, 4.0x interpreted) with the same
 `decimal.php`: fewer strings, small functions inlined, a peephole machine and a leaner handler,
 § 7 item 1. What already has code moves into
    `examples/`, each with a gate that compiles it and compares it with php. Four of the five parts
@@ -1496,10 +1496,20 @@ In the order the measurements put them, each with the number that says why:
    | the same machine: a cast or a `!` of a fresh boolean, and a branch on it, on every road | 0.452 |
    | the handler reads and checks an int or string argument in place | **0.425** |
 
-   **The three columns: interpreted 1.737 ms, the module 0.425 ms (4.09x), the C twin 0.125 ms
-   (13.9x); module/C 4.87 -> 3.40.** Each part turned off alone in the final build
-   (`MCPHP_INLINE=0`, `MCPHP_PEEP=0` in the compiler's environment): see the table in the pull
-   request and `examples/decimal/README.md`.
+   The steps were measured with a 700-node inlining bound; the review set it to 450 (below), and
+   the final build was re-measured with main and the twin in a second sitting (best of nine, nine
+   rounds interleaved), each half of the compiler turned off in the compiler's environment:
+
+   | build | ms |
+   |---|---|
+   | main | 0.608 |
+   | this batch | **0.434** |
+   | this batch, `MCPHP_INLINE=0` | 0.479 |
+   | this batch, `MCPHP_PEEP=0` | 0.510 |
+   | this batch, both off (the strings and the handler alone) | 0.545 |
+
+   **The three columns: interpreted 1.744 ms, the module 0.434 ms (4.02x), the C twin 0.125 ms
+   (13.95x); module/C 4.86 -> 3.47.**
 
    * **Inlining** (`src/opt.mc`) copies a function's finished pre-rc tree into each caller
      declared after it, when the function has a plain signature, no loop and at most 450 nodes --

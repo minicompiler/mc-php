@@ -173,13 +173,13 @@ main and moves 0 now; peak moved 0 on main and 16 bytes now (e.g. linux/x86_64 u
 501 816, peak 502 024 -> 502 040).
 
 **Three columns, the core-strings batch** (2026-09-25, macos/arm64, php 8.5.10, one host, one
-sitting, seven rounds interleaved; `decimal.php` byte for byte what it was). Every gain is in the
+sitting, nine rounds interleaved; `decimal.php` byte for byte what it was). Every gain is in the
 compiler and its runtime -- `docs/plan.md` § 7 item 1 has the profile and what each step bought:
 
 | | interpreted | the module | the C twin | module / C |
 |---|---|---|---|---|
-| zend-mm (main) | 1.737 ms | 0.609 ms (2.85x) | 0.125 ms (13.9x) | 4.87 |
-| core-strings | 1.737 ms | **0.425 ms (4.09x)** | 0.125 ms | **3.40** |
+| zend-mm (main) | 1.744 ms | 0.608 ms (2.87x) | 0.125 ms (13.95x) | 4.86 |
+| core-strings | 1.744 ms | **0.434 ms (4.02x)** | 0.125 ms | **3.47** |
 
 Fewer strings built per call (`dec_add` 8 -> 5, `dec_div` 34 -> 14; `tests/examples.sh` gates the
 counts), the small `_dec_*` helpers copied into their callers, a peephole machine derived from
