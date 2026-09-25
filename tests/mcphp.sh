@@ -61,9 +61,10 @@ exe=$tmp
 case $(uname -s) in MINGW*|MSYS*|CYGWIN*) exe=$tmp.exe ;; esac
 # MCPHP__RC=check (tests/grid.sh's and tests/fixtures.sh's private name for
 # it) compiles the program the way src/rc.mc's check mode does: every string
-# counted and poisoned at zero. It reaches the COMPILER as MCPHP_RC and is gone
-# before the program runs, so a test that reads its own environment sees what
-# php's run of it saw.
+# counted and poisoned at zero. It reaches the COMPILER as MCPHP_RC through
+# `env` and is gone before the program runs; a public MCPHP_RC the caller or
+# the test itself set is left alone, since php's run of the test saw it too,
+# so a test that reads its own environment sees what php's run of it saw.
 rc_env=
 [ -n "${MCPHP__RC:-}" ] && rc_env="MCPHP_RC=$MCPHP__RC"
 if [ -n "${MCPHP_WINLINK:-}" ]; then
@@ -116,7 +117,7 @@ if [ -n "${MCPHP__OUT:-}${MCPHP__BIN:-}${MCPHP__TMP:-}" ]; then
 else
     unset MCPHP_OUT MCPHP_BIN MCPHP_TMP
 fi
-unset MCPHP__RC MCPHP_RC
+unset MCPHP__RC
 # EXEC, so this shell BECOMES the program: python's subprocess timeout kills
 # the process it spawned, and a program that loops for ever must be that same
 # process. Without the exec the timeout killed the shell and left the binary
