@@ -246,7 +246,9 @@ and `$s[$i] = c` on a string nothing else holds grow or write it where it is -- 
 php's `zend_string_extend` for a refcount-1 left operand -- and anything else (an interned
 string, a literal, a string a second variable or a zval also holds) is copied first, the copy
 becoming the slot's own. `tests/ext.sh` step 11 counts the two: with `MCPHP_STATS=1` in php's
-environment the module prints `mc-php stats: in place N, copied M` at the end of each request.
+environment the module prints `mc-php stats: in place N, copied M, strings built K` at the end of
+each request -- K every string the request built, a copy included, which `tests/examples.sh`
+gates for `examples/decimal`.
 That is the counted slot's privilege: a function with no loop copies on `.=`, because nothing
 says the pool's reference is the only one (and it appends a bounded number of times).
 

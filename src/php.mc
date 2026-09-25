@@ -31,6 +31,7 @@
 #include "types.mc"
 #include "packed.mc"
 #include "rc.mc"
+#include "opt.mc"
 #include "expr.mc"
 #include "builtin.mc"
 #include "stmt.mc"
@@ -39,4 +40,5 @@
 #include "class.mc"
 #include "decl.mc"
 #include "ext.mc"
+#include "mach.mc"
 #include "program.mc"

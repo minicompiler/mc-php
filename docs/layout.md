@@ -2,7 +2,7 @@
 
 ```
 mc.toml              the mc project that builds the compiler:  mc build -> build/mc-php
-src/*.mc             the compiler -- one mc Tier 3 module, 17 files, plus one entry
+src/*.mc             the compiler -- one mc Tier 3 module, 23 files, plus one entry
                      per host it can be built for
 lib/php_rt.mc        the runtime, #embed'ed into the compiler and pushed into every
                      program it compiles
@@ -48,8 +48,12 @@ mc is single pass, so `src/php.mc` includes the parts in order and the order is 
 | `lvalue.mc` | 1685 | the lvalue chain, `isset`/`empty`, and `list()` destructuring |
 | `closure.mc` | 263 | closures, arrow functions, `use (&$x)` |
 | `class.mc` | 787 | classes, interfaces, traits, enums; members; a method body |
+| `packed.mc` | 812 | the packed int array: a token scan that proves a local array holds only ints under keys 0..n-1, and its lowering |
+| `rc.mc` | 569 | who owns a string on the extension road: the pool of temporaries, counted slots in a function that loops, borrowing in one that does not |
+| `opt.mc` | 720 | rewrites over a finished function: substr() windows read in place by a concatenation, and small loop-free functions copied into their callers |
 | `decl.mc` | 533 | the top-level declarations, and php's hoisting of a global function |
 | `ext.mc` | 303 | the EXTENSION back end: one handler per exported function, then `get_module`. It knows no Zend offset -- `lib/php_ext.mc` does |
+| `mach.mc` | 632 | a peephole machine derived from mc's arm64 and x86-64 ones (and `<float>`'s): immediates, folded offsets, one branch per loop exit, a global's page offset in its access |
 | `program.mc` | 418 | the one registration, the byte scan that runs before the first token, `#embed` of the runtime, and `user_init` |
 
 ## `lib/php_rt.mc` -- the runtime

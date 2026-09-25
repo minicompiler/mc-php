@@ -154,6 +154,53 @@ else
     echo "  FAIL  packed: $pk / $pn accepted in g/105; lowered in g/106 where the proof must fail: ${pe:-none}"
     fail=1
 fi
+# src/opt.mc's concatenation windows: g/112's every substr() is a piece of a
+# concatenation, so its compiled functions have php_str_catwN and not one php_substr
+# (a fusion that never fired would pass the differential just as well).
+"$MCPHP_BIN" --dump-ast $P/g/112-concat-windows.php > "$tmp/cw.ast" 2>&1
+set -- $(awk '/^FUNC/ { u = ($0 ~ / name=(f_|main$)/) }
+               u && /CALL .*name=php_str_catw/ { w++ } u && /CALL .*name=php_substr$/ { n++ }
+               END { print w + 0, n + 0 }' "$tmp/cw.ast")
+if [ "$1" = 7 ] && [ "$2" = 0 ]; then
+    echo "  windows: g/112's 7 concatenations read their substr() pieces in place"
+else
+    echo "  FAIL  windows: g/112's lowering has $1 php_str_catw and $2 php_substr (want 7 and 0)"
+    fail=1
+fi
+# src/opt.mc's inlining: in g/113's run() every call but the recursive one
+# is a copy, so its lowering calls f_fact and no other php function.
+"$MCPHP_BIN" --dump-ast $P/g/113-inline.php > "$tmp/in.ast" 2>&1
+il=$(awk '/^FUNC/ { u = ($0 ~ / name=f_run$/) } u && /CALL .*name=f_/ { print $NF }' "$tmp/in.ast" | sort -u | tr '\n' ' ')
+if [ "$il" = "name=f_fact " ]; then
+    echo "  inlining: g/113's run() calls only its recursive function; the rest are copies"
+else
+    echo "  FAIL  inlining: g/113's run() still calls: $il(want only name=f_fact)"
+    fail=1
+fi
+# src/mach.mc's peepholes, read back on BOTH machines whatever the host (the
+# dump takes --machine=): in g/114's sums() a constant that fits is the
+# immediate (4095) and one that does not stays a register (4096), `$i < $n`
+# feeding its loop's exit is one conditional branch, and a global's store
+# carries its page offset. The differential passes without any of it. The
+# branch is counted as present, not once: with MCPHP_RC=check the pool's own
+# drains add more fused compares to the same function.
+set -- $("$MCPHP_BIN" --machine=arm64 --dump-asm $P/g/114-peephole.php 2>&1 | awk '
+    /^_/ { u = ($0 == "_f_sums:") }
+    u && /add x9, x9, #4095$/ { a++ } u && /movz x10, #4096$/ { b++ }
+    u && /cmp x9, x10$/ { getline; if ($1 == "b.ge") c++ }
+    /@PAGEOFF\]$/ { d++ }
+    END { print a + 0, b + 0, (c > 0), (d > 0) }')
+set -- "$@" $("$MCPHP_BIN" --machine=x86_64 --dump-asm $P/g/114-peephole.php 2>&1 | awk '
+    /^_/ { u = ($0 == "_f_sums:") }
+    u && /lea r8, \[r8\+4095\]$/ { a++ } u && /lea r8, \[r8-4096\]$/ { b++ }
+    u && /cmp r8, r9$/ { getline; if ($1 == "jge") c++ }
+    END { print a + 0, b + 0, (c > 0) }')
+if [ "$*" = "1 1 1 1 1 1 1" ]; then
+    echo "  peephole: g/114 has its immediates, one branch per loop exit and a global's page offset, on arm64 and x86-64"
+else
+    echo "  FAIL  peephole: g/114's dump reads $* (want 1 1 1 1 1 1 1: arm64 add #4095, movz #4096, b.ge, @PAGEOFF]; x86-64 lea +4095, lea -4096, jge)"
+    fail=1
+fi
 # The one place the packed lowering is NOT php: an int that overflows on an
 # element. php makes a float; a native int cannot hold one, so it is a named
 # ArithmeticError and never a wrapped int. Not a differential -- php's answer

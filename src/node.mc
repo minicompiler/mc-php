@@ -138,6 +138,22 @@ i64 ph_strlit(uptr bytes, i64 len) {
 uptr ph_lits;
 i64  ph_nlits;
 i64  ph_litcap;
+uptr ph_litcp;             // copies of php_str_lit/php_bmap_lit uses (src/opt.mc)
+i64  ph_nlitcp;
+i64  ph_litcpcap;
+
+void ph_lit_copied(i64 c) {
+    if (ph_nlitcp == ph_litcpcap) {
+        i64 cap = ph_litcpcap * 2 + 64;
+        uptr nl = xalloc(cap * 8);
+        i64 i = 0;
+        loop { if (i >= ph_nlitcp) break; st64(nl + i * 8, ld64(ph_litcp + i * 8)); i = i + 1; }
+        ph_litcp = nl;
+        ph_litcpcap = cap;
+    }
+    st64(ph_litcp + ph_nlitcp * 8, c);
+    ph_nlitcp = ph_nlitcp + 1;
+}
 uptr ph_bmaps;             // ph_bmap_of's sites, built beside the literals
 i64  ph_nbmaps;
 i64  ph_bmapcap;
@@ -204,6 +220,17 @@ i64 ph_lit_finish(uptr fl, i64 line) {
         tail = st2;
         set_nd_name(m, "ld64");
         set_nd_next(mc, 0);
+        i = i + 1;
+    }
+    // the COPIES of literal and byte-map uses src/opt.mc's inlining made:
+    // their caches are the originals', already built above, so a copy is only
+    // turned into its load
+    i = 0;
+    loop {
+        if (i >= ph_nlitcp) break;
+        i64 cp = ld64(ph_litcp + i * 8);
+        set_nd_name(cp, "ld64");
+        set_nd_next(nd_a(cp), 0);
         i = i + 1;
     }
     i64 b = node_new(N_BLOCK, line, fl);

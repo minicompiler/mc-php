@@ -146,6 +146,7 @@ uptr php_str_alloc(i64 n) {
     // a size that wrapped negative is a huge size_t to _emalloc, which php's
     // memory limit refuses by name
     uptr s = _emalloc(ZSX_HDR + n + 1, "mc-php", 0, 0, 0);
+    ph_rc_built = ph_rc_built + 1;
     st64(s, 94489280513);                       // refcount 1 | GC_STRING (22) << 32
     st64(s + 8, 0);
     st64(s + ZSX_LEN, n);
@@ -591,7 +592,10 @@ void phx_snapshot() {
 }
 
 // MCPHP_STATS=1 in php's environment: at the end of each request, what the
-// string discipline did -- the in-place gate reads it (tests/ext.sh). Written
+// string discipline did -- how many writes were in place and how many copied,
+// and how many strings the request built at all (every _emalloc of one, a
+// copy included). tests/ext.sh's in-place gate and tests/examples.sh's count
+// of decimal's strings read it. Written
 // from a byte buffer: RSHUTDOWN runs outside a call, where a string would be
 // the module's arena and stay for good.
 i64 phx_stats = 0 - 1;
@@ -613,13 +617,15 @@ void phx_stat_line() {
         if (v) { if (ld8(v) == '1') phx_stats = 1; }
     }
     if (!phx_stats) return;
-    u8 b[96];
+    u8 b[128];
     u8 w[8];
     st64(w, 0);
     phx_put_s(b, w, "mc-php stats: in place ");
     st64(w, phx_put_n(b, ld64(w), ph_rc_inplace));
     phx_put_s(b, w, ", copied ");
     st64(w, phx_put_n(b, ld64(w), ph_rc_copied));
+    phx_put_s(b, w, ", strings built ");
+    st64(w, phx_put_n(b, ld64(w), ph_rc_built));
     phx_put_s(b, w, "\n");
     write(2, b, ld64(w));
 }
@@ -637,6 +643,7 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) {
     phx_stat_line();
     ph_rc_inplace = 0;
     ph_rc_copied = 0;
+    ph_rc_built = 0;
     // the kept strings go while their holders are still readable, then the
     // blocks that held them
     phx_esc_from(0);

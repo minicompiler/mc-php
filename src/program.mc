@@ -112,6 +112,7 @@ void ph_program() {
         set_nd_a(b, on);
         ph_rc_fn(f);
     }
+    ph_opt_fn(f);
     top_add(f);
     if (ph_ext) ph_ext_emit(fl, line);
     top_add(ph_lit_finish(fl, line));
@@ -509,9 +510,11 @@ void ph_push_rt_host() {
 void user_init() {
     ph_ext_config();
     ph_rc_env();
+    phi_env();
     float_init();
     machine_arm64_float_init();
     machine_x86_64_float_init();
+    ph_mach_init();
     ty_pstr = type_new("php_str", 8, 8, TK_INT);
     ty_parr = type_new("php_arr", 8, 8, TK_INT);
     ty_pzv  = type_new("php_zval", 8, 8, TK_INT);

@@ -323,8 +323,11 @@ rm -rf "$tmp/build"
 # 48 MiB arena for the life of the server (docs/plan.md § 7). The second line
 # of each response is an output buffer the MODULE opens and leaves open, which
 # is php's own stack: the script's echo after the call goes into it too.
-printf '<?php\nfunction counter(): int { static $n = 0; $n++; return $n; }\nfunction remember(string $s): string { global $last; $prev = $last ?? ""; $last = $s; return $prev; }\nfunction big(): int { static $keep = ""; $keep = str_repeat("x", 4 << 20); return strlen($keep); }\nfunction open_ob(): int { echo "0"; ob_start(); echo "A"; ob_start(); echo "B"; return 1; }\nfunction inner_ob(): string { ob_start(); echo "in"; return ob_get_clean() . "!"; }\nfunction lens(): string { ob_start(); echo "abcd"; $n = ob_get_length(); ob_end_clean(); return var_export($n, true) . " " . var_export(ob_get_length(), true); }\n' > "$tmp/r.php"
-printf '<?php\nif (!function_exists("counter")) { require __DIR__ . "/r.php"; }\necho counter(), counter(), " [", remember("a"), remember("b"), "] ", big(), " ", inner_ob(), "\\n";\necho lens(), "\\n";\n$n = open_ob();\necho "C$n\\n";\n' > "$tmp/router.php"
+# shared() answers the runtime's shared empty and one-byte strings, which are
+# built on first use -- in the first request, whose pinned call has the arena
+# put back as MINIT left it at its end; the other nineteen must still see them.
+printf '<?php\nfunction counter(): int { static $n = 0; $n++; return $n; }\nfunction remember(string $s): string { global $last; $prev = $last ?? ""; $last = $s; return $prev; }\nfunction big(): int { static $keep = ""; $keep = str_repeat("x", 4 << 20); return strlen($keep); }\nfunction open_ob(): int { echo "0"; ob_start(); echo "A"; ob_start(); echo "B"; return 1; }\nfunction inner_ob(): string { ob_start(); echo "in"; return ob_get_clean() . "!"; }\nfunction lens(): string { ob_start(); echo "abcd"; $n = ob_get_length(); ob_end_clean(); return var_export($n, true) . " " . var_export(ob_get_length(), true); }\nfunction shared(int $k): string { $e = ltrim(str_repeat("0", $k), "0"); return "<" . $e . substr("ab", 5) . chr(65 + $k) . ">" . strlen($e); }\n' > "$tmp/r.php"
+printf '<?php\nif (!function_exists("counter")) { require __DIR__ . "/r.php"; }\necho counter(), counter(), " [", remember("a"), remember("b"), "] ", big(), " ", inner_ob(), "\\n";\necho lens(), " ", shared(3), shared(0), "\\n";\n$n = open_ob();\necho "C$n\\n";\n' > "$tmp/router.php"
 rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/rq.build" 2>&1; then
     tmpn=$(cygpath -m "$tmp" 2>/dev/null || echo "$tmp")
@@ -332,7 +335,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/rq.build" 2>&1; then
     "$PHP" tests/ext/requests.php "$tmpn/router.php" 20 > "$tmp/rq.i" 2>&1; qi=$?
     want=$(sort -u "$tmp/rq.i" | tr -d '\r' | tr '\n' '|')
     if [ "$qn" = 0 ] && [ "$qi" = 0 ] && cmp -s "$tmp/rq.n" "$tmp/rq.i" \
-       && [ "$want" = "0ABC1|12 [a] 4194304 in!|4 false|" ] \
+       && [ "$want" = "0ABC1|12 [a] 4194304 in!|4 false <D>0<A>0|" ] \
        && [ "$(wc -l < "$tmp/rq.n" | tr -d ' ')" = 60 ]; then
         say "requests: 20 through php -S, every one the interpreted source's (statics reset, ob levels php's own)"
     else
@@ -357,6 +360,8 @@ rm -rf "$tmp/build"
 #   offset write on the string that loop built;
 #   share(3): $k holds the same string as $s, so the first `.=` must COPY (and
 #   $k keeps "aa"), after which $s is its own again.
+#   Four strings are built in all: the two copies, str_repeat's and the
+#   answer of share -- an in-place growth builds none.
 printf '<?php\nfunction grow(int $n): int { $s = ""; for ($i = 0; $i < $n; $i++) { $s .= "x"; } $s[5] = "y"; return strlen($s) + ord($s[5]); }\nfunction share(int $n): string { $s = str_repeat("a", 2); $k = $s; for ($i = 0; $i < $n; $i++) { $s .= "b"; } return $k . " " . $s; }\n' > "$tmp/r.php"
 rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/gr.build" 2>&1; then
@@ -364,9 +369,9 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/gr.build" 2>&1; then
         -r 'echo grow(100000), " ", share(3), "\n";' 2>&1 | tr -d '\r' | tr '\n' '|')
     want=$(printf '<?php\nrequire $argv[1]; echo grow(100000), " ", share(3), "\\n";\n' > "$tmp/gi.php"; "$PHP" "$tmp/gi.php" "$tmp/r.php" | tr -d '\r')
     case "$got" in
-        "$want|mc-php stats: in place 100002, copied 2|")
+        "$want|mc-php stats: in place 100002, copied 2, strings built 4|")
             say "in place: 100002 of 100004 string writes grew or wrote the string itself, 2 copied (a literal, and a shared string) -- answers php's own" ;;
-        *) bad "in place: want '$want|mc-php stats: in place 100002, copied 2|', got '$got'" ;;
+        *) bad "in place: want '$want|mc-php stats: in place 100002, copied 2, strings built 4|', got '$got'" ;;
     esac
 else
     bad "in place: it would not build"; sed 's/^/      /' "$tmp/gr.build"
