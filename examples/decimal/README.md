@@ -156,6 +156,22 @@ names nothing (`tests/leaks.sh`, a debug php). The soak, 1 000 000 calls in one 
 517 336 -> 517 336 bytes, peak 517 544 -> 517 560 -- the 16 bytes are the call's temporaries
 growing with the accumulator's three extra digits (`soak.php` says why).
 
+On every CI leg (`tests/ext.sh`'s bench line, best of nine, three rounds interleaved; main is run
+36056378453, this batch run 36078460677; the Linux and Windows runners have no `php-config` with a
+`cc`, so there is no C column there):
+
+| leg | interpreted | main's module | zend-mm's module | C twin (main / zend-mm) |
+|---|---|---|---|---|
+| macos/arm64 | 1.991 / 2.106 ms | 0.774 ms (2.57x) | 0.906 ms (2.32x) | 0.159 / 0.172 ms |
+| linux/aarch64 | 3.086 / 3.090 ms | 1.169 ms (2.64x) | 1.445 ms (2.14x) | -- |
+| linux/x86_64 | 3.567 / 3.828 ms | 1.399 ms (2.55x) | 1.850 ms (2.07x) | -- |
+| windows/aarch64 | 8.754 / 8.771 ms | 1.895 ms (4.62x) | 2.640 ms (3.32x) | -- |
+| windows/x86_64 | 6.949 / 6.881 ms | 1.630 ms (4.26x) | 2.007 ms (3.43x) | -- |
+
+The soak on the same runs, a million calls in one request: usage moved 40 bytes on every leg on
+main and moves 0 now; peak moved 0 on main and 16 bytes now (e.g. linux/x86_64 usage 501 816 ->
+501 816, peak 502 024 -> 502 040).
+
 ## What it cannot do yet
 
 * **A wrong TYPE** is an internal function's message in the module and a userland one

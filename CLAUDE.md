@@ -842,3 +842,14 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     0.125 ms. SLOWER, and the profile says why (`docs/plan.md` § 7 item 1): memory 15.0% -> 18.8%
     of the module's time, eleven strings a call each an `_emalloc` and an `_efree`; the first,
     call-per-store version was 0.858 ms and the counting as calls was 42% of the time.
+  * On the five CI legs (main run 36056378453 -> run 36078460677), the module's bench:
+    macos/arm64 0.774 -> 0.906 ms (C twin 0.159 / 0.172), linux/aarch64 1.169 -> 1.445,
+    linux/x86_64 1.399 -> 1.850, windows/aarch64 1.895 -> 2.640, windows/x86_64 1.630 -> 2.007;
+    the soak's usage moves 0 bytes on every leg (40 on main), its peak 16. Every leg green.
+  * The phpt grid, three directories, main vs this branch vs this branch in check mode: every one
+    of the 15 lists holds the same test names (`comm -3` empty), green 104 / 766 / 272 in all
+    three, and no check-mode output carries the dead-string message. The check run found one
+    compile error -- a valued `return` in a `void` function named a slot void functions never
+    declare (`Zend/tests/void_disallowed2.phpt`), fixed; the thirteen other rows whose recorded
+    exit code moved are programs php refuses at compile time, for which mc-php prints nothing and
+    exits with a register's leftovers, main and this branch alike for the same layout.

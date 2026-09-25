@@ -287,7 +287,10 @@ its arena strings exactly as a module counts Zend ones, drains its temporaries a
 statement rather than every loop iteration, and POISONS a string that reaches zero instead of
 freeing it (a length no string has, and a use of it dies with
 `mc-php: MCPHP_RC=check: a string was used after its last reference went`). The fixtures and the
-three grid directories compiled that way must answer exactly what they answer without it.
+three grid directories compiled that way must answer exactly what they answer without it. They
+do: 109/109 fixtures in both builds (`tests/run.sh` and `tests/linux.sh` run the second pass), and
+the grid's 15 lists hold the same test names in both (green 104 / 766 / 272), with no dead-string
+message anywhere.
 
 Measured (2026-09-24, macos/arm64, php 8.5.10):
 
