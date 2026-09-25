@@ -54,7 +54,7 @@ The schema stays inside the TOML subset mc's own parser already reads (it comes 
 
 ```
 mc.toml        mc build -> build/mc-php
-src/*.mc       the compiler, 18 files, included in ORDER (mc is single pass)
+src/*.mc       the compiler, 23 files and one entry per host, included in ORDER (mc is single pass)
 lib/php_rt.mc  the runtime, #embed'ed and pushed into every program
 lib/php_ext.mc the EXTENSION runtime, pushed only on that road
 tests/         the fixtures, the grid driver and the fast gates
@@ -853,3 +853,29 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     declare (`Zend/tests/void_disallowed2.phpt`), fixed; the thirteen other rows whose recorded
     exit code moved are programs php refuses at compile time, for which mc-php prints nothing and
     exits with a register's leftovers, main and this branch alike for the same layout.
+- Core-strings (2026-09-25, branch `core-strings`), on **mc 1.1.0** here: **`examples/decimal`
+  from 0.609 to 0.425 ms, module/C 4.87 -> 3.40** (interpreted 1.737, the twin 0.125, one sitting,
+  seven rounds interleaved), `decimal.php` unchanged -- the owner's reading of zend-mm: the core
+  lacked optimisation. Profile first (`sample`, and `xctrace` mapped to instructions), and a count
+  the runtime now keeps (`MCPHP_STATS=1` prints `strings built N`): per call `dec_add` 8 -> 5,
+  `dec_sub` 10 -> 7, `dec_mul` 13 -> 11, `dec_cmp` 2 -> 1, `dec_div` 34 -> 14, gated by
+  `tests/examples.sh`. Four mechanisms, each with a gate that fails without it:
+  * **Windows of a concatenation** (`src/opt.mc`, a pass after `src/rc.mc`): a `.` chain with
+    `substr()` pieces is `php_str_catwN` over (string, start, length), the substrings never built;
+    an empty side answers the other operand (php's concat_function); trim/substr/chr answer the
+    shared empty and one-byte strings. `tests/g/112` + a lowering read-back in `tests/fixtures.sh`.
+  * **Inlining** (`src/opt.mc`): a plain, loop-free function of at most 120 nodes is copied, as its
+    finished pre-rc tree, into every caller declared after it; returns become stores (an early one
+    nested under a continuing `if` goes behind a flag), parameters locals or the caller's own local,
+    the copy's literal uses turned into cache loads at `ph_lit_finish` too, the caller's position
+    re-announced after a copy that moved it. `MCPHP_INLINE=0` turns it off. `tests/g/113` + read-back.
+  * **A peephole machine** (`src/mach.mc`) derived from mc's arm64 and both x86-64 tables (over
+    `<float>`'s): immediates, the address add folded into the access, one branch per loop exit, a
+    fresh boolean's cast/`!`/branch, a lone constant or global load written into its local, and a
+    global's access carrying its page offset (band 500..501). `MCPHP_PEEP=0` turns it off.
+    `tests/g/114` + a read-back of both machines' dumps. It reaches mc names that are documented
+    but not frozen (the `Ins` buffer, `I_*`/`X_*`): `docs/plan.md` § 5, reported.
+  * **The handler** (`src/ext.mc`) reads and checks an int or string argument in place.
+  Measured and dropped: a leaf's locals on `x0..x7` (+1%), range masks for trim/strspn (0%).
+  The grid: `tests/lang` 104, `Zend/tests` 766, strings 272, plain and `MCPHP_RC=check`, all 30
+  lists identical to main's (`comm -3`). `tests/leaks.sh`: no block left. fib/sum module unchanged.

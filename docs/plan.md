@@ -1010,6 +1010,29 @@ What would close it in mc: let the allocator use caller-saved registers in a fun
 no call (a leaf has `x0..x7` free once its parameters are read, and `x16`/`x17`), and give the
 walker immediate forms for `add`/`sub`/`cmp` and a constant offset in `ldr`/`str`.
 
+**The core-strings batch (2026-09-25) took the second half inside mc-php**, the way mc offers to
+teach a machine: `src/mach.mc` is a machine DERIVED from the one in effect (mc's
+`docs/reference/machine.md` § Deriving a machine, `lib/machine_arm64_float.mc`'s recipe), and it
+rewrites what was just emitted -- the constant as the immediate of `add`/`sub`/`and`/`cmp` (`lea`
+on x86-64), the address add as the load or store offset, `b.cond L; b M; L:` as one branch, and a
+global's page offset in its access. The leaf half stays open here: renaming a leaf's locals onto
+`x0..x7` at the end of the function was built, measured at +1% on `examples/decimal` (the hot
+runtime routines each have a cold call and are not leaves) and dropped. The first half is still
+mc's to close.
+
+**And a surface gap it opened, reported rather than hidden.** A derived machine that rewrites
+instructions needs the `Ins` buffer -- `ins_add`, `ins_at`, `ins_op`/`rd`/`rn`/`rm`/`imm`/`label`
+and their setters, `nins`, `ins_base` -- and the bundled machines' opcode numbers and a few of
+their helpers (`in_reg`, `dalias_at`, `mem_op`, `gen_cast`, the x86 twins). mc documents them as
+the walker's and the machine's (`docs/reference/machine.md` § What the walker keeps) and
+`<float>`'s machines use them, but `tests/golden/surface.txt` freezes only `machine_tab`,
+`machine_slot`, `machine` and `val_reg`/`dst_reg`/`dst_done`. So `src/mach.mc` is the one file of
+this repository that reaches names mc may renumber in a minor: it is built against mc 1.1.0 here
+and 1.3.0 in CI, whose machine files are identical (`git diff v1.0.0 v1.3.0 --
+src/machine_arm64.mc src/machine_x86_64.mc src/gen_walk.mc` is empty). `MCPHP_PEEP=0` turns it
+off whole. What would close it in mc: freeze the `Ins` accessors and the bundled `I_*`/`X_*`
+numbers a derived machine reads, as the float machines already need.
+
 ### Still unmeasured
 
 - The ELF half of everything above: `probes/t2/run.sh` has never run on Linux. What HAS: the
@@ -1049,7 +1072,10 @@ its code is written.
    time to 4.1x (1.51 -> 0.98 ms here), § 7 item 1. The zend-mm batch put its strings on php's
    own refcount and Zend's allocator, the owner's direction, and paid for it on this workload:
    0.524 -> 0.606 ms on a quiet run of this Mac with the interpreter at 1.70-1.79 ms and the C
-   twin at 0.125 (module/C 4.19 -> 4.85, still 2.8x php interpreted), § 7 item 1. What already has code moves into
+   twin at 0.125 (module/C 4.19 -> 4.85, still 2.8x php interpreted), § 7 item 1. The
+core-strings batch took it to 0.425 ms (module/C 3.40, 4.1x interpreted) with the same
+`decimal.php`: fewer strings, small functions inlined, a peephole machine and a leaner handler,
+§ 7 item 1. What already has code moves into
    `examples/`, each with a gate that compiles it and compares it with php. Four of the five parts
    are DONE (the examples branch, 2026-09-23), gated by `tests/ext.sh` and `tests/examples.sh`
    inside `tests/run.sh`, `tests/linux.sh` and `tests/windows.sh`, **green on all five CI legs**
@@ -1429,6 +1455,99 @@ In the order the measurements put them, each with the number that says why:
    main's compiler the same function dies with php's `Allowed memory size of 134217728 bytes
    exhausted`), and a `.=` in a loop used to copy the whole string every time (step 11:
    `grow(100000)` is 100 002 writes in place and 2 copies; on main it too exhausts php's memory).
+
+   **The core-strings batch (2026-09-25): what the compiler generates for `examples/decimal`,
+   not what `decimal.php` says.** The owner's reading of the zend-mm result was that the failure
+   is in the core, which lacks optimisation, and not in the algorithm; `decimal.php` is byte for
+   byte what it was. The profile came first, two ways: `sample` (inclusive and self per
+   function) and, because a flat profile of a few hundred small functions says little per
+   function, Instruments' Time Profiler exported by `xctrace` and mapped back to the module's
+   instructions. And a COUNT, which the runtime now keeps: `MCPHP_STATS=1` prints how many
+   strings a request built, a copy included.
+
+   | a call of | strings built, main | after |
+   |---|---|---|
+   | `dec_add('123456.78', '1093.75', 2)` | 8 | 5 |
+   | `dec_sub('123456.78', '2682.24', 2)` | 10 | 7 |
+   | `dec_mul('123456.78', '0.004375000000', 2)` | 13 | 11 |
+   | `dec_cmp('123456.78', '0')` | 2 | 1 |
+   | `dec_div('5.25', '1200', 12)` | 34 | 14 |
+
+   Which ones, traced by the strings freed: for `dec_add` the two coefficients (`_dec_coef`'s
+   `str_replace`), the limb `str_pad` built, the limb again as `$limb . ''` (the first `$out`),
+   the limb without its zeros (`ltrim`), `_dec_fmt`'s two `substr` and the answer. The ones that
+   went: an empty side of `.` answers the other operand itself (php's `concat_function` does);
+   a concatenation whose pieces are `substr()` calls is ONE string built from windows of the
+   operands (`php_str_catwN`, the substrings never built); a `trim`/`substr` answering nothing or
+   one byte, and `chr()`, answer php's shared empty and one-byte strings (`dec_div`'s quotient
+   digits were fourteen allocations). What stays is the algorithm's: a new string per step.
+
+   And the count was not the gap. The C twin allocates about as often (seven `emalloc`s a
+   `dec_add`); what separated the two was everything around each operation. The module's
+   column of `bench.php`, every build re-measured in ONE sitting on this Mac (best of nine, seven
+   rounds interleaved with the interpreter, main's module and the C twin):
+
+   | change | ms |
+   |---|---|
+   | main (zend-mm) | 0.609 |
+   | the strings above (`src/opt.mc`'s windows, the runtime's empty and one-byte answers) | 0.571 |
+   | **small php functions inlined** (`src/opt.mc`), and `chr()` | 0.560 |
+   | **a peephole machine derived from mc's** (`src/mach.mc`): immediates, the address add folded into the access, one branch per loop exit, a global's page offset in its access -- and the inlined copies' literals as loads, which were calls | 0.470 |
+   | the same machine: a cast or a `!` of a fresh boolean, and a branch on it, on every road | 0.452 |
+   | the handler reads and checks an int or string argument in place | **0.425** |
+
+   **The three columns: interpreted 1.737 ms, the module 0.425 ms (4.09x), the C twin 0.125 ms
+   (13.9x); module/C 4.87 -> 3.40.** Each part turned off alone in the final build
+   (`MCPHP_INLINE=0`, `MCPHP_PEEP=0` in the compiler's environment): see the table in the pull
+   request and `examples/decimal/README.md`.
+
+   * **Inlining** (`src/opt.mc`) copies a function's finished pre-rc tree into each caller
+     declared after it, when the function has a plain signature, no loop and at most 120 nodes.
+     Its parameters become locals of the caller (or the caller's own local, when the argument is
+     one and the callee never assigns it); a `return` becomes a store, and what follows an early
+     return moves into the branch that goes on -- or behind a flag the returns set, when the
+     return is nested under an `if` whose other branch continues. The caller's `src/rc.mc` pass
+     then counts or borrows the copy's strings by its own rule, which is why a function with a
+     loop is never copied: it would turn a borrowing caller into a counting one. Only a call
+     before which nothing but reads and arithmetic was evaluated is taken out of its statement,
+     never the right side of `&&`/`||`. A copy that moved the position re-announces the
+     caller's. `decimal.php`'s `_dec_sc`, `_dec_neg`, `_dec_coef`, `_dec_zeros`, `_dec_limb`,
+     `_dec_strip`, `_dec_scale` and `_dec_ucmp` are copies now. **The call overhead was smaller
+     than it looked**: 3.5 ns a call measured on its own, but 2% of the whole once taken out --
+     most of the cost of a helper is what it does.
+   * **The machine** (`src/mach.mc`) is mc's documented recipe (its `docs/reference/machine.md`
+     § Deriving a machine): a copy of the table in effect -- `<float>`'s over mc's, on arm64 and
+     on both x86-64 ABIs -- a few slots replaced, the rest delegated through a pristine copy. Each
+     rewrite looks at what was just emitted: a constant in the immediate field of add/sub/and/cmp
+     (`lea` on x86-64), the address add folded into the load or store offset, a small constant or
+     a global load written straight into an allocated local, `b.cond L; b M; L:` as one inverted
+     branch, a redundant `!= 0`, cast or `!` of a fresh boolean, and mc's own branch fusion on
+     every road (mc does it with `-O` only). One new form: a global's load or store carrying its
+     page offset (`adrp` + `ldr [x, :lo12:sym]`, one band of its own, 500..501, the free one in
+     mc's registry) -- every linker and mc's own `--exe` writer patch a page offset into a load by
+     its size bits. It is the largest single step because it is not about decimal at all: the
+     runtime's byte loops (trim, strspn, memchr, strtol, str_replace) and every compiled
+     function go through it. **What the machine reaches is not all frozen**: the `Ins` buffer
+     (`ins_add`, `ins_at`, `nins`, `ins_base`), mc's `I_*`/`X_*` numbering and a few of the
+     bundled machines' helpers are documented by mc as the walker's and the machine's -- § 5.
+   * **The handler** (`src/ext.mc`) reads an int or string argument's zval and checks its type
+     byte in place, and the argument count, calling `phx_chk`/`phx_arity` only to raise php's
+     error. The reading and checking calls were 5% of the module's time.
+
+   Tried and dropped, measured: a leaf function renamed onto `x0..x7` instead of saving
+   `x19..x28` (+1%: the hot runtime routines are not leaves -- each has a cold call on its
+   rarest path), and a literal `trim`/`strspn` mask that is one range of bytes read as that range
+   with `(int)` of a window taking a short road for a leading digit (0%).
+
+   **What is left, from the final profile** (`xctrace`, macos/arm64): the runtime's small string
+   routines are ~40% of the module (`php_trim_m`, `php_memcpy`, `php_spn`, `php_stoi_b`,
+   `php_memchr`, `php_str_del2`, `php_str_alloc`), each called many times per operation on ten
+   to twenty bytes, and each a function with a prologue that saves the callee-saved registers
+   its locals took; the compiled php functions ~25%, most of it the frame (spilled values: ten
+   allocatable registers) and the exception check and position after every call; the pool and
+   the count ~4%; the boundary ~4%. None of it is one change any more: the gap to the twin is the
+   algorithm's shape -- re-validating and re-parsing string operands every call, where the twin
+   parses once into digits -- paid in a language whose calls cost a prologue.
 
 2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
    through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`

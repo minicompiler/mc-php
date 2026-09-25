@@ -172,6 +172,20 @@ The soak on the same runs, a million calls in one request: usage moved 40 bytes 
 main and moves 0 now; peak moved 0 on main and 16 bytes now (e.g. linux/x86_64 usage 501 816 ->
 501 816, peak 502 024 -> 502 040).
 
+**Three columns, the core-strings batch** (2026-09-25, macos/arm64, php 8.5.10, one host, one
+sitting, seven rounds interleaved; `decimal.php` byte for byte what it was). Every gain is in the
+compiler and its runtime -- `docs/plan.md` § 7 item 1 has the profile and what each step bought:
+
+| | interpreted | the module | the C twin | module / C |
+|---|---|---|---|---|
+| zend-mm (main) | 1.737 ms | 0.609 ms (2.85x) | 0.125 ms (13.9x) | 4.87 |
+| core-strings | 1.737 ms | **0.425 ms (4.09x)** | 0.125 ms | **3.40** |
+
+Fewer strings built per call (`dec_add` 8 -> 5, `dec_div` 34 -> 14; `tests/examples.sh` gates the
+counts), the small `_dec_*` helpers copied into their callers, a peephole machine derived from
+mc's (immediates, folded offsets, one branch per loop exit), and a handler that reads and checks
+its arguments in place.
+
 ## What it cannot do yet
 
 * **A wrong TYPE** is an internal function's message in the module and a userland one

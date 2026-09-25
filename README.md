@@ -379,7 +379,7 @@ never freed, an array copies eagerly, a string is immutable.
 
 ```
 mc.toml              the mc project:  mc build -> build/mc-php
-src/*.mc             the compiler -- one mc Tier 3 module, 17 files
+src/*.mc             the compiler -- one mc Tier 3 module, 23 files
 src/mc-php*.mc       one entry per host, and src/mc-php.<target>.toml beside each
 lib/php_rt.mc        the runtime, #embed'ed into the compiler and pushed into every program
 lib/rt_host_*.mc     the runtime's system layer, one file per host, pushed ahead of it
