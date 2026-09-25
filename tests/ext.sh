@@ -409,7 +409,7 @@ cat > "$tmp/own.php" <<'EOF2'
 <?php
 if (!function_exists('alias')) { require __DIR__ . '/r.php'; }
 for ($k = 0; $k < 3; $k++) {
-    echo strlen(grow(1000)), substr(grow(300), 290), " ", alias(), " ", self_cat("ab"), "\n";
+    echo strlen(grow(1000)), substr(grow(300), 290), " ", alias(), " ", self_cat("ab"), " ", doubler("a$k", 4 + $k), "\n";
     $x = "arg$k";
     echo param($x), " ", $x, " ", same($x), same("lit"), keep_last("one", "two$k"), " ", keepers(), " ", counter("t$k"), "\n";
     try { echo thrower($k), "\n"; } catch (RuntimeException $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }

@@ -29,6 +29,14 @@ function self_cat(string $p): string {
     return $s;
 }
 
+// the same inside a loop, where the string is counted and grows in place:
+// the piece appended is the string being grown
+function doubler(string $p, int $n): string {
+    $s = $p . "";
+    for ($i = 0; $i < $n; $i++) { $s .= $s; $s = $s . "<" . $s . "|"; }
+    return $s;
+}
+
 // a parameter assigned in the body is the function's own copy
 function param(string $p): string {
     $p .= "!";
@@ -70,6 +78,7 @@ function thrower(int $at): string {
 echo strlen(grow(1000)), " ", substr(grow(1000), 990), "\n";
 echo alias(), "\n";
 echo self_cat("ab"), "\n";
+echo doubler("ab", 2), " ", strlen(doubler("xyz", 5)), " ", substr(doubler("xyz", 5), 100, 60), "\n";
 $x = "arg";
 echo param($x), " ", $x, "\n";
 echo same($x), same("lit"), keep_last("one", "two"), "\n";
