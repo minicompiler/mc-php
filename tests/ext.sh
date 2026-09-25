@@ -357,6 +357,8 @@ rm -rf "$tmp/build"
 #   offset write on the string that loop built;
 #   share(3): $k holds the same string as $s, so the first `.=` must COPY (and
 #   $k keeps "aa"), after which $s is its own again.
+#   Four strings are built in all: the two copies, str_repeat's and the
+#   answer of share -- an in-place growth builds none.
 printf '<?php\nfunction grow(int $n): int { $s = ""; for ($i = 0; $i < $n; $i++) { $s .= "x"; } $s[5] = "y"; return strlen($s) + ord($s[5]); }\nfunction share(int $n): string { $s = str_repeat("a", 2); $k = $s; for ($i = 0; $i < $n; $i++) { $s .= "b"; } return $k . " " . $s; }\n' > "$tmp/r.php"
 rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/gr.build" 2>&1; then
@@ -364,9 +366,9 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/gr.build" 2>&1; then
         -r 'echo grow(100000), " ", share(3), "\n";' 2>&1 | tr -d '\r' | tr '\n' '|')
     want=$(printf '<?php\nrequire $argv[1]; echo grow(100000), " ", share(3), "\\n";\n' > "$tmp/gi.php"; "$PHP" "$tmp/gi.php" "$tmp/r.php" | tr -d '\r')
     case "$got" in
-        "$want|mc-php stats: in place 100002, copied 2|")
+        "$want|mc-php stats: in place 100002, copied 2, strings built 4|")
             say "in place: 100002 of 100004 string writes grew or wrote the string itself, 2 copied (a literal, and a shared string) -- answers php's own" ;;
-        *) bad "in place: want '$want|mc-php stats: in place 100002, copied 2|', got '$got'" ;;
+        *) bad "in place: want '$want|mc-php stats: in place 100002, copied 2, strings built 4|', got '$got'" ;;
     esac
 else
     bad "in place: it would not build"; sed 's/^/      /' "$tmp/gr.build"

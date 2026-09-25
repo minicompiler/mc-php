@@ -170,6 +170,7 @@ uptr php_str_mk(i64 n, i64 pool) {
         // a size that wrapped negative goes to _emalloc as a huge size_t,
         // which php's memory limit refuses by name, as php_alloc's does
         s = phx_em(ZS_HDR + n + 1);
+        ph_rc_built = ph_rc_built + 1;
         st32(s + 4, ZS_GC_STRING);
     }
     if (!ph_zalloc) {

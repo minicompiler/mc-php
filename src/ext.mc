@@ -197,12 +197,29 @@ i64 ph_ext_if(i64 cond, i64 then) {
     return f;
 }
 
+// The handler's fast path, written in place: argument k's zval is at
+// ex + EXX_ARG1 (80) + k * ZVX_SIZE (16), its value in the first eight bytes
+// and its type in the low byte of the u32 at +8 (lib/php_ext.mc, whose ABI
+// gate checks the same offsets); the argument count is the u32 at
+// EXX_NUM_ARGS (44). An int and a string are read and checked there; the
+// runtime's phx_chk/phx_arity run only when the check fails, to raise php's
+// own error. Measured on examples/decimal: the reading and checking calls were
+// 5% of the module's time.
+i64 ph_ext_argz(i64 k, i64 off) {
+    return ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(80 + k * 16 + off), TY_UPTR);
+}
+
+i64 ph_ext_or(i64 fast, i64 slow) {
+    i64 n = ph_bin(ph_tok("||", 2), fast, slow, TY_U8);
+    return n;
+}
+
 // the reader that turns argument k into the mc value the php function takes
 i64 ph_ext_read(i64 pt, i64 k) {
     i64 ex = ph_ext_ident("ex", TY_UPTR);
-    if (pt == PT_INT)    return ph_c2("phx_i", ex, ph_int(k), TY_I64);
+    if (pt == PT_INT)    return ph_quiet("ld64", 1, ph_ext_argz(k, 0), 0, 0, 0, TY_I64);
+    if (pt == PT_STRING) return ph_quiet("ld64", 1, ph_ext_argz(k, 0), 0, 0, 0, ty_pstr);
     if (pt == PT_FLOAT)  return ph_c2("phx_f", ex, ph_int(k), ty_f64);
-    if (pt == PT_STRING) return ph_c2("phx_s", ex, ph_int(k), ty_pstr);
     return ph_c2("phx_b", ex, ph_int(k), TY_U8);              // bool
 }
 
@@ -245,10 +262,22 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
         st64(cv + 16, ph_int(ld64(ph_fpt + (fi * PH_MAXP + k) * 8)));
         st64(cv + 24, ph_raw(name, cstrlen(name)));
         st64(cv + 32, ph_raw(pn, cstrlen(pn)));
-        body = ph_ext_if(ph_calln("phx_chk", cv, 5, TY_I64), body);
+        i64 chk = ph_calln("phx_chk", cv, 5, TY_I64);
+        i64 pk = ld64(ph_fpt + (fi * PH_MAXP + k) * 8);
+        i64 tag = 0;
+        if (pk == PT_INT) tag = 4;                    // IS_LONG
+        if (pk == PT_STRING) tag = 6;                 // IS_STRING
+        if (tag) {
+            i64 ty = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
+            chk = ph_ext_or(ph_bin(ph_tok("==", 2), ty, ph_int(tag), TY_U8), chk);
+        }
+        body = ph_ext_if(chk, body);
     }
-    body = ph_ext_if(ph_c3("phx_arity", ph_ext_ident("ex", TY_UPTR), ph_int(np),
-                           ph_raw(name, cstrlen(name)), TY_I64), body);
+    i64 nar = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR),
+                       0, 0, 0, TY_I64);
+    body = ph_ext_if(ph_ext_or(ph_bin(ph_tok("==", 2), nar, ph_int(np), TY_U8),
+                               ph_c3("phx_arity", ph_ext_ident("ex", TY_UPTR), ph_int(np),
+                                     ph_raw(name, cstrlen(name)), TY_I64)), body);
 
     i64 pre = ph_stmt_of(ph_call("phx_enter", 0, 0, 0, 0, 0, TY_VOID));
     set_nd_next(pre, body);

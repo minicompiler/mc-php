@@ -592,7 +592,10 @@ void phx_snapshot() {
 }
 
 // MCPHP_STATS=1 in php's environment: at the end of each request, what the
-// string discipline did -- the in-place gate reads it (tests/ext.sh). Written
+// string discipline did -- how many writes were in place and how many copied,
+// and how many strings the request built at all (every _emalloc of one, a
+// copy included). tests/ext.sh's in-place gate and tests/examples.sh's count
+// of decimal's strings read it. Written
 // from a byte buffer: RSHUTDOWN runs outside a call, where a string would be
 // the module's arena and stay for good.
 i64 phx_stats = 0 - 1;
