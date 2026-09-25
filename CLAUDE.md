@@ -864,7 +864,7 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     `substr()` pieces is `php_str_catwN` over (string, start, length), the substrings never built;
     an empty side answers the other operand (php's concat_function); trim/substr/chr answer the
     shared empty and one-byte strings. `tests/g/112` + a lowering read-back in `tests/fixtures.sh`.
-  * **Inlining** (`src/opt.mc`): a plain, loop-free function of at most 120 nodes is copied, as its
+  * **Inlining** (`src/opt.mc`): a plain, loop-free function of at most 450 nodes (counted after its own inlining) is copied, as its
     finished pre-rc tree, into every caller declared after it; returns become stores (an early one
     nested under a continuing `if` goes behind a flag), parameters locals or the caller's own local,
     the copy's literal uses turned into cache loads at `ph_lit_finish` too, the caller's position
@@ -874,7 +874,8 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     fresh boolean's cast/`!`/branch, a lone constant or global load written into its local, and a
     global's access carrying its page offset (band 500..501). `MCPHP_PEEP=0` turns it off.
     `tests/g/114` + a read-back of both machines' dumps. It reaches mc names that are documented
-    but not frozen (the `Ins` buffer, `I_*`/`X_*`): `docs/plan.md` § 5, reported.
+    but not frozen (the `Ins` buffer, `I_*`/`X_*`), so it is on only for mc 1.1-1.3 (`mc_version()`):
+    `docs/plan.md` § 5, reported.
   * **The handler** (`src/ext.mc`) reads and checks an int or string argument in place.
   Measured and dropped: a leaf's locals on `x0..x7` (+1%), range masks for trim/strspn (0%).
   The grid: `tests/lang` 104, `Zend/tests` 766, strings 272, plain and `MCPHP_RC=check`, all 30

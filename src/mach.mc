@@ -587,8 +587,20 @@ void px_fill(uptr tab, uptr orig, uptr src, uptr pro) {
     machine_slot(tab, MTASK_JNZ,      &px_jnz);
 }
 
+// The derivation reads the Ins record, opcode numbers and machine helpers
+// that mc's tests/golden/surface.txt does not freeze, so it is enabled only on
+// the mc lines it was validated on (tests/fixtures.sh's peephole read-back,
+// run on all five CI legs). On any other mc the bundled machines stay and the
+// compiled code is what the core writes; that read-back then fails, which is
+// the signal to validate the new line and add it here.
+i64 pm_validated() {
+    uptr v = xstrdup(mc_version(), 4);
+    return str_eq(v, "1.1.") || str_eq(v, "1.2.") || str_eq(v, "1.3.");
+}
+
 // derived from whatever "arm64" is now (<float>'s machine, over mc's)
 void ph_mach_init() {
+    if (!pm_validated()) return;
     pm_env();
     pm_tab  = xalloc(MTASK_COUNT * 8);
     pm_orig = xalloc(MTASK_COUNT * 8);

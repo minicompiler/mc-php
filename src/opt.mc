@@ -117,7 +117,7 @@ void ph_opt_fn(i64 f) {
 // order, unless the argument is a local of the caller or an integer that the
 // callee never assigns. The position a statement announced is announced again
 // after the copy, which announced its own.
-#define PHI_MAXN   700                // nodes in a callee's body, at most
+#define PHI_MAXN   450                // nodes in a callee's body, its own inlined copies included
 uptr phi_name;                        // the candidates: mangled name, FUNC copy
 uptr phi_fn;
 i64  phi_n;
@@ -488,6 +488,20 @@ i64 phi_intrinsic(uptr c) {
     return str_eq(c + 2, "8") || str_eq(c + 2, "16") || str_eq(c + 2, "32") || str_eq(c + 2, "64");
 }
 
+// a copy binds each parameter to an argument, so only a call that passes
+// exactly as many as the candidate declares is copied (mc-php refuses any
+// other count of a plain signature while lowering, and the rest keep the call)
+i64 phi_len(i64 n) {
+    i64 k = 0;
+    loop { if (!n) break; k = k + 1; n = nd_next(n); }
+    return k;
+}
+
+i64 phi_arity_ok(i64 c) {
+    i64 fc = ld64(phi_fn + phi_find(nd_name(c)) * 8);
+    return phi_len(nd_a(c)) == phi_len(nd_a(fc));
+}
+
 void phi_seek(i64 hold, i64 field, i64 n, i64 sel) {
     if (!n) return;
     if (phi_hit) return;
@@ -517,7 +531,7 @@ void phi_seek(i64 hold, i64 field, i64 n, i64 sel) {
         if (phi_hit) return;
         uptr nm = nd_name(n);
         if (phi_intrinsic(nm)) return;
-        if (sel && !d0 && phi_find(nm) >= 0) { phi_hit = n; phi_hold = hold; phi_field = field; return; }
+        if (sel && !d0 && phi_find(nm) >= 0 && phi_arity_ok(n)) { phi_hit = n; phi_hold = hold; phi_field = field; return; }
         phi_dirty = 1;
         return;
     }

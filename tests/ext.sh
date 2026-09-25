@@ -323,8 +323,11 @@ rm -rf "$tmp/build"
 # 48 MiB arena for the life of the server (docs/plan.md § 7). The second line
 # of each response is an output buffer the MODULE opens and leaves open, which
 # is php's own stack: the script's echo after the call goes into it too.
-printf '<?php\nfunction counter(): int { static $n = 0; $n++; return $n; }\nfunction remember(string $s): string { global $last; $prev = $last ?? ""; $last = $s; return $prev; }\nfunction big(): int { static $keep = ""; $keep = str_repeat("x", 4 << 20); return strlen($keep); }\nfunction open_ob(): int { echo "0"; ob_start(); echo "A"; ob_start(); echo "B"; return 1; }\nfunction inner_ob(): string { ob_start(); echo "in"; return ob_get_clean() . "!"; }\nfunction lens(): string { ob_start(); echo "abcd"; $n = ob_get_length(); ob_end_clean(); return var_export($n, true) . " " . var_export(ob_get_length(), true); }\n' > "$tmp/r.php"
-printf '<?php\nif (!function_exists("counter")) { require __DIR__ . "/r.php"; }\necho counter(), counter(), " [", remember("a"), remember("b"), "] ", big(), " ", inner_ob(), "\\n";\necho lens(), "\\n";\n$n = open_ob();\necho "C$n\\n";\n' > "$tmp/router.php"
+# shared() answers the runtime's shared empty and one-byte strings, which are
+# built on first use -- in the first request, whose pinned call has the arena
+# put back as MINIT left it at its end; the other nineteen must still see them.
+printf '<?php\nfunction counter(): int { static $n = 0; $n++; return $n; }\nfunction remember(string $s): string { global $last; $prev = $last ?? ""; $last = $s; return $prev; }\nfunction big(): int { static $keep = ""; $keep = str_repeat("x", 4 << 20); return strlen($keep); }\nfunction open_ob(): int { echo "0"; ob_start(); echo "A"; ob_start(); echo "B"; return 1; }\nfunction inner_ob(): string { ob_start(); echo "in"; return ob_get_clean() . "!"; }\nfunction lens(): string { ob_start(); echo "abcd"; $n = ob_get_length(); ob_end_clean(); return var_export($n, true) . " " . var_export(ob_get_length(), true); }\nfunction shared(int $k): string { $e = ltrim(str_repeat("0", $k), "0"); return "<" . $e . substr("ab", 5) . chr(65 + $k) . ">" . strlen($e); }\n' > "$tmp/r.php"
+printf '<?php\nif (!function_exists("counter")) { require __DIR__ . "/r.php"; }\necho counter(), counter(), " [", remember("a"), remember("b"), "] ", big(), " ", inner_ob(), "\\n";\necho lens(), " ", shared(3), shared(0), "\\n";\n$n = open_ob();\necho "C$n\\n";\n' > "$tmp/router.php"
 rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/rq.build" 2>&1; then
     tmpn=$(cygpath -m "$tmp" 2>/dev/null || echo "$tmp")
@@ -332,7 +335,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/rq.build" 2>&1; then
     "$PHP" tests/ext/requests.php "$tmpn/router.php" 20 > "$tmp/rq.i" 2>&1; qi=$?
     want=$(sort -u "$tmp/rq.i" | tr -d '\r' | tr '\n' '|')
     if [ "$qn" = 0 ] && [ "$qi" = 0 ] && cmp -s "$tmp/rq.n" "$tmp/rq.i" \
-       && [ "$want" = "0ABC1|12 [a] 4194304 in!|4 false|" ] \
+       && [ "$want" = "0ABC1|12 [a] 4194304 in!|4 false <D>0<A>0|" ] \
        && [ "$(wc -l < "$tmp/rq.n" | tr -d ' ')" = 60 ]; then
         say "requests: 20 through php -S, every one the interpreted source's (statics reset, ob levels php's own)"
     else

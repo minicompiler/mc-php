@@ -1502,7 +1502,10 @@ In the order the measurements put them, each with the number that says why:
    request and `examples/decimal/README.md`.
 
    * **Inlining** (`src/opt.mc`) copies a function's finished pre-rc tree into each caller
-     declared after it, when the function has a plain signature, no loop and at most 120 nodes.
+     declared after it, when the function has a plain signature, no loop and at most 450 nodes --
+     counted after its own calls were inlined, so a chain of candidates cannot grow past it. The
+     bound is measured: 120 nodes 0.449 ms, 250 0.449, 450 0.434, 700 0.430, the module 482792,
+     482792, 499304 and 515816 bytes.
      Its parameters become locals of the caller (or the caller's own local, when the argument is
      one and the callee never assigns it); a `return` becomes a store, and what follows an early
      return moves into the branch that goes on -- or behind a flag the returns set, when the
@@ -1529,7 +1532,10 @@ In the order the measurements put them, each with the number that says why:
      runtime's byte loops (trim, strspn, memchr, strtol, str_replace) and every compiled
      function go through it. **What the machine reaches is not all frozen**: the `Ins` buffer
      (`ins_add`, `ins_at`, `nins`, `ins_base`), mc's `I_*`/`X_*` numbering and a few of the
-     bundled machines' helpers are documented by mc as the walker's and the machine's -- § 5.
+     bundled machines' helpers are documented by mc as the walker's and the machine's -- § 5. So
+     the derivation is enabled only on the mc lines it was validated on (1.1, 1.2 and 1.3, read
+     from `mc_version()`); on any other the bundled machines stay, and `tests/fixtures.sh`'s
+     peephole read-back fails, which is the signal to validate the new line.
    * **The handler** (`src/ext.mc`) reads an int or string argument's zval and checks its type
      byte in place, and the argument count, calling `phx_chk`/`phx_arity` only to raise php's
      error. The reading and checking calls were 5% of the module's time.
