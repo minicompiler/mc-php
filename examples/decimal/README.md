@@ -34,7 +34,7 @@ digit -- `dec_round("0.125", 2)` is `0.12`, `dec_round("0.135", 2)` is `0.14`,
 | the differential | `check.php` runs twice -- with `decimal.so` loaded, and with `decimal.php` required -- and the two must print the same bytes on both streams and exit the same: 60 lines, every tie in both signs, the four operations at three scales, a ledger, and the seven wrong VALUES |
 | bcmath | `bccheck.php`, where the host php has bcmath: 1219 results of the module against bcmath's exact result rounded by `bcround(..., RoundingMode::HalfEven)` -- add, sub and mul exact at the sum of the scales, a quotient taken to 80 digits first. It ran, 0 wrong, on macos/arm64, windows/x86_64 and windows/arm64 in CI; the `php:8.5-alpine` image the Linux legs use has no bcmath, and the gate says `SKIPPED` there |
 | what is published | `get_extension_funcs("decimal")` is the six `dec_*` names: the `_dec_*` helpers are module-private (a leading underscore, `docs/php-extension.md` § What is published) |
-| the soak | `soak.php`: **1 000 000** `dec_add` calls in ONE request, and `memory_get_peak_usage()` must not move (the answer must be `12500000.00`) |
+| the soak | `soak.php`: **1 000 000** `dec_add` calls in ONE request after a thousand warm-up calls, and `memory_get_usage()` and `memory_get_peak_usage()` must each move less than a kilobyte (the answer must be `12500000.00`) |
 | the C twin | `c/decimal.c` -- the same six functions written as an ordinary C extension, built with `php-config` and `cc` where the host has both, and graded by the same `check.php` (and, by hand, `bccheck.php`: 1219, 0 wrong). Where there is no `php-config` or no `cc` -- the Linux containers, the Windows runners -- the gate says `SKIPPED` and the bench has two columns |
 | the bench row | `bench.php`: three ten-year loan schedules, ~1500 calls a run, a warm-up and the best of nine per process, the interpreted, compiled and C-twin processes interleaved three times. The answers must be equal; the ratios are printed and not gated |
 
@@ -133,7 +133,28 @@ What still separates the module from the twin is mostly the ALGORITHM both php a
 a number is a string, so every operation re-validates and re-parses its operands and makes new
 strings for its intermediate values, where the twin parses each operand once into digits and
 writes into one buffer; the rest is named in `docs/plan.md` § 7 (mc's code for a leaf function,
-§ 5; the call's memory zeroed on return; the result copied out to Zend).
+§ 5).
+
+**Three columns, the zend-mm batch** (2026-09-24, macos/arm64, php 8.5.10, one host, one sitting,
+five rounds interleaved, main's module and this batch's side by side; `decimal.php` byte for byte
+what it was). Every string a call builds is now php's own `zend_string` -- `_emalloc`ed,
+refcounted, `_efree`d when its last reference goes -- and a result goes back to php as that same
+string, where main bumped strings through a chunk it zeroed on every return and copied the result
+out (`docs/php-extension.md` § The memory):
+
+| | interpreted | the module | the C twin | module / C |
+|---|---|---|---|---|
+| main (decimal-c) | 1.70-1.79 ms | 0.524 ms (3.25x) | 0.125 ms (13.6x) | 4.19 |
+| zend-mm | 1.70-1.79 ms | **0.606 ms (2.81x)** | 0.125 ms | **4.85** |
+
+It is SLOWER on this workload, and `docs/plan.md` § 7 item 1 has the profile: memory is 18.8% of
+the module's time against main's 15.0%, because each of the eleven or so strings a `dec_add`
+builds costs an `_emalloc` and an `_efree` -- php's own price for a string, which the twin avoids
+by allocating two or three times a call. What it buys: no chunk zeroed on return, no result
+copied, a loop inside one call that keeps a bounded peak, `.=` in place, and a leak check that
+names nothing (`tests/leaks.sh`, a debug php). The soak, 1 000 000 calls in one request: usage
+517 336 -> 517 336 bytes, peak 517 544 -> 517 560 -- the 16 bytes are the call's temporaries
+growing with the accumulator's three extra digits (`soak.php` says why).
 
 ## What it cannot do yet
 
