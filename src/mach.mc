@@ -26,7 +26,10 @@
 //   P4  at a label: `b.cond L; b M; L:` is `b.!cond M; L:`, and a branch to
 //       the label itself (nothing but labels between) is dropped;
 //   P5  `cmp x, #0; cset x, ne` right after a cset into x is dropped: the
-//       value is already 0 or 1;
+//       value is already 0 or 1, and so is an integer cast of it (P7);
+//   P8  `!b` right after the cset that made b flips its condition instead;
+//   P9  a branch on that boolean is a branch on the flags (P8 and P9 are mc's
+//       own P2 and P1, which it applies with -O only; here they apply always);
 //   P6  a global's load or store is `adrp x, sym; ldr y, [x, :lo12:sym]`, not
 //       `adrp; add; ldr [x]`: the page offset goes into the access itself.
 //       This one IS a new form, the access with a PAGEOFF12 relocation on it,
@@ -39,7 +42,8 @@
 //
 // The x86-64 half (both ABIs, over <float>'s) is the same idea in that
 // machine's forms: `lea rd, [rl + k]` is the add or sub of a constant, and a
-// load or a store takes the lea's offset; P4 with jcc/jmp. x86 has no compare
+// load or a store takes the lea's offset; P4 with jcc/jmp; P7, P8 and P9
+// after the setcc/movzx pair. x86 has no compare
 // with an immediate in mc's table and its mov of a constant into a local is
 // already retargeted, so P1's cmp half, P3 and P5 have no x86 twin.
 
@@ -226,6 +230,49 @@ void pm_bool(i64 d) {
     callp(pm_of(MTASK_BOOL), d);
 }
 
+// P7: an integer cast of a value a cset just made (0 or 1 fits every width)
+void pm_cast(i64 ty, i64 d) {
+    i64 k = type_kind(ty);
+    if (!pm_off && pm_int(d) && (k == TK_INT || k == TK_SINT) && in_reg(d) && dalias_at(d) < 0) {
+        i64 j = pm_last();
+        if (j >= 0) {
+            uptr e = ins_at(j);
+            if (ins_op(e) == I_CSET && ins_rd(e) == REG_BASE + d) return;
+        }
+    }
+    callp(pm_of(MTASK_CAST), ty, d);
+}
+
+// P8: `!b` right after the cset that made b is the cset of the other
+// condition -- mc does it on the optimised road only (its own P2)
+void pm_un(i64 op, i64 d) {
+    if (!pm_off && op == MUN_LNOT && pm_int(d) && in_reg(d) && dalias_at(d) < 0) {
+        i64 j = pm_last();
+        if (j >= 0) {
+            uptr e = ins_at(j);
+            if (ins_op(e) == I_CSET && ins_rd(e) == REG_BASE + d) { set_ins_imm(e, ins_imm(e) ^ 1); return; }
+        }
+    }
+    callp(pm_of(MTASK_UN), op, d);
+}
+
+// P9: a branch on the boolean a cset just made is a branch on the flags --
+// mc's own P1, which it applies on the optimised road only
+i64 pm_fuse(i64 d, i64 l, i64 take) {
+    if (pm_off || !pm_int(d) || !in_reg(d) || dalias_at(d) >= 0) return 0;
+    i64 j = pm_last();
+    if (j < 0) return 0;
+    uptr e = ins_at(j);
+    if (ins_op(e) != I_CSET || ins_rd(e) != REG_BASE + d) return 0;
+    i64 cc = ins_imm(e);
+    if (!take) cc = cc ^ 1;
+    set_ins_op(e, I_NOP);
+    ins_add(I_BCOND, 0, 0, 0, cc, l, 0);
+    return 1;
+}
+void pm_jz(i64 d, i64 l)  { if (!pm_fuse(d, l, 0)) callp(pm_of(MTASK_JZ), d, l); }
+void pm_jnz(i64 d, i64 l) { if (!pm_fuse(d, l, 1)) callp(pm_of(MTASK_JNZ), d, l); }
+
 i64 pm_is_branch(i64 op) { return op == I_BCOND || op == I_CBZ || op == I_CBNZ; }
 
 // P4
@@ -307,7 +354,9 @@ void pm_dump(uptr e) {
     if (mem_wreg(mi)) { out_str(1, "w"); out_num(1, ins_rd(e)); } else d_reg(ins_rd(e));
     out_str(1, ", [");
     d_reg(ins_rn(e));
-    out_str(1, ", :lo12:sym]\n");
+    out_str(1, ", ");
+    out_str(1, sym_name(sym_at(ins_sym(e))));
+    out_str(1, "@PAGEOFF]\n");
 }
 
 void pm_prologue() {
@@ -464,6 +513,52 @@ void px_label(i64 l) {
     callp(px_of(MTASK_LABEL), l);
 }
 
+// P7 on x86-64: the setcc/movzx pair already made a 0 or a 1
+void px_cast(i64 ty, i64 d) {
+    i64 k = type_kind(ty);
+    if (!pm_off && pm_int(d) && (k == TK_INT || k == TK_SINT) && x86_in_reg(d) && xalias_at(d) < 0) {
+        i64 j = px_last();
+        if (j > ins_base) {
+            uptr z = ins_at(j);
+            uptr c = ins_at(j - 1);
+            if (ins_op(z) == X_MOVZXB && ins_rd(z) == XREG_BASE + d && ins_rn(z) == XREG_BASE + d
+                && ins_op(c) == X_SETCC && ins_rd(c) == XREG_BASE + d) return;
+        }
+    }
+    callp(px_of(MTASK_CAST), ty, d);
+}
+
+void px_un(i64 op, i64 d) {
+    if (!pm_off && op == MUN_LNOT && pm_int(d) && x86_in_reg(d) && xalias_at(d) < 0) {
+        i64 j = px_last();
+        if (j > ins_base) {
+            uptr z = ins_at(j);
+            uptr c = ins_at(j - 1);
+            if (ins_op(z) == X_MOVZXB && ins_rd(z) == XREG_BASE + d && ins_rn(z) == XREG_BASE + d
+                && ins_op(c) == X_SETCC && ins_rd(c) == XREG_BASE + d) { set_ins_imm(c, ins_imm(c) ^ 1); return; }
+        }
+    }
+    callp(px_of(MTASK_UN), op, d);
+}
+
+i64 px_fuse(i64 d, i64 l, i64 take) {
+    if (pm_off || !pm_int(d) || !x86_in_reg(d) || xalias_at(d) >= 0) return 0;
+    i64 j = px_last();
+    if (j <= ins_base) return 0;
+    uptr z = ins_at(j);
+    uptr c = ins_at(j - 1);
+    if (ins_op(z) != X_MOVZXB || ins_rd(z) != XREG_BASE + d || ins_rn(z) != XREG_BASE + d) return 0;
+    if (ins_op(c) != X_SETCC || ins_rd(c) != XREG_BASE + d) return 0;
+    i64 cc = ins_imm(c);
+    if (!take) cc = cc ^ 1;
+    set_ins_op(z, X_NOP);
+    set_ins_op(c, X_NOP);
+    ins_add(X_JCC, 0, 0, 0, cc, l, 0);
+    return 1;
+}
+void px_jz(i64 d, i64 l)  { if (!px_fuse(d, l, 0)) callp(px_of(MTASK_JZ), d, l); }
+void px_jnz(i64 d, i64 l) { if (!px_fuse(d, l, 1)) callp(px_of(MTASK_JNZ), d, l); }
+
 void px_prologue_at(uptr orig) {
     px_cur = orig;
     i64 d = 0;
@@ -486,6 +581,10 @@ void px_fill(uptr tab, uptr orig, uptr src, uptr pro) {
     machine_slot(tab, MTASK_LOAD,     &px_load);
     machine_slot(tab, MTASK_STORE,    &px_store);
     machine_slot(tab, MTASK_LABEL,    &px_label);
+    machine_slot(tab, MTASK_CAST,     &px_cast);
+    machine_slot(tab, MTASK_UN,       &px_un);
+    machine_slot(tab, MTASK_JZ,       &px_jz);
+    machine_slot(tab, MTASK_JNZ,      &px_jnz);
 }
 
 // derived from whatever "arm64" is now (<float>'s machine, over mc's)
@@ -509,6 +608,10 @@ void ph_mach_init() {
     machine_slot(pm_tab, MTASK_REG_STORE, &pm_reg_store);
     machine_slot(pm_tab, MTASK_LABEL,     &pm_label);
     machine_slot(pm_tab, MTASK_BOOL,      &pm_bool);
+    machine_slot(pm_tab, MTASK_CAST,      &pm_cast);
+    machine_slot(pm_tab, MTASK_UN,        &pm_un);
+    machine_slot(pm_tab, MTASK_JZ,        &pm_jz);
+    machine_slot(pm_tab, MTASK_JNZ,       &pm_jnz);
     machine_slot(pm_tab, MTASK_GLOBAL_LOAD,  &pm_global_load);
     machine_slot(pm_tab, MTASK_GLOBAL_STORE, &pm_global_store);
     machine_slot(pm_tab, MTASK_INS_SIZE,     &pm_ins_size);

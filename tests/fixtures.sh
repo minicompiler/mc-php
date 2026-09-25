@@ -177,6 +177,28 @@ else
     echo "  FAIL  inlining: g/113's run() still calls: $il(want only name=f_fact)"
     fail=1
 fi
+# src/mach.mc's peepholes, read back on BOTH machines whatever the host (the
+# dump takes --machine=): in g/114's sums() a constant that fits is the
+# immediate (4095) and one that does not stays a register (4096), `$i < $n`
+# feeding its loop's exit is one conditional branch, and a global's store
+# carries its page offset. The differential passes without any of it.
+set -- $("$MCPHP_BIN" --machine=arm64 --dump-asm $P/g/114-peephole.php 2>&1 | awk '
+    /^_/ { u = ($0 == "_f_sums:") }
+    u && /add x9, x9, #4095$/ { a++ } u && /movz x10, #4096$/ { b++ }
+    u && /cmp x9, x10$/ { getline; if ($1 == "b.ge") c++ }
+    /@PAGEOFF\]$/ { d++ }
+    END { print a + 0, b + 0, c + 0, (d > 0) }')
+set -- "$@" $("$MCPHP_BIN" --machine=x86_64 --dump-asm $P/g/114-peephole.php 2>&1 | awk '
+    /^_/ { u = ($0 == "_f_sums:") }
+    u && /lea r8, \[r8\+4095\]$/ { a++ } u && /lea r8, \[r8-4096\]$/ { b++ }
+    u && /cmp r8, r9$/ { getline; if ($1 == "jge") c++ }
+    END { print a + 0, b + 0, c + 0 }')
+if [ "$*" = "1 1 1 1 1 1 1" ]; then
+    echo "  peephole: g/114 has its immediates, one branch per loop exit and a global's page offset, on arm64 and x86-64"
+else
+    echo "  FAIL  peephole: g/114's dump reads $* (want 1 1 1 1 1 1 1: arm64 add #4095, movz #4096, b.ge, @PAGEOFF]; x86-64 lea +4095, lea -4096, jge)"
+    fail=1
+fi
 # The one place the packed lowering is NOT php: an int that overflows on an
 # element. php makes a float; a native int cannot hold one, so it is a named
 # ArithmeticError and never a wrapped int. Not a differential -- php's answer
