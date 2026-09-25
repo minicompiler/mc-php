@@ -72,8 +72,8 @@ then
     "$tmp/abi" > "$tmp/abi.txt"
     n=0
     while read -r name val; do
-        mine=$(sed -n "s/^#define  *$name  *\([0-9][0-9]*\).*/\1/p" lib/php_ext.mc | head -1)
-        [ -n "$mine" ] || { bad "layout: lib/php_ext.mc has no $name"; continue; }
+        mine=$(sed -n "s/^#define  *$name  *\([0-9][0-9]*\).*/\1/p" lib/php_ext.mc lib/php_rt.mc | head -1)
+        [ -n "$mine" ] || { bad "layout: neither lib/php_ext.mc nor lib/php_rt.mc has $name"; continue; }
         n=$((n + 1))
         [ "$mine" = "$val" ] || bad "layout $name: php_ext.mc says $mine, the header says $val"
     done < "$tmp/abi.txt"
@@ -341,6 +341,92 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/rq.build" 2>&1; then
     fi
 else
     bad "requests: it would not build"; sed 's/^/      /' "$tmp/rq.build"
+fi
+rm -rf "$tmp/build"
+
+# --- 11. a refcount-1 string grows in place --------------------------------
+# php's concat_function extends the left operand in place (zend_string_extend,
+# which is _erealloc) when it is the result and nobody else holds it, and a
+# string offset write does the same; any other string is copied first. The
+# module does both now (lib/php_rt.mc § who owns a string). The runtime counts
+# which way each `.=` and `$s[$i] =` went and prints the two numbers at the
+# end of the request when MCPHP_STATS=1 is in php's environment -- so this
+# counts reallocations against copies rather than timing anything.
+#   grow(100000): the first `.=` copies the literal "" (a literal is the
+#   module's, never written), the other 99 999 are in place, and so is the
+#   offset write on the string that loop built;
+#   share(3): $k holds the same string as $s, so the first `.=` must COPY (and
+#   $k keeps "aa"), after which $s is its own again.
+printf '<?php\nfunction grow(int $n): int { $s = ""; for ($i = 0; $i < $n; $i++) { $s .= "x"; } $s[5] = "y"; return strlen($s) + ord($s[5]); }\nfunction share(int $n): string { $s = str_repeat("a", 2); $k = $s; for ($i = 0; $i < $n; $i++) { $s .= "b"; } return $k . " " . $s; }\n' > "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/gr.build" 2>&1; then
+    got=$(MCPHP_STATS=1 "$PHP" -d extension="$tmp/build/r.$sx" \
+        -r 'echo grow(100000), " ", share(3), "\n";' 2>&1 | tr -d '\r' | tr '\n' '|')
+    want=$(printf '<?php\nrequire $argv[1]; echo grow(100000), " ", share(3), "\\n";\n' > "$tmp/gi.php"; "$PHP" "$tmp/gi.php" "$tmp/r.php" | tr -d '\r')
+    case "$got" in
+        "$want|mc-php stats: in place 100002, copied 2|")
+            say "in place: 100002 of 100004 string writes grew or wrote the string itself, 2 copied (a literal, and a shared string) -- answers php's own" ;;
+        *) bad "in place: want '$want|mc-php stats: in place 100002, copied 2|', got '$got'" ;;
+    esac
+else
+    bad "in place: it would not build"; sed 's/^/      /' "$tmp/gr.build"
+fi
+rm -rf "$tmp/build"
+
+# --- 12. a loop inside ONE call keeps a bounded high-water mark ---------------
+# Each iteration builds two 1 KB strings that the next iteration no longer
+# reads. A temporary dies at the top of the next iteration and a variable's old
+# string when it is overwritten, so 100 000 iterations in one call leave php's
+# PEAK where one iteration puts it. The module used to bump every string of a
+# call through its chunk until the call returned: 200 MB for this loop, past
+# php's 128 MiB memory_limit.
+printf '<?php\nfunction churn(int $n): int { $t = 0; for ($i = 0; $i < $n; $i++) { $s = str_repeat("y", 1000) . $i; $t += strlen($s); } return $t; }\n' > "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/ch.build" 2>&1; then
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" \
+        -r 'churn(10); $p = memory_get_peak_usage(); $t = churn(100000); printf("%d %d", $t, memory_get_peak_usage() - $p);' 2>&1 | tr -d '\r')
+    set -- $got
+    if [ "${1:-}" = 100488890 ] && [ "${2:-999999}" -lt 8192 ]; then
+        say "one call: 100000 iterations that each build two 1 KB strings, php's peak moved $2 bytes"
+    else
+        bad "one call: want 100488890 and a peak that moved under 8 KiB, got $got"
+    fi
+else
+    bad "one call: it would not build"; sed 's/^/      /' "$tmp/ch.build"
+fi
+rm -rf "$tmp/build"
+
+# --- 13. the ownership shapes, in the module as interpreted ----------------
+# tests/g/111-string-ownership.php's functions compiled into a module and
+# called from php, several times, against the same source interpreted: a
+# second name on a string, a string appended to itself, a parameter the body
+# writes, an argument handed straight back, strings kept by an array, a
+# closure and a static, and an exception thrown from the middle of a loop that
+# builds strings. A string freed under a live name, or written through a name
+# that shares it, prints something else.
+{ printf '<?php\n'; awk '/^echo /{exit} /^function /{p=1} p' tests/g/111-string-ownership.php; } > "$tmp/r.php"
+cat > "$tmp/own.php" <<'EOF2'
+<?php
+if (!function_exists('alias')) { require __DIR__ . '/r.php'; }
+for ($k = 0; $k < 3; $k++) {
+    echo strlen(grow(1000)), substr(grow(300), 290), " ", alias(), " ", self_cat("ab"), " ", doubler("a$k", 4 + $k), "\n";
+    $x = "arg$k";
+    echo param($x), " ", $x, " ", same($x), same("lit"), keep_last("one", "two$k"), " ", keepers(), " ", counter("t$k"), "\n";
+    try { echo thrower($k), "\n"; } catch (RuntimeException $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+}
+EOF2
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/ow.build" 2>&1; then
+    "$PHP" -d extension="$tmp/build/r.$sx" "$tmp/own.php" > "$tmp/ow.n" 2>&1; on=$?
+    "$PHP" "$tmp/own.php" > "$tmp/ow.i" 2>&1; oi=$?
+    if [ "$on" = "$oi" ] && cmp -s "$tmp/ow.n" "$tmp/ow.i"; then
+        say "ownership: $(wc -l < "$tmp/ow.n" | tr -d ' ') lines of aliasing, self-appends and kept strings, byte for byte php's own"
+    else
+        bad "ownership: the module (exit $on) and the interpreted source (exit $oi) differ"
+        diff "$tmp/ow.i" "$tmp/ow.n" | head -8 | sed 's/^/      /'
+    fi
+else
+    bad "ownership: it would not build"; sed 's/^/      /' "$tmp/ow.build"
 fi
 rm -rf "$tmp/build"
 

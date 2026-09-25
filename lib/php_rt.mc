@@ -43,9 +43,12 @@ void php_die(uptr msg, i64 n) { php_flush(); write(2, msg, n); exit(255); }
 // ---- the allocation seam --------------------------------------------------
 // ONE entry and two implementations, chosen by road. A program -- and an
 // extension's MINIT -- bumps the arena. An extension CALL sets ph_zalloc to
-// its Zend allocator (lib/php_ext.mc), which the call frees in one sweep when
-// it returns: that is what keeps a million calls in one request bounded, and
-// the program road never names a Zend symbol.
+// its Zend allocator (lib/php_ext.mc): the zvals, arrays and objects a call
+// builds are bumped through a Zend chunk the call frees when it returns,
+// which keeps a million calls in one request bounded, and the program road
+// never names a Zend symbol. STRINGS are not in that chunk: on the extension
+// road each one is a zend_string of its own with php's refcount (the next
+// section).
 //
 // A call that writes state which outlives it -- a static, a global, a
 // constant, a handler, a class, a file table row -- PINS itself: its blocks
@@ -53,6 +56,10 @@ void php_die(uptr msg, i64 n) { php_flush(); write(2, msg, n); exit(255); }
 // state is put back as MINIT left it (php_request_reset). Every such write
 // calls php_pin; a write that does not is a use-after-free, which is why the
 // list of them is short and each one says so.
+//
+// NOTHING is zeroed for a caller: the home chunk is reused call after call and
+// an _emalloc block is whatever the allocator had. Every allocation site
+// writes what it reads (the audit is docs/php-extension.md § The memory).
 #define PH_ZBIG 4096                // a block bigger than this is never bumped: it gets its own
 uptr ph_zalloc;                     // the slow path; set = inside an extension call
 uptr ph_zcur;                       // the Zend chunk the call is bumping through
@@ -81,23 +88,184 @@ uptr php_alloc(i64 n) {
 // 0 refcount u32 | 4 type_info u32 | 8 h u64 | 16 len u64 | 24 val[]
 #define ZS_HDR 24
 
-uptr php_str_alloc(i64 n) {
-    // php_alloc's bump inlined for the one allocation every string makes:
-    // a call less per string on the extension road (the arena road, and a
-    // block that does not fit, take php_alloc)
+// ---- who owns a string (docs/php-extension.md § The memory) -------------
+// php's own rule, on the EXTENSION road: a string built inside a call is ONE
+// _emalloc block laid as a zend_string, refcount 1, GC_STRING, and it is
+// released -- _efree at zero -- when the last reference goes. What holds a
+// reference:
+//   * a TEMPORARY -- what a runtime call answered and nobody took yet: the
+//     POOL below, one reference each, from the building function's entry mark
+//     up. The compiled code drains its own part at the top of every loop
+//     iteration and on every return, which is php's own point of view: a
+//     temporary dies once the statement that used it is over;
+//   * in a function that LOOPS, a php variable of type string, a string
+//     parameter the body assigns, and the compiler's own string temporaries:
+//     a COUNTED SLOT. A store takes the new value's reference (the pool's,
+//     when it is the temporary on top) and releases the old value's, and the
+//     function releases every slot on its way out. A function with no loop
+//     never drains before it returns, so its locals BORROW from the pool and
+//     count nothing (src/rc.mc writes all of it, in place);
+//   * a zval, an array key, a class entry, a file row: those live in the
+//     call's chunk (the section above) and are not counted, so a string put
+//     into one is ESCAPED -- one more reference, on a list the call releases
+//     when its chunk is freed (or at RSHUTDOWN, for a call that pinned).
+// A string that is not ours to free -- a literal, $s[$i]'s one-byte strings,
+// anything MINIT built in the module's arena -- carries IS_STR_INTERNED
+// (GC_IMMUTABLE): nobody counts it, nobody frees it, nobody writes into it,
+// and php, handed one, treats it as interned too. On the PROGRAM road every
+// string is the arena's and carries the same flag, so all of this is inert
+// there and the compiler does not even emit the counted stores -- unless the
+// program was compiled with MCPHP_RC=check (src/rc.mc), which counts arena
+// strings as the extension road counts Zend ones and POISONS a string that
+// reaches zero instead of freeing it: that is how the phpt grid grades this
+// discipline, which it otherwise never runs (a php extension has no grid).
+#define ZS_GC_STRING 22             // GC_STRING: IS_STRING | GC_NOT_COLLECTABLE
+#define ZS_INTERNED  64             // IS_STR_INTERNED (GC_IMMUTABLE)
+#define ZS_PERSIST   128            // IS_STR_PERSISTENT (GC_PERSISTENT): pefree'd, not efree'd
+#define ZS_MODULE    86             // GC_STRING | IS_STR_INTERNED: module memory
+#define ZS_DEAD      32000          // check mode: a string that reached zero (no 64, no 128)
+
+// _emalloc, _efree, _erealloc and free(3): lib/php_ext.mc defines these four
+// on the extension road, lib/php_prog.mc on the program road (where they are
+// never reached). Called directly: they are the hottest calls on that road.
+uptr phx_em(i64 n);
+void phx_ef(uptr p);
+uptr phx_er(uptr p, i64 n);
+void phx_pf(uptr p);
+i64  ph_rcchk;                      // MCPHP_RC=check: arena strings are counted, and poisoned at zero
+uptr ph_pool;                       // the temporaries: one reference each
+i64  ph_pn;
+i64  ph_pcap;
+uptr ph_esc;                        // the escaped strings: one reference each
+i64  ph_en;
+i64  ph_ecap;
+i64  ph_rc_inplace;                 // `.=` and `$s[$i] =` that wrote into the string itself,
+i64  ph_rc_copied;                  // and the ones that had to copy it (MCPHP_STATS)
+
+// a list's storage: Zend's inside a call (freed at RSHUTDOWN), the arena in
+// check mode (a program)
+uptr php_rc_grow(uptr old, i64 n, i64 cap) {
+    uptr nb = 0;
+    if (ph_zalloc) nb = phx_em(cap * 8);
+    if (!ph_zalloc) nb = php_alloc(cap * 8);
+    i64 i = 0;
+    loop { if (i >= n) break; st64(nb + i * 8, ld64(old + i * 8)); i = i + 1; }
+    if (old && ph_zalloc) phx_ef(old);
+    return nb;
+}
+
+void php_pool_push(uptr s) {
+    if (ph_pn == ph_pcap) { ph_pcap = ph_pcap * 2 + 256; ph_pool = php_rc_grow(ph_pool, ph_pn, ph_pcap); }
+    st64(ph_pool + ph_pn * 8, s);
+    ph_pn = ph_pn + 1;
+}
+
+// A string of n bytes, the header written and the NUL; the n bytes are the
+// caller's to write, every one of them (nothing here is zeroed). `pool` 0 is
+// a string whose one reference the caller keeps (php_str_append's copy).
+uptr php_str_mk(i64 n, i64 pool) {
     uptr s = 0;
     if (ph_zalloc) {
-        i64 z = (ph_zpos + 7) & (0 - 8);
-        i64 e = z + ZS_HDR + n + 1;
-        if (n >= 0 && n <= PH_ZBIG - ZS_HDR - 1 && e <= ph_zlim) { ph_zpos = e; s = ph_zcur + z; }
+        // a size that wrapped negative goes to _emalloc as a huge size_t,
+        // which php's memory limit refuses by name, as php_alloc's does
+        s = phx_em(ZS_HDR + n + 1);
+        st32(s + 4, ZS_GC_STRING);
     }
-    if (!s) s = php_alloc(ZS_HDR + n + 1);
+    if (!ph_zalloc) {
+        s = php_alloc(ZS_HDR + n + 1);
+        st32(s + 4, ZS_MODULE);
+        if (ph_rcchk) st32(s + 4, ZS_GC_STRING);
+    }
     st32(s, 1);
-    st32(s + 4, 22);                          // GC_STRING
     st64(s + 8, 0);                           // h: not computed
     st64(s + 16, n);
     st8(s + ZS_HDR + n, 0);
+    if (pool && ld32(s + 4) == ZS_GC_STRING) {
+        // php_pool_push's fast path, in place: one per string built
+        if (ph_pn < ph_pcap) { st64(ph_pool + ph_pn * 8, s); ph_pn = ph_pn + 1; }
+        else php_pool_push(s);
+    }
     return s;
+}
+
+// php_str_alloc -- every string the runtime builds, header written, pushed
+// on the pool -- and php_str_free are defined per ROAD: lib/php_ext.mc's are
+// _emalloc and _efree with nothing between (the hottest two calls on the
+// extension road), lib/php_prog.mc's are the arena and check mode's poison.
+uptr php_str_alloc(i64 n);
+void php_str_free(uptr s);
+
+// module memory whatever the road -- a literal, a one-byte string: the arena,
+// immutable, never counted and never freed
+uptr php_str_mod(uptr b, i64 n);
+
+void php_rc_dead(uptr s) {
+    php_die("mc-php: MCPHP_RC=check: a string was used after its last reference went\n", 72);
+}
+
+// php's zend_string_release: nothing for an interned string, the count down
+// by one, and php_str_free at zero. src/rc.mc writes the same test in place
+// for the compiled code's own releases; this is the runtime's.
+void php_str_release(uptr s) {
+    if (!s) return;
+    if (ld32(s + 4) & ZS_INTERNED) return;
+    i64 rc = ld32(s);
+    if (rc > 1) { st32(s, rc - 1); return; }
+    php_str_free(s);
+}
+
+// one more reference for whoever keeps `s`: the pool's, when `s` is the
+// temporary on top of it (it is then no longer a temporary), else a new one
+void php_rc_take(uptr s) {
+    if (ph_pn) { if (ld64(ph_pool + ph_pn * 8 - 8) == s) { ph_pn = ph_pn - 1; return; } }
+    if (ld32(s + 4) == ZS_DEAD) php_rc_dead(s);
+    st32(s, ld32(s) + 1);
+}
+
+// the store into a counted slot: the new value first, then the old one goes,
+// so `$s = $s` and a runtime call that answers its argument change nothing
+uptr php_sset(uptr old, uptr nw) {
+    if (nw) { if (!(ld32(nw + 4) & ZS_INTERNED)) php_rc_take(nw); }
+    php_str_release(old);
+    return nw;
+}
+
+// a string put where nothing counts it (a zval, an array key, a class entry,
+// a file row): kept until the call's chunk goes
+uptr php_str_esc(uptr s) {
+    if (!s) return s;
+    if (ld32(s + 4) & ZS_INTERNED) return s;
+    php_rc_take(s);
+    if (ph_en == ph_ecap) { ph_ecap = ph_ecap * 2 + 256; ph_esc = php_rc_grow(ph_esc, ph_en, ph_ecap); }
+    st64(ph_esc + ph_en * 8, s);
+    ph_en = ph_en + 1;
+    return s;
+}
+
+// the temporaries above mark m die: per road too (lib/php_ext.mc frees with
+// _efree in the loop itself, lib/php_prog.mc poisons in check mode)
+void php_rc_drain(i64 m);
+
+// may this string be written in place? Ours (not interned, not persistent)
+// and nobody else's: php's own test before zend_string_extend reallocates.
+i64 php_str_mine(uptr s) {
+    if (ld32(s) != 1) return 0;
+    return (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) == 0;
+}
+
+// n bytes of room for a string we own, which may MOVE: _erealloc, php's
+// zend_string_extend. In check mode it always moves and the old block is
+// poisoned, so a stale pointer is caught rather than lucky.
+uptr php_str_grow(uptr s, i64 n) {
+    if (ph_zalloc) return phx_er(s, ZS_HDR + n + 1);
+    uptr ns = php_alloc(ZS_HDR + n + 1);
+    i64 i = 0;
+    i64 w = ZS_HDR + ld64(s + 16) + 1;
+    loop { if (i >= w) break; st8(ns + i, ld8(s + i)); i = i + 1; }
+    st32(s, 0);
+    st32(s + 4, ZS_DEAD);
+    st64(s + 16, 1099511627776);
+    return ns;
 }
 
 i64  php_strlen(uptr s) { return ld64(s + 16); }
@@ -168,6 +336,25 @@ uptr php_str_new(uptr b, i64 n) {
     return s;
 }
 
+u64 php_str_hash(uptr s);
+
+uptr php_str_mod(uptr b, i64 n) {
+    uptr za = ph_zalloc;
+    ph_zalloc = 0;
+    uptr s = php_alloc(ZS_HDR + n + 1);
+    ph_zalloc = za;
+    st32(s, 1);
+    st32(s + 4, ZS_MODULE);
+    st64(s + 8, 0);
+    st64(s + 16, n);
+    php_memcpy(s + ZS_HDR, b, n);
+    st8(s + ZS_HDR + n, 0);
+    // an interned string's hash is set before anyone reads it (php's own
+    // zend_new_interned_string computes it)
+    php_str_hash(s);
+    return s;
+}
+
 // A literal is built once per program run and cached in a global the compiler
 // emits beside it -- an arena with no free cannot afford one copy per loop
 // iteration (D7's risk, measured in RESULTS.md).
@@ -175,10 +362,7 @@ uptr php_str_lit(uptr cache, uptr b, i64 n) {
     uptr s = ld64(cache);
     if (s) return s;
     // module memory, whatever the road: the cache outlives every call
-    uptr za = ph_zalloc;
-    ph_zalloc = 0;
-    s = php_str_new(b, n);
-    ph_zalloc = za;
+    s = php_str_mod(b, n);
     st64(cache, s);
     return s;
 }
@@ -216,6 +400,91 @@ uptr php_str_cat4(uptr a, uptr b, uptr c, uptr d) {
     php_memcpy(s + ZS_HDR + la + lb, c + ZS_HDR, lc);
     php_memcpy(s + ZS_HDR + la + lb + lc, d + ZS_HDR, ld);
     return s;
+}
+
+// `$s .= x` on a counted slot (src/rc.mc): php's concat_function when the
+// left operand is the result -- a string with no other reference grows in
+// place (_erealloc, which may move it), anything else is copied into a new
+// string whose one reference the slot keeps, and the old one is released.
+// Either way the answer replaces the slot's reference: no php_sset around it.
+uptr php_str_append(uptr s, uptr x) {
+    i64 la = ld64(s + 16);
+    i64 lb = ld64(x + 16);
+    if (!lb) return s;
+    if (php_str_mine(s)) {
+        ph_rc_inplace = ph_rc_inplace + 1;
+        uptr ns = php_str_grow(s, la + lb);
+        uptr src = x;
+        if (x == s) src = ns;               // `$s .= $s`: the bytes moved with it
+        php_memcpy(ns + ZS_HDR + la, src + ZS_HDR, lb);
+        st64(ns + 8, 0);                    // zend_string_forget_hash_val
+        st64(ns + 16, la + lb);
+        st8(ns + ZS_HDR + la + lb, 0);
+        return ns;
+    }
+    ph_rc_copied = ph_rc_copied + 1;
+    uptr o = php_str_mk(la + lb, 0);
+    php_memcpy(o + ZS_HDR, s + ZS_HDR, la);
+    php_memcpy(o + ZS_HDR + la, x + ZS_HDR, lb);
+    php_str_release(s);
+    return o;
+}
+
+// `$s = $s . a . b` (and `. c`): the compiler's chain folded into one call,
+// with the slot's string first -- one growth for the whole chain. A piece that
+// IS the slot's string is read from where the growth left it.
+uptr php_str_appendv(uptr s, uptr a, uptr b, uptr c) {
+    i64 la = ld64(s + 16);
+    i64 l1 = ld64(a + 16);
+    i64 l2 = ld64(b + 16);
+    i64 l3 = 0;
+    if (c) l3 = ld64(c + 16);
+    uptr o = 0;
+    if (php_str_mine(s)) {
+        ph_rc_inplace = ph_rc_inplace + 1;
+        o = php_str_grow(s, la + l1 + l2 + l3);
+        st64(o + 8, 0);
+    }
+    i64 copied = 0;
+    if (!o) {
+        ph_rc_copied = ph_rc_copied + 1;
+        copied = 1;
+        o = php_str_mk(la + l1 + l2 + l3, 0);
+        php_memcpy(o + ZS_HDR, s + ZS_HDR, la);
+    }
+    // the old block is gone when it moved: its bytes are o's first la
+    if (a == s) a = o;
+    if (b == s) b = o;
+    if (c == s) c = o;
+    php_memcpy(o + ZS_HDR + la, a + ZS_HDR, l1);
+    php_memcpy(o + ZS_HDR + la + l1, b + ZS_HDR, l2);
+    if (c) php_memcpy(o + ZS_HDR + la + l1 + l2, c + ZS_HDR, l3);
+    st64(o + 16, la + l1 + l2 + l3);
+    st8(o + ZS_HDR + la + l1 + l2 + l3, 0);
+    if (copied) php_str_release(s);
+    return o;
+}
+
+uptr php_str_setoff(uptr s, i64 i, uptr cz);
+
+// `$s[$i] = c` on a counted slot: the byte written into the string itself
+// when nobody else holds it and the offset is inside it (php's own in-place
+// write); otherwise php_str_setoff's new string, stored the ordinary way
+uptr php_str_setoff_own(uptr s, i64 i, uptr cz) {
+    i64 n = ld64(s + 16);
+    i64 k = i;
+    if (k < 0) k = n + k;
+    if (k >= 0 && k < n && php_str_mine(s)) {
+        uptr c = php_zv_str(cz);
+        if (ld64(c + 16)) {
+            ph_rc_inplace = ph_rc_inplace + 1;
+            st8(s + ZS_HDR + k, ld8(c + ZS_HDR));
+            st64(s + 8, 0);
+            return s;
+        }
+    }
+    ph_rc_copied = ph_rc_copied + 1;
+    return php_sset(s, php_str_setoff(s, i, cz));
 }
 
 // memcmp over the bytes, then the length: PHP's own strcmp ordering.
@@ -1056,7 +1325,9 @@ uptr php_zundef() { uptr z = php_zv_alloc(); php_zv_settype(z, IS_UNDEF); return
 uptr php_zlong(i64 v) { uptr z = php_alloc(ZV_SIZE); st64(z, v); st64(z + 8, IS_LONG); return z; }
 uptr php_zbool(u8 b) { uptr z = php_zv_alloc(); if (b) php_zv_settype(z, IS_TRUE); if (!b) php_zv_settype(z, IS_FALSE); return z; }
 uptr php_zdouble(f64 x) { uptr z = php_alloc(ZV_SIZE); stf64(z, x); st64(z + 8, IS_DOUBLE); return z; }
-uptr php_zstr(uptr s) { uptr z = php_alloc(ZV_SIZE); st64(z, s); st64(z + 8, IS_STRING); return z; }
+// a zval lives in the call's chunk and counts nothing, so the string it holds
+// is escaped (php_str_esc): kept until the chunk goes
+uptr php_zstr(uptr s) { uptr z = php_alloc(ZV_SIZE); st64(z, php_str_esc(s)); st64(z + 8, IS_STRING); return z; }
 uptr php_zarr(uptr a) { uptr z = php_zv_alloc(); st64(z, a); php_zv_settype(z, IS_ARRAY); return z; }
 uptr php_zobj(uptr o) { uptr z = php_zv_alloc(); st64(z, o); php_zv_settype(z, IS_OBJECT); return z; }
 
@@ -1220,7 +1491,7 @@ uptr php_ht_slotfor(uptr a, u64 h, uptr key) {
     st64(b, 0);
     php_zv_settype(b, IS_NULL);
     st64(b + 16, h);
-    st64(b + 24, key);
+    st64(b + 24, php_str_esc(key));        // a bucket counts nothing: the key is escaped
     i64 si = php_ht_slot(a, h);
     st32(b + 12, php_ht_hget(a, si));
     php_ht_hset(a, si, i);
@@ -3142,10 +3413,9 @@ uptr php_str_ch(i64 c) {
     if (!ph_ch1) { ph_zalloc = 0; ph_ch1 = php_alloc(256 * 8); ph_zalloc = za; }
     uptr s = ld64(ph_ch1 + c * 8);
     if (s) return s;
-    ph_zalloc = 0;
-    s = php_str_alloc(1);
-    ph_zalloc = za;
-    st8(s + ZS_HDR, c);
+    u8 cb[8];
+    st8(cb, c);
+    s = php_str_mod(cb, 1);
     st64(ph_ch1 + c * 8, s);
     return s;
 }
@@ -4731,7 +5001,7 @@ uptr php_clskey(uptr name) {
 
 uptr php_ce_new(uptr name) {
     uptr ce = php_alloc(CE_SIZE);
-    st64(ce, name);
+    st64(ce, php_str_esc(name));
     st64(ce + 8, 0);
     st64(ce + 16, 0);
     st64(ce + 24, php_arr_new(8));
@@ -7597,7 +7867,7 @@ i64 php_fh_new(i64 fd, uptr name, i64 own) {
     st64(ph_fh_fd + ph_nfh * 8, fd);
     st64(ph_fh_eof + ph_nfh * 8, 0);
     st64(ph_fh_own + ph_nfh * 8, own);
-    st64(ph_fh_name + ph_nfh * 8, name);
+    st64(ph_fh_name + ph_nfh * 8, name);          // a C string, never read back
     ph_nfh = ph_nfh + 1;
     return ph_nfh;                               // the id is 1-based
 }
@@ -8465,7 +8735,7 @@ u8 php_f_settype(uptr vz, uptr tz) {
     }
     if (php_streq_c(t, "string", 6)) {
         uptr v = php_zv_str(vz);
-        st64(vz, v); php_zv_settype(vz, IS_STRING); return 1;
+        st64(vz, php_str_esc(v)); php_zv_settype(vz, IS_STRING); return 1;
     }
     if (php_streq_c(t, "bool", 4) || php_streq_c(t, "boolean", 7)) {
         i64 v = php_zv_bool(vz);

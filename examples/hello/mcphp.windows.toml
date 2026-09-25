@@ -23,7 +23,7 @@
 #                     else is exported, so two mc-php modules in one php do
 #                     not see each other's runtime (docs/plan.md § 7 item 6
 #                     is macOS's and Linux's flat namespace, not this one's)
-#   php8.lib          the five php8.dll names lib/php_ext.mc calls
+#   php8.lib          the php8.dll names lib/php_ext.mc calls (src/win/php8.def)
 #   kernel32.lib, ucrtbase.lib   the runtime's own (lib/rt_host_windows.mc)
 # Every one of them is an import library tests/winsys.sh writes from a list of
 # names: no php development pack and no Windows SDK.

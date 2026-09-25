@@ -813,3 +813,43 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     fixed, on record in § 7: native int arithmetic wraps on overflow (D10 says it promotes), an
     array local assigned on one path only is a SIGSEGV on the other, an assignment from anything
     that throws clobbers its target, and the float printer is not shortest-round-trip.
+- Zend-mm (2026-09-24, branch `zend-mm`), on **mc 1.1.0** here: **the full Zend memory model for
+  STRINGS on the extension road**, the owner's direction that batch A delivered by half. A string
+  a call builds is one `_emalloc` block laid as a `zend_string` (refcount 1, `GC_STRING`), freed
+  with `_efree` -- `free(3)` for a persistent one -- when its last reference goes, as php's
+  `zend_string_release`; a string RESULT is that same `zend_string` handed to `return_value` (no
+  copy); a refcount-1 string grows in place with `_erealloc` on `.=`, `$s = $s . a . b` and
+  `$s[$i] = c`; literals, one-byte strings and everything MINIT builds are module memory flagged
+  `IS_STR_INTERNED`; nothing is zeroed (the 56 `php_str_alloc` and 29 `php_alloc` sites audited).
+  Who holds a reference: a POOL of temporaries drained at every loop top and return (`src/rc.mc`,
+  a pass over each finished php function), COUNTED SLOTS for a function that loops (a store takes
+  the new reference and releases the old, written in place), BORROWING for one that does not, and
+  `php_str_esc` for a string put into a zval, an array key or a class entry -- which stay in the
+  call's chunk (why: `docs/php-extension.md` § The memory). `lib/php_prog.mc` is the program
+  road's half; the program road keeps its arena and is unchanged unless compiled with
+  `MCPHP_RC=check`, which counts arena strings and POISONS one at zero so the grid and the
+  fixtures grade the discipline (`tests/mcphp.sh` passes it as `MCPHP__RC`).
+  * Gates, each failing on main where it can: `tests/ext.sh` step 11 (`MCPHP_STATS=1`: 100 002
+    writes in place, 2 copies; main exhausts php's 128 MiB), step 12 (100 000 iterations in one
+    call building 2 KB each move the peak 0 bytes; main exhausts memory_limit), step 13 and
+    `tests/g/111` (the ownership shapes, module and fixture, normal and check mode), the soak
+    bounded to 1 KiB (usage 517 336 -> 517 336, peak 517 544 -> 517 560), the 20-request
+    `php -S`, the ABI gate grading the runtime's string flags too, and `tests/leaks.sh` -- a debug
+    php 8.5.10 in docker (Lima VM): no block left in any request, and 27 leaks reported when
+    RSHUTDOWN's release is disabled.
+  * `examples/decimal`, head to head in one sitting: interpreted 1.70-1.79 ms, main's module
+    0.524 ms (3.25x, module/C 4.19), this batch **0.606 ms (2.81x, module/C 4.85)**, the C twin
+    0.125 ms. SLOWER, and the profile says why (`docs/plan.md` § 7 item 1): memory 15.0% -> 18.8%
+    of the module's time, eleven strings a call each an `_emalloc` and an `_efree`; the first,
+    call-per-store version was 0.858 ms and the counting as calls was 42% of the time.
+  * On the five CI legs (main run 36056378453 -> run 36078460677), the module's bench:
+    macos/arm64 0.774 -> 0.906 ms (C twin 0.159 / 0.172), linux/aarch64 1.169 -> 1.445,
+    linux/x86_64 1.399 -> 1.850, windows/aarch64 1.895 -> 2.640, windows/x86_64 1.630 -> 2.007;
+    the soak's usage moves 0 bytes on every leg (40 on main), its peak 16. Every leg green.
+  * The phpt grid, three directories, main vs this branch vs this branch in check mode: every one
+    of the 15 lists holds the same test names (`comm -3` empty), green 104 / 766 / 272 in all
+    three, and no check-mode output carries the dead-string message. The check run found one
+    compile error -- a valued `return` in a `void` function named a slot void functions never
+    declare (`Zend/tests/void_disallowed2.phpt`), fixed; the thirteen other rows whose recorded
+    exit code moved are programs php refuses at compile time, for which mc-php prints nothing and
+    exits with a register's leftovers, main and this branch alike for the same layout.

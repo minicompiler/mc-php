@@ -196,47 +196,134 @@ php should be NTS.
 
 `docs/plan.md` D7 -- one arena per process, never freed -- is the PROGRAM road's model, and on
 the extension road it is **superseded**: a module allocates the way a C extension does, through
-the Zend Memory Manager. The runtime has ONE allocation seam, `php_alloc`, with two
-implementations chosen by road: the arena (a program, and a module's MINIT) or the Zend chunk an
-extension call bumps through ([`lib/php_ext.mc`](../lib/php_ext.mc) § the call's memory).
+the Zend Memory Manager, and a STRING has php's own lifetime -- one `_emalloc` block laid as a
+`zend_string`, a refcount, and `_efree` when the last reference goes. The runtime keeps ONE
+allocation seam with two implementations chosen by road (`lib/php_rt.mc` § the allocation seam
+and § who owns a string): the arena (a program, and a module's MINIT) or Zend's allocator (a call).
 
 | lives for | what | where |
 |---|---|---|
-| the module | what MINIT builds -- the bootstrap classes, the source's classes and top-level constants -- and every string literal's cache | the module's own static arena, never freed |
-| one call | everything the call allocates | a 32 KiB Zend chunk the request reuses: zeroed again, and every other block the call took `efree`d, when the call returns |
-| the request | what a call that writes MODULE STATE kept -- a `static`, a `global`, `define()`, an error or exception handler, a class, a file, a destructor, an output buffer left open | the call PINS itself: its blocks stay, and RSHUTDOWN puts the state back as MINIT left it |
+| the module | what MINIT builds -- the bootstrap classes, the source's classes and top-level constants -- every string LITERAL, and `$s[$i]`'s 256 one-byte strings | the module's own static arena, never freed. A string there carries `IS_STR_INTERNED` (`GC_IMMUTABLE`): nobody counts it, nobody frees it, nobody writes into it, and php, handed one as a result, treats it as the interned string it is |
+| its last reference | every string a call builds | one `_emalloc` block of its own, a `zend_string` with refcount 1 and `GC_STRING`, `_efree`d at zero -- php's `zend_string_release`, persistent ones through `free(3)` as `pefree` does |
+| one call | the zvals, arrays, objects and class entries a call builds | a 32 KiB Zend chunk the request reuses, bumped through; every other block the call took is freed when it returns. Nothing is zeroed |
+| the request | what a call that writes MODULE STATE kept -- a `static`, a `global`, `define()`, an error or exception handler, a class, a file, a destructor, an output buffer left open | the call PINS itself: its chunk part stays, and so do the references its blocks hold on strings; RSHUTDOWN puts the state back as MINIT left it and releases them |
 
-**Strings cross without a copy where they can.** The runtime's string IS a `zend_string`
-(`docs/php-abi.md`), and strings are immutable here, so a string ARGUMENT is borrowed: the engine
-keeps it alive for the call, the runtime only ever writes the hash into it (the same DJBX33A
-`zend_string_hash_val` stores, and never into an interned string, whose hash is set). A result the
-call built in a block of its own is handed to php as it is; a small one lives inside the chunk and
-is copied once; an argument returned unchanged gains a reference.
+**Who holds a reference to a string** (`src/rc.mc` for the compiled code, `lib/php_rt.mc` for the
+runtime):
+
+* **a temporary** -- what a runtime call answered and nothing took yet -- sits on the runtime's
+  POOL with one reference, above the building function's entry mark. The top of every loop
+  iteration and every return drain the function's own part of it, which is php's rule that a
+  temporary dies with the statement that used it: a loop inside ONE call keeps a bounded
+  high-water mark (`tests/ext.sh` step 12). A string a function returns comes out as the
+  caller's temporary, exactly like a runtime call's -- or, when it is a string parameter the body
+  never assigned, as the caller's own string, which it holds already;
+* **a counted slot**, in a function that LOOPS -- a php variable of type `string`, a string
+  parameter the body assigns, and the compiler's own string temporaries. The slot is declared
+  0; a store takes the new value's reference (the pool's own, when the value is the temporary on
+  top) and releases the old value's; the function releases every slot on its way out, the
+  exceptional early return included. A function with NO loop never drains before it returns,
+  so there its locals BORROW from the pool and nothing is counted: every string it built stays
+  alive until the return that drains them all. A parameter the body never assigns is read where
+  it stands in either kind: the caller holds it for the call, as php holds an argument. The
+  take, the release and the pool push are written into the function itself, not called
+  (`src/rc.mc`);
+* **a container that is not counted** -- a zval, an array key, a class entry -- takes a reference
+  of its own when a string is put into it (`php_str_esc`), and that reference lives as long as
+  the container does: until the call's chunk goes, or until RSHUTDOWN for a call that pinned.
+
+**The boundary copies nothing.** A string ARGUMENT is the engine's `zend_string`, borrowed: the
+module never writes into it except the hash (the same DJBX33A, top bit set, that
+`zend_string_hash_val` stores, and never into an interned string, whose hash is set), and a
+store that keeps it past a statement takes a reference like any other. A string RESULT is the
+same `zend_string` the function built -- `return_value` takes the reference the answer carried
+as the call's temporary -- and a literal goes out as the interned string it is (`IS_STRING`,
+no reference). Before, a result was built in the call's chunk and copied into a fresh Zend
+string on the way out (`phx_ret_str`).
+
+**A string with one reference is written in place**, as php does. `$s .= x`, `$s = $s . a . b`
+and `$s[$i] = c` on a string nothing else holds grow or write it where it is -- `_erealloc`,
+php's `zend_string_extend` for a refcount-1 left operand -- and anything else (an interned
+string, a literal, a string a second variable or a zval also holds) is copied first, the copy
+becoming the slot's own. `tests/ext.sh` step 11 counts the two: with `MCPHP_STATS=1` in php's
+environment the module prints `mc-php stats: in place N, copied M` at the end of each request.
+That is the counted slot's privilege: a function with no loop copies on `.=`, because nothing
+says the pool's reference is the only one (and it appends a bounded number of times).
 
 **RSHUTDOWN is the request's end, as php has one.** It is the `request_shutdown_func` slot of the
 module entry (`docs/php-abi.md`). Statics a request initialised go back to "never run", files it
 opened are closed, an output buffer it left open is written out, the runtime's roots (the global
 table, constants, handlers, the class table, the pending exception, `error_reporting()`) are
 restored from the copy taken when MINIT ended -- and, if a call pinned, the arena itself. Then the
-request's blocks are freed. `RINIT` is 0: a request starts from the state the last RSHUTDOWN
-restored, so there is nothing to set up.
+references pinned calls kept are released and the request's blocks freed. `RINIT` is 0: a request
+starts from the state the last RSHUTDOWN restored, so there is nothing to set up.
 
-Measured (2026-09-24, macos/arm64, php 8.5.10, `examples/decimal/soak.php`): **1 000 000
-`dec_add` calls in one request**, `memory_get_usage()` 513 888 -> 513 928 bytes (the 40 are the
-accumulator growing) and `memory_get_peak_usage()` 515 336 -> 515 336. Before batch A the same
-loop died with `mc-php: arena exhausted` between 28 000 and 30 000 calls. Through `php -S`, 20
-requests each keeping 4 MiB in a `static` answer the same line every time, as interpreted
-(`tests/ext.sh` step 10); before, the statics survived from one request into the next and the
-server ran out of arena at the twelfth.
+**Why zvals, arrays and objects still live in the call's chunk.** They have no count in this
+runtime, and giving them one is not a change to one seam: a php array is a VALUE the runtime
+copies eagerly (D7's own rule), a zval is copied bitwise at 114 sites of the runtime (56
+`php_zv_cp`, 58 `php_zv_cpv`), and a handle to either is passed by raw pointer through the 501
+runtime functions the compiler calls, none of which says who owns what. A string needed its OWNERS
+found -- the compiler's typed slots and the four places the runtime stores one into a container
+-- and those were countable; the containers' owners are not yet, and a count that is wrong frees
+a live array. So a zval, an array or an object lives as long as the call that built it (or the
+request, for a call that pinned), exactly as before -- which is also why a loop that builds zvals
+inside one call grows until the call returns, where a loop that builds strings does not.
 
-What a pinned call costs, measured: a function with a `static $n` called 100 000 times in one
-request keeps **32 bytes a call** until the request ends (3.2 MB); the next request starts clean.
-A pinned call also keeps a reference on each string ARGUMENT it borrowed, because nothing tells
-which of its writes retained one: `tally(string $s)` adding `strlen($s)` into a static, called
-100 000 times with a fresh 105-byte string each time, keeps **240 bytes a call** (24 MB) until the
-request ends. A call that pins nothing keeps nothing.
-That is the one shape whose memory grows with the call count inside a request, and it is php's
-own shape too -- php frees what refcounting frees, and a module has no refcount.
+**What was audited instead of zeroed.** A reused chunk and an `_emalloc` block hold whatever was
+there before; the call's chunk used to be zeroed on the way out (`phx_zero`, 4.1% of the module's
+time) because the runtime's allocations assumed zeroed memory. Every allocation site was read
+for a reader that depends on it: the 56 `php_str_alloc` sites write every byte they allot (27 of
+them shrink the length afterwards, and each of those writes the NUL at the new end), and the 29
+`php_alloc` sites either write each field before it is read (a zval's both words, a hash's
+header and its slot table, an object's header but the four padding bytes at +12 that nothing
+reads, a class entry's thirteen fields) or zero what they
+read on purpose (`md5`/`sha1`'s padding block). The one allocation that relied on zeroed memory
+is `ph_ch1`'s table of one-byte strings, which lives in the arena and the arena is fresh `__bss`.
+
+**Graded without an extension, too.** The phpt grid runs the program road, which never counts
+(every string there is the arena's and immutable). Compiled with `MCPHP_RC=check` in the
+compiler's environment -- `tests/mcphp.sh` passes it on as `MCPHP__RC=check` -- a program counts
+its arena strings exactly as a module counts Zend ones, drains its temporaries after every
+statement rather than every loop iteration, and POISONS a string that reaches zero instead of
+freeing it (a length no string has, and a use of it dies with
+`mc-php: MCPHP_RC=check: a string was used after its last reference went`). The fixtures and the
+three grid directories compiled that way must answer exactly what they answer without it. They
+do: 109/109 fixtures in both builds (`tests/run.sh` and `tests/linux.sh` run the second pass), and
+the grid's 15 lists hold the same test names in both (green 104 / 766 / 272), with no dead-string
+message anywhere.
+
+Measured (2026-09-24, macos/arm64, php 8.5.10):
+
+* **1 000 000 `dec_add` calls in one request** (`examples/decimal/soak.php`, after a thousand
+  warm-up calls): `memory_get_usage()` 517 336 -> 517 336 bytes, `memory_get_peak_usage()`
+  517 544 -> 517 560. The peak follows the size of a call's own temporaries, which grow with the
+  accumulator (three more digits over the million calls); the gate allows a kilobyte. Before
+  batch A the same loop died with `mc-php: arena exhausted` near 29 000 calls; after it, and
+  before this change, the peak did not move at all, because the chunk was a fixed 32 KiB.
+* **100 000 iterations inside ONE call**, each building two 1 KB strings (`tests/ext.sh` step
+  12): php's peak moved **0 bytes**. On the batch-A runtime the same function died with php's
+  `Allowed memory size of 134217728 bytes exhausted`: the chunk kept every string until the
+  call returned.
+* **`$s .= "x"` 100 000 times in one call** (step 11): 100 002 writes in place and 2 copies, the
+  answer php's. On the batch-A runtime it exhausted php's memory the same way (every `.=` a copy
+  kept until the call returned).
+* **20 requests through `php -S`** (step 10): every response the interpreted source's.
+* **Leaks** (`tests/leaks.sh`): php 8.5.10 built with `--enable-debug` from the
+  `php:8.5-alpine` image's own source, linux/aarch64 (docker inside a Lima VM on this Mac), and
+  `examples/decimal`'s check, soak (100 000 calls) and bench plus the ownership shapes, a pinned
+  call and a loop inside one call run in it: the debug allocator reports **no block left** at the
+  end of any request. The check is proved to see a leak: with RSHUTDOWN's release of a pinned
+  call's strings disabled it reports `mc-php(0) :  Freeing ... (38 bytes)` and
+  `=== Total 27 memory leaks detected ===`. macOS's `leaks` (with `USE_ZEND_ALLOC=0`) could
+  not be used: it cannot read Homebrew's php ("Process ... is not debuggable. Due to security
+  restrictions, leaks can only show or save contents of readonly memory of restricted
+  processes"), so the check runs on Linux.
+
+What a pinned call costs, measured before this change: a function with a `static $n` called
+100 000 times in one request kept **32 bytes a call** until the request ended (3.2 MB); the next
+request started clean. A pinned call no longer keeps a reference on every string argument it
+borrowed -- a string it stored is referenced by the zval that holds it, and one it did not store
+is not kept at all.
 
 ## Two extensions in one process
 

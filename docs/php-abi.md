@@ -13,8 +13,9 @@ and re-measured on **2026-09-23**. The oracle is [`tests/ext/abi.c`](../tests/ex
 cc -o abi tests/ext/abi.c $(php-config --includes) && ./abi
 ```
 
-and [`tests/ext.sh`](../tests/ext.sh) step 1 diffs its 55 lines against the `#define`s in
-`lib/php_ext.mc`, failing on any that disagree. Where `php-config` or a C compiler is absent --
+and [`tests/ext.sh`](../tests/ext.sh) step 1 diffs its 64 lines against the `#define`s in
+`lib/php_ext.mc` and `lib/php_rt.mc` (the runtime spells the string flags itself, since it cannot
+include the extension runtime), failing on any that disagree. Where `php-config` or a C compiler is absent --
 every Linux container this repository grades in -- the step says so and skips; a gate's oracle is
 not a dependency of the thing it grades.
 
@@ -108,17 +109,26 @@ after. That is **the same record the runtime's own strings use** (`lib/php_rt.mc
 `probes/t3`), which is why a php string argument is BORROWED where it stands: the engine keeps it
 alive for the call, the runtime never writes into a string it did not make except the hash, and
 its hash is zend's own (DJBX33A from 5381, the top bit set) -- which is exactly what
-`zend_string_hash_val` stores. An INTERNED string carries `IS_STR_INTERNED` (64, `GC_IMMUTABLE`)
-in `type_info` and has its hash set already, so nothing is ever written into one, and it has no
-count: a reference to it is taken by copying the pointer and tagging the zval `IS_STRING` (6),
-not `IS_STRING_EX`. A call that pins keeps a reference on every string it borrowed.
+`zend_string_hash_val` stores.
 
-**Returning one**: `zend_string_alloc` is inline and unexported, so the header is laid by hand
--- refcount 1, `type_info` `0x16` (`GC_STRING`, not interned), hash 0 or the hash, the length, the
-bytes, a NUL -- and the zval's `type_info` is `0x106`. A string the call built in a Zend block of
-its own IS that already and is handed over with no copy; a small one lives inside the call's chunk
-and is copied into an `_emalloc` block. Anything else and the engine either leaks it or frees
-something it does not own.
+The flags live in the low bits of `type_info` (`GC_FLAGS_SHIFT` is 0), and three of them decide
+what may be done with a string, each re-read from the headers by the layout gate:
+
+| flag | value | what it means here |
+|---|---|---|
+| `GC_STRING` | 22 | `IS_STRING` \| `GC_NOT_COLLECTABLE`: a counted string, php's `zend_string_alloc` result |
+| `IS_STR_INTERNED` (`GC_IMMUTABLE`) | 64 | nobody counts it and nobody frees it; a reference to one is the pointer, tagged `IS_STRING` (6) and not `IS_STRING_EX`. The module's own literals and one-byte strings carry it (22 \| 64 = 86), with the hash set, as php's interned strings do |
+| `IS_STR_PERSISTENT` (`GC_PERSISTENT`) | 128 | `pefree(s, 1)`, which is `free(3)`, and never written in place |
+
+**Every string a call builds is php's own**: one `_emalloc` block, refcount 1, `GC_STRING`, hash
+0, the length, the bytes, a NUL -- `zend_string_alloc` is inline and unexported, so the header is
+laid by hand -- released by the runtime's `php_str_release`, which is `zend_string_release`
+letter for letter (nothing for an interned string, `free(3)` for a persistent one, `_efree`
+otherwise). A string RESULT is that same block: `return_value` takes a reference and gets tagged
+`IS_STRING_EX` (0x106), or `IS_STRING` for an interned one. A string with refcount 1 that is
+neither interned nor persistent is grown with `_erealloc` (`zend_string_extend`'s own test) and
+its hash forgotten. Anything else and the engine either leaks it or frees something it does not
+own.
 
 ## The symbols an extension reaches out to
 
@@ -126,9 +136,16 @@ All exported from the php binary, all reached as ordinary `extern`s:
 
 | | |
 |---|---|
-| `void *_emalloc(size_t)` | the engine's allocator, for a returned `zend_string` |
-| `void *_ecalloc(size_t, size_t)` | a call's chunk and any block too big for one, zeroed as the arena was |
-| `void _efree(void *)` | the call's blocks, when it returns |
+| `void *_emalloc(size_t)` | every string a call builds, a call's chunk and any block too big for one -- nothing zeroed |
+| `void *_erealloc(void *, size_t)` | a refcount-1 string grown in place (`.=`, `$s[$i] =`) |
+| `void _efree(void *)` | a string whose last reference went, and the call's blocks when it returns |
+| `void free(void *)` | the C library's, for the one case php frees that way: a persistent string reaching zero |
+
+The three Zend allocator functions take two more pairs of arguments in a php built with
+`--enable-debug` (`ZEND_FILE_LINE_DC ZEND_FILE_LINE_ORIG_DC`: the caller's file and line, twice),
+which the debug allocator keeps in the block to name a leak. `lib/php_ext.mc` always passes
+them (`"mc-php"`, 0, 0, 0): a release php never reads past the size, and a debug php names the
+module in its leak report, which is what `tests/leaks.sh` reads.
 | `size_t php_output_write(const char *, size_t)` | php's output layer: what a module echoes passes every `ob_start()` level |
 | `php_output_start_default`, `_get_contents`, `_get_length`, `_get_level`, `_discard`, `_end`, `_flush` | the ob_* functions a module calls, on php's own stack; each answers a `zend_result`, an `int` whose 0 is SUCCESS, so mc declares them `i32` |
 | `void zend_type_error(const char *fmt, ...)` | a `TypeError` |

@@ -6,14 +6,15 @@
 ; convention itself is the ordinary Win64 one for an integer argument, so mc's
 ; call is right as it is; only the NAME needs the alias, which is what `==`
 ; says -- the program links to _emalloc, the loader looks up _emalloc@@8.
-; _ecalloc (two size_t, 16 bytes) and _efree (one pointer, 8) are the same
-; convention: the call's memory (lib/php_ext.mc § the call's memory).
+; _erealloc (a pointer and a size_t, 16 bytes) and _efree (one pointer, 8)
+; are the same convention: a string's own block, grown in place and released
+; at zero (lib/php_rt.mc § who owns a string), and the call's chunk.
 ; Measured: without it php refused the module with "The specified procedure
 ; could not be found".
 LIBRARY php8ts.dll
 EXPORTS
 _emalloc == _emalloc@@8
-_ecalloc == _ecalloc@@16
+_erealloc == _erealloc@@16
 _efree == _efree@@8
 php_output_discard
 php_output_end

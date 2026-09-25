@@ -244,6 +244,7 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     set_nd_type(f, TY_UPTR);
     set_nd_a(f, head);
     set_nd_b(f, body);
+    ph_rc_fn(f);
     top_add(f);
 
     ph_scope_restore(savenv);

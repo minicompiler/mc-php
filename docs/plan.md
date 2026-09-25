@@ -178,27 +178,39 @@ D7. DECIDED (owner, 2026-09-15): no VM and no GC -- "teko already proves automat
     name holds a reference to (`&int(99)`), and D7 has no refcount, so nothing at run time tells
     the mark from the value. The values agree; the mark is a documented difference
     (`probes/t8/g/42-string-offset-ref.php` compares the values with `echo` and says why).
-    **SUPERSEDED on the EXTENSION road (owner, 2026-09-24, batch A).** A module outlives every
-    request, so one arena per process -- never freed -- is a program's model and not a module's:
-    `examples/decimal` died with `mc-php: arena exhausted` near 29 000 calls in one php. On the
-    extension road the runtime now allocates the way a C extension does, through the Zend Memory
-    Manager, and D7 stays exactly as written for the PROGRAM road (a standalone binary has no
-    Zend). The runtime keeps ONE allocation seam, `php_alloc`, with two implementations chosen by
-    road -- the arena, or the Zend chunk an extension call bumps through (`lib/php_ext.mc`) --
-    rather than two runtimes. What lives where:
-    * **module lifetime** -- what MINIT builds (the class table, top-level constants, the bootstrap
-      hierarchy) and every string literal's cache: the module's own static arena, never freed,
-      which is `pemalloc`'s role taken by the module's own data;
-    * **call lifetime** -- everything a call allocates: a Zend chunk the request reuses, zeroed
-      and every extra block `efree`d when the call returns, so a million calls in one request
-      keep one chunk (measured below);
-    * **request lifetime** -- what a call that WRITES module state kept (a `static`, a `global`, a
-      `define()`, a handler, a class, a file): the call PINS itself, its blocks stay until the
-      request ends, and RSHUTDOWN puts the state back as MINIT left it -- statics reset, files
-      closed, the arena restored from a snapshot -- which is php's own rule for a request.
-    A string ARGUMENT is borrowed (the runtime's string IS a `zend_string`, and strings are
-    immutable here); a result the call built in a block of its own is handed over, a small one is
-    copied once. `docs/php-extension.md` § The memory has the rules and the numbers.
+    **SUPERSEDED on the EXTENSION road (owner, 2026-09-24, batch A; completed by the zend-mm
+    batch the same day).** A module outlives every request, so one arena per process -- never
+    freed -- is a program's model and not a module's: `examples/decimal` died with
+    `mc-php: arena exhausted` near 29 000 calls in one php. On the extension road the runtime
+    allocates the way a C extension does, through the Zend Memory Manager, and D7 stays exactly
+    as written for the PROGRAM road (a standalone binary has no Zend). The runtime keeps ONE
+    allocation seam with two implementations chosen by road rather than two runtimes. What lives
+    where:
+    * **module lifetime** -- what MINIT builds (the class table, top-level constants, the
+      bootstrap hierarchy), every string LITERAL and `$s[$i]`'s 256 one-byte strings: the
+      module's own static arena, never freed, which is `pemalloc`'s role taken by the module's
+      own data. A string there carries `IS_STR_INTERNED`, so it is never counted, freed or
+      written, and php treats one handed to it as interned;
+    * **a string's own lifetime** -- every string a call builds is ONE `_emalloc` block laid as a
+      `zend_string`, refcount 1, released (`_efree` at zero) when its last reference goes, as
+      php's `zend_string_release` does. The compiled code counts its own references
+      (`src/rc.mc`: a string local is a counted slot, a temporary lives on a pool drained at
+      every loop iteration and every return), a zval, an array key or a class entry takes one of
+      its own, and a string RESULT is the same `zend_string` handed to `return_value` -- no copy
+      at the boundary. A string with one reference is appended to (`.=`, `$s = $s . x`) and
+      written into (`$s[$i] = c`) in place with `_erealloc`, php's `zend_string_extend`;
+    * **call lifetime** -- the zvals, arrays, objects and class entries a call builds: a Zend
+      chunk the request reuses, every extra block `efree`d when the call returns. They have no
+      count in this runtime and the reason is written down in `docs/php-extension.md` § The
+      memory; a string one of them holds is kept by a reference that dies with the chunk;
+    * **request lifetime** -- what a call that WRITES module state kept (a `static`, a `global`,
+      a `define()`, a handler, a class, a file): the call PINS itself, its chunk part and the
+      string references it holds stay until the request ends, and RSHUTDOWN puts the state back
+      as MINIT left it -- statics reset, files closed, the arena restored from a snapshot --
+      which is php's own rule for a request.
+    Nothing is zeroed for a caller: every allocation site writes what it reads (the audit is in
+    `docs/php-extension.md` § The memory). `docs/php-extension.md` § The memory has the rules
+    and the numbers.
 
 D8. DECIDED (owner, 2026-09-15): every `.php` written in this repository -- fixtures, any part of
     the runtime or standard library written in PHP, examples -- carries TESTS that run in BOTH
@@ -1034,7 +1046,10 @@ its code is written.
    DONE since batch E -- compiled from PHP and faster than interpreted on all five legs, 1.52x to
    2.99x (macos/arm64 2.19x here, the twin 13.8x; § 7 item 1 below has the profile and the
    table) -- and the other two are not. The decimal-c batch took the module from 6.3x the C twin's
-   time to 4.1x (1.51 -> 0.98 ms here), § 7 item 1. What already has code moves into
+   time to 4.1x (1.51 -> 0.98 ms here), § 7 item 1. The zend-mm batch put its strings on php's
+   own refcount and Zend's allocator, the owner's direction, and paid for it on this workload:
+   0.524 -> 0.606 ms on a quiet run of this Mac with the interpreter at 1.70-1.79 ms and the C
+   twin at 0.125 (module/C 4.19 -> 4.85, still 2.8x php interpreted), § 7 item 1. What already has code moves into
    `examples/`, each with a gate that compiles it and compares it with php. Four of the five parts
    are DONE (the examples branch, 2026-09-23), gated by `tests/ext.sh` and `tests/examples.sh`
    inside `tests/run.sh`, `tests/linux.sh` and `tests/windows.sh`, **green on all five CI legs**
@@ -1361,6 +1376,59 @@ In the order the measurements put them, each with the number that says why:
    not set a pending exception aside: checking before `throw new B` inside `try { throw A; }
    finally { throw new B; }` would unwind with A where php throws B (measured). Setting the
    pending exception aside in `finally` is the fix for both, and is not done here.
+
+   **The zend-mm batch (2026-09-24): the Zend memory model the owner asked for, and what it
+   costs.** Batch A had put the extension road on Zend's allocator by half: a call bumped every
+   string through a 32 KiB chunk, swept and ZEROED it on return, counted nothing, and COPIED a
+   result out into a fresh Zend string. Now a string built inside a call is php's own -- one
+   `_emalloc` block laid as a `zend_string`, refcount 1, freed with `_efree` when its last
+   reference goes -- a result is that same `zend_string` handed to `return_value`, a refcount-1
+   string is appended to and written into in place with `_erealloc`, and nothing is zeroed
+   (§ 3 D7, `docs/php-extension.md` § The memory; `lib/php_rt.mc` § who owns a string and
+   `src/rc.mc` are the code). Zvals, arrays and objects stay in the call's chunk, and why is in
+   the same section.
+
+   **It is slower on `examples/decimal`, and the profile says exactly where.** The same bench,
+   every step measured head to head with main's module in the same sitting (`bench.php`, best of
+   nine per process, three to five rounds interleaved, this Mac):
+
+   | step | the module | main, same sitting |
+   |---|---|---|
+   | strings as `zend_string`s, the counting as runtime calls | 0.858 ms | 0.523 ms |
+   | the take, the release and the pool push written into each function | 0.706 | 0.525 |
+   | only a function that LOOPS counts its locals; one with no loop borrows from the pool | 0.682 | 0.524 |
+   | `php_str_alloc`/`php_str_free` per road: `_emalloc`/`_efree` with nothing between | 0.629 | 0.524 |
+   | a string parameter the body never assigns returned with no reference taken | 0.619 | 0.523 |
+   | the pool drained with `_efree` in its own loop | 0.606 | 0.524 |
+
+   The first line is what a naive discipline costs: calling a two-line helper per store and per
+   release was 42% of the module's time (`sample`, 6153 samples; `php_str_release` alone 11.6%,
+   most of it mc's prologue around the test). The final build against main, category by
+   category (`sample`, 7710 samples against main's 6177, self time):
+
+   | where | main | this batch |
+   |---|---|---|
+   | allocation: a string built (`php_str_alloc`, `_emalloc`), the chunk's `php_alloc` | 10.4% | 10.8% |
+   | freeing: the chunk zeroed and swept (main) / a count reaching zero, the pool drained, `_efree` (this batch) | 4.6% | 8.0% |
+   | copying bytes into new strings | 14.5% | 12.7% |
+   | scanning and converting digits | 35.9% | 30.9% |
+   | the php functions' own bodies | 18.2% | 24.4% |
+   | the extension boundary | 8.2% | 5.8% |
+   | arrays and zvals, php itself, the rest | 8.1% | 7.5% |
+
+   Memory is **18.8%** of the module's time, from 15.0% (plus the counting written into the
+   functions' bodies, whose share grew by 6 points), and the extension boundary lost the result
+   copy (8.2% -> 5.8%). The reason is the count: `decimal.php` builds about eleven strings per
+   `dec_add` (a number is a string, and every step of the algorithm makes a new one), and each
+   of them is now an `_emalloc` and an `_efree` -- php's own price, which php interpreting the
+   same source pays too -- where main bumped a pointer and zeroed a chunk. The C twin makes two
+   or three allocations a call. What moved the other way is everything a string does not have
+   to do twice: no zeroing, no result copy, and no longer any sweep that grows with the call --
+   a loop inside one call used to keep every string it built until the call returned
+   (`tests/ext.sh` step 12: 100 000 iterations building 2 KB each moved php's peak 0 bytes; on
+   main's compiler the same function dies with php's `Allowed memory size of 134217728 bytes
+   exhausted`), and a `.=` in a loop used to copy the whole string every time (step 11:
+   `grow(100000)` is 100 002 writes in place and 2 copies; on main it too exhausts php's memory).
 
 2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
    through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`

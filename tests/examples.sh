@@ -156,13 +156,17 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
         skip "the bcmath cross-check: this php has no bcmath"
     fi
     # 1 000 000 calls in ONE request: every string a call builds is a Zend
-    # block the call frees, so php's own peak does not move. The module used
-    # to allocate out of a fixed arena and died near 29 000 calls.
+    # block freed when its last reference goes, so php's own usage does not
+    # move and its peak moves only as far as a call's temporaries grow with the
+    # accumulator's digits (soak.php says why): a kilobyte is allowed, and one
+    # leaked string a call would be tens of megabytes. The module used to
+    # allocate out of a fixed arena and died near 29 000 calls.
     set -- $("$PHP" -d extension="$dso" "$EX/soak.php" 1000000 2>&1 | tr -d '\r')
-    if [ "${2:-}" = 1000000 ] && [ "${4:-}" = 12500000.00 ] && [ "${10:-x}" = "${12:-y}" ]; then
+    if [ "${2:-}" = 1000000 ] && [ "${4:-}" = 12500000.00 ] \
+       && [ $((${8:-99999999} - ${6:-0})) -lt 1024 ] && [ $((${12:-99999999} - ${10:-0})) -lt 1024 ]; then
         say "soak: 1000000 dec_add calls in one request, usage $6 -> $8 bytes, peak ${10} -> ${12}"
     else
-        bad "soak.php: want 1000000 calls, 12500000.00 and an unmoved peak, got: $*"
+        bad "soak.php: want 1000000 calls, 12500000.00, and usage and peak that move under 1 KiB, got: $*"
     fi
     # the C twin (c/decimal.c): the same six functions written the ordinary
     # way, graded by the same check.php, and the reference the bench compares
