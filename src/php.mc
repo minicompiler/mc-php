@@ -40,4 +40,5 @@
 #include "class.mc"
 #include "decl.mc"
 #include "ext.mc"
+#include "mach.mc"
 #include "program.mc"

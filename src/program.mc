@@ -514,6 +514,7 @@ void user_init() {
     float_init();
     machine_arm64_float_init();
     machine_x86_64_float_init();
+    ph_mach_init();
     ty_pstr = type_new("php_str", 8, 8, TK_INT);
     ty_parr = type_new("php_arr", 8, 8, TK_INT);
     ty_pzv  = type_new("php_zval", 8, 8, TK_INT);

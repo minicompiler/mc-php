@@ -161,6 +161,10 @@ i64 phi_copy(i64 n) {
         set_nd_b(c, phi_copy(nd_b(n)));
         set_nd_c(c, phi_copy(nd_c(n)));
         set_nd_d(c, phi_copy(nd_d(n)));
+        // a literal's use is rewritten into a load of its cache at the end
+        // of the unit (ph_lit_finish): the copy has to be too
+        if (nd_kind(n) == N_CALL && (str_eq(nd_name(n), "php_str_lit") || str_eq(nd_name(n), "php_bmap_lit")))
+            ph_lit_copied(c);
         if (t) set_nd_next(t, c);
         if (!t) h = c;
         t = c;
