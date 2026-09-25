@@ -510,6 +510,7 @@ void ph_push_rt_host() {
 void user_init() {
     ph_ext_config();
     ph_rc_env();
+    phi_env();
     float_init();
     machine_arm64_float_init();
     machine_x86_64_float_init();

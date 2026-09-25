@@ -292,6 +292,16 @@ i64 ph_function() {
     set_nd_type(f, ph_mcty(rt));
     set_nd_a(f, head);
     set_nd_b(f, body);
+    // src/opt.mc: calls to smaller functions declared earlier are copied in,
+    // and this one may be copied into later ones -- only a plain signature
+    i64 inl = !retref && !fwd && !nap && !ld64(ph_fpr + fi * 8) && !ld64(ph_fvar + fi * 8);
+    i64 kd = 0;
+    loop {
+        if (kd >= np) break;
+        if (ld64(ph_fpd + (fi * PH_MAXP + kd) * 8)) inl = 0;
+        kd = kd + 1;
+    }
+    ph_inl_fn(f, inl);
     ph_rc_fn(f);
     ph_opt_fn(f);
     return f;

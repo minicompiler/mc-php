@@ -1177,6 +1177,7 @@ uptr php_zstr(uptr s);
 uptr php_zlong(i64 v);
 uptr php_str_new(uptr b, i64 n);
 uptr php_str_short(uptr b, i64 n);
+uptr php_str_ch(i64 c);
 i64  php_zv_type(uptr z);
 
 // set_error_handler(): the callable, and the one the previous call replaced.
@@ -3135,12 +3136,11 @@ uptr php_ftos6(f64 x) {
 }
 
 // ---- the rest of the string set T5 implements -----------------------------
+// the shared one-byte string, as php's own chr() answers ZSTR_CHAR
 uptr php_chr(i64 c) {
     i64 b = c % 256;
     if (b < 0) b = b + 256;
-    u8 t[1];
-    st8(t, b);
-    return php_str_new(t, 1);
+    return php_str_ch(b);
 }
 i64 php_ord(uptr s) { if (php_strlen(s) == 0) return 0; return ld8(s + ZS_HDR); }
 

@@ -167,6 +167,16 @@ else
     echo "  FAIL  windows: g/112's lowering has $1 php_str_catw and $2 php_substr (want 7 and 0)"
     fail=1
 fi
+# src/opt.mc's inlining: in g/113's run() every call but the recursive one
+# is a copy, so its lowering calls f_fact and no other php function.
+"$MCPHP_BIN" --dump-ast $P/g/113-inline.php > "$tmp/in.ast" 2>&1
+il=$(awk '/^FUNC/ { u = ($0 ~ / name=f_run$/) } u && /CALL .*name=f_/ { print $NF }' "$tmp/in.ast" | sort -u | tr '\n' ' ')
+if [ "$il" = "name=f_fact " ]; then
+    echo "  inlining: g/113's run() calls only its recursive function; the rest are copies"
+else
+    echo "  FAIL  inlining: g/113's run() still calls: $il(want only name=f_fact)"
+    fail=1
+fi
 # The one place the packed lowering is NOT php: an int that overflows on an
 # element. php makes a float; a native int cannot hold one, so it is a named
 # ArithmeticError and never a wrapped int. Not a differential -- php's answer
