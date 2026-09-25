@@ -75,6 +75,17 @@ echo "== the fixtures and the refusals =="
 sh tests/fixtures.sh || fail=1
 
 echo ""
+echo "== the fixtures again, every string counted (MCPHP_RC=check) =="
+# The program road counts nothing -- every string is the arena's -- so the
+# discipline the EXTENSION road runs on (src/rc.mc, lib/php_rt.mc § who owns a
+# string) would go ungraded by the fixtures. Compiled with MCPHP_RC=check the
+# same programs count their arena strings as a module counts Zend ones, drain
+# after every statement, and poison a string that reaches zero: a string freed
+# under a live name reads back wrong or dies naming itself, and the answers
+# must still be php's. tests/mcphp.sh hands it to the compiler only.
+MCPHP__RC=check sh tests/fixtures.sh || fail=1
+
+echo ""
 echo "== the extension road =="
 # The other half of what this compiler is for, and it is a DIFFERENTIAL like
 # the one above: examples/hello/check.php runs twice, once with the compiled

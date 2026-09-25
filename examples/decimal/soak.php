@@ -22,13 +22,14 @@ if (!extension_loaded('decimal')) {
     require __DIR__ . '/decimal.php';
 }
 $n = (int) ($argv[1] ?? 1000000);
+$w = min(1000, $n);                            // the warm-up is part of the N
 $acc = '0';
-for ($i = 0; $i < 1000; $i++) {                // warm
+for ($i = 0; $i < $w; $i++) {
     $acc = dec_add($acc, '12.5', 2);
 }
 $u0 = memory_get_usage();
 $p0 = memory_get_peak_usage();
-for ($i = 1000; $i < $n; $i++) {
+for ($i = $w; $i < $n; $i++) {
     $acc = dec_add($acc, '12.5', 2);
 }
 $u1 = memory_get_usage();

@@ -93,6 +93,12 @@ echo "== the fixture gate, on this host =="
 sh tests/fixtures.sh || exit 1
 
 echo ""
+echo "== the fixture gate again, every string counted (MCPHP_RC=check) =="
+# tests/run.sh says why: the string discipline of the extension road, graded on
+# the program road by poisoning a string that reaches zero
+MCPHP__RC=check sh tests/fixtures.sh || exit 1
+
+echo ""
 echo "== the extension road, on this host =="
 # The same six steps the macOS gate runs, with examples/hello/mcphp.linux.toml
 # for the [linker]. The .so is loaded by the php IN THIS CONTAINER and graded

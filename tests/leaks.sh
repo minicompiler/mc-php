@@ -76,12 +76,19 @@ dbg() { sed "s/^build_id = .*/build_id = \"$bid\"/; s/^debug = .*/debug = true/;
 leakfree() {
     name=$1; shift
     "$PHP" -d report_memleaks=1 "$@" > "$t/out" 2> "$t/err"; rc=$?
+    # every request here is expected to succeed: a module that does not load,
+    # or a php that dies, prints no leak report and is not leak-free
+    if [ "$rc" != 0 ]; then
+        bad "$name: exit $rc"
+        tail -5 "$t/out" "$t/err" | sed "s/^/      /"
+        return
+    fi
     if grep -q "memory leaks detected\|Freeing 0x" "$t/out" "$t/err"; then
         bad "$name: the debug allocator reports blocks still allocated:"
         grep -h "Freeing\|leaks detected" "$t/out" "$t/err" | head -8 | sed "s/^/      /"
         return
     fi
-    say "$name: exit $rc, no block left at the end of the request"
+    say "$name: exit 0, no block left at the end of the request"
 }
 
 cp -R examples/decimal "$t/decimal"
