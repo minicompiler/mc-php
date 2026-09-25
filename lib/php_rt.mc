@@ -141,6 +141,7 @@ i64  ph_en;
 i64  ph_ecap;
 i64  ph_rc_inplace;                 // `.=` and `$s[$i] =` that wrote into the string itself,
 i64  ph_rc_copied;                  // and the ones that had to copy it (MCPHP_STATS)
+i64  ph_rc_built;                   // every string a call built (MCPHP_STATS, extension road)
 
 // a list's storage: Zend's inside a call (freed at RSHUTDOWN), the arena in
 // check mode (a program)
@@ -367,9 +368,14 @@ uptr php_str_lit(uptr cache, uptr b, i64 n) {
     return s;
 }
 
+// An empty side answers the other operand itself, as php's concat_function
+// does (ZVAL_COPY of the non-empty side): a runtime call may answer its
+// argument, and the caller takes the reference it keeps (php_rc_take).
 uptr php_str_concat(uptr a, uptr b) {
     i64 la = ld64(a + 16);
     i64 lb = ld64(b + 16);
+    if (!lb) return a;
+    if (!la) return b;
     uptr s = php_str_alloc(la + lb);
     php_memcpy(s + ZS_HDR, a + ZS_HDR, la);
     php_memcpy(s + ZS_HDR + la, b + ZS_HDR, lb);
@@ -399,6 +405,60 @@ uptr php_str_cat4(uptr a, uptr b, uptr c, uptr d) {
     php_memcpy(s + ZS_HDR + la, b + ZS_HDR, lb);
     php_memcpy(s + ZS_HDR + la + lb, c + ZS_HDR, lc);
     php_memcpy(s + ZS_HDR + la + lb + lc, d + ZS_HDR, ld);
+    return s;
+}
+
+// A concatenation whose pieces are substr() WINDOWS, in one allocation
+// (src/opt.mc's fusion): each piece is (string, start, length) with php's
+// own substr bounds, and a length PHP_INT_MAX where the call had none -- which
+// is what php_substr's absent length clamps to. A whole string is the window
+// (s, 0, PHP_INT_MAX). The substrings are never built.
+i64 php_win(uptr s, i64 st, i64 ln, uptr off) {
+    i64 n = ld64(s + 16);
+    if (st < 0) { st = n + st; if (st < 0) st = 0; }
+    if (st > n) { st64(off, n); return 0; }
+    i64 want = ln;
+    if (ln < 0) want = n - st + ln;
+    if (want < 0) want = 0;
+    if (want > n - st) want = n - st;
+    st64(off, st);
+    return want;
+}
+
+uptr php_str_catw2(uptr a, i64 sa, i64 na, uptr b, i64 sb, i64 nb) {
+    u8 o[16];
+    i64 la = php_win(a, sa, na, o);
+    i64 lb = php_win(b, sb, nb, o + 8);
+    uptr s = php_str_alloc(la + lb);
+    php_memcpy(s + ZS_HDR, a + ZS_HDR + ld64(o), la);
+    php_memcpy(s + ZS_HDR + la, b + ZS_HDR + ld64(o + 8), lb);
+    return s;
+}
+
+uptr php_str_catw3(uptr a, i64 sa, i64 na, uptr b, i64 sb, i64 nb, uptr c, i64 sc, i64 nc) {
+    u8 o[24];
+    i64 la = php_win(a, sa, na, o);
+    i64 lb = php_win(b, sb, nb, o + 8);
+    i64 lc = php_win(c, sc, nc, o + 16);
+    uptr s = php_str_alloc(la + lb + lc);
+    php_memcpy(s + ZS_HDR, a + ZS_HDR + ld64(o), la);
+    php_memcpy(s + ZS_HDR + la, b + ZS_HDR + ld64(o + 8), lb);
+    php_memcpy(s + ZS_HDR + la + lb, c + ZS_HDR + ld64(o + 16), lc);
+    return s;
+}
+
+uptr php_str_catw4(uptr a, i64 sa, i64 na, uptr b, i64 sb, i64 nb, uptr c, i64 sc, i64 nc,
+                   uptr d, i64 sd, i64 nd) {
+    u8 o[32];
+    i64 la = php_win(a, sa, na, o);
+    i64 lb = php_win(b, sb, nb, o + 8);
+    i64 lc = php_win(c, sc, nc, o + 16);
+    i64 ld = php_win(d, sd, nd, o + 24);
+    uptr s = php_str_alloc(la + lb + lc + ld);
+    php_memcpy(s + ZS_HDR, a + ZS_HDR + ld64(o), la);
+    php_memcpy(s + ZS_HDR + la, b + ZS_HDR + ld64(o + 8), lb);
+    php_memcpy(s + ZS_HDR + la + lb, c + ZS_HDR + ld64(o + 16), lc);
+    php_memcpy(s + ZS_HDR + la + lb + lc, d + ZS_HDR + ld64(o + 24), ld);
     return s;
 }
 
@@ -1116,6 +1176,7 @@ uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5);
 uptr php_zstr(uptr s);
 uptr php_zlong(i64 v);
 uptr php_str_new(uptr b, i64 n);
+uptr php_str_short(uptr b, i64 n);
 i64  php_zv_type(uptr z);
 
 // set_error_handler(): the callable, and the one the previous call replaced.
@@ -2699,7 +2760,7 @@ uptr php_substr(uptr s, i64 start, i64 len, i64 haslen) {
     }
     if (want < 0) want = 0;
     if (start + want > n) want = n - start;
-    return php_str_new(s + ZS_HDR + start, want);
+    return php_str_short(s + ZS_HDR + start, want);
 }
 
 // (int) substr($s, ...): the same window, read as an int in place -- the
@@ -3418,6 +3479,17 @@ uptr php_str_ch(i64 c) {
     s = php_str_mod(cb, 1);
     st64(ph_ch1 + c * 8, s);
     return s;
+}
+
+// A result the caller will not write into: an empty or one-byte one is the
+// shared module string (php's ZSTR_EMPTY_ALLOC and ZSTR_CHAR), anything else
+// a new one. Only for results nobody writes into afterwards.
+uptr ph_str_e;
+uptr php_str_short(uptr b, i64 n) {
+    if (n == 1) return php_str_ch(ld8(b));
+    if (n) return php_str_new(b, n);
+    if (!ph_str_e) ph_str_e = php_str_mod(b, 0);
+    return ph_str_e;
 }
 
 // $s[$i] outside the string is php's "Warning: Uninitialized string offset"
@@ -6820,7 +6892,7 @@ uptr php_trim_m(uptr s, uptr bm, i64 mode) {
     if (mode != 2) { loop { if (a >= b) break; c = ld8(v + a); if (!((ld8(bm + (c >> 3)) >> (c & 7)) & 1)) break; a = a + 1; } }
     if (mode != 1) { loop { if (b <= a) break; c = ld8(v + b - 1); if (!((ld8(bm + (c >> 3)) >> (c & 7)) & 1)) break; b = b - 1; } }
     if (a == 0 && b == n) return s;
-    return php_str_new(v + a, b - a);
+    return php_str_short(v + a, b - a);
 }
 
 // trim with a mask the compiler could not see

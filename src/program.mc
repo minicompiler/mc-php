@@ -112,6 +112,7 @@ void ph_program() {
         set_nd_a(b, on);
         ph_rc_fn(f);
     }
+    ph_opt_fn(f);
     top_add(f);
     if (ph_ext) ph_ext_emit(fl, line);
     top_add(ph_lit_finish(fl, line));

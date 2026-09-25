@@ -674,6 +674,7 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     set_nd_a(f, head);
     set_nd_b(f, body);
     ph_rc_fn(f);
+    ph_opt_fn(f);
     top_add(f);
     ph_scope_restore(savenv);
     ph_hoist_head = hh;

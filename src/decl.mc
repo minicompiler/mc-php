@@ -293,6 +293,7 @@ i64 ph_function() {
     set_nd_a(f, head);
     set_nd_b(f, body);
     ph_rc_fn(f);
+    ph_opt_fn(f);
     return f;
 }
 

@@ -154,6 +154,19 @@ else
     echo "  FAIL  packed: $pk / $pn accepted in g/105; lowered in g/106 where the proof must fail: ${pe:-none}"
     fail=1
 fi
+# src/opt.mc's concatenation windows: g/112's every substr() is a piece of a
+# concatenation, so its compiled functions have php_str_catwN and not one php_substr
+# (a fusion that never fired would pass the differential just as well).
+"$MCPHP_BIN" --dump-ast $P/g/112-concat-windows.php > "$tmp/cw.ast" 2>&1
+set -- $(awk '/^FUNC/ { u = ($0 ~ / name=(f_|main$)/) }
+               u && /CALL .*name=php_str_catw/ { w++ } u && /CALL .*name=php_substr$/ { n++ }
+               END { print w + 0, n + 0 }' "$tmp/cw.ast")
+if [ "$1" = 7 ] && [ "$2" = 0 ]; then
+    echo "  windows: g/112's 7 concatenations read their substr() pieces in place"
+else
+    echo "  FAIL  windows: g/112's lowering has $1 php_str_catw and $2 php_substr (want 7 and 0)"
+    fail=1
+fi
 # The one place the packed lowering is NOT php: an int that overflows on an
 # element. php makes a float; a native int cannot hold one, so it is a named
 # ArithmeticError and never a wrapped int. Not a differential -- php's answer
