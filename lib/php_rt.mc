@@ -2886,7 +2886,12 @@ uptr php_str_repeat(uptr s, i64 times) {
     // nothing to repeat, or one byte once: the shared empty and one-byte
     // strings, not a new one (`$w . str_repeat('0', $to - $from)` is most
     // often a zero-length pad)
-    if (times <= 0) return php_str_short("", 0);
+    if (times < 0) {
+        php_throw_str(php_str_new("ValueError", 10),
+            php_str_new("str_repeat(): Argument #2 ($times) must be greater than or equal to 0", 69));
+        return php_str_short("", 0);
+    }
+    if (times == 0) return php_str_short("", 0);
     i64 n = php_strlen(s);
     if (n == 1 && times == 1) return php_str_short(s + ZS_HDR, 1);
     uptr o = php_str_alloc(n * times);

@@ -884,7 +884,10 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   rewritten after `c/decimal.c` function by function (parse once, a digit at a time, results
   written into strings of the right length), so the three columns measure ONE algorithm; `check.php`
   byte for byte, bccheck 1219 / 0 wrong. On main's compiler that was 0.941 ms (module/C 7.41); the
-  compiler and runtime took it to **0.398 ms, module/C 3.13, 6.64x the interpreter** (1.725 ms on
+  compiler and runtime took it to 0.398 ms, module/C 3.13 -- **0.417 ms, 3.31, 6.27x the
+  interpreter** after the review (a loop whose slow halves can raise a diagnostic keeps its pool
+  drain: the text is built in the pool, 8.4 MB for 100 000 out-of-range reads, `tests/ext.sh` step
+  12b; str_repeat with a negative count is php's ValueError, `tests/g/116`) (1.725 ms on
   the old source, 2.641 on this one; the twin 0.127), one sitting, nine rounds interleaved, each
   change with its own number in `examples/decimal/README.md`: `ord($s[$i])` and `$s[$i] = chr(c)`
   / `= STRING` read and written in place (`php_str_byte`, `php_str_setb`/`sets`), the runtime's

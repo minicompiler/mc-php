@@ -1246,22 +1246,23 @@ void phr_tail(i64 f) {
 // ---- a loop that builds nothing does not drain -------------------------------
 // src/rc.mc drains the pool at the top of every iteration: `if (ph_pn >
 // ph_pm) php_rc_drain(ph_pm)`, a load and a compare each time round. A loop
-// whose every call is a quiet one or the slow half of a copied runtime routine
-// builds nothing on the path it takes, so the test is dropped there: what a
-// slow half may leave in the pool (a diagnostic's text, a string copied
-// before its first write) is drained by the enclosing loop's test or when the
-// function returns.
-i64 phr_slow_call(uptr nm) {
-    i64 n = cstrlen(nm);
-    if (n > 5 && str_eq(nm + n - 5, "_slow")) return 1;
-    return str_eq(nm, "php_pk_overflow") || str_eq(nm, "php_str_setoff_own")
-        || str_eq(nm, "php_zstr") || str_eq(nm, "php_chr");
+// whose every call is PROVEN to add nothing to the pool has nothing to drain,
+// so the test is dropped there. Proven means: mc's loads and stores, the
+// counting's own releases, and a slow half that can only THROW -- the throw
+// leaves the loop through the unwinding, which drains. A slow half that can
+// raise a diagnostic is not one: the diagnostic's text is built (php_mi ->
+// php_itos) in the pool, so an out-of-range read repeated in a loop grew the
+// pool by one string an iteration (tests/ext.sh step 12b), and
+// neither is anything that copies a string or calls the counting's push.
+i64 phr_throws_only(uptr nm) {
+    return str_eq(nm, "php_pk_overflow") || str_eq(nm, "php_intdiv_slow");
 }
 
 i64 phr_builds(i64 n) {
     loop {
         if (!n) break;
-        if (nd_kind(n) == N_CALL && !phr_quiet_call(nd_name(n)) && !phr_slow_call(nd_name(n))) return 1;
+        if (nd_kind(n) == N_CALL && (str_eq(nd_name(n), "php_pool_push")
+            || (!phr_quiet_call(nd_name(n)) && !phr_throws_only(nd_name(n))))) return 1;
         if (!phr_is_check(n)) {
             if (phr_builds(nd_a(n)) || phr_builds(nd_b(n)) || phr_builds(nd_c(n)) || phr_builds(nd_d(n))) return 1;
         }

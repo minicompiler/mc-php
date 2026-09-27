@@ -204,13 +204,14 @@ algorithm (above), and the batch took the module as close to the twin as the com
 |---|---|---|---|---|
 | main, the old `decimal.php` | 1.725 ms | 0.440 ms (3.92x) | 0.127 ms (13.58x) | 3.46 |
 | the twin's algorithm, main's compiler | 2.641 ms | 0.941 ms (2.81x) | 0.127 ms (20.80x) | 7.41 |
-| the twin's algorithm, this batch | 2.641 ms | **0.398 ms (6.64x)** | 0.127 ms | **3.13** |
+| the twin's algorithm, this batch | 2.641 ms | 0.398 ms (6.64x) | 0.127 ms | 3.13 |
+| the same, after the review's drain fix (a second sitting, nine rounds) | 2.616 ms | **0.417 ms (6.27x)** | 0.126 ms | **3.31** |
 
 The interpreter is slower on the twin's algorithm (a byte at a time is dear in php) and so was the
 module on main's compiler: every `$s[$i]` read built a one-byte string, every `$s[$i] = ...`
 built a zval, every packed element was a call. Each change below is in the compiler or its
-runtime, measured in the same sitting (`tests/examples.sh`'s own row on the final tree: 3.008 /
-0.458 / 0.143 ms, 6.57x and 21.03x):
+runtime, measured in the same sitting (`tests/examples.sh`'s own row on the final tree: 2.637 /
+0.408 / 0.126 ms, 6.46x and 20.93x):
 
 | change | the module | module / C |
 |---|---|---|
@@ -227,10 +228,12 @@ runtime, measured in the same sitting (`tests/examples.sh`'s own row on the fina
 | `strspn` with a literal set, a three-argument routine | 0.448 ms (0.440 against 0.448 head to head, fifteen rounds) | 3.53 |
 | `c ? 1 : 0` and any two int literals: arithmetic, not a branch (the carry was a random branch) | 0.426 ms | 3.35 |
 | no pool drain at the top of a loop that builds nothing | 0.408 ms | 3.21 |
-| `str_repeat` of nothing, or of one byte once: the shared strings | **0.398 ms** | **3.13** |
+| `str_repeat` of nothing, or of one byte once: the shared strings | 0.398 ms | 3.13 |
+| the review: a loop whose slow halves can raise a diagnostic keeps its drain (the text is built in the pool: 100 000 out-of-range reads grew php's peak 8.4 MB, `tests/ext.sh` step 12b) | **0.417 ms** (0.399 against 0.417 head to head) | **3.31** |
 
-What separates the two now, measured on the final tree (the gap is 0.271 ms; `xctrace`, and
-builds with one cause taken out):
+What separates the two now, measured on the tree before the review's drain fix (the gap was
+0.271 ms; `xctrace`, and builds with one cause taken out; the fix adds 0.018 ms of the pool test
+back to the loops whose slow halves can raise a diagnostic):
 
 | cause | share | class | what removing it takes |
 |---|---|---|---|
@@ -241,7 +244,7 @@ builds with one cause taken out):
 | the extension boundary: the handler's entry, exit and argument checks | 2.5% of the module's samples, about 0.010 ms | (a), small | -- |
 | Zend's VM running `bench.php` and the calls themselves | 0.021 ms, in both columns (a null twin: the six functions read their arguments and answer a constant) | common | -- |
 
-So the module is 3.13x the twin, 6.64x php interpreting the same source, and what is left is
+So the module is 3.31x the twin, 6.27x php interpreting the same source, and what is left is
 php's own checks (0.037 ms), php's strings being values, and mc's register allocation -- the last
 unproven. The soak on the final tree: a million `dec_add` calls, usage 517 656 -> 517 656 bytes,
 peak 517 928 -> 517 960.
