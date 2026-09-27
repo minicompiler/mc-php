@@ -230,10 +230,15 @@ for m in arm64 x86_64 x86_64-win; do
             END { print ((a > 0 && b == 0) ? "out" : ((a == 0 && b > 0) ? "in" : "mixed")) }')
     done
 done
-if [ "$*" = "out in out in out in" ]; then
-    echo "  out of line: g/115's slow halves are after the ret on arm64, x86-64 and Win64, and in line with MCPHP_LAYOUT=0"
+# A Windows-hosted compiler reads no environment (mc's host_environ() is 0
+# there, M38's Decision 5), so the switch cannot reach it and the off half
+# reads "out" like the on half: that host checks the layout alone.
+want="out in out in out in"; off="and in line with MCPHP_LAYOUT=0"
+if [ "$sfx" = .exe ]; then want="out out out out out out"; off="(the switch is not readable on a Windows host)"; fi
+if [ "$*" = "$want" ]; then
+    echo "  out of line: g/115's slow halves are after the ret on arm64, x86-64 and Win64, $off"
 else
-    echo "  FAIL  out of line: g/115's slow halves read $* (want out in out in out in: arm64, x86_64, x86_64-win, each on and off)"
+    echo "  FAIL  out of line: g/115's slow halves read $* (want $want: arm64, x86_64, x86_64-win, each on and off)"
     fail=1
 fi
 # The one place the packed lowering is NOT php: an int that overflows on an
