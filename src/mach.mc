@@ -39,6 +39,11 @@
 //       with a zero offset, which is what every linker and mc's own --exe
 //       writer already patch a page offset into (they classify the access by
 //       its size bits).
+//   P10 a slow half the walker jumps over -- a straight-line region whose
+//       first call is a *_slow routine, php_rc_drain or php_pk_overflow -- is
+//       moved past the epilogue once the function is finished, so the fast
+//       path falls through its guards (see the section below; both machines,
+//       MCPHP_LAYOUT=0 turns it off alone).
 //
 // The x86-64 half (both ABIs, over <float>'s) is the same idea in that
 // machine's forms: `lea rd, [rl + k]` is the add or sub of a constant, and a
@@ -52,6 +57,7 @@ uptr pm_orig;                         // what it was derived from, pristine
 i64  pm_ad[MAXDEPTH];                 // P2: where the last address add for a depth is
 i64  pm_ad_at(i64 d) { return ld64(pm_ad + d * 8); }
 void pm_ad_set(i64 d, i64 v) { st64(pm_ad + d * 8, v); }
+i64  pm_nolay;                        // MCPHP_LAYOUT=0: P10 alone off
 i64  pm_off;                          // MCPHP_PEEP=0 in the compiler's environment
 
 uptr pm_of(i64 task) { return ld64(pm_orig + task * 8); }
@@ -372,7 +378,8 @@ void pm_env() {
     loop {
         uptr s = ld64(e + i * 8);
         if (!s) return;
-        if (str_eq(s, "MCPHP_PEEP=0")) { pm_off = 1; return; }
+        if (str_eq(s, "MCPHP_PEEP=0")) pm_off = 1;
+        if (str_eq(s, "MCPHP_LAYOUT=0")) pm_nolay = 1;
         i = i + 1;
     }
 }
@@ -568,6 +575,8 @@ void px_prologue_at(uptr orig) {
 void px_prologue_sysv() { px_prologue_at(px_orig); }
 void px_prologue_win()  { px_prologue_at(px_orig_win); }
 
+void px_frame_fix(i64 frame);
+
 void px_fill(uptr tab, uptr orig, uptr src, uptr pro) {
     i64 t = 0;
     loop {
@@ -585,7 +594,182 @@ void px_fill(uptr tab, uptr orig, uptr src, uptr pro) {
     machine_slot(tab, MTASK_UN,       &px_un);
     machine_slot(tab, MTASK_JZ,       &px_jz);
     machine_slot(tab, MTASK_JNZ,      &px_jnz);
+    machine_slot(tab, MTASK_FRAME_FIX, &px_frame_fix);
 }
+
+// ---- P10: the slow path out of line (both machines) -------------------------
+// The runtime's fast paths come with a slow half -- `if (k < n) <load> else
+// php_pk_get_slow(...)`, `if (ph_pn > ph_pm) php_rc_drain(ph_pm)`, `if
+// (<overflow>) php_pk_overflow(0)` -- and mc lays an if out in source order:
+// the fast half ends in a jump over the slow one, and an if with no else is a
+// jump over its body. So the path that runs takes a branch for every guard:
+// six taken branches in examples/decimal's _dec_umul inner loop, where one
+// (the back edge) is enough.
+//
+// Once the function is finished (after the frame fixup, which reads the
+// prologue's own index), a straight-line region the walker jumps over is moved
+// past the epilogue when its first call is a cold routine: one whose name ends
+// in _slow, or php_rc_drain or php_pk_overflow. Precisely, a branch P to a
+// label T further on, where everything between them is labels up front and
+// then straight-line code with no label in it:
+//   P unconditional -- the region is only reached through its labels: P goes,
+//                      and the code before it now falls into T;
+//   P conditional   -- the region was its fallthrough: P is inverted and
+//                      branches to the region's first label (a new one if it
+//                      has none).
+// The moved region ends with a jump back to T. Every other branch names a
+// label, and labels move with their code, so nothing else changes. A function
+// with a raw word in it (emit(), a #opcode body, a reloc()) is left alone: a
+// hand-encoded word may be pc-relative. MCPHP_LAYOUT=0 turns this off alone.
+i64 lay_x86;
+
+i64 lay_nop()          { if (lay_x86) return X_NOP; return I_NOP; }
+i64 lay_jmp()          { if (lay_x86) return X_JMP; return I_B; }
+i64 lay_cond(i64 op)   { if (lay_x86) return op == X_JCC; return pm_is_branch(op); }
+i64 lay_call(i64 op)   { if (lay_x86) return op == X_CALL; return op == I_BL; }
+i64 lay_callr(i64 op)  { if (lay_x86) return op == X_CALLR; return op == I_BLR; }
+i64 lay_raw(i64 op)    { if (lay_x86) return op == X_EMIT; return op == I_EMIT; }
+
+void lay_invert(uptr e) {
+    i64 op = ins_op(e);
+    if (lay_x86 || op == I_BCOND) { set_ins_imm(e, ins_imm(e) ^ 1); return; }
+    if (op == I_CBZ) set_ins_op(e, I_CBNZ); else set_ins_op(e, I_CBZ);
+}
+
+i64 pm_cold_sym(i64 si) {
+    uptr n = sym_name(sym_at(si));
+    if (ld8(n) == '_') n = n + 1;
+    if (str_eq(n, "php_rc_drain") || str_eq(n, "php_pk_overflow")) return 1;
+    i64 k = cstrlen(n);
+    return k > 5 && str_eq(n + k - 5, "_slow");
+}
+
+// the region (i, t) qualifies: labels up front, then no label, and the first
+// call is cold. Answers the first label up front, 0 if none, -1 if it does not.
+i64 lay_region(i64 i, i64 t) {
+    i64 lead = 0;
+    i64 j = i + 1;
+    loop {
+        if (j >= t) return 0 - 1;
+        i64 op = ins_op(ins_at(j));
+        if (op == I_LABEL) { if (!lead) lead = ins_label(ins_at(j)); j = j + 1; continue; }
+        if (op == lay_nop()) { j = j + 1; continue; }
+        break;
+    }
+    loop {
+        if (j >= t) return 0 - 1;
+        uptr e = ins_at(j);
+        i64 op = ins_op(e);
+        if (op == I_LABEL || lay_callr(op)) return 0 - 1;
+        if (lay_call(op)) { if (pm_cold_sym(ins_sym(e))) return lead; return 0 - 1; }
+        j = j + 1;
+    }
+    return 0 - 1;
+}
+
+void lay_copy(uptr e) {
+    ins_add(ins_op(e), ins_rd(e), ins_rn(e), ins_rm(e), ins_imm(e), ins_label(e), ins_sym(e));
+}
+
+void lay_run() {
+    if (pm_off || pm_nolay || nprel != prel_base()) return;
+    i64 n = nins - ins_base;
+    i64 i = ins_base;
+    loop { if (i >= nins) break; if (lay_raw(ins_op(ins_at(i)))) return; i = i + 1; }
+    uptr lpos = xalloc((nlabels + 2) * 8);
+    i = ins_base;
+    loop {
+        if (i >= nins) break;
+        if (ins_op(ins_at(i)) == I_LABEL) st64(lpos + ins_label(ins_at(i)) * 8, i);
+        i = i + 1;
+    }
+    uptr rp = xalloc(n * 8);                     // the region's branch P
+    uptr re = xalloc(n * 8);                     // its end: T's own index
+    uptr rl = xalloc(n * 8);                     // the label P now names, 0 for none
+    i64 nr = 0;
+    i = ins_base;
+    loop {
+        if (i >= nins) break;
+        uptr e = ins_at(i);
+        i64 op = ins_op(e);
+        if ((op == lay_jmp() || lay_cond(op)) && ins_label(e) > 0 && ins_label(e) <= nlabels) {
+            i64 t = ld64(lpos + ins_label(e) * 8);
+            if (t > i) {
+                i64 lead = lay_region(i, t);
+                if (lead >= 0) {
+                    st64(rp + nr * 8, i);
+                    st64(re + nr * 8, t);
+                    st64(rl + nr * 8, lead);
+                    nr = nr + 1;
+                    i = t;
+                    continue;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (!nr) return;
+    // A moved region's branch and its jump back each span at most the whole
+    // function, which grows by one `b` per region. mc's arm64 encoder refuses a
+    // branch past 0x1ffff words ("branch too far", its br_off -- every form,
+    // b included), so a function that could reach that is left as the walker
+    // laid it out: the move must not turn a function main compiles into one it
+    // refuses. x86-64's jmp and jcc are rel32, and no function comes near it.
+    if (!lay_x86) {
+        i64 sz = 4 * nr;
+        i = ins_base;
+        loop { if (i >= nins) break; sz = sz + pm_ins_size(ins_at(i)); i = i + 1; }
+        if (sz > 4 * 0x1ffff) return;
+    }
+    uptr cp = xalloc(n * INS_SIZE);
+    i = 0;
+    loop { if (i >= n * INS_SIZE) break; st64(cp + i, ld64(ins_at(ins_base) + i)); i = i + 8; }
+    i64 b = ins_base;
+    nins = ins_base;
+    i64 r = 0;
+    i = 0;
+    loop {                                       // the function without its regions
+        if (i >= n) break;
+        uptr e = cp + i * INS_SIZE;
+        if (r < nr && b + i == ld64(rp + r * 8)) {
+            if (lay_cond(ins_op(e))) {
+                if (!ld64(rl + r * 8)) { nlabels = nlabels + 1; st64(rl + r * 8, nlabels); }
+                lay_copy(e);
+                uptr ne = ins_at(nins - 1);
+                lay_invert(ne);
+                set_ins_label(ne, ld64(rl + r * 8));
+            } else {
+                st64(rl + r * 8, 0);             // reached through its own labels only
+            }
+            i = ld64(re + r * 8) - b;            // T stays, and the code runs on into it
+            r = r + 1;
+            continue;
+        }
+        lay_copy(e);
+        i = i + 1;
+    }
+    r = 0;
+    loop {                                       // and each region after the epilogue
+        if (r >= nr) break;
+        i64 p = ld64(rp + r * 8) - b;
+        uptr pe = cp + p * INS_SIZE;
+        i64 lc = ld64(rl + r * 8);
+        i64 lead = 0;
+        i64 k = p + 1;
+        if (k < ld64(re + r * 8) - b && ins_op(cp + k * INS_SIZE) == I_LABEL) lead = ins_label(cp + k * INS_SIZE);
+        if (lc && lc != lead) ins_add(I_LABEL, 0, 0, 0, 0, lc, 0);
+        loop {
+            if (k >= ld64(re + r * 8) - b) break;
+            lay_copy(cp + k * INS_SIZE);
+            k = k + 1;
+        }
+        ins_add(lay_jmp(), 0, 0, 0, 0, ins_label(pe), 0);
+        r = r + 1;
+    }
+}
+
+void pm_frame_fix(i64 frame) { callp(pm_of(MTASK_FRAME_FIX), frame); lay_x86 = 0; lay_run(); }
+void px_frame_fix(i64 frame) { callp(px_of(MTASK_FRAME_FIX), frame); lay_x86 = 1; lay_run(); }
 
 // The derivation reads the Ins record, opcode numbers and machine helpers
 // that mc's tests/golden/surface.txt does not freeze, so it is enabled only on
@@ -624,6 +808,7 @@ void ph_mach_init() {
     machine_slot(pm_tab, MTASK_UN,        &pm_un);
     machine_slot(pm_tab, MTASK_JZ,        &pm_jz);
     machine_slot(pm_tab, MTASK_JNZ,       &pm_jnz);
+    machine_slot(pm_tab, MTASK_FRAME_FIX, &pm_frame_fix);
     machine_slot(pm_tab, MTASK_GLOBAL_LOAD,  &pm_global_load);
     machine_slot(pm_tab, MTASK_GLOBAL_STORE, &pm_global_store);
     machine_slot(pm_tab, MTASK_INS_SIZE,     &pm_ins_size);

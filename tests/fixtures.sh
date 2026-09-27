@@ -216,6 +216,51 @@ else
     echo "  FAIL  peephole: g/114's dump reads $* (want 1 1 1 1 1 1 1: arm64 add #4095, movz #4096, b.ge, @PAGEOFF]; x86-64 lea +4095, lea -4096, jge)"
     fail=1
 fi
+# src/mach.mc's P10, read back on the three machines: every slow half in g/115's
+# acc() -- the element read and write outside the array, the overflow -- is
+# laid out after the function's ret, and the fast path falls through its
+# guards. MCPHP_LAYOUT=0 is the off switch and puts every one back in line; the
+# "on" half unsets it, so this reads the same under a run with the switch off.
+set --
+for m in arm64 x86_64 x86_64-win; do
+    for e in "-u MCPHP_LAYOUT" "MCPHP_LAYOUT=0"; do
+        set -- "$@" $(env $e "$MCPHP_BIN" --machine=$m --dump-asm $P/g/115-hot-paths.php 2>&1 | awk '
+            /^_/ { u = ($0 == "_f_acc:"); r = 0 } u && / ret$/ { r = 1 }
+            u && /(_slow|_php_pk_overflow)$/ { if (r) a++; else b++ }
+            END { print ((a > 0 && b == 0) ? "out" : ((a == 0 && b > 0) ? "in" : "mixed")) }')
+    done
+done
+# A Windows-hosted compiler reads no environment (mc's host_environ() is 0
+# there, M38's Decision 5), so the switch cannot reach it and the off half
+# reads "out" like the on half: that host checks the layout alone.
+want="out in out in out in"; off="and in line with MCPHP_LAYOUT=0"
+if [ "$sfx" = .exe ]; then want="out out out out out out"; off="(the switch is not readable on a Windows host)"; fi
+if [ "$*" = "$want" ]; then
+    echo "  out of line: g/115's slow halves are after the ret on arm64, x86-64 and Win64, $off"
+else
+    echo "  FAIL  out of line: g/115's slow halves read $* (want $want: arm64, x86_64, x86_64-win, each on and off)"
+    fail=1
+fi
+# P10's reach. mc's arm64 encoder refuses any branch past 0x1ffff words
+# ("branch too far") and a moved region's branch spans the whole function, one
+# `b` per region longer than main's layout. This function is 131 114 words,
+# its longest branch on main 131 067 (it compiles) and, with the region
+# moved, 131 090 (it did not): the move has to stand down for it. Generated
+# rather than checked in, 1600 lines of xor after one loop with a string read.
+# The sizes are the plain lowering's (MCPHP_RC=check makes it larger than main
+# can compile), so it is compiled without that switch.
+awk 'BEGIN { print "<?php"; print "function big(string $s, int $t): int {"
+    print "    for ($i = 0; $i < strlen($s); $i++) { $t = $t + ord($s[$i]); }"
+    for (i = 0; i < 1598; i++) { printf "    $t = $t"
+        for (k = 1; k <= 40; k++) printf " ^ %d", (i * 40 + k) % 4000 + 1; print ";" }
+    print "    $t = $t;"; print "    return $t;"; print "}"
+    print "echo big(\"abcdefg\", 5), \"\\n\";" }' > "$tmp/far.php"
+if env -u MCPHP_RC "$MCPHP_BIN" --backend=macho "$tmp/far.php" -o "$tmp/far.o" > "$tmp/far.err" 2>&1; then
+    echo "  reach: a 131 114-word function whose moved slow half would be out of a branch's range compiles, laid out as main lays it"
+else
+    echo "  FAIL  reach: $(head -1 "$tmp/far.err") (a function main compiles)"
+    fail=1
+fi
 # The one place the packed lowering is NOT php: an int that overflows on an
 # element. php makes a float; a native int cannot hold one, so it is a named
 # ArithmeticError and never a wrapped int. Not a differential -- php's answer
