@@ -1,0 +1,1 @@
+mc-php: out-of-range read: offset 3, length 3 (tests/c/06-trap-hashed.php:8)

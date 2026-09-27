@@ -135,6 +135,31 @@ for f in $P/r/*.php; do
     esac
 done
 echo "  refusals: $nrok / $nr parse under php and are named by mc-php, exit 3"
+# c/*.php: C semantics (docs/semantics.md), which php does not have, so each
+# is graded against its own recording and not against php: NAME.out is
+# stdout, NAME.err stderr (empty when absent; the path of the file is
+# spelled tests/c/NAME.php whatever the host wrote) and NAME.code the exit
+# code (0 when absent).
+nc=0; ncok=0
+for f in $P/c/*.php; do
+    nc=$((nc + 1))
+    b=${f%.php}
+    lim $P/mcphp.sh "$f" > "$tmp/c.out" 2> "$tmp/c.err"; ce=$?
+    rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
+    tr -d '\r' < "$tmp/c.out" > "$tmp/c.o"
+    tr -d '\r' < "$tmp/c.err" | sed 's#(.*tests[/\\]c[/\\]#(tests/c/#' > "$tmp/c.e"
+    want=0; [ -f "$b.code" ] && want=$(cat "$b.code")
+    [ -f "$b.err" ] && cp "$b.err" "$tmp/c.we" || : > "$tmp/c.we"
+    if [ "$timedout" != yes ] && [ "$ce" = "$want" ] && cmp -s "$b.out" "$tmp/c.o" && cmp -s "$tmp/c.we" "$tmp/c.e"; then
+        ncok=$((ncok + 1))
+    else
+        printf '  FAIL  c/%s (exit %s, want %s)\n' "$(basename "$f")" "$ce" "$want"
+        diff "$b.out" "$tmp/c.o" | sed -n '1,6p' | sed 's/^/      /'
+        diff "$tmp/c.we" "$tmp/c.e" | sed -n '1,6p' | sed 's/^/      /'
+        fail=1
+    fi
+done
+echo "  C semantics: $ncok / $nc answer their recording (wrap, in-range reads, the debug trap)"
 # The packed int array (src/packed.mc) is a LOWERING, and a differential only
 # says the answers are php's -- a proof that silently never fires would pass
 # it too. So the lowering is read back: every pk_* function of g/105 must
@@ -267,6 +292,7 @@ fi
 # is the float -- so the refusal's text is what is checked.
 cat > "$tmp/pko.php" <<'PKO'
 <?php
+// mc-php: semantics=php
 function pko(int $n): string {
     $x = [];
     $x[] = $n;
@@ -312,6 +338,19 @@ if [ "$pko" = "$pkw" ]; then
     echo "  packed: an overflow on an element is the named ArithmeticError, not a wrapped int, and no store"
 else
     echo "  FAIL  packed overflow: want [$pkw], got [$pko]"; fail=1
+fi
+# ... and its C twin, the same source with C's rules (docs/semantics.md, the
+# default): each operation wraps as C's does and nothing is thrown -- so
+# `throw` of the product is php's "Can only throw objects" over an int.
+grep -v 'mc-php: semantics=' "$tmp/pko.php" > "$tmp/pkc.php"
+lim $P/mcphp.sh "$tmp/pkc.php" > "$tmp/pkc.out" 2> "$tmp/pkc.err"
+rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
+pkc=$(tr -d '\r' < "$tmp/pkc.out")
+pcw=$(printf '15\n9223372036854775805\n-12 2\n2 10 2 -2\nE E\n-5 -5 -9223372036854775808 -9223372036854775808')
+if [ "$pkc" = "$pcw" ]; then
+    echo "  packed, C: the same overflows wrap as C's do, and nothing is thrown"
+else
+    echo "  FAIL  packed overflow, C: want [$pcw], got [$pkc]"; fail=1
 fi
 # A size near PHP_INT_MAX on the program road is "arena exhausted", never a
 # bump past the arena: `a + n` wrapped and moved the top to a wild address

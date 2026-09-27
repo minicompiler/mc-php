@@ -1,4 +1,6 @@
 <?php
+// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
+// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // The runtime's byte loops, at every length that crosses a word: a copy of
 // 0..20 bytes (substr, concat), and str_replace of one byte -- found at the
 // start, the end, adjacent, never, and inside an eight-byte word -- with an

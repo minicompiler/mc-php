@@ -408,7 +408,9 @@ rm -rf "$tmp/build"
 # (php_mi -> php_itos). Treated as building nothing, 100 000 out-of-range reads
 # in one call grew php's peak by 8.4 MB each (the review of #24, reproduced
 # before the fix); with the drain kept it does not move.
-printf '<?php\nfunction offs(string $s, int $n): int { $t = 0; for ($i = 0; $i < $n; $i++) { $t = $t + ord($s[$i + 100]); } return $t; }\nfunction keys(int $n): int { $a = array_fill(0, 4, 1); $t = 0; for ($i = 0; $i < $n; $i++) { $t = $t + $a[$i + 100]; } return $t; }\n' > "$tmp/r.php"
+# The reads are OUTSIDE the string and the array on purpose, which is php's
+# warning only under php's rules (docs/semantics.md): C's are undefined.
+printf '<?php\n// mc-php: semantics=php\nfunction offs(string $s, int $n): int { $t = 0; for ($i = 0; $i < $n; $i++) { $t = $t + ord($s[$i + 100]); } return $t; }\nfunction keys(int $n): int { $a = array_fill(0, 4, 1); $t = 0; for ($i = 0; $i < $n; $i++) { $t = $t + $a[$i + 100]; } return $t; }\n' > "$tmp/r.php"
 rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/dg.build" 2>&1; then
     # the 200 020 warnings are the module's own output: on stdout, dropped 4 KB
