@@ -880,3 +880,25 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   Measured and dropped: a leaf's locals on `x0..x7` (+1%), range masks for trim/strspn (0%).
   The grid: `tests/lang` 104, `Zend/tests` 766, strings 272, plain and `MCPHP_RC=check`, all 30
   lists identical to main's (`comm -3`). `tests/leaks.sh`: no block left. fib/sum module unchanged.
+- Same-algorithm (2026-09-27, branch `decimal-same-algorithm`), on **mc 1.1.0**: `examples/decimal/decimal.php`
+  rewritten after `c/decimal.c` function by function (parse once, a digit at a time, results
+  written into strings of the right length), so the three columns measure ONE algorithm; `check.php`
+  byte for byte, bccheck 1219 / 0 wrong. On main's compiler that was 0.941 ms (module/C 7.41); the
+  compiler and runtime took it to **0.398 ms, module/C 3.13, 6.64x the interpreter** (1.725 ms on
+  the old source, 2.641 on this one; the twin 0.127), one sitting, nine rounds interleaved, each
+  change with its own number in `examples/decimal/README.md`: `ord($s[$i])` and `$s[$i] = chr(c)`
+  / `= STRING` read and written in place (`php_str_byte`, `php_str_setb`/`sets`), the runtime's
+  small routines copied into the compiled code AFTER `src/rc.mc` (`src/opt.mc` `phr_*`, each a fast
+  path plus a `_slow` half), the position and the unwinding check moved into those slow halves and
+  a check nothing can have raised before dropped, one unwinding tail per function (the checks
+  `break` out of a loop around the body), a `for` step with no flag when there is no `continue`,
+  branchless int-literal ternaries, no pool drain in a loop that builds nothing, a packed array's
+  length 0 once hashed (one bound test), `intdiv` copied, `strspn` with a literal set a
+  three-argument routine, `str_repeat` of nothing the shared string. `phi_is_ann` is exact now (a
+  loop body that begins with a flattened announcement was taken for one). Gates: `tests/g/115` +
+  a read-back in `tests/fixtures.sh`; the strings gate re-recorded 700 700 800 300 10700 (the twin's
+  division by repeated subtraction answers a new remainder per step). What is left, measured: php's
+  checks 0.037 ms (c), strings as values (c), mc's ten-register allocation (b, unproven -- copying
+  `strspn`'s loop into callers made it 8% slower). The grid: `tests/lang` 104, `Zend/tests` 766,
+  strings 272, plain and `MCPHP_RC=check`, all 30 lists identical to main's. `tests/leaks.sh` and
+  `tests/linux.sh` (aarch64) green.

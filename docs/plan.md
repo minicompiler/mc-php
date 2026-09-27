@@ -1075,7 +1075,10 @@ its code is written.
    twin at 0.125 (module/C 4.19 -> 4.85, still 2.8x php interpreted), § 7 item 1. The
 core-strings batch took it to 0.434 ms (module/C 3.47, 4.0x interpreted) with the same
 `decimal.php`: fewer strings, small functions inlined, a peephole machine and a leaner handler,
-§ 7 item 1. What already has code moves into
+§ 7 item 1. The same-algorithm batch (2026-09-27) rewrote `decimal.php` after its C twin, function
+by function, so that the three columns measure one algorithm: 0.941 ms on main's compiler
+(module/C 7.41), **0.398 ms** after the batch (module/C **3.13**, 6.64x the interpreter on the
+same source), § 7 item 1. What already has code moves into
    `examples/`, each with a gate that compiles it and compares it with php. Four of the five parts
    are DONE (the examples branch, 2026-09-23), gated by `tests/ext.sh` and `tests/examples.sh`
    inside `tests/run.sh`, `tests/linux.sh` and `tests/windows.sh`, **green on all five CI legs**
@@ -1564,6 +1567,23 @@ In the order the measurements put them, each with the number that says why:
    the count ~4%; the boundary ~4%. None of it is one change any more: the gap to the twin is the
    algorithm's shape -- re-validating and re-parsing string operands every call, where the twin
    parses once into digits -- paid in a language whose calls cost a prologue.
+
+   **The same-algorithm batch (2026-09-27)** removed that last premise: `decimal.php` is
+   `c/decimal.c`'s algorithm now (parsed once, a digit at a time, results written into strings of
+   the right length), which on main's compiler was 0.941 ms -- every `$s[$i]` read built a
+   one-byte string, every write a zval, every packed element was a call. The compiler and its
+   runtime took it to 0.398 ms, module/C 7.41 -> 3.13, one change at a time with its own number
+   (`examples/decimal/README.md` has the table): byte reads and writes in place, the runtime's
+   small routines copied into the compiled code after `src/rc.mc` as a fast path plus a `_slow`
+   half (`src/opt.mc`, `phr_*`), the position and the unwinding check moved into those slow halves
+   and a check nothing can have raised before dropped, one unwinding tail per function, a `for`
+   step with no flag, branchless int-literal ternaries, no pool drain in a loop that builds
+   nothing. What is left, measured: php's own checks (bounds, the element's null flag, overflow)
+   0.037 ms -- (c); strings being values (a helper answers a new string where the twin writes
+   into its caller's buffer) -- (c); and mc's register allocation (ten callee-saved registers per
+   whole function, so a hot loop reads its locals from the frame) -- (b), unproven. Copying
+   `strspn`'s loop or the window concatenation's `memcpy`s into the callers made the module
+   slower (8% and 5%), which is that register pressure measured from the other side.
 
 2. **A php ternary allocated per evaluation** -- DONE in batch A. `a ? b : c` lowered its value
    through a zval whatever the branches were, so `return $n < 2 ? $n : f($n-1) + f($n-2);`

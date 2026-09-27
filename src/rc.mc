@@ -406,6 +406,8 @@ i64 ph_rc_one(i64 s) {
         }
         if (ph_rc_is_call(v, "php_str_cat4", nm)) { set_nd_name(v, "php_str_appendv"); return s; }
         if (ph_rc_is_call(v, "php_str_setoff", nm)) { set_nd_name(v, "php_str_setoff_own"); return s; }
+        if (ph_rc_is_call(v, "php_str_sets", nm)) { set_nd_name(v, "php_str_sets_own"); return s; }
+        if (ph_rc_is_call(v, "php_str_setb", nm)) { set_nd_name(v, "php_str_setb_own"); return s; }
         // ph_sn = value; take(ph_sn); release(slot); slot = ph_sn -- the new
         // reference first, so `$s = $s` and a call that answers its argument
         // change nothing

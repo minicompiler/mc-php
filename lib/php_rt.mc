@@ -428,6 +428,17 @@ i64 php_win(uptr s, i64 st, i64 ln, uptr off) {
 
 uptr php_str_catw2(uptr a, i64 sa, i64 na, uptr b, i64 sb, i64 nb) {
     u8 o[16];
+    // both windows inside their strings, the common case: no php_win calls
+    i64 aa = ld64(a + 16);
+    i64 bb = ld64(b + 16);
+    if (sa >= 0 && na >= 0 && sb >= 0 && nb >= 0 && sa <= aa && sb <= bb) {
+        if (na > aa - sa) na = aa - sa;
+        if (nb > bb - sb) nb = bb - sb;
+        uptr r = php_str_alloc(na + nb);
+        php_memcpy(r + ZS_HDR, a + ZS_HDR + sa, na);
+        php_memcpy(r + ZS_HDR + na, b + ZS_HDR + sb, nb);
+        return r;
+    }
     i64 la = php_win(a, sa, na, o);
     i64 lb = php_win(b, sb, nb, o + 8);
     uptr s = php_str_alloc(la + lb);
@@ -547,6 +558,35 @@ uptr php_str_setoff_own(uptr s, i64 i, uptr cz) {
     ph_rc_copied = ph_rc_copied + 1;
     return php_sset(s, php_str_setoff(s, i, cz));
 }
+
+// `$s[$i] = STRING`: the same write with the value still a string, so no
+// zval is built for it (php_str_setoff_own's in-place road, otherwise its
+// copy with the zval made there). php_str_sets is the uncounted slot's.
+// The fast path calls nothing, so src/opt.mc copies it into the caller.
+uptr php_zstr(uptr s);
+uptr php_chr(i64 c);
+uptr php_str_sets_own(uptr s, i64 i, uptr c) {
+    if ((u64) i < (u64) ld64(s + 16) && ld64(c + 16) && ld32(s) == 1 && (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) == 0) {
+        ph_rc_inplace = ph_rc_inplace + 1;
+        st8(s + ZS_HDR + i, ld8(c + ZS_HDR));
+        st64(s + 8, 0);
+        return s;
+    }
+    return php_str_setoff_own(s, i, php_zstr(c));
+}
+uptr php_str_sets(uptr s, i64 i, uptr c) { return php_str_setoff(s, i, php_zstr(c)); }
+
+// `$s[$i] = chr(c)`: the byte itself, with no one-byte string between
+uptr php_str_setb_own(uptr s, i64 i, i64 c) {
+    if ((u64) i < (u64) ld64(s + 16) && ld32(s) == 1 && (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) == 0) {
+        ph_rc_inplace = ph_rc_inplace + 1;
+        st8(s + ZS_HDR + i, c & 255);
+        st64(s + 8, 0);
+        return s;
+    }
+    return php_str_setoff_own(s, i, php_zstr(php_chr(c)));
+}
+uptr php_str_setb(uptr s, i64 i, i64 c) { return php_str_setoff(s, i, php_zstr(php_chr(c))); }
 
 // memcmp over the bytes, then the length: PHP's own strcmp ordering.
 i64 php_str_cmp(uptr a, uptr b) {
@@ -1786,6 +1826,10 @@ void php_pk_hash(uptr p) {
     i64 i = 0;
     loop { if (i >= n) break; php_arr_iset(a, i, php_zlong(ld64(d + i * 8))); i = i + 1; }
     st64(p + 24, a);
+    // the packed length is 0 from now on, so the fast paths' one bound test
+    // (php_pk_get, php_pk_set) sends every key to the hash; every other
+    // reader looks at the hash first
+    st64(p, 0);
 }
 
 void php_pk_push(uptr p, i64 v) {
@@ -1803,7 +1847,15 @@ void php_pk_push(uptr p, i64 v) {
     st64(p, n + 1);
 }
 
+void php_pk_set_slow(uptr p, i64 k, i64 v);
+// the fast path alone, and no early return: src/opt.mc copies it into the
+// caller as one if/else
 void php_pk_set(uptr p, i64 k, i64 v) {
+    if ((u64) k < (u64) ld64(p)) st64(ld64(p + 16) + k * 8, v);
+    else php_pk_set_slow(p, k, v);
+}
+
+void php_pk_set_slow(uptr p, i64 k, i64 v) {
     if (!ld64(p + 24)) {
         i64 n = ld64(p);
         if (k >= 0 && k < n) { st64(ld64(p + 16) + k * 8, v); return; }
@@ -1813,7 +1865,13 @@ void php_pk_set(uptr p, i64 k, i64 v) {
     php_arr_iset(ld64(p + 24), k, php_zlong(v));
 }
 
+i64 php_pk_get_slow(uptr p, i64 k);
 i64 php_pk_get(uptr p, i64 k) {
+    if ((u64) k < (u64) ld64(p)) { ph_pkabs = 0; return ld64(ld64(p + 16) + k * 8); }
+    return php_pk_get_slow(p, k);
+}
+
+i64 php_pk_get_slow(uptr p, i64 k) {
     if (!ld64(p + 24)) {
         if (k >= 0 && k < ld64(p)) { ph_pkabs = 0; return ld64(ld64(p + 16) + k * 8); }
         php_undef_ikey(k);
@@ -2825,10 +2883,22 @@ i64 php_strpos(uptr h, uptr nd, i64 off) {
 i64 php_strpos1(uptr h, i64 c) { return php_memchr(h + ZS_HDR, c, ld64(h + 16)); }
 
 uptr php_str_repeat(uptr s, i64 times) {
-    if (times <= 0) return php_str_new("", 0);
+    // nothing to repeat, or one byte once: the shared empty and one-byte
+    // strings, not a new one (`$w . str_repeat('0', $to - $from)` is most
+    // often a zero-length pad)
+    if (times <= 0) return php_str_short("", 0);
     i64 n = php_strlen(s);
+    if (n == 1 && times == 1) return php_str_short(s + ZS_HDR, 1);
     uptr o = php_str_alloc(n * times);
     i64 i = 0;
+    // one byte, the common case (a run of zeros, of spaces): a word at a time
+    if (n == 1) {
+        i64 b = ld8(s + ZS_HDR);
+        u64 w = b * 0x0101010101010101;
+        loop { if (i + 8 > times) break; st64(o + ZS_HDR + i, w); i = i + 8; }
+        loop { if (i >= times) break; st8(o + ZS_HDR + i, b); i = i + 1; }
+        return o;
+    }
     loop { if (i >= times) break; php_memcpy(o + ZS_HDR + i * n, s + ZS_HDR, n); i = i + 1; }
     return o;
 }
@@ -3000,7 +3070,15 @@ uptr php_explode(uptr sep, uptr s) {
     return a;
 }
 
+i64 php_intdiv_slow(i64 a, i64 b);
+// a positive divisor can neither be zero nor turn PHP_INT_MIN into an
+// overflow: the division itself, and src/opt.mc copies it into the caller
 i64 php_intdiv(i64 a, i64 b) {
+    if (b > 0) return a / b;
+    return php_intdiv_slow(a, b);
+}
+
+i64 php_intdiv_slow(i64 a, i64 b) {
     if (b == 0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16)); return 0; }
     // php's own message, and php's own class: the quotient is not an integer,
     // which is a throw and not a trap
@@ -3510,6 +3588,22 @@ uptr php_str_off(uptr s, i64 i) {
     if (j < 0) j = n + j;
     if (j < 0 || j >= n) { php_str_off_warn(i); return php_str_new("", 0); }
     return php_str_ch(ld8(s + ZS_HDR + j));
+}
+
+// ord($s[$i]): the byte, read in place -- no one-byte string between the two
+i64 php_str_byte_slow(uptr s, i64 i);
+i64 php_str_byte(uptr s, i64 i) {
+    if ((u64) i < (u64) ld64(s + 16)) return ld8(s + ZS_HDR + i);
+    return php_str_byte_slow(s, i);
+}
+
+// php_str_off's rules, without the empty string it answers outside
+i64 php_str_byte_slow(uptr s, i64 i) {
+    i64 n = ld64(s + 16);
+    i64 j = i;
+    if (j < 0) j = n + j;
+    if (j < 0 || j >= n) { php_str_off_warn(i); return 0; }
+    return ld8(s + ZS_HDR + j);
 }
 
 
@@ -6946,6 +7040,22 @@ i64 php_spn(uptr s, uptr bm, i64 o, i64 l, i64 hasl, i64 want) {
         i = i + 1;
     }
     return i;
+}
+
+// strspn with a literal set and no length (most calls): three arguments
+// instead of six, and an offset inside the string scans from there; anything
+// else takes php_spn's rules
+i64 php_spn_o(uptr s, uptr bm, i64 o) {
+    i64 n = ld64(s + 16);
+    if ((u64) o > (u64) n) return php_spn(s, bm, o, 0, 0, 1);
+    i64 i = o;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(s + ZS_HDR + i);
+        if (!((ld8(bm + (c >> 3)) >> (c & 7)) & 1)) break;
+        i = i + 1;
+    }
+    return i - o;
 }
 
 i64 php_spn_s(uptr s, uptr set, i64 o, i64 l, i64 hasl, i64 want) {

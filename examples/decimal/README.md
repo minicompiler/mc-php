@@ -27,6 +27,13 @@ than `$scale` it goes to the nearest representable value, and an exact tie goes 
 digit -- `dec_round("0.125", 2)` is `0.12`, `dec_round("0.135", 2)` is `0.14`,
 `dec_div("-1", "8", 2)` is `-0.12`, `dec_round("-2.5", 0)` is `-2`. bcmath truncates instead.
 
+**The algorithm is `c/decimal.c`'s.** The C twin is the specification and `decimal.php` says the
+same thing function by function: each operand parsed once into its digits, base-10 arithmetic one
+digit at a time (schoolbook multiplication, long division by repeated subtraction), each result
+digit written into a string of the right length. What PHP cannot say the way C does is written
+down in the source: three locals for C's `dnum` (a function returns one value), an index where C
+moves a pointer past zeros, and a new string where C writes into its caller's buffer.
+
 ## How it is checked -- `tests/examples.sh`, on all five hosts
 
 | step | |
@@ -186,6 +193,59 @@ counts), the small `_dec_*` helpers copied into their callers, a peephole machin
 mc's (immediates, folded offsets, one branch per loop exit), and a handler that reads and checks
 its arguments in place.
 
+**Three columns, the same-algorithm batch** (2026-09-27, macos/arm64, php 8.5.10, one host, one
+sitting, every column below interleaved nine rounds; `bench.php` unchanged). Until now
+`decimal.php` re-validated and re-parsed its operands on every call, worked nine digits at a time
+and built a new string per step, while the twin parses once and works digit by digit in buffers
+-- two algorithms, so the columns did not measure one thing. Now `decimal.php` is the twin's
+algorithm (above), and the batch took the module as close to the twin as the compiler could go:
+
+| | interpreted | the module | the C twin | module / C |
+|---|---|---|---|---|
+| main, the old `decimal.php` | 1.725 ms | 0.440 ms (3.92x) | 0.127 ms (13.58x) | 3.46 |
+| the twin's algorithm, main's compiler | 2.641 ms | 0.941 ms (2.81x) | 0.127 ms (20.80x) | 7.41 |
+| the twin's algorithm, this batch | 2.641 ms | **0.398 ms (6.64x)** | 0.127 ms | **3.13** |
+
+The interpreter is slower on the twin's algorithm (a byte at a time is dear in php) and so was the
+module on main's compiler: every `$s[$i]` read built a one-byte string, every `$s[$i] = ...`
+built a zval, every packed element was a call. Each change below is in the compiler or its
+runtime, measured in the same sitting (`tests/examples.sh`'s own row on the final tree: 3.008 /
+0.458 / 0.143 ms, 6.57x and 21.03x):
+
+| change | the module | module / C |
+|---|---|---|
+| the rewrite, main's compiler | 0.941 ms | 7.41 |
+| `$s[$i] = STRING` writes the string, no zval; `str_repeat` of one byte a word at a time | 0.841 ms | 6.62 |
+| `ord($s[$i])` is the byte, read in place (`php_str_byte`) | 0.689 ms | 5.43 |
+| `$s[$i] = chr($c)` is the byte, written in place (`php_str_setb`) | 0.625 ms | 4.92 |
+| the runtime's small routines copied into the compiled code after the counting pass (`src/opt.mc` `phr_*`): the byte read and write, the packed element read and write, the overflow-checked `+ - *` | 0.576 ms | 4.54 |
+| a `for` with no `continue`: the step follows the body, no first-iteration flag | 0.550 ms | 4.33 |
+| those copies take an argument of the same width and signedness as it is, and return into the local they are assigned to | 0.534 ms | 4.20 |
+| each routine a fast path with no call and a `_slow` half; the position and the unwinding check move into the slow halves, and a check nothing can have raised before is dropped | 0.501 ms | 3.94 |
+| a packed array's one bound test (its length is 0 once it is a hash); one unwinding tail per function | 0.469 ms | 3.69 |
+| `intdiv` copied; a two-window concatenation without `php_win` | 0.449 ms | 3.54 |
+| `strspn` with a literal set, a three-argument routine | 0.448 ms (0.440 against 0.448 head to head, fifteen rounds) | 3.53 |
+| `c ? 1 : 0` and any two int literals: arithmetic, not a branch (the carry was a random branch) | 0.426 ms | 3.35 |
+| no pool drain at the top of a loop that builds nothing | 0.408 ms | 3.21 |
+| `str_repeat` of nothing, or of one byte once: the shared strings | **0.398 ms** | **3.13** |
+
+What separates the two now, measured on the final tree (the gap is 0.271 ms; `xctrace`, and
+builds with one cause taken out):
+
+| cause | share | class | what removing it takes |
+|---|---|---|---|
+| php's checks on the hot path: a string offset's bounds, a packed key's bounds and the null flag of the element read, the integer overflow that php would turn into a float | 0.037 ms (a build without them: 0.361 ms) | (c) php semantics | nothing the compiler may do: each is php's defined behaviour |
+| the position announced and the exception checked per statement | 0.003 ms (a build without them: 0.401 ms) | (a), done here | -- (measured the same way halfway through this batch, before the move: 9% and 6% of the module) |
+| building strings: `strspn` scans, copies, window concatenations, allocation, `str_repeat` -- 31% of the module's samples | about 0.12 ms, against 0.043 ms (34% of the twin's samples) in the twin's `_emalloc`/`_efree`/`memmove`/`memset` | mostly (c): a php string is a value, so a helper answers a new string where the twin writes into its caller's buffer (`dec_div` builds 107 strings a call); partly (a), the call per small routine | measured and not taken: copying `strspn`'s loop into its callers made the module 8% SLOWER and copying the window concatenation's two `memcpy`s 5% slower -- mc's registers, below |
+| the compiled functions' own code: 46% of the module's samples | about 0.18 ms, against 0.066 ms (52% of the twin's) | (b), unproven | mc's allocator gives at most ten callee-saved registers to a whole function, so `_dec_umul`'s inner loop reads `$i`, `$x` and `$nb` from the frame every iteration; an index is scaled by `mul`; `a && b` is made a value and then tested. A derived machine could lend the allocator caller-saved registers spilled around calls; not built (the core-strings batch measured leaf `x0..x7` at +1%) |
+| the extension boundary: the handler's entry, exit and argument checks | 2.5% of the module's samples, about 0.010 ms | (a), small | -- |
+| Zend's VM running `bench.php` and the calls themselves | 0.021 ms, in both columns (a null twin: the six functions read their arguments and answer a constant) | common | -- |
+
+So the module is 3.13x the twin, 6.64x php interpreting the same source, and what is left is
+php's own checks (0.037 ms), php's strings being values, and mc's register allocation -- the last
+unproven. The soak on the final tree: a million `dec_add` calls, usage 517 656 -> 517 656 bytes,
+peak 517 928 -> 517 960.
+
 ## What it cannot do yet
 
 * **A wrong TYPE** is an internal function's message in the module and a userland one
@@ -193,9 +253,9 @@ its arguments in place.
   one. The wrong VALUES it makes are the same in both runs, because the source throws them.
 
 Writing this example found two defects in the compiler's front end, both fixed with a fixture
-(`tests/g/96-static-args.php`, `tests/g/97-elseif-string.php`), and one it works around:
-`str_replace` with an ARRAY search is a wrong answer (`Array to string conversion`) rather than a
-refusal, so `_dec_coef` calls it twice with strings (`docs/plan.md` § 7).
+(`tests/g/96-static-args.php`, `tests/g/97-elseif-string.php`), and one it worked around until
+batch A fixed it: `str_replace` with an ARRAY search was a wrong answer (`Array to string
+conversion`) rather than a refusal (`docs/plan.md` § 7).
 
 | file | |
 |---|---|

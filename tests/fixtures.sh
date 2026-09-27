@@ -177,6 +177,21 @@ else
     echo "  FAIL  inlining: g/113's run() still calls: $il(want only name=f_fact)"
     fail=1
 fi
+# src/opt.mc's runtime pass: in g/115 the byte read and the packed element
+# read and write are copied into acc() and bytes() -- no call to the routine
+# is left, only to its slow half -- and the unwinding is one tail the checks
+# break out to (acc()'s two loops plus the tail's own: `break 3`).
+"$MCPHP_BIN" --dump-ast $P/g/115-hot-paths.php > "$tmp/hp.ast" 2>&1
+set -- $(awk '/^FUNC/ { u = ($0 ~ / name=f_(acc|bytes)$/) }
+               u && /CALL .*name=php_(pk_get|pk_set|str_byte)$/ { f++ }
+               u && /CALL .*name=php_pk_get_slow$/ { s++ } u && /BREAK val=3$/ { b++ }
+               END { print f + 0, (s > 0), (b > 0) }' "$tmp/hp.ast")
+if [ "$*" = "0 1 1" ]; then
+    echo "  runtime copies: g/115's byte and element reads and writes are inline, their slow halves calls, one unwind tail"
+else
+    echo "  FAIL  runtime copies: g/115's lowering reads $* (want 0 1 1: no php_pk_get/pk_set/str_byte call, a php_pk_get_slow, a break to the tail)"
+    fail=1
+fi
 # src/mach.mc's peepholes, read back on BOTH machines whatever the host (the
 # dump takes --machine=): in g/114's sums() a constant that fits is the
 # immediate (4095) and one that does not stays a register (4096), `$i < $n`

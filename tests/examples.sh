@@ -174,17 +174,21 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
     # lowering that stopped reading substr() windows in place, answering an
     # empty concatenation side or a one-byte result without a new string, or
     # a chr() without one, moves it up. Before those (main at #22) the counts
-    # were 800, 1000, 1300, 200 and 3400.
+    # were 800, 1000, 1300, 200 and 3400. decimal.php is c/decimal.c's
+    # algorithm since the same-algorithm rewrite, which moved them: dec_div's
+    # long division by repeated subtraction builds a remainder per step where
+    # the twin subtracts in its one buffer -- a PHP string is a value, and a
+    # helper cannot write into its caller's.
     sb=
     for op in "dec_add('123456.78', '1093.75', 2)" "dec_sub('123456.78', '2682.24', 2)" \
               "dec_mul('123456.78', '0.004375000000', 2)" "dec_cmp('123456.78', '0')" "dec_div('5.25', '1200', 12)"; do
         n=$(MCPHP_STATS=1 "$PHP" -d extension="$dso" -r "for (\$i = 0; \$i < 100; \$i++) $op;" 2>&1 | tr -d '\r' | sed -n 's/.*strings built //p')
         sb="$sb${sb:+ }${n:-?}"
     done
-    if [ "$sb" = "500 700 1100 100 1400" ]; then
+    if [ "$sb" = "700 700 800 300 10700" ]; then
         say "strings: 100 calls of add, sub, mul, cmp, div build $sb strings"
     else
-        bad "strings: 100 calls of add, sub, mul, cmp, div built $sb strings (want 500 700 1100 100 1400)"
+        bad "strings: 100 calls of add, sub, mul, cmp, div built $sb strings (want 700 700 800 300 10700)"
     fi
     # the C twin (c/decimal.c): the same six functions written the ordinary
     # way, graded by the same check.php, and the reference the bench compares
