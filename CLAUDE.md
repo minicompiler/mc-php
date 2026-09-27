@@ -957,3 +957,16 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   `c` three tests go green -> wrong, all three out-of-range string offsets on purpose
   (`Zend/tests/bug39018_2`, `str_offset_001`, `string_offset_int_min_max`). Found on the way,
   not changed: plain (non-packed) int arithmetic ALREADY wrapped in every mode (docs/plan.md § 7).
+  Review of #26 (Copilot, six findings, each reproduced first). (1+2) a proven packed array
+  still becomes php's hash on a store outside it, and `php_pk_get_c` read the stale dense buffer
+  (`$a = array_fill(0, 1, 7); $a[3] = 9;` gave `$a[3]` 7) while `php_pk_get_d` trapped valid keys:
+  both test the packed-or-hashed state (`p + 24`) now, a hash's missing key is a quiet null in `c`
+  and the trap in `c-debug`; 0.358 -> 0.367 ms, module/C 2.94. P10's `lay_region` moved a whole
+  loop body whose first call was the new slow half (0.375 ms): a region holding a branch back to
+  before its start is refused now, `php` mode unchanged at 0.392. (3) precedence reordered, the
+  source comment first, then the environment, then the project file, so `MCPHP_SEMANTICS=c` no
+  longer overrides a fixture's own `php`. (4) the marker counts only as a real line comment,
+  strings, heredocs, nowdocs and block comments stepped over (`ph_sem_hop_doc` + `ph_scan_hop`).
+  (5) README: no annotations except the semantics selector. (6) d8check: eight regimes, and
+  `extension` listed. New `tests/c/05-hashed`, `06-trap-hashed`, `07-marker-in-text`, each failing
+  on the pre-fix compiler.

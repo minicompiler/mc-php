@@ -309,7 +309,26 @@ small enough that building it IS the bound):
 | and no `ph_pkabs = 0` store in the read (an element is never php's null under C's rules) | 0.359 ms | none: reverted |
 | string reuse in place (item 4 of the request): the bound, below | at most ~0.007 ms | not built |
 
-The same compiler, the three semantics of the same source, interleaved:
+**The review of #26 found that the bounds above measured an UNSAFE read.** A proven packed array
+still becomes php's hash when a store falls outside it (`$a = array_fill(0, 1, 7); $a[3] = 9;`),
+and the unchecked read went on reading the stale dense buffer: `$a[3]` answered 7 where php says
+9, and `c-debug` trapped a valid key. The read now tests the packed-or-hashed state first
+(`lib/php_rt.mc` `php_pk_get_c`) and takes the hash's own lookup after a transition. That test is
+the price of a correct C read, measured:
+
+| rule | the module | module / C |
+|---|---|---|
+| C's rules as first built (reads the stale buffer after a transition: wrong) | 0.358 ms | 2.87 |
+| **with the packed-state test** | **0.366-0.367 ms** | **2.94** |
+
+The fix had one more cost, and it is not there any more. The new slow call sits at the TOP of
+`_dec_umul`'s inner loop, and the out-of-line pass (`src/mach.mc` P10, #25) moved that whole
+loop body past the epilogue as though it were a slow half. That made the build 0.375 ms. P10 now
+refuses a region that holds a branch back to before its start, a loop's back edge. `php` mode is
+the same 0.392 ms it was, and the gates that read P10 back are unchanged.
+
+The same compiler, the three semantics of the same source, interleaved (measured before the
+review; `c` is 0.367 ms with the fix):
 
 | | the module | module / C |
 |---|---|---|
@@ -318,8 +337,9 @@ The same compiler, the three semantics of the same source, interleaved:
 | **`c`, the default** | **0.358-0.359 ms** | **2.87** |
 
 Head to head, main's module and this one interleaved with the interpreter and the twin, fifteen
-rounds, two sittings: interpreted 2.617-2.626 ms, main 0.391-0.392 ms (6.68-6.72x, module/C
-3.13-3.14), **C semantics 0.359 ms (7.29-7.31x, module/C 2.87)**, the twin 0.125 ms
+rounds, two sittings, after the review's fix: interpreted 2.614-2.620 ms, main 0.392-0.394 ms
+(6.63-6.68x, module/C 3.14-3.15), **C semantics 0.367 ms (7.12-7.14x, module/C 2.94)**, the
+twin 0.125 ms (before the fix: 0.359 ms, 2.87)
 (`tests/examples.sh`'s own row: 2.629 / 0.360 / 0.126 ms, 7.30x and 20.87x).
 
 **The string item, measured and not built.** In `php` mode as in `c`, the bench's `work()` builds

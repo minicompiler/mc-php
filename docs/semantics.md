@@ -22,12 +22,14 @@ use `semantics = "php"` for code that must not trust its indices.
 
 The first of these that is set decides:
 
-1. `MCPHP_SEMANTICS=php` (or `c`, `c-debug`) in the COMPILER's environment. mc on Windows
-   reads no environment, so on a Windows host use one of the two below.
-2. The project file, `mcphp.toml`: `[php]` `semantics = "php"` ([mcphp-toml.md](mcphp-toml.md)).
-3. A comment in a php source: `// mc-php: semantics=php`. It is a comment, so php itself
-   runs the file unchanged. `tests/g` uses it for the fixtures that read out of range on
-   purpose.
+1. A line comment in a php source: `// mc-php: semantics=php`. It is a comment, so php itself
+   runs the file unchanged. Only a real line comment counts: the same bytes inside a string, a
+   heredoc, a nowdoc or a `/* */` comment are text and change nothing. A file that says what it
+   needs is not overridden by the run: `tests/g` uses the comment for the six fixtures that read
+   out of range on purpose, and they keep php's rules even under `MCPHP_SEMANTICS=c`.
+2. `MCPHP_SEMANTICS=php` (or `c`, `c-debug`) in the COMPILER's environment. mc on Windows
+   reads no environment, so on a Windows host use one of the other two.
+3. The project file, `mcphp.toml`: `[php]` `semantics = "php"` ([mcphp-toml.md](mcphp-toml.md)).
 
 A value other than these three is a compile error, so a misspelt `"php"` does not quietly
 give C's rules. The choice is made once for the whole compilation, not per function.
@@ -84,10 +86,19 @@ A packed array is an int array the compiler proved is a native buffer
 
 Under C's rules an element read is never php's `null`: it is always an int.
 
+**A store outside the range still makes the array php's hash**, as it does under php's rules.
+From then on a read is the hash's own lookup and not the unchecked one: a key the hash has
+answers its value in every mode. Under C's rules the price of this is one test per read, the
+packed-or-hashed state. A key the hash does NOT have is a read outside the array:
+
+- `c` answers php's `null`, with no warning;
+- `c-debug` stops the program, naming the line;
+- `php` gives php's warning and `null`.
+
 These are unchanged in every mode:
 
 - A **store** outside the range is php's own: `$a[] = v` and `$a[count($a)] = v` append, and
-  any other key makes the array php's hash.
+  any other key makes the array php's hash (above).
 - `$a[$k] ?? $d` is php's quiet read.
 
 ## What is NOT different

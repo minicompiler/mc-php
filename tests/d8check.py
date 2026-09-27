@@ -13,7 +13,7 @@ cannot waive the rule for itself, so the statement has to be ENFORCED and not
 written down.
 
 This is the enforcement. Every `.php` under the probe is put in exactly one
-of SEVEN regimes, each with its own obligation, and a file in none of them
+of EIGHT regimes, each with its own obligation, and a file in none of them
 fails the run:
 
   helper     a `g/` file another fixture `require`s and the gate does not
@@ -44,6 +44,8 @@ fails the run:
   bench      a row in `bench10.sh`, which runs it under `php` and as an
              mc-php binary, REFUSES to time them unless the two answers are
              equal, and prints the ratio.
+  extension  a `.php` under `examples/` that a gate script builds into an
+             extension and runs (project_sweep, below).
 
     python3 tests/d8check.py
 """

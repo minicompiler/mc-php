@@ -7,15 +7,16 @@ a `zend_module_entry` and the `zend_function_entry` tables that php loads.
 
 The rule that makes it meaningful: **a `.php` source is PHP**. It runs under `php` and it compiles
 with `mc-php`, and the two must agree -- the oracle is php-src's own `.phpt` corpus, run under
-both. No dialect and no annotations.
+both. No dialect, and no annotations except one: the semantics selector below, a comment php
+ignores.
 
 **One exception, by design: a compiled program behaves the way C does where C and php part
 ways.** By default an int that overflows wraps, and a string offset or a packed array element
 read inside its range is the read and nothing else. A read OUTSIDE the range is undefined
 behaviour, not php's warning, and inside a php process it is a memory-safety risk.
 [`docs/semantics.md`](docs/semantics.md) lists every difference and how to get php's rules
-back: `semantics = "php"` in the project file, a `// mc-php: semantics=php` comment, or
-`MCPHP_SEMANTICS=php`. `semantics = "c-debug"` checks those reads again and stops the program
+back: a `// mc-php: semantics=php` line comment in the source, `MCPHP_SEMANTICS=php`, or
+`semantics = "php"` in the project file, the first of these that says winning. `semantics = "c-debug"` checks those reads again and stops the program
 at one, naming the line. The `.phpt` grid runs with php's rules.
 
 ---
@@ -266,7 +267,7 @@ Seven gates, and they are what CI runs on every push:
 | `d8check` | every `.php` in the project is in a regime with an obligation (`docs/plan.md` D8) |
 | `lencheck` | every hand-counted string length in `src/` and `lib/` is right |
 | `aritycheck` | every library row's callee exists in the runtime with that many parameters |
-| fixtures | `tests/g/*.php` byte for byte what `php` prints, on **both** streams and the exit code |
+| fixtures | `tests/g/*.php` byte for byte what `php` prints, on **both** streams and the exit code. The six that read outside a string or an array on purpose carry the one annotation there is, `// mc-php: semantics=php`, a comment php ignores ([docs/semantics.md](docs/semantics.md)) |
 | refusals | `tests/r/*.php` parse under `php` and are refused **by name** by mc-php, exit 3 |
 | C semantics | `tests/c/*.php` answer their own recording (`NAME.out`, `.err`, `.code`): an int that wraps, in-range reads, and the `c-debug` trap -- [docs/semantics.md](docs/semantics.md) |
 | D8 (a) | the workload's `TestCase` **run** in both worlds -- every declared `test*` executed in each, both exiting 0, and the two outputs identical |

@@ -607,11 +607,13 @@ void px_fill(uptr tab, uptr orig, uptr src, uptr pro) {
 // (the back edge) is enough.
 //
 // Once the function is finished (after the frame fixup, which reads the
-// prologue's own index), a straight-line region the walker jumps over is moved
-// past the epilogue when its first call is a cold routine: one whose name ends
-// in _slow, or php_rc_drain or php_pk_overflow. Precisely, a branch P to a
-// label T further on, where everything between them is labels up front and
-// then straight-line code with no label in it:
+// prologue's own index), a region the walker jumps over is moved past the
+// epilogue when its first call is a cold routine: one whose name ends in
+// _slow, or php_rc_drain or php_pk_overflow. Precisely, a branch P to a label
+// T further on, where everything between them is labels up front, then code
+// with no label and no call before that cold call (after it the slow half may
+// branch within itself), and no branch anywhere in it back to before P -- a
+// loop's back edge, which would make the region a loop body, hot code:
 //   P unconditional -- the region is only reached through its labels: P goes,
 //                      and the code before it now falls into T;
 //   P conditional   -- the region was its fallthrough: P is inverted and
@@ -646,7 +648,7 @@ i64 pm_cold_sym(i64 si) {
 
 // the region (i, t) qualifies: labels up front, then no label, and the first
 // call is cold. Answers the first label up front, 0 if none, -1 if it does not.
-i64 lay_region(i64 i, i64 t) {
+i64 lay_region(i64 i, i64 t, uptr lpos) {
     i64 lead = 0;
     i64 j = i + 1;
     loop {
@@ -656,14 +658,22 @@ i64 lay_region(i64 i, i64 t) {
         if (op == lay_nop()) { j = j + 1; continue; }
         break;
     }
+    i64 cold = -1;
     loop {
-        if (j >= t) return 0 - 1;
+        if (j >= t) break;
         uptr e = ins_at(j);
         i64 op = ins_op(e);
-        if (op == I_LABEL || lay_callr(op)) return 0 - 1;
-        if (lay_call(op)) { if (pm_cold_sym(ins_sym(e))) return lead; return 0 - 1; }
+        if (lay_callr(op)) return 0 - 1;
+        if (cold < 0 && op == I_LABEL) return 0 - 1;
+        if (cold < 0 && lay_call(op)) { if (!pm_cold_sym(ins_sym(e))) return 0 - 1; cold = j; }
+        // a branch back to before the region is a loop's back edge: the
+        // region is a loop body whose first call happens to be a slow half,
+        // hot code, and not what this pass is for
+        if ((op == lay_jmp() || lay_cond(op)) && ins_label(e) > 0 && ins_label(e) <= nlabels
+            && ld64(lpos + ins_label(e) * 8) <= i) return 0 - 1;
         j = j + 1;
     }
+    if (cold >= 0) return lead;
     return 0 - 1;
 }
 
@@ -695,7 +705,7 @@ void lay_run() {
         if ((op == lay_jmp() || lay_cond(op)) && ins_label(e) > 0 && ins_label(e) <= nlabels) {
             i64 t = ld64(lpos + ins_label(e) * 8);
             if (t > i) {
-                i64 lead = lay_region(i, t);
+                i64 lead = lay_region(i, t, lpos);
                 if (lead >= 0) {
                     st64(rp + nr * 8, i);
                     st64(re + nr * 8, t);

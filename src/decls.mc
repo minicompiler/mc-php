@@ -32,14 +32,14 @@
 // SEM_C, the default -- an int that overflows wraps, an in-range read is the
 // read and nothing else; SEM_PHP, php's own rules (the phpt grid's mode); and
 // SEM_CDEBUG, C's rules with every read it made unchecked checked again as a
-// hard trap. Chosen, the first that says: MCPHP_SEMANTICS in the compiler's
-// environment, [php] semantics in the project file, a `// mc-php:
-// semantics=...` comment in a php source (src/program.mc, ph_sem_*).
+// hard trap. Chosen, the first that says: a `// mc-php: semantics=...` line
+// comment in a php source, MCPHP_SEMANTICS in the compiler's environment,
+// [php] semantics in the project file (src/program.mc, ph_sem_*).
 #define SEM_C      0
 #define SEM_PHP    1
 #define SEM_CDEBUG 2
 i64 ph_sem;
-i64 ph_sem_by;            // who chose it: 0 nobody, 1 a source, 2 the project, 3 the environment
+i64 ph_sem_by;            // who chose it: 0 nobody, 1 the project, 2 the environment, 3 a source
 
 i64 ty_pstr;              // the mc type `string` lowers to (D10)
 i64 ty_parr;
