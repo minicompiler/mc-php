@@ -56,3 +56,8 @@ api = 20250925
 build_id = "API20250925,NTS"
 thread_safety = false
 debug = false
+# The default, said out loud: C's rules (docs/semantics.md). An int wraps, and
+# a string offset or a packed element read in range is the read and nothing
+# else. The decimal reads only inside its digit strings and arrays; build it
+# with "c-debug" to have that checked, or "php" for php's own rules.
+semantics = "c"

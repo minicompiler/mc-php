@@ -13,6 +13,11 @@ cd "$root"
 bin=${1:-build/mc-php}; out=${2:-build/grid}; full=${3:-}
 MCPHP_BIN=$(CDPATH= cd -- "$(dirname -- "$bin")" && pwd)/$(basename "$bin")
 export MCPHP_BIN
+# php's rules (docs/semantics.md): the grid is php's own tests, so it grades
+# the compiler in the mode that promises php's answers. A caller that wants
+# the default, C's rules, says MCPHP_SEMANTICS=c and reads the differences.
+MCPHP_SEMANTICS=${MCPHP_SEMANTICS:-php}
+export MCPHP_SEMANTICS
 . "$(dirname -- "$0")/tmp.sh"
 mcphp_tmp_init mcphp-grid
 mcphp_tmp_watch

@@ -74,3 +74,5 @@ api = 20250925
 build_id = "API20250925,NTS,VS17"
 thread_safety = false
 debug = false
+# C semantics, the default (docs/semantics.md): see mcphp.toml
+semantics = "c"

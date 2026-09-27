@@ -1,4 +1,6 @@
 <?php
+// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
+// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // The string lowerings batch E made native (docs/plan.md § 7): strspn and
 // strcspn over native strings with a literal or a computed set, the trim
 // family with a mask (ranges included), $s[$i] === 'c' compared in place,

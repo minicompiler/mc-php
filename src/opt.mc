@@ -843,6 +843,10 @@ void phr_init() {
     phr_add("php_str_sets_own");
     phr_add("php_str_setb_own");
     phr_add("php_pk_get");
+    phr_add("php_str_byte_c");
+    phr_add("php_str_byte_d");
+    phr_add("php_pk_get_c");
+    phr_add("php_pk_get_d");
     phr_add("php_pk_set");
     phr_add("php_add_ck");
     phr_add("php_sub_ck");

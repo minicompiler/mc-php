@@ -1,4 +1,6 @@
 <?php
+// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
+// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // The runtime's fast paths copied into the compiled code (src/opt.mc, phr_*):
 // a string offset read as its byte, a byte written in place, a packed
 // element read and written, an overflow-checked add, intdiv -- each with the

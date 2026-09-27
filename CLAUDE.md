@@ -932,3 +932,28 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   word function (main's longest branch 131 067, the moved one 131 090). P10 now stands down on arm64
   when the function plus one `b` per region exceeds 0x1ffff words; x86-64's jmp/jcc are rel32.
   Gate `reach` in `tests/fixtures.sh` (fails before, passes after); every other object unchanged.
+- C semantics (2026-09-27, branch `decimal-cmode`), on **mc 1.1.0**, the owner's decision: a
+  compiled program behaves as C does where C and php part ways, BY DEFAULT (`docs/semantics.md`
+  lists every difference). An int that overflows in `+ - *` (and unary `-`) on a packed element
+  wraps instead of the overflow test; `$s[$i]`, `ord($s[$i])`, `$s[$i] === 'c'` and `$a[$k]` on
+  a packed array read with no bounds check (`php_str_byte_c`, `php_str_off_c`, `php_pk_get_c`,
+  copied into the caller like their php twins), so a read outside the range is undefined
+  behaviour. A negative offset spelt as a literal (`$s[-1]`), `??` reads, stores, division and
+  modulo by zero and `intdiv(PHP_INT_MIN, -1)` stay php's in every mode. Chosen, the first that
+  says: `MCPHP_SEMANTICS` in the compiler's environment, `[php] semantics` in the project file,
+  a `// mc-php: semantics=...` comment in a php source (`src/program.mc` `ph_sem_*`); values
+  `c` (default), `c-debug` (the unchecked reads checked again: outside, `mc-php: out-of-range
+  read: offset N, length L (FILE:LINE)` on stderr and exit 134, `php_oob_slow`) and `php`.
+  `tests/grid.sh` compiles with `php`. The six `tests/g` fixtures that read out of range on
+  purpose carry the `php` comment; `tests/c/*.php` (a new d8 regime, `recording`) are graded
+  against their own `NAME.out`/`.err`/`.code`: the wrap, in-range reads, the trap on a string
+  and on a packed array; `tests/fixtures.sh`'s packed-overflow case gained a C twin; `tests/ext.sh`
+  step 12b is in `php`. Measured (fifteen rounds interleaved, best of nine): reads unchecked
+  0.392 -> 0.379 ms, and the wrap 0.358 ms; head to head 0.359 against main's 0.392, **module/C
+  2.87** (was 3.14), 7.3x the interpreter; `php` 0.390, `c-debug` 0.389. Measured and NOT built:
+  no `ph_pkabs` store (0) and string reuse in place (bound ~0.007 ms: php's allocator is 8% of
+  the samples, the avoidable strings are `_dec_fmt`'s 3 of 7; two source rewrites of it were
+  slower). Grid with `php`: all 30 lists identical to main's (plain and `MCPHP_RC=check`); with
+  `c` three tests go green -> wrong, all three out-of-range string offsets on purpose
+  (`Zend/tests/bug39018_2`, `str_offset_001`, `string_offset_int_min_max`). Found on the way,
+  not changed: plain (non-packed) int arithmetic ALREADY wrapped in every mode (docs/plan.md § 7).

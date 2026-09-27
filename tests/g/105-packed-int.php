@@ -1,4 +1,6 @@
 <?php
+// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
+// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // The packed int array (src/packed.mc): an array the compiler proves holds
 // only ints under keys 0..n-1 and never leaves its function is a native i64
 // buffer. Every function here is one the proof ACCEPTS for its $x (the end

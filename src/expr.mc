@@ -317,6 +317,20 @@ i64 ph_var_ref(uptr d) {
     return n;
 }
 
+// a string offset read, on either semantics (ph_index)
+i64 ph_is_stroff(uptr n) {
+    return str_eq(n, "php_str_off") || str_eq(n, "php_str_off_c") || str_eq(n, "php_str_off_d");
+}
+
+// a negative integer literal as the source spelled it: `-1` or `(-1)`
+i64 ph_neg_lit(i64 n) {
+    if (nd_kind(n) == N_INT) return nd_val(n) < 0;
+    // `-1` is `0 - 1` here (the unary minus, just above)
+    if (nd_kind(n) == N_BINARY && nd_op(n) == ph_tok("-", 1) && nd_kind(nd_a(n)) == N_INT
+        && nd_val(nd_a(n)) == 0 && nd_kind(nd_b(n)) == N_INT) return nd_val(nd_b(n)) > 0;
+    return 0;
+}
+
 // $a[i] / $s[i] on the right-hand side. An array element is a zval, which is
 // what makes an array heterogeneous (D4 (d)); a string offset is a string.
 i64 ph_index(i64 base, i64 bt) {
@@ -328,6 +342,11 @@ i64 ph_index(i64 base, i64 bt) {
         // allocates nothing. `$s[$i] ?? d` is isset's quiet read, whose
         // absent offset is null, so the default is taken as php takes it.
         if (ph_at("??", 2)) { ph_ety = PT_MIXED; return ph_quiet("php_str_off_q", 2, base, i, 0, 0, ty_pzv); }
+        // C semantics (docs/semantics.md): the read, unchecked -- except an
+        // offset the source spells as a negative literal, which is php's
+        // count-from-the-end and not a read outside the string
+        if (ph_sem == SEM_C && !ph_neg_lit(i)) return ph_quiet("php_str_off_c", 2, base, i, 0, 0, ty_pstr);
+        if (ph_sem == SEM_CDEBUG && !ph_neg_lit(i)) return ph_c2("php_str_off_d", base, i, ty_pstr);
         return ph_c2("php_str_off", base, i, ty_pstr);
     }
     i64 kx = ph_expr(0);
@@ -338,6 +357,8 @@ i64 ph_index(i64 base, i64 bt) {
         if (kt != PT_INT) ph_pk_disagree(ph_tfile, ph_tline, "a key that is not an int");
         if (ph_at("??", 2)) return ph_c2("php_pk_getq", base, kx, ty_pzv);
         ph_ety = PT_INULL;
+        if (ph_sem == SEM_C) return ph_quiet("php_pk_get_c", 2, base, kx, 0, 0, TY_I64);
+        if (ph_sem == SEM_CDEBUG) return ph_c2("php_pk_get_d", base, kx, TY_I64);
         return ph_c2("php_pk_get", base, kx, TY_I64);
     }
     // an int key on an array needs no key zval: php_arr_iget(_w) is the
@@ -563,7 +584,11 @@ i64 ph_primary() {
         i64 t = ph_ety;
         // -null is int(0); -PHP_INT_MIN is php's float, so an element's
         // negation is the checked subtraction
-        if (t == PT_INULL || (t == PT_INT && ph_is_ck(v))) { ph_ety = PT_INT; return ph_c2("php_sub_ck", ph_int(0), v, TY_I64); }
+        if (t == PT_INULL || (t == PT_INT && ph_is_ck(v))) {
+            ph_ety = PT_INT;
+            if (ph_sem != SEM_PHP) return ph_bin(ph_tok("-", 1), ph_int(0), v, TY_I64);
+            return ph_c2("php_sub_ck", ph_int(0), v, TY_I64);
+        }
         if (t == PT_FLOAT) return ph_c1("php_fneg", v, ty_f64);
         // -"1.2" is float(-1.2) and -"abc" is a TypeError: a zval keeps its
         // own rules, and converting to int first threw the fraction away.
@@ -957,6 +982,8 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
     // + - * on a packed element, or on what such an operation answered: php's
     // overflow test, and a named ArithmeticError where php would make a float
     // (php_add_ck and its two siblings, lib/php_rt.mc) -- never a wrapped int
+    // C semantics (docs/semantics.md): the same operation wraps, as C's does
+    if (ck && ph_sem != SEM_PHP) ck = 0;
     if (ck) {
         if (op == ph_tok("+", 1)) return ph_c2("php_add_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
         if (op == ph_tok("-", 1)) return ph_c2("php_sub_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
@@ -1029,19 +1056,25 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         if (strict) {
             i64 off = 0;
             i64 lit = 0;
-            if (nd_kind(lhs) == N_CALL && str_eq(nd_name(lhs), "php_str_off") && ph_is_strlit(rhs)) { off = lhs; lit = rhs; }
-            if (nd_kind(rhs) == N_CALL && str_eq(nd_name(rhs), "php_str_off") && ph_is_strlit(lhs)) { off = rhs; lit = lhs; }
+            if (nd_kind(lhs) == N_CALL && ph_is_stroff(nd_name(lhs)) && ph_is_strlit(rhs)) { off = lhs; lit = rhs; }
+            if (nd_kind(rhs) == N_CALL && ph_is_stroff(nd_name(rhs)) && ph_is_strlit(lhs)) { off = rhs; lit = lhs; }
             if (off && nd_val(nd_next(nd_next(nd_a(lit)))) == 1) {
                 i64 by = ld8(nd_name(nd_next(nd_a(lit))));
+                uptr onm = nd_name(off);
                 i64 sb = nd_a(off);
                 i64 ix = nd_next(sb);
                 set_nd_next(sb, 0);
                 i64 at = 0;
+                // C semantics: the byte, read (and checked by the debug trap)
+                if (str_eq(onm, "php_str_off_c"))
+                    at = ph_bin(ph_tok("==", 2), ph_quiet("php_str_byte_c", 2, sb, ix, 0, 0, TY_I64), ph_int(by), TY_U8);
+                if (str_eq(onm, "php_str_off_d"))
+                    at = ph_bin(ph_tok("==", 2), ph_c2("php_str_byte_d", sb, ix, TY_I64), ph_int(by), TY_U8);
                 // a variable and a variable or literal index: the in-range
                 // byte compared right here, and the call only outside the
                 // string, where php_str_at_is warns (both operands are read
                 // twice, so only names and literals qualify)
-                if ((nd_kind(sb) == N_IDENT) && (nd_kind(ix) == N_IDENT || nd_kind(ix) == N_INT)) {
+                if (!at && (nd_kind(sb) == N_IDENT) && (nd_kind(ix) == N_IDENT || nd_kind(ix) == N_INT)) {
                     i64 len = ph_strlen_of(ph_tref(sb));
                     i64 ix1 = ph_tref(ix);
                     if (nd_kind(ix) == N_INT) ix1 = ph_int(nd_val(ix));

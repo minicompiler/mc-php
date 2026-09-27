@@ -288,6 +288,52 @@ So of the four instruction-selection items only the layout moved the time: the l
 its taken branches, not by its instruction count, and removing 17 more instructions from it
 bought 0.004 ms. What is left of the (b) row is below the noise on this host.
 
+**Three columns, C semantics** (2026-09-27, macos/arm64, php 8.5.10, one host, one sitting,
+fifteen rounds interleaved, best of nine each; `decimal.php` and `bench.php` unchanged). The
+owner's decision: a compiled mc-php program behaves as C does where C and php part ways, BY
+DEFAULT -- an int that overflows wraps, and a string offset or a packed array element read in
+range is the read and nothing else ([`docs/semantics.md`](../../docs/semantics.md) lists every
+difference, and how to get php's rules back). A read outside the range is undefined behaviour
+under these rules. The decimal never makes one, and `semantics = "c-debug"` proves it on this
+workload: that build checks every such read as a trap, and it answers `check.php` and bcmath
+exactly.
+
+The bounds, each a build of the module with one rule changed (a direct measurement: the change is
+small enough that building it IS the bound):
+
+| rule | the module | its share |
+|---|---|---|
+| main (c63cedd), php's rules | 0.392 ms | -- |
+| reads unchecked (`$s[$i]`, `ord($s[$i])`, `$s[$i] === 'c'`, `$a[$k]`), overflow still checked | 0.378-0.380 ms | 0.013 ms |
+| and `+ - *` on an element wrapping instead of the overflow test | **0.358 ms** | 0.021 ms more |
+| and no `ph_pkabs = 0` store in the read (an element is never php's null under C's rules) | 0.359 ms | none: reverted |
+| string reuse in place (item 4 of the request): the bound, below | at most ~0.007 ms | not built |
+
+The same compiler, the three semantics of the same source, interleaved:
+
+| | the module | module / C |
+|---|---|---|
+| `php` (the grid's) | 0.390-0.391 ms | 3.12 |
+| `c-debug` (the reads checked again, as a trap) | 0.388-0.391 ms | 3.11 |
+| **`c`, the default** | **0.358-0.359 ms** | **2.87** |
+
+Head to head, main's module and this one interleaved with the interpreter and the twin, fifteen
+rounds, two sittings: interpreted 2.617-2.626 ms, main 0.391-0.392 ms (6.68-6.72x, module/C
+3.13-3.14), **C semantics 0.359 ms (7.29-7.31x, module/C 2.87)**, the twin 0.125 ms
+(`tests/examples.sh`'s own row: 2.629 / 0.360 / 0.126 ms, 7.30x and 20.87x).
+
+**The string item, measured and not built.** In `php` mode as in `c`, the bench's `work()` builds
+12 447 strings (`MCPHP_STATS=1`), and php's own `_emalloc`/`_efree` are 8% of the samples, the
+module's `php_str_alloc` 5% and the pool drain 4% -- about 0.06 ms for all of them, 5 ns a string.
+The strings a reuse could avoid are `_dec_fmt`'s: `$c = substr($c, ...)` and the three `.=` that
+build `$o` (a straight-line function does not count its strings, so its locals borrow from the
+pool, and an in-place write there needs to know no other local holds the same string). That is 3
+of the 7 strings of a `dec_add`, 1 440 of the 12 447 -- about 0.007 ms at 5 ns. Two rewrites of
+`_dec_fmt` in the source, which is what the compiler would reach at best, both came out SLOWER:
+the answer built in one expression (7 strings a call to 6) 0.363 ms, and the answer written byte
+by byte into one `str_repeat` of its final length (2 888 strings fewer a `work()`) 0.367-0.368 ms,
+against 0.358-0.360 ms.
+
 ## What it cannot do yet
 
 * **A wrong TYPE** is an internal function's message in the module and a userland one

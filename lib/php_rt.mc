@@ -1871,6 +1871,15 @@ i64 php_pk_get(uptr p, i64 k) {
     return php_pk_get_slow(p, k);
 }
 
+// C semantics: the element, read (above, php_str_byte_c)
+i64 php_pk_get_c(uptr p, i64 k) { ph_pkabs = 0; return ld64(ld64(p + 16) + k * 8); }
+void php_oob_slow(i64 i, i64 n);
+i64 php_pk_get_d(uptr p, i64 k) {
+    if ((u64) k < (u64) ld64(p)) { ph_pkabs = 0; return ld64(ld64(p + 16) + k * 8); }
+    php_oob_slow(k, ld64(p));
+    return 0;
+}
+
 i64 php_pk_get_slow(uptr p, i64 k) {
     if (!ld64(p + 24)) {
         if (k >= 0 && k < ld64(p)) { ph_pkabs = 0; return ld64(ld64(p + 16) + k * 8); }
@@ -3600,6 +3609,41 @@ i64 php_str_byte_slow(uptr s, i64 i);
 i64 php_str_byte(uptr s, i64 i) {
     if ((u64) i < (u64) ld64(s + 16)) return ld8(s + ZS_HDR + i);
     return php_str_byte_slow(s, i);
+}
+
+// ---- C semantics (docs/semantics.md) ---------------------------------------
+// The default of a compiled program: a string offset and a packed element are
+// READ, and nothing is checked -- an offset outside the string or below zero
+// is C's undefined behaviour, a read of whatever memory is there. The php
+// rules are the SEM_PHP road above; SEM_CDEBUG is the same read with the range
+// checked again, and outside it a hard trap that names the statement.
+i64  php_str_byte_c(uptr s, i64 i) { return ld8(s + ZS_HDR + i); }
+uptr php_str_off_c(uptr s, i64 i)  { return php_str_ch(ld8(s + ZS_HDR + i)); }
+
+void php_oob_slow(i64 i, i64 n) {
+    php_flush();
+    php_mreset();
+    php_mc("mc-php: out-of-range read: offset ");
+    php_mi(i);
+    php_mc(", length ");
+    php_mi(n);
+    php_mc(" (");
+    if (ph_dfile) php_mc(ph_dfile);
+    php_mc(":");
+    php_mi(ph_dline);
+    php_mc(")\n");
+    write(2, ph_msg, ph_msgn);
+    exit(134);
+}
+i64 php_str_byte_d(uptr s, i64 i) {
+    if ((u64) i < (u64) ld64(s + 16)) return ld8(s + ZS_HDR + i);
+    php_oob_slow(i, ld64(s + 16));
+    return 0;
+}
+uptr php_str_off_d(uptr s, i64 i) {
+    if ((u64) i < (u64) ld64(s + 16)) return php_str_ch(ld8(s + ZS_HDR + i));
+    php_oob_slow(i, ld64(s + 16));
+    return 0;
 }
 
 // php_str_off's rules, without the empty string it answers outside

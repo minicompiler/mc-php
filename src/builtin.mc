@@ -186,8 +186,15 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
         if ((mask >> n) & 1) a = ph_ref_arg(fl, line);
         if (!a) a = ph_expr(0);
         i64 t = ph_ety;
-        if (byte && n == 0 && t == PT_STRING && nd_kind(a) == N_CALL && str_eq(nd_name(a), "php_str_off")) {
-            set_nd_name(a, "php_str_byte");
+        // the byte of a C read is a C read (src/expr.mc ph_index)
+        uptr bn = 0;
+        if (byte && n == 0 && t == PT_STRING && nd_kind(a) == N_CALL) {
+            if (str_eq(nd_name(a), "php_str_off")) bn = "php_str_byte";
+            if (str_eq(nd_name(a), "php_str_off_c")) bn = "php_str_byte_c";
+            if (str_eq(nd_name(a), "php_str_off_d")) bn = "php_str_byte_d";
+        }
+        if (bn) {
+            set_nd_name(a, bn);
             set_nd_type(a, TY_I64);
             t = PT_INT;
             fused = 1;

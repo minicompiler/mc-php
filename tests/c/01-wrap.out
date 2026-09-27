@@ -1,0 +1,6 @@
+-9223372036854775808 9223372036854775807
+6 15 -6 1
+-9223372036854775808 9223372036854775805 -9223372036854775808 1
+ArithmeticError: Division of PHP_INT_MIN by -1 is not an integer
+DivisionByZeroError: Division by zero
+DivisionByZeroError: Modulo by zero

@@ -1,4 +1,6 @@
 <?php
+// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
+// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // Small functions are copied into their callers (src/opt.mc): every shape a
 // copy has to keep -- an early return nested under an if whose other branch
 // goes on, a return in both branches, a parameter the callee assigns, the

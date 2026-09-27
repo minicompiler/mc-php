@@ -13,7 +13,7 @@ cannot waive the rule for itself, so the statement has to be ENFORCED and not
 written down.
 
 This is the enforcement. Every `.php` under the probe is put in exactly one
-of SIX regimes, each with its own obligation, and a file in none of them
+of SEVEN regimes, each with its own obligation, and a file in none of them
 fails the run:
 
   helper     a `g/` file another fixture `require`s and the gate does not
@@ -33,6 +33,9 @@ fails the run:
              pair `fixtures.sh` runs -- php PARSES it (`php -l`) and mc-php
              refuses it with a named message and exit 3 -- which is what
              makes "mc-php refuses what php accepts" a measurement.
+  recording  `c/*.php`. C's rules (docs/semantics.md), which php does not
+             have, so not a differential: `fixtures.sh` grades stdout, stderr
+             and the exit code against the file's own NAME.out / .err / .code.
   instrument the mechanism of D8 (a) itself -- the `TestCase` shim, the test
              class, the runner that names the test methods. Testing the test
              harness with the test harness is a circle.
@@ -219,7 +222,7 @@ def project_sweep():
     repository and NOT under `tests/` -- an `examples/` program, a fixture
     dropped at the root -- has no regime at all and no gate runs it.
 
-    There is one such place, and it is the SEVENTH regime: `extension`. An
+    There is one such place, and it is the EIGHTH regime: `extension`. An
     `examples/<name>/` directory is a PHP extension's source, and its
     obligation is `tests/ext.sh` or `tests/examples.sh` -- which builds it into a `.so`, loads it
     under `php` and compares its answers with php's own, on both streams and
@@ -300,8 +303,8 @@ def _check_uncomment():
 def main():
     _check_uncomment()
     globs = fixture_globs()
-    if globs != {'g', 'r'}:
-        sys.exit(f'd8check: fixtures.sh walks {sorted(globs)}, expected g and r')
+    if globs != {'c', 'g', 'r'}:
+        sys.exit(f'd8check: fixtures.sh walks {sorted(globs)}, expected c, g and r')
 
     tested = reach(os.path.join(HERE, 'bench/WorkloadTest.php'))
     benched = set()
@@ -336,7 +339,11 @@ def main():
     # `fixtures.sh` enforces -- php PARSES it (`php -l`) and mc-php refuses
     # it with a named message and exit 3 -- and calling it a fixture
     # claimed a differential the gate does not run.
-    counts = {'fixture': 0, 'refusal': 0, 'helper': 0, 'instrument': 0,
+    # `recording` is `c/`: C's rules (docs/semantics.md), which php does not
+    # have, so the file cannot be a differential. Its obligation is the one
+    # `fixtures.sh` enforces -- stdout, stderr and the exit code against its
+    # own NAME.out / NAME.err / NAME.code -- and this checks the .out exists.
+    counts = {'fixture': 0, 'refusal': 0, 'recording': 0, 'helper': 0, 'instrument': 0,
               'library': 0, 'bench': 0}
     bad = []
     for f in files:
@@ -346,6 +353,11 @@ def main():
                 counts['helper'] += 1
             else:
                 bad.append(f'{f}: skipped by the gate and required by no fixture')
+        elif d == 'c' and f.count('/') == 1:
+            if os.path.exists(os.path.join(HERE, f[:-4] + '.out')):
+                counts['recording'] += 1
+            else:
+                bad.append(f'{f}: a C-semantics file with no recording ({f[:-4]}.out)')
         elif d in globs and f.count('/') == 1:
             counts['refusal' if d == 'r' else 'fixture'] += 1
         elif f in INSTRUMENTS:
@@ -357,7 +369,7 @@ def main():
         else:
             bad.append(f)
 
-    for k in ('fixture', 'refusal', 'helper', 'instrument', 'library', 'bench'):
+    for k in ('fixture', 'refusal', 'recording', 'helper', 'instrument', 'library', 'bench'):
         print(f'  {counts[k]:4d}  {k}')
     bad += test_methods_are_all_run()
     bad += project_sweep()

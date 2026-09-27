@@ -1,4 +1,6 @@
 <?php
+// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
+// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // The packed int array's proof FAILING (src/packed.mc): each function below
 // builds an int array the way tests/g/105 does and then does ONE thing the
 // proof does not allow, so the array stays php's own ordered hash of zvals
