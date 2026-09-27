@@ -1291,6 +1291,19 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
             if (bt3 == ct3 && (bt3 == PT_INT || bt3 == PT_FLOAT || bt3 == PT_BOOL || bt3 == PT_STRING))
                 rt3 = bt3;
             if (rt3 == PT_MIXED) { b3 = ph_to_mixed(b3, bt3); c3 = ph_to_mixed(c3, ct3); }
+            // two int literals: `c ? B : C` is C + c * (B - C), no branch
+            // (`$d >= 10 ? 1 : 0` is a carry, and a branch on it is taken
+            // at random)
+            if (rt3 == PT_INT && !ib3 && !ic3 && nd_kind(b3) == N_INT && nd_kind(c3) == N_INT
+                && nd_val(b3) > -2147483648 && nd_val(b3) < 2147483648
+                && nd_val(c3) > -2147483648 && nd_val(c3) < 2147483648) {
+                i64 kb = nd_val(b3);
+                i64 kc = nd_val(c3);
+                i64 cv = ph_cast(TY_I64, cnd3);
+                ph_ety = PT_INT;
+                if (kb == 1 && kc == 0) return cv;
+                return ph_bin(ph_tok("+", 1), ph_int(kc), ph_bin(ph_tok("*", 1), cv, ph_int(kb - kc), TY_I64), TY_I64);
+            }
             ph_nonce = ph_nonce + 1;
             uptr nn3 = php_dec(ph_nonce);
             uptr tn3 = p_cat("phq_", nn3, 0, cstrlen(nn3));

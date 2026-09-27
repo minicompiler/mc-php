@@ -305,6 +305,12 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
             set_nd_name(sb, ph_mangle(d, "v_"));
             set_nd_type(sb, ty_pstr);
             ph_can_throw = 1;
+            // a string value is written as a string: no zval built for it,
+            // and chr(c) as its byte
+            if (cvt == PT_STRING && nd_kind(cv) == N_CALL && str_eq(nd_name(cv), "php_chr"))
+                return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_c3("php_str_setb", sb, ix, nd_a(cv), ty_pstr)));
+            if (cvt == PT_STRING)
+                return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_c3("php_str_sets", sb, ix, cv, ty_pstr)));
             return ph_wrap(ph_set(ph_mangle(d, "v_"),
                 ph_c3("php_str_setoff", sb, ix, ph_to_mixed(cv, cvt), ty_pstr)));
         }

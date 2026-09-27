@@ -94,8 +94,11 @@ void ph_opt_walk(i64 n) {
     }
 }
 
+void phr_fn(i64 f);
+
 void ph_opt_fn(i64 f) {
     ph_opt_walk(nd_b(f));
+    phr_fn(f);
 }
 
 // ---- small php functions are inlined -----------------------------------------
@@ -186,6 +189,7 @@ i64 phi_find(uptr name) {
 // ---- which function may be copied --------------------------------------------
 i64 phi_size;
 i64 phi_bad;
+i64 phi_rt;                           // scanning a runtime routine: its stores to globals are its own
 
 // is `name` declared in the function (a parameter or a local)?
 i64 phi_decl_in(i64 s, uptr name) {
@@ -218,7 +222,7 @@ void phi_scan(i64 f, i64 s) {
         if (k == N_LOOP || k == N_BREAK || k == N_CONTINUE || k == N_ADDR || k == N_HOLE
             || k == N_FUNC || k == N_GLOBAL || k == N_BLOB || k == N_INDEX) phi_bad = 1;
         if (k == N_VAR && nd_val(s)) phi_bad = 1;
-        if (k == N_ASSIGN && !str_eq(nd_name(s), "ph_dfile") && !str_eq(nd_name(s), "ph_dline")
+        if (k == N_ASSIGN && !phi_rt && !str_eq(nd_name(s), "ph_dfile") && !str_eq(nd_name(s), "ph_dline")
             && !phi_decl_in(f, nd_name(s))) phi_bad = 1;
         if (k == N_CALL && phi_denied(nd_name(s))) phi_bad = 1;
         phi_scan(f, nd_a(s));
@@ -565,6 +569,51 @@ i64 phi_local_of_caller(uptr name) {
 
 i64 phi_list(i64 s);
 
+// the runtime pass (phr_fn) substitutes an argument for a parameter of a
+// different type of the same width and signedness -- a php string handle for
+// a uptr -- and lets a routine return straight into the local it is assigned
+// to; the php pass keeps to exact types (src/rc.mc tells strings by type)
+i64 phi_rtpass;
+i64 phi_drop;
+
+i64 phi_cls(i64 t) {
+    if (type_width(t) != 8) return 0 - 1;
+    i64 k = type_kind(t);
+    if (k != TK_INT && k != TK_SINT) return 0 - 1;
+    return type_signed(t);
+}
+
+i64 phi_same_ty(i64 a, i64 b) {
+    if (a == b) return 1;
+    if (!phi_rtpass) return 0;
+    return phi_cls(a) >= 0 && phi_cls(a) == phi_cls(b);
+}
+
+// the declared type of a local of the caller (0 when none is found)
+i64 phi_decl_ty1(i64 s, uptr name) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if ((k == N_VAR || k == N_PARAM) && str_eq(nd_name(s), name)) return nd_type(s);
+        i64 t = phi_decl_ty1(nd_a(s), name);
+        if (t) return t;
+        t = phi_decl_ty1(nd_b(s), name);
+        if (t) return t;
+        t = phi_decl_ty1(nd_c(s), name);
+        if (t) return t;
+        s = nd_next(s);
+    }
+    return 0;
+}
+
+i64 phi_decl_ty(uptr name) {
+    i64 t = phi_decl_ty1(phi_vh, name);
+    if (t) return t;
+    t = phi_decl_ty1(nd_a(phi_cf), name);
+    if (t) return t;
+    return phi_decl_ty1(nd_b(phi_cf), name);
+}
+
 // the statements that replace the call: arguments, then the body. The call
 // itself becomes the local its returns store into.
 i64 phi_expand(i64 c) {
@@ -586,7 +635,7 @@ i64 phi_expand(i64 c) {
         i64 an = nd_next(a);
         set_nd_next(a, 0);
         uptr pn = nd_name(p);
-        if (nd_kind(a) == N_IDENT && nd_type(a) == nd_type(p) && phi_local_of_caller(nd_name(a))
+        if (nd_kind(a) == N_IDENT && phi_same_ty(nd_type(a), nd_type(p)) && phi_local_of_caller(nd_name(a))
             && !ph_rc_assigned(body, pn)) {
             phi_rn_add(pn, nd_name(a));
         } else {
@@ -607,7 +656,17 @@ i64 phi_expand(i64 c) {
     phi_rename(body);
     body = phi_hoist(body);
     uptr rv = 0;
-    if (nd_type(fc) != TY_VOID) {
+    // a runtime routine whose answer is the whole value of `x = call(...)`,
+    // x a local of the caller: its returns store into x itself, and the
+    // statement goes (phi_drop)
+    i64 drop = 0;
+    if (phi_rtpass && nd_type(fc) != TY_VOID && phi_field == 0 && nd_kind(phi_hold) == N_ASSIGN
+        && nd_a(phi_hold) == c && phi_local_of_caller(nd_name(phi_hold))
+        && phi_same_ty(phi_decl_ty(nd_name(phi_hold)), nd_type(fc))) {
+        rv = nd_name(phi_hold);
+        drop = 1;
+    }
+    if (!rv && nd_type(fc) != TY_VOID) {
         rv = phi_local("ph_ret");
         phi_declare(rv, nd_type(fc), line, fl);
         i64 id = node_new(N_IDENT, line, fl);
@@ -631,6 +690,7 @@ i64 phi_expand(i64 c) {
     phi_useflag = 0;
     // the arguments may call candidates of their own
     ph = phi_list(ph);
+    phi_drop = drop;
     return phi_cat(ph, body);
 }
 
@@ -648,11 +708,18 @@ i64 phi_announces(i64 n) {
     return 0;
 }
 
+// exactly ph_posstmt's block: the two stores and nothing else. A block that
+// merely BEGINS with them -- a loop body whose first statement's announcement
+// a copy flattened into it -- is not one: taking it for one skipped the
+// inlining inside that loop, and re-announcing "it" after a copy repeated the
+// whole block.
 i64 phi_is_ann(i64 s) {
     if (nd_kind(s) != N_BLOCK) return 0;
     i64 a = nd_a(s);
-    if (!a) return 0;
-    return nd_kind(a) == N_ASSIGN && str_eq(nd_name(a), "ph_dfile");
+    if (!a || nd_kind(a) != N_ASSIGN || !str_eq(nd_name(a), "ph_dfile")) return 0;
+    i64 b = nd_next(a);
+    if (!b || nd_kind(b) != N_ASSIGN || !str_eq(nd_name(b), "ph_dline")) return 0;
+    return nd_next(b) == 0;
 }
 
 i64 phi_list(i64 s) {
@@ -676,6 +743,7 @@ i64 phi_list(i64 s) {
                 i64 c = phi_hit;
                 i64 whole = k == N_EXPRSTMT && nd_a(s) == c;
                 i64 ins = phi_expand(c);
+                if (phi_drop) whole = 1;
                 if (ann && phi_announces(ins)) ins = phi_cat(ins, phi_copy1(ann));
                 if (ins) {
                     if (t) set_nd_next(t, ins);
@@ -731,4 +799,531 @@ void ph_inl_fn(i64 f, i64 ok) {
     st64(phi_name + phi_n * 8, nd_name(f));
     st64(phi_fn + phi_n * 8, phi_copy1(f));
     phi_n = phi_n + 1;
+}
+
+// ---- the runtime's small leaf routines are inlined too -------------------------
+// After src/rc.mc, a compiled function still calls lib/php_rt.mc for the
+// smallest operations -- a string offset's byte, a packed array element, an
+// overflow-checked add -- and each call costs a prologue, an epilogue and the
+// caller's live registers saved around it, several times what the operation
+// does. These routines are written as a FAST PATH that calls nothing plus a
+// call to the general routine for the rest, and the same copy the php
+// inliner makes (phi_expand) puts them into the caller. It runs here, after
+// the counting pass, because two of them (php_str_sets_own, php_str_setb_own)
+// only exist after it; none of them returns a string the caller counts.
+//
+// The runtime is parsed before the php source (src/program.mc pushes it
+// first), so decl_find reaches each finished function. A routine the scan
+// refuses, or one this runtime does not have, is simply left a call.
+uptr phr_name;
+uptr phr_fn_;
+i64  phr_n;
+i64  phr_done;
+
+void phr_add(uptr name) {
+    i64 d = decl_find(name);
+    if (d < 0) return;
+    if (nd_kind(d) != N_FUNC || !nd_b(d)) return;
+    phi_size = 0;
+    phi_bad = 0;
+    phi_rt = 1;
+    phi_scan(d, nd_b(d));
+    phi_rt = 0;
+    if (phi_bad || phi_size > PHI_MAXN) return;
+    st64(phr_name + phr_n * 8, name);
+    st64(phr_fn_ + phr_n * 8, phi_copy1(d));
+    phr_n = phr_n + 1;
+}
+
+void phr_init() {
+    phr_done = 1;
+    phr_name = xalloc(16 * 8);
+    phr_fn_ = xalloc(16 * 8);
+    phr_add("php_str_byte");
+    phr_add("php_str_sets_own");
+    phr_add("php_str_setb_own");
+    phr_add("php_pk_get");
+    phr_add("php_pk_set");
+    phr_add("php_add_ck");
+    phr_add("php_sub_ck");
+    phr_add("php_mul_ck");
+    phr_add("php_intdiv");
+}
+
+// ---- the position and the unwinding check go where a call can raise ---------
+// A php statement that can raise is announced (ph_dfile/ph_dline, stored
+// before it) and checked (`if (ph_exc) unwind`, after each part of it). Once
+// the runtime's fast paths are copied in, the only calls such a statement may
+// still make are often the slow halves of those copies -- the out-of-range
+// read, the overflow -- each inside an `if`. Two rewrites, in order:
+//
+//  1. the announcement moves INTO those branches, before the slow call, and
+//     a copy of the statement's check follows the call there -- when every
+//     call the statement makes is in such a branch (no nested php statement,
+//     no loop, no call outside an if). An announcement nothing after it can
+//     raise under is dropped.
+//  2. a check is dropped where nothing since the last check can have raised:
+//     `pend`, carried through the function in the order it runs, says
+//     whether a call that can raise ran since the last check did.
+//
+// The path that raises is announced and checked as before; the path that
+// cannot pays for neither. Checking right after the call is also closer to
+// php: an exception stops the expression there.
+
+// `if (!!ph_exc) <unwind>`, and the unwind really leaves: a return, a break
+// to a catch, php_uncaught at the top level. An inlined copy's own check only
+// sets its answer and its done-flag, and is not one.
+i64 phr_leaves(i64 b) {
+    i64 l = phi_last(phi_blist(b));
+    if (!l) return 0;
+    i64 k = nd_kind(l);
+    if (k == N_RETURN || k == N_BREAK) return 1;
+    if (k == N_BLOCK) return phr_leaves(l);
+    if (k == N_EXPRSTMT && nd_kind(nd_a(l)) == N_CALL && str_eq(nd_name(nd_a(l)), "php_uncaught")) return 1;
+    return 0;
+}
+
+i64 phr_is_check(i64 s) {
+    if (nd_kind(s) != N_IF || nd_c(s)) return 0;
+    i64 c = nd_a(s);
+    if (nd_kind(c) != N_UNARY) return 0;
+    c = nd_a(c);
+    if (nd_kind(c) != N_UNARY) return 0;
+    c = nd_a(c);
+    if (nd_kind(c) != N_IDENT || !str_eq(nd_name(c), "ph_exc")) return 0;
+    return phr_leaves(nd_b(s));
+}
+
+// a call that cannot raise: the counting's own, and mc's loads and stores
+i64 phr_quiet_call(uptr nm) {
+    if (phi_intrinsic(nm)) return 1;
+    return str_eq(nm, "php_str_free") || str_eq(nm, "php_pool_push") || str_eq(nm, "php_rc_drain");
+}
+
+// anything that stops the move: an announcement or a loop anywhere inside
+i64 phr_nested(i64 n) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_LOOP) return 1;
+        if (nd_kind(n) == N_ASSIGN && (str_eq(nd_name(n), "ph_dfile") || str_eq(nd_name(n), "ph_dline"))) return 1;
+        if (phr_nested(nd_a(n)) || phr_nested(nd_b(n)) || phr_nested(nd_c(n)) || phr_nested(nd_d(n))) return 1;
+        n = nd_next(n);
+    }
+    return 0;
+}
+
+// a raising call anywhere in n (the list from n on); a check's own unwinding
+// is not looked into
+i64 phr_calls(i64 n) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_CALL && !phr_quiet_call(nd_name(n))) return 1;
+        if (!phr_is_check(n)) {
+            if (phr_calls(nd_a(n)) || phr_calls(nd_b(n)) || phr_calls(nd_c(n)) || phr_calls(nd_d(n))) return 1;
+        }
+        n = nd_next(n);
+    }
+    return 0;
+}
+i64 phr_calls1(i64 n) {
+    if (!n) return 0;
+    i64 nx = nd_next(n);
+    set_nd_next(n, 0);
+    i64 r = phr_calls(n);
+    set_nd_next(n, nx);
+    return r;
+}
+
+// a raising call reached whether or not any if is taken (one node and what
+// hangs under it, not its successors)
+i64 phr_uncond1(i64 n);
+i64 phr_uncond(i64 n) {
+    loop {
+        if (!n) break;
+        if (phr_uncond1(n)) return 1;
+        n = nd_next(n);
+    }
+    return 0;
+}
+i64 phr_uncond1(i64 n) {
+    if (!n) return 0;
+    i64 k = nd_kind(n);
+    if (k == N_IF) return phr_uncond(nd_a(n));
+    if (k == N_CALL && !phr_quiet_call(nd_name(n))) return 1;
+    return phr_uncond(nd_a(n)) || phr_uncond(nd_b(n)) || phr_uncond(nd_c(n)) || phr_uncond(nd_d(n));
+}
+
+i64 phr_wrap(i64 br, i64 ann, i64 chk, i64 line, uptr fl) {
+    i64 l = phi_blist(br);
+    if (chk) l = phi_cat(l, phi_copy1(chk));
+    if (ann) l = phi_cat(phi_copy1(ann), l);
+    return phi_block(l, line, fl);
+}
+
+// the announcement and the check into every branch that makes a call
+// whichever way its own ifs go -- the innermost such branch, so a path with
+// no call is never checked
+i64 phr_branch(i64 br, i64 ann, i64 chk, i64 line, uptr fl);
+void phr_move(i64 s, i64 ann, i64 chk) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_BLOCK) phr_move(nd_a(s), ann, chk);
+        if (k == N_IF && !phr_is_check(s)) {
+            if (nd_b(s)) set_nd_b(s, phr_branch(nd_b(s), ann, chk, nd_line(s), nd_file(s)));
+            if (nd_c(s)) set_nd_c(s, phr_branch(nd_c(s), ann, chk, nd_line(s), nd_file(s)));
+        }
+        s = nd_next(s);
+    }
+}
+i64 phr_branch(i64 br, i64 ann, i64 chk, i64 line, uptr fl) {
+    if (!phr_calls(br)) return br;
+    if (phr_uncond(phi_blist(br))) return phr_wrap(br, ann, chk, line, fl);
+    phr_move(phi_blist(br), ann, chk);
+    return br;
+}
+
+// rewrite 1 for one php statement: `ann` and its parts up to the next
+// announcement. Answers the new list for it.
+i64 phr_group(i64 ann, i64 h) {
+    i64 chk = 0;
+    i64 ok = 1;
+    i64 any = 0;
+    i64 p = h;
+    loop {
+        if (!p) break;
+        if (phr_is_check(p)) { if (!chk) chk = p; }
+        if (!phr_is_check(p)) {
+            if (phr_nested(p) || phr_uncond1(p)) ok = 0;
+            if (phr_calls1(p)) any = 1;
+        }
+        p = nd_next(p);
+    }
+    if (!any) return h;                           // nothing raises under it
+    if (!ok) {
+        if (!ann) return h;
+        set_nd_next(ann, h);
+        return ann;
+    }
+    phr_move(h, ann, chk);
+    return h;
+}
+
+i64 phr_ann(i64 s) {
+    i64 p = s;
+    loop {
+        if (!p) break;
+        i64 k = nd_kind(p);
+        if (k == N_BLOCK && !phi_is_ann(p)) set_nd_a(p, phr_ann(nd_a(p)));
+        if (k == N_LOOP) set_nd_a(p, phr_ann(nd_a(p)));
+        if (k == N_IF && !phr_is_check(p)) {
+            if (nd_b(p)) set_nd_b(p, phi_block(phr_ann(phi_blist(nd_b(p))), nd_line(p), nd_file(p)));
+            if (nd_c(p)) set_nd_c(p, phi_block(phr_ann(phi_blist(nd_c(p))), nd_line(p), nd_file(p)));
+        }
+        p = nd_next(p);
+    }
+    i64 h = 0;
+    i64 t = 0;
+    i64 ann = 0;
+    i64 gh = 0;
+    i64 gt = 0;
+    p = s;
+    loop {
+        i64 nx = 0;
+        if (p) { nx = nd_next(p); set_nd_next(p, 0); }
+        if (!p || phi_is_ann(p)) {
+            i64 g = phr_group(ann, gh);
+            if (g) {
+                if (t) set_nd_next(t, g);
+                if (!t) h = g;
+                t = phi_last(g);
+            }
+            if (!p) break;
+            ann = p;
+            gh = 0;
+            gt = 0;
+        } else {
+            if (gt) set_nd_next(gt, p);
+            if (!gt) gh = p;
+            gt = p;
+        }
+        p = nx;
+    }
+    return h;
+}
+
+// rewrite 2: the list, run with `pend` on entry; answers the list and leaves
+// the pend on exit in phr_pend. `dry` computes without rewriting.
+i64 phr_pend;
+
+i64 phr_has_cont(i64 n) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_CONTINUE) return 1;
+        if (phr_has_cont(nd_a(n)) || phr_has_cont(nd_b(n)) || phr_has_cont(nd_c(n))) return 1;
+        n = nd_next(n);
+    }
+    return 0;
+}
+
+i64 phr_chk(i64 s, i64 pend, i64 dry) {
+    i64 h = 0;
+    i64 t = 0;
+    loop {
+        if (!s) break;
+        i64 nx = nd_next(s);
+        i64 keep = 1;
+        i64 k = nd_kind(s);
+        if (phr_is_check(s)) {
+            if (!pend) keep = 0;
+            pend = 0;
+        } else if (k == N_IF) {
+            if (phr_uncond(nd_a(s))) pend = 1;
+            i64 pb = pend;
+            i64 po = pend;
+            if (nd_b(s)) {
+                i64 b = phr_chk(phi_blist(nd_b(s)), pb, dry);
+                if (!dry) set_nd_b(s, phi_block(b, nd_line(s), nd_file(s)));
+                po = phr_pend;
+            }
+            i64 pc = pb;
+            if (nd_c(s)) {
+                i64 c = phr_chk(phi_blist(nd_c(s)), pb, dry);
+                if (!dry) set_nd_c(s, phi_block(c, nd_line(s), nd_file(s)));
+                pc = phr_pend;
+            }
+            pend = po | pc;
+        } else if (k == N_LOOP) {
+            i64 pin = pend;
+            if (phr_has_cont(nd_a(s))) { if (phr_calls(nd_a(s))) pin = 1; }
+            else { phr_chk(nd_a(s), pend, 1); pin = pend | phr_pend; }
+            i64 b = phr_chk(nd_a(s), pin, dry);
+            if (!dry) set_nd_a(s, b);
+            if (phr_calls(nd_a(s))) pend = 1;
+        } else if (k == N_BLOCK) {
+            i64 b = phr_chk(nd_a(s), pend, dry);
+            if (!dry) set_nd_a(s, b);
+            pend = phr_pend;
+        } else {
+            if (phr_calls1(s)) pend = 1;
+        }
+        if (dry || keep) {
+            if (!dry) {
+                if (t) set_nd_next(t, s);
+                if (!t) h = s;
+                t = s;
+            }
+        }
+        s = nx;
+    }
+    if (!dry && t) set_nd_next(t, 0);
+    phr_pend = pend;
+    return h;
+}
+
+i64 phr_lazy(i64 s) {
+    s = phr_ann(s);
+    return phr_chk(s, 0, 0);
+}
+
+// ---- one unwinding tail per function ---------------------------------------
+// Every check a function keeps (`if (ph_exc) <unwind>`) carries the whole
+// unwind: every counted slot released, the pool drained, the default answer
+// returned -- forty-odd instructions, the same ones each time. They are never
+// run on the path that does not raise, but mc lays them out beside it and its
+// register allocator counts the locals they name like any others, so the
+// function's hot variables lose registers to code that almost never runs.
+// The body goes into a `loop { ... }` that the normal path always leaves by
+// its own return, each check becomes `break` out of it (as many levels as
+// the loops around the check, plus that one), and ONE copy of the unwind
+// follows the loop.
+// does the unwind end in a return (and not a break to a catch)?
+i64 phr_rets(i64 b) {
+    i64 l = phi_last(phi_blist(b));
+    if (!l) return 0;
+    if (nd_kind(l) == N_BLOCK) return phr_rets(l);
+    return nd_kind(l) == N_RETURN;
+}
+i64 phr_brk(i64 s, i64 depth, i64 line, uptr fl) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (phr_is_check(s)) {
+            if (phr_rets(nd_b(s))) {
+                i64 b = node_new(N_BREAK, line, fl);
+                set_nd_val(b, depth + 1);
+                set_nd_b(s, b);
+            }
+        } else {
+            i64 d = depth;
+            if (k == N_LOOP) d = depth + 1;
+            phr_brk(nd_a(s), d, line, fl);
+            phr_brk(nd_b(s), d, line, fl);
+            phr_brk(nd_c(s), d, line, fl);
+            phr_brk(nd_d(s), d, line, fl);
+        }
+        s = nd_next(s);
+    }
+    return 0;
+}
+
+// the checks that unwind by returning, counted; the first one's unwind kept
+i64 phr_tailb;
+i64 phr_count_ret(i64 s) {
+    i64 n = 0;
+    loop {
+        if (!s) break;
+        if (phr_is_check(s)) {
+            if (phr_rets(nd_b(s))) {
+                if (!phr_tailb) phr_tailb = nd_b(s);
+                n = n + 1;
+            }
+        } else {
+            n = n + phr_count_ret(nd_a(s)) + phr_count_ret(nd_b(s)) + phr_count_ret(nd_c(s)) + phr_count_ret(nd_d(s));
+        }
+        s = nd_next(s);
+    }
+    return n;
+}
+
+void phr_tail(i64 f) {
+    i64 body = nd_b(f);
+    i64 line = nd_line(f);
+    uptr fl = nd_file(f);
+    phr_tailb = 0;
+    if (phr_count_ret(nd_a(body)) < 2) return;
+    // the declarations stay ahead of the loop (the unwind names them); one
+    // that comes after a statement is split into its declaration and a store
+    i64 vh = 0;
+    i64 vt = 0;
+    i64 rh = 0;
+    i64 rt = 0;
+    i64 s = nd_a(body);
+    loop {
+        if (!s) break;
+        i64 nx = nd_next(s);
+        set_nd_next(s, 0);
+        i64 put = s;
+        if (nd_kind(s) == N_VAR) {
+            if (rh && nd_a(s)) {
+                i64 d = node_new(N_VAR, nd_line(s), nd_file(s));
+                set_nd_name(d, nd_name(s));
+                set_nd_type(d, nd_type(s));
+                put = phi_st(nd_name(s), nd_a(s), nd_line(s), nd_file(s));
+                s = d;
+            } else put = 0;
+            if (vt) set_nd_next(vt, s);
+            if (!vt) vh = s;
+            vt = s;
+        }
+        if (put) {
+            if (rt) set_nd_next(rt, put);
+            if (!rt) rh = put;
+            rt = put;
+        }
+        s = nx;
+    }
+    // the path that does not raise must never reach the unwind
+    // (A function that falls off its end has raised php's `none returned`
+    // there and unwound at the check after it, so the return added for a
+    // valued one is never run; it only keeps the unwind out of reach.)
+    if (!rt || !phr_rets(phi_block(rt, line, fl))) {
+        i64 r = node_new(N_RETURN, line, fl);
+        if (nd_type(f) != TY_VOID) set_nd_a(r, ph_cast(nd_type(f), phi_i(0, line, fl)));
+        if (rt) set_nd_next(rt, r);
+        if (!rt) rh = r;
+        rt = r;
+    }
+    i64 tail = phi_copy1(phr_tailb);
+    phr_brk(rh, 0, line, fl);
+    i64 lp = node_new(N_LOOP, line, fl);
+    set_nd_a(lp, phi_block(rh, line, fl));
+    set_nd_next(lp, phi_blist(tail));
+    if (vt) { set_nd_next(vt, lp); set_nd_a(body, vh); }
+    if (!vt) set_nd_a(body, lp);
+}
+
+// ---- a loop that builds nothing does not drain -------------------------------
+// src/rc.mc drains the pool at the top of every iteration: `if (ph_pn >
+// ph_pm) php_rc_drain(ph_pm)`, a load and a compare each time round. A loop
+// whose every call is PROVEN to add nothing to the pool has nothing to drain,
+// so the test is dropped there. Proven means: mc's loads and stores, the
+// counting's own releases, and a slow half that can only THROW -- the throw
+// leaves the loop through the unwinding, which drains. A slow half that can
+// raise a diagnostic is not one: the diagnostic's text is built (php_mi ->
+// php_itos) in the pool, so an out-of-range read repeated in a loop grew the
+// pool by one string an iteration (tests/ext.sh step 12b), and
+// neither is anything that copies a string or calls the counting's push.
+i64 phr_throws_only(uptr nm) {
+    return str_eq(nm, "php_pk_overflow") || str_eq(nm, "php_intdiv_slow");
+}
+
+i64 phr_builds(i64 n) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_CALL && (str_eq(nd_name(n), "php_pool_push")
+            || (!phr_quiet_call(nd_name(n)) && !phr_throws_only(nd_name(n))))) return 1;
+        if (!phr_is_check(n)) {
+            if (phr_builds(nd_a(n)) || phr_builds(nd_b(n)) || phr_builds(nd_c(n)) || phr_builds(nd_d(n))) return 1;
+        }
+        n = nd_next(n);
+    }
+    return 0;
+}
+
+i64 phr_is_drain(i64 s) {
+    if (nd_kind(s) != N_IF || nd_c(s)) return 0;
+    i64 c = nd_a(s);
+    if (nd_kind(c) != N_BINARY || nd_kind(nd_a(c)) != N_IDENT || !str_eq(nd_name(nd_a(c)), "ph_pn")) return 0;
+    i64 b = phi_blist(nd_b(s));
+    if (!b || nd_next(b)) return 0;
+    if (nd_kind(b) == N_EXPRSTMT) b = nd_a(b);
+    return nd_kind(b) == N_CALL && str_eq(nd_name(b), "php_rc_drain");
+}
+
+void phr_nodrain(i64 s) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_LOOP && nd_kind(nd_a(s)) == N_BLOCK) {
+            i64 b = nd_a(s);
+            i64 first = nd_a(b);
+            if (first && phr_is_drain(first) && !phr_builds(nd_next(first))) set_nd_a(b, nd_next(first));
+        }
+        if (!phr_is_check(s)) {
+            phr_nodrain(nd_a(s));
+            phr_nodrain(nd_b(s));
+            phr_nodrain(nd_c(s));
+        }
+        s = nd_next(s);
+    }
+}
+
+void phr_fn(i64 f) {
+    if (phi_off) return;
+    if (!phr_done) phr_init();
+    if (!phr_n) return;
+    i64 body = nd_b(f);
+    if (!body) return;
+    // the runtime's list in place of the php one, for this pass only
+    uptr sn = phi_name;
+    uptr sf = phi_fn;
+    i64 sk = phi_n;
+    phi_name = phr_name;
+    phi_fn = phr_fn_;
+    phi_n = phr_n;
+    phi_cf = f;
+    phi_vh = 0;
+    phi_vt = 0;
+    phi_rtpass = 1;
+    set_nd_a(body, phi_list(nd_a(body)));
+    phi_rtpass = 0;
+    phi_drop = 0;
+    set_nd_a(body, phr_lazy(nd_a(body)));
+    phr_nodrain(nd_a(body));
+    phr_tail(f);
+    if (phi_vh) { set_nd_next(phi_vt, nd_a(body)); set_nd_a(body, phi_vh); }
+    phi_cf = 0;
+    phi_name = sn;
+    phi_fn = sf;
+    phi_n = sk;
 }

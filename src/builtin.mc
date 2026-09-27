@@ -96,6 +96,12 @@ i64 ph_ref_arg(uptr fl, i64 line) {
 #define PH_SPREADN 16
 i64 ph_had_spread;
 
+// ord($s[$i]): set by the caller just before ph_read_args, like ph_argref.
+// The first argument, when it is a string offset, is then read as its BYTE
+// (php_str_byte) before it can be hoisted, and ph_argbyte_done says so.
+i64 ph_argbyte;
+i64 ph_argbyte_done;
+
 uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
     // 24 bytes per argument: the node, its php type, and -- when the
     // argument is a string LITERAL -- its bytes, which is what a
@@ -105,6 +111,9 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
     uptr buf = xalloc(maxn * 24 + 24 + PH_SPREADN * 24);
     i64 mask = ph_argref;
     ph_argref = 0;
+    i64 byte = ph_argbyte;
+    ph_argbyte = 0;
+    i64 fused = 0;
     i64 n = 0;
     // THIS call's own answer, and nothing else. It used to be a save of the
     // enclosing value and a restore of it when this call had no spread,
@@ -177,6 +186,12 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
         if ((mask >> n) & 1) a = ph_ref_arg(fl, line);
         if (!a) a = ph_expr(0);
         i64 t = ph_ety;
+        if (byte && n == 0 && t == PT_STRING && nd_kind(a) == N_CALL && str_eq(nd_name(a), "php_str_off")) {
+            set_nd_name(a, "php_str_byte");
+            set_nd_type(a, TY_I64);
+            t = PT_INT;
+            fused = 1;
+        }
         // a string LITERAL, recognised the way `define` already does it --
         // before the hoist below can replace the node with a temporary
         uptr lb = 0;
@@ -204,6 +219,7 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
     ph_want(")", 1, "expected ) in a php call");
     st64(pn, n);
     ph_had_spread = mine;
+    ph_argbyte_done = fused;
     return buf;
 }
 
@@ -789,6 +805,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         // It was missing, so the outputs were READ and the parsed values
         // had nowhere to go (docs/review-backlog.md round ten).
         if (str_eq(name, "sscanf")) ph_argref = 252;
+        if (str_eq(name, "ord")) ph_argbyte = 1;
     }
     uptr av = ph_read_args(16, fl, line, pnb);
     i64 na = ld64(pnb);
@@ -1082,7 +1099,13 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_cast(TY_U8, ph_c1("php_f_defined", ph_to_mixed(a0, t0), TY_I64));
     }
     if (str_eq(name, "chr")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_chr", ph_to_int(a0, t0), ty_pstr); }
-    if (str_eq(name, "ord")) { ph_need(na, 1, name, fl, line); ph_ety = PT_INT; return ph_c1("php_ord", ph_to_str(a0, t0), TY_I64); }
+    if (str_eq(name, "ord")) {
+        ph_need(na, 1, name, fl, line);
+        ph_ety = PT_INT;
+        // ord($s[$i]): the byte was read in place (ph_read_args)
+        if (ph_argbyte_done && na == 1) return a0;
+        return ph_c1("php_ord", ph_to_str(a0, t0), TY_I64);
+    }
     if (str_eq(name, "strtoupper")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_strtoupper", ph_to_str(a0, t0), ty_pstr); }
     if (str_eq(name, "strtolower")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_strtolower", ph_to_str(a0, t0), ty_pstr); }
     if (str_eq(name, "ucfirst")) { ph_need(na, 1, name, fl, line); ph_ety = PT_STRING; return ph_c1("php_ucfirst", ph_to_str(a0, t0), ty_pstr); }
@@ -1136,13 +1159,16 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         st64(sa + 32, ph_int(hasl));
         st64(sa + 40, ph_int(want));
         uptr sf = "php_spn_s";
+        i64 nargs = 6;
         if (ph_is_strlit(set)) {
             sf = "php_spn";
             set = ph_bmap_of(set, 0);
+            // strspn($s, 'lit'[, $o]): the three-argument routine
+            if (want && !hasl) { sf = "php_spn_o"; nargs = 3; st64(sa + 16, so); }
         }
         st64(sa + 8, set);
         i64 save = ph_can_throw;
-        i64 sc = ph_calln(sf, sa, 6, TY_I64);
+        i64 sc = ph_calln(sf, sa, nargs, TY_I64);
         ph_can_throw = save;
         ph_ety = PT_INT;
         return sc;

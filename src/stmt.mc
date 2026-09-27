@@ -384,8 +384,39 @@ i64 ph_block_or_stmt() {
 // condition.
 i64 ph_cpre;
 
+// does a `continue` inside `s` reach the loop `s` is the body of? `depth` is
+// how many mc loops enclose the node inside the body; a continue whose level
+// is beyond them leaves them all
+i64 ph_cont_out(i64 s, i64 depth) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_CONTINUE) {
+            i64 lv = nd_val(s);
+            if (lv < 1) lv = 1;
+            if (lv > depth) return 1;
+        }
+        i64 d = depth;
+        if (k == N_LOOP) d = depth + 1;
+        if (ph_cont_out(nd_a(s), d)) return 1;
+        if (ph_cont_out(nd_b(s), d)) return 1;
+        if (ph_cont_out(nd_c(s), d)) return 1;
+        if (ph_cont_out(nd_d(s), d)) return 1;
+        s = nd_next(s);
+    }
+    return 0;
+}
+
 i64 ph_loop_of(i64 cond, i64 body, i64 step, i64 line, uptr fl) {
     i64 pre = 0;
+    // with no `continue` to skip it, the step simply follows the body: no
+    // flag to test and clear on every iteration
+    if (step && body && !ph_cont_out(body, 0)) {
+        i64 bt = body;
+        loop { if (!nd_next(bt)) break; bt = nd_next(bt); }
+        set_nd_next(bt, step);
+        step = 0;
+    }
     if (step) {
         ph_nonce = ph_nonce + 1;
         uptr fn = p_cat("phl_f", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
