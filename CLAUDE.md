@@ -905,3 +905,24 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   `strspn`'s loop into callers made it 8% slower). The grid: `tests/lang` 104, `Zend/tests` 766,
   strings 272, plain and `MCPHP_RC=check`, all 30 lists identical to main's. `tests/leaks.sh` and
   `tests/linux.sh` (aarch64) green.
+- Instruction selection (2026-09-27, branch `decimal-isel`), on **mc 1.1.0**: the (b) codegen items
+  of `examples/decimal`'s hot loops, each BOUNDED first by hand-patching the built module (fifteen
+  rounds interleaved, best of nine). `_dec_umul`'s inner loop with all four applied: 0.387 ms
+  against 0.409-0.416; one taken out at a time: the slow halves out of line 0.016 ms, index
+  arithmetic ~0.005, scaled addressing ~0.004, the fused overflow test ~0.001; removing the pool
+  test outright made the module SLOWER (0.410 against 0.393), so no cheaper form was built. Built:
+  **P10** in `src/mach.mc` on the arm64 and both x86-64 machines -- after the frame fixup, a
+  straight-line region the code jumps over whose first call is a `_slow` routine, `php_rc_drain`
+  or `php_pk_overflow` moves past the epilogue and the branch over it goes (inverted when the region
+  was the fallthrough); a function with `emit()`/`reloc()` is left alone. `MCPHP_LAYOUT=0` turns it
+  off alone, and with it every `tests/g` dump on the three machines is byte for byte main's (345 of
+  345). Module 0.413 -> **0.393 ms**, module/C 3.30 -> **3.13**, 6.67x the interpreter. Measured
+  and not kept: P11 (no copy out of a local's register for a cast to 8 bytes, 0), scaled addressing
+  module-wide (0), `a && b` as two branches (0), and -- re-bounded on the P10 module at the owner's
+  request -- the loops' frame loads in caller-saved registers (`_dec_umul` <=0.001 ms, `_dec_uadd`
+  0.012 ms SLOWER). Gates: the read-back `out of line` in `tests/fixtures.sh` (g/115 on the three
+  machines, on and off); fixtures 114/114 plain, `MCPHP_RC=check` and `MCPHP_LAYOUT=0`; the grid's
+  30 lists identical to main's; bcmath 1219 / 0, the soak; `tests/leaks.sh` and `tests/linux.sh`
+  (aarch64) on mc-k7; `tests/linux.sh x86_64` under Rosetta 114/114 twice, its `requests` step
+  failing there on main's compiler too. No new instruction form: the non-pc-relative sweeps are the
+  same sets as main's on four object formats, and 15 714 arm64 branches re-assemble byte for byte.

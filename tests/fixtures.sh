@@ -216,6 +216,26 @@ else
     echo "  FAIL  peephole: g/114's dump reads $* (want 1 1 1 1 1 1 1: arm64 add #4095, movz #4096, b.ge, @PAGEOFF]; x86-64 lea +4095, lea -4096, jge)"
     fail=1
 fi
+# src/mach.mc's P10, read back on the three machines: every slow half in g/115's
+# acc() -- the element read and write outside the array, the overflow -- is
+# laid out after the function's ret, and the fast path falls through its
+# guards. MCPHP_LAYOUT=0 is the off switch and puts every one back in line; the
+# "on" half unsets it, so this reads the same under a run with the switch off.
+set --
+for m in arm64 x86_64 x86_64-win; do
+    for e in "-u MCPHP_LAYOUT" "MCPHP_LAYOUT=0"; do
+        set -- "$@" $(env $e "$MCPHP_BIN" --machine=$m --dump-asm $P/g/115-hot-paths.php 2>&1 | awk '
+            /^_/ { u = ($0 == "_f_acc:"); r = 0 } u && / ret$/ { r = 1 }
+            u && /(_slow|_php_pk_overflow)$/ { if (r) a++; else b++ }
+            END { print ((a > 0 && b == 0) ? "out" : ((a == 0 && b > 0) ? "in" : "mixed")) }')
+    done
+done
+if [ "$*" = "out in out in out in" ]; then
+    echo "  out of line: g/115's slow halves are after the ret on arm64, x86-64 and Win64, and in line with MCPHP_LAYOUT=0"
+else
+    echo "  FAIL  out of line: g/115's slow halves read $* (want out in out in out in: arm64, x86_64, x86_64-win, each on and off)"
+    fail=1
+fi
 # The one place the packed lowering is NOT php: an int that overflows on an
 # element. php makes a float; a native int cannot hold one, so it is a named
 # ArithmeticError and never a wrapped int. Not a differential -- php's answer

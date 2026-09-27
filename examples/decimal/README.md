@@ -249,6 +249,45 @@ php's own checks (0.037 ms), php's strings being values, and mc's register alloc
 unproven. The soak on the final tree: a million `dec_add` calls, usage 517 656 -> 517 656 bytes,
 peak 517 928 -> 517 960.
 
+**Three columns, the instruction-selection batch** (2026-09-27, macos/arm64, php 8.5.10, one host,
+one sitting, fifteen rounds interleaved, best of nine each; `decimal.php` and `bench.php`
+unchanged). The (b) row above, taken item by item: each candidate was first BOUNDED by
+hand-patching the built module and timing it, and only what the bound showed was built.
+
+The bounds, `_dec_umul`'s inner loop (59 instructions an iteration, the C twin's is 8) rewritten
+by hand with every candidate applied and then with one taken out at a time, three sittings (a
+rebuilt copy of the loop with nothing changed is the control, 0.409-0.416 ms):
+
+| candidate | the loop | all four applied | without it | its share |
+|---|---|---|---|---|
+| scaled addressing (`ldr x, [base, idx, lsl #3]` for `mov #8; mul; add; ldr`) | -8 insns | 0.386-0.389 ms | 0.390-0.393 ms | ~0.004 ms |
+| overflow fused (`adds; b.vs` for `add; eor; eor; and; cmp; b.ge`) | -3 insns | | 0.388-0.390 ms | ~0.001 ms, noise |
+| **slow halves out of line** (the fast path falls through every guard; six taken branches an iteration become one, the back edge) | -4 insns | | 0.402-0.403 ms | **0.016 ms** |
+| index arithmetic (`$i + $j` once, no `mov x9, xN` copies) | -6 insns | | 0.392 ms | ~0.005 ms |
+| the pool test | -- | removing it outright, an upper bound for any cheaper form: 0.409-0.411 ms against 0.393 ms WITH it, three sittings -- slower, not faster, so no cheaper form was built | | none |
+
+Built, and re-bounded on the module that has it:
+
+| change | the module | module / C |
+|---|---|---|
+| main | 0.413-0.414 ms | 3.29-3.30 |
+| **P10, the slow halves out of line** (`src/mach.mc`, both machines; `MCPHP_LAYOUT=0` turns it off alone): once a function is finished, a straight-line region the code jumps over whose first call is a `_slow` routine, `php_rc_drain` or `php_pk_overflow` moves past the epilogue, and the branch over it goes (or, when it was the fallthrough, is inverted) | **0.393 ms (6.66-6.68x the interpreter)** | **3.12-3.14** |
+| then P11, no copy out of a local's register for a cast to 8 bytes (the `mov x9, x21` of every bounds check) | 0.393 ms against 0.391-0.393 | reverted: no gain |
+| then scaled addressing at all 29 sites in the module (hand-patched) | 0.391-0.393 ms against 0.392-0.393 | not built: no gain |
+| then `a && b` as two branches instead of a value tested (`_dec_uadd`/`_dec_usub`'s in-place byte write, hand-patched) | 0.391-0.393 ms against 0.391-0.393 | not built: no gain |
+| then the loops' frame loads in caller-saved registers (the 1.4% of the registers measurement, re-bounded on this module): `_dec_umul` | 0.390-0.392 ms against 0.391-0.393 | not built: at the noise |
+| the same, `_dec_uadd` / `_dec_usub` / all three | 0.404-0.405 / 0.391-0.394 / 0.401-0.403 ms | not built: slower or nothing |
+
+`tests/examples.sh`'s own bench row on the final tree (a busy host, the ratios are what compare):
+3.373 / 0.547 (6.17x) / 0.160 ms. Head to head, main's module and this one interleaved with the
+interpreter and the twin, fifteen rounds, two sittings: interpreted 2.616-2.625 ms, main 0.413-0.414
+ms (6.33x, module/C 3.29-3.30), **this batch 0.393 ms (6.66-6.68x, module/C 3.12-3.14)**, the twin
+0.125-0.126 ms.
+
+So of the four instruction-selection items only the layout moved the time: the loop is bound by
+its taken branches, not by its instruction count, and removing 17 more instructions from it
+bought 0.004 ms. What is left of the (b) row is below the noise on this host.
+
 ## What it cannot do yet
 
 * **A wrong TYPE** is an internal function's message in the module and a userland one
