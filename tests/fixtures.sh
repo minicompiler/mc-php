@@ -241,6 +241,26 @@ else
     echo "  FAIL  out of line: g/115's slow halves read $* (want $want: arm64, x86_64, x86_64-win, each on and off)"
     fail=1
 fi
+# P10's reach. mc's arm64 encoder refuses any branch past 0x1ffff words
+# ("branch too far") and a moved region's branch spans the whole function, one
+# `b` per region longer than main's layout. This function is 131 114 words,
+# its longest branch on main 131 067 (it compiles) and, with the region
+# moved, 131 090 (it did not): the move has to stand down for it. Generated
+# rather than checked in, 1600 lines of xor after one loop with a string read.
+# The sizes are the plain lowering's (MCPHP_RC=check makes it larger than main
+# can compile), so it is compiled without that switch.
+awk 'BEGIN { print "<?php"; print "function big(string $s, int $t): int {"
+    print "    for ($i = 0; $i < strlen($s); $i++) { $t = $t + ord($s[$i]); }"
+    for (i = 0; i < 1598; i++) { printf "    $t = $t"
+        for (k = 1; k <= 40; k++) printf " ^ %d", (i * 40 + k) % 4000 + 1; print ";" }
+    print "    $t = $t;"; print "    return $t;"; print "}"
+    print "echo big(\"abcdefg\", 5), \"\\n\";" }' > "$tmp/far.php"
+if env -u MCPHP_RC "$MCPHP_BIN" --backend=macho "$tmp/far.php" -o "$tmp/far.o" > "$tmp/far.err" 2>&1; then
+    echo "  reach: a 131 114-word function whose moved slow half would be out of a branch's range compiles, laid out as main lays it"
+else
+    echo "  FAIL  reach: $(head -1 "$tmp/far.err") (a function main compiles)"
+    fail=1
+fi
 # The one place the packed lowering is NOT php: an int that overflows on an
 # element. php makes a float; a native int cannot hold one, so it is a named
 # ArithmeticError and never a wrapped int. Not a differential -- php's answer

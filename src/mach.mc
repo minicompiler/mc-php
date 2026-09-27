@@ -709,6 +709,18 @@ void lay_run() {
         i = i + 1;
     }
     if (!nr) return;
+    // A moved region's branch and its jump back each span at most the whole
+    // function, which grows by one `b` per region. mc's arm64 encoder refuses a
+    // branch past 0x1ffff words ("branch too far", its br_off -- every form,
+    // b included), so a function that could reach that is left as the walker
+    // laid it out: the move must not turn a function main compiles into one it
+    // refuses. x86-64's jmp and jcc are rel32, and no function comes near it.
+    if (!lay_x86) {
+        i64 sz = 4 * nr;
+        i = ins_base;
+        loop { if (i >= nins) break; sz = sz + pm_ins_size(ins_at(i)); i = i + 1; }
+        if (sz > 4 * 0x1ffff) return;
+    }
     uptr cp = xalloc(n * INS_SIZE);
     i = 0;
     loop { if (i >= n * INS_SIZE) break; st64(cp + i, ld64(ins_at(ins_base) + i)); i = i + 8; }

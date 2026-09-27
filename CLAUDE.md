@@ -926,3 +926,9 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   (aarch64) on mc-k7; `tests/linux.sh x86_64` under Rosetta 114/114 twice, its `requests` step
   failing there on main's compiler too. No new instruction form: the non-pc-relative sweeps are the
   same sets as main's on four object formats, and 15 714 arm64 branches re-assemble byte for byte.
+  Review (Copilot, the branch reach): mc's arm64 encoder refuses ANY branch past 0x1ffff words
+  (`branch too far`, its `br_off`, `b` included), so a moved region could never assemble wrong, but
+  it could turn a function main compiles into one mc refuses -- reproduced with a generated 131 114-
+  word function (main's longest branch 131 067, the moved one 131 090). P10 now stands down on arm64
+  when the function plus one `b` per region exceeds 0x1ffff words; x86-64's jmp/jcc are rel32.
+  Gate `reach` in `tests/fixtures.sh` (fails before, passes after); every other object unchanged.
