@@ -83,8 +83,11 @@ An element read is always an int, never php's `null`.
 `$a[count($a)] = v` append, and any other key turns the array into a hash under the same handle.
 
 - From then on a read is the hash's own lookup, and a key the hash has answers its value. The
-  price is one test per read, of whether the array is still packed.
-- A key the hash does NOT have is a read outside the array. It answers php's `null` with no
+  price is one test per read, of whether the array is still packed. An array whose every keyed
+  store is `$a[K] = ... $a[K] ...` -- the same key, read on the right-hand side -- can never
+  become a hash: under these rules that read says K is inside it. Such an array (src/packed.mc's
+  FIXED array) is read and written as C reads and writes a buffer, with neither test.
+- A key the hash does NOT have is a read outside the array. It answers an int, 0, with no
   warning, and under `checked_reads` the program stops.
 
 `$a[$k] ?? $d` is php's quiet read.
