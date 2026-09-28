@@ -21,7 +21,7 @@ i64 ph_function() {
     i64 retref = 0;
     if (ph_at("&", 1)) { ph_next(); retref = 1; }
     if (ph_tid != T_IDENT) ph_todo(fl, line, "an anonymous function or closure");
-    uptr name = ph_tname;
+    uptr name = ph_ns_decl(ph_tname);                // `ns\name` inside a namespace
     ph_next();
     // a call earlier in the file already made the row (php hoists the
     // declaration): take it over rather than refusing it as a duplicate, and

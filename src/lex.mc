@@ -469,8 +469,11 @@ i64 ph_heredoc(uptr q, uptr e, uptr pend) {
     return n;
 }
 
+i64 ph_qpend;                   // the token was a qualified name read past the core lexer
 void ph_next() {
-    if (ph_tid == PHT_PSTR || ph_tid == PHT_HTML || ph_tid == PHT_DSTR) { p_next(); ph_sync(); return; }
+    if (ph_tid == PHT_PSTR || ph_tid == PHT_HTML || ph_tid == PHT_DSTR || ph_qpend) {
+        ph_qpend = 0; p_next(); ph_sync(); return;
+    }
     if (ph_nopeek) { ph_nopeek = 0; p_next(); ph_sync(); return; }
     if (p_id() == T_STR || p_id() == T_CHAR || p_id() == T_EOF) { p_next(); ph_sync(); return; }
 
@@ -557,6 +560,25 @@ void ph_next() {
         p_skip_to(ld64(eb3));
         ph_tid = PHT_DSTR;
         ph_tnode = n3;
+        return;
+    }
+    // a qualified name, `\A`, `A\B`, `namespace\B`: one identifier, the
+    // backslashes kept (src/ns.mc resolves it)
+    uptr qe = ph_ns_scan(q, e);
+    if (qe) {
+        // p_skip_to moves only from the end of the token just lexed, so the
+        // line is the current one plus the newlines in between
+        i64 nl = 0;
+        uptr z = q0;
+        loop { if (z >= q) break; if (ld8(z) == 10) nl = nl + 1; z = z + 1; }
+        ph_tline = p_line() + nl;
+        ph_tfile = p_file();
+        ph_tname = xstrdup(q, qe - q);
+        p_skip_to(qe);
+        ph_tid = T_IDENT;
+        ph_tval = 0;
+        ph_tlen = 0;
+        ph_qpend = 1;
         return;
     }
     if (q != q0) p_skip_to(q);

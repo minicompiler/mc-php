@@ -97,6 +97,7 @@ i64  ph_mcall_node(i64 recv, uptr name, uptr fl, i64 line);
 i64  ph_mcall_ns(i64 recv, uptr name, uptr fl, i64 line, i64 ns);
 i64  ph_scall_node(i64 ce, uptr name, uptr fl, i64 line);
 i64  ph_ce_of(uptr name, uptr fl, i64 line);
+uptr ph_ns_scan(uptr q, uptr e);
 i64  ph_this(uptr fl, i64 line);
 i64  ph_recv(i64 v, i64 t);
 void ph_skip_type();
