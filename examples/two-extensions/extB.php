@@ -1,9 +1,9 @@
 <?php
-// extB -- the SOURCE extB.mc stands in for. B calls a function A publishes,
-// resolved when the call runs, as php resolves any function call. mc-php
-// refuses it today, by name, and tests/examples.sh pins that refusal:
-//
-//   extB.php:8: mc-php: a php function mc-php does not have: a_add is not implemented yet
+// extB -- calls a function extension A publishes, which this source does not
+// declare. php resolves a call when it RUNS, in its own function table; so
+// does the compiled extB: the call is looked up there once per request and
+// made with zend_call_known_function, which is what c/extB.c, its C twin,
+// does (README.md). With A absent it throws php's own Error.
 function b_use(int $a, int $b): int {
     return a_add($a, $b);
 }

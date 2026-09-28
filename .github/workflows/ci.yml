@@ -174,9 +174,9 @@ jobs:
           name: mc-php-linux
           path: build
 
-      # mc itself, for the two HAND-WRITTEN examples (examples/two-extensions
-      # and examples/awaitable): they are plain mc, and every source mc-php
-      # compiles gets the php runtime pushed into it (tests/examples.sh). The
+      # mc itself, for the HAND-WRITTEN example (examples/awaitable): it is
+      # plain mc, and every source mc-php compiles gets the php runtime
+      # pushed into it (tests/examples.sh). The
       # release's Linux mc is a static binary, so tests/linux.sh runs it
       # inside the php container as it is, from build/mc-linux-<nick>/.
       - name: Install mc ${{ env.MC_VERSION }} (the Linux build)

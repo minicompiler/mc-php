@@ -1,5 +1,5 @@
 <?php
-// extA -- the SOURCE extA.mc stands in for. This half compiles with mc-php
-// today (it is examples/hello's shape); the pair does not, because extB.php
-// calls into it (README.md).
+// extA -- one function, compiled by mc-php into build/extA.so (ext*.toml).
+// c/extA.c is its C twin: the same function written as an ordinary C
+// extension, measured beside it (README.md).
 function a_add(int $a, int $b): int { return $a + $b; }

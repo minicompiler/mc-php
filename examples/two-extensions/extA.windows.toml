@@ -1,0 +1,37 @@
+# two-extensions, A -- extA.php compiled into build/extA.dll; the Windows linker line.
+#
+#     mc-php build examples/two-extensions --config examples/two-extensions/extA.windows.toml
+#
+# One file per extension and per host, exactly as examples/decimal has one per
+# host: mc's [linker] is flat, and one project file builds one module.
+# examples/decimal/mcphp.windows.toml says what each key is.
+
+[project]
+entry = "extA.php"
+out = "build/extA.dll"
+kind = "exe"
+opt = 1
+
+[target]
+os   = "windows"
+arch = "x86_64"
+
+[sysroot]
+path = "../../build/win-x86_64"
+
+[linker]
+cmd = "lld-link"
+args = ["-dll", "-noentry", "-machine:x64", "-nodefaultlib", "-export:get_module",
+        "-out:{out}", "{obj}",
+        "{sysroot}/php8.lib", "{sysroot}/kernel32.lib", "{sysroot}/ucrtbase.lib"]
+
+[extension]
+name = "extA"
+version = "0.1.0"
+
+[php]
+api = 20250925
+build_id = "API20250925,NTS,VS17"
+thread_safety = false
+debug = false
+checked_reads = false
