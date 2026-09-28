@@ -1065,4 +1065,7 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   (`php_clskey`). Both forms, `namespace X;` and braced. `tests/g/120-namespaces.php`,
   `121-namespace-blocks.php`, `tests/ext.sh` step 15. `examples/awaitable` gained its C twin
   (`c/awaitable.c`, graded against `check.expect`), and its pinned refusal moved to line 13
-  (`#[Extern]`).
+  (`#[Extern]`). The grid against a snapshot of main: `tests/lang` 104 = 104, `Zend/tests`
+  766 -> **828** (+62: `namespaces/*`, `use_function/*`, `use_const/*`, `group_use/*`,
+  `class_alias/*` and the rest a qualified name was blocking), `ext/standard/tests/strings`
+  273 = 273, no loss.
