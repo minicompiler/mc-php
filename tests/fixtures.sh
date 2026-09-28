@@ -404,4 +404,24 @@ if tr -d '\r' < "$tmp/big.err" | grep -q '^mc-php: arena exhausted$'; then
 else
     echo "  FAIL  arena: want 'mc-php: arena exhausted' on stderr, got [$(cat "$tmp/big.err")]"; fail=1
 fi
+# `namespace` and `use` are declarations of a file's top level: php refuses
+# them in a function body or a block with a parse error, and a namespace
+# declaration inside a braced one as "Cannot mix". mc-php refuses all three
+# while compiling, and the namespace in effect does not change first.
+nsr=0
+for c in 'function f() { namespace inner; }|namespace' 'function f() { use Foo\Bar; }|use' \
+         'if (true) { use Foo; }|use' 'namespace A { namespace B; }|braced'; do
+    src=${c%|*}; want=${c##*|}
+    printf '<?php\n%s\necho 1;\n' "$src" > "$tmp/nsr.php"
+    if env -u MCPHP_RC "$MCPHP_BIN" --backend=macho "$tmp/nsr.php" -o "$tmp/nsr.o" > "$tmp/nsr.err" 2>&1; then
+        echo "  FAIL  namespace scope: [$src] compiled"; nsr=1; fail=1
+    elif [ "$want" = braced ]; then
+        grep -q 'a namespace declaration inside a braced namespace' "$tmp/nsr.err" ||
+            { echo "  FAIL  namespace scope: [$src] said [$(head -1 "$tmp/nsr.err")]"; nsr=1; fail=1; }
+    else
+        grep -q "a declaration of a file's top level, not a statement: $want" "$tmp/nsr.err" ||
+            { echo "  FAIL  namespace scope: [$src] said [$(head -1 "$tmp/nsr.err")]"; nsr=1; fail=1; }
+    fi
+done
+[ "$nsr" = 0 ] && echo "  namespace scope: namespace and use in a function or a block, and a namespace inside a braced one, refused while compiling"
 exit $fail

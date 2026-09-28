@@ -14,8 +14,14 @@ namespace report {
 }
 
 namespace {
+    require 'inc-ns.inc';
+    echo incns\tag(), " [", __NAMESPACE__, "]\n";
     echo report\line(3), "\n";
     echo \shapes\describe(new shapes\Square(2)), "\n";
     echo shapes\SIDES, " ", get_class(new shapes\Square(1)), " [", __NAMESPACE__, "]\n";
     echo strlen("global"), "\n";
+    // a global function called before its declaration in this block: the
+    // forward scan puts it in the global namespace, not in `report`
+    echo later(), " ", (new shapes\Square(5))->area(), "\n";
+    function later(): string { return __FUNCTION__; }
 }

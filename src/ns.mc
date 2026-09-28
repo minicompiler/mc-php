@@ -155,20 +155,36 @@ uptr ph_ns_fc(uptr raw, i64 cst, uptr fb) {
 }
 
 // ---- the statements -----------------------------------------------------------
-// `namespace X;`, and the braced form `namespace X { ... }` / `namespace { }`:
-// its statements are the file's top-level ones (src/program.mc's loop reads
-// them, so a function declared in it is a top-level declaration), and its
-// `}` puts the file back in the global namespace
-i64 ph_ns_brace;
+// Only a file's top level reads these (src/program.mc); in a block or a
+// function body src/lvalue.mc refuses them. `namespace X;`, and the braced
+// form `namespace X { ... }` / `namespace { }`: its statements are the
+// file's top-level ones (src/program.mc's loop reads them, so a function
+// declared in it is a top-level declaration), and its `}` puts the file back
+// in the global namespace
+//
+// A braced block belongs to its FILE: a file required inside one declares its
+// own namespace (and may open its own block), so the open blocks are a stack
+// of the files that opened them, and only the file on top can close one.
+#define PH_MAXBR 16
+uptr ph_nsbr[PH_MAXBR];
+i64  ph_nnsbr;
+i64 ph_ns_open_here() { return ph_nnsbr > 0 && str_eq(ld64(ph_nsbr + (ph_nnsbr - 1) * 8), ph_tfile); }
+
 void ph_ns_stmt(uptr fl, i64 line) {
     ph_next();
     uptr name = "";
     if (ph_tid == T_IDENT) { name = ph_tname; if (ld8(name) == 92) name = name + 1; ph_next(); }
+    // checked before the namespace changes: src/program.mc's loop is the
+    // only caller, so what is left to refuse is one inside a braced block
+    if (ph_ns_open_here()) err_at(fl, line, "mc-php: a namespace declaration inside a braced namespace");
+    // set before the next token is read: after the last token of a required
+    // file, that token is the including file's
     ph_ns_set(name, fl, line);
     if (ph_at("{", 1)) {
-        if (ph_ns_brace || !ph_toplevel) err_at(fl, line, "mc-php: a namespace block inside another block");
+        if (ph_nnsbr >= PH_MAXBR) err_at(fl, line, "mc-php: too many nested required files in braced namespaces");
+        st64(ph_nsbr + ph_nnsbr * 8, fl);
+        ph_nnsbr = ph_nnsbr + 1;
         ph_next();
-        ph_ns_brace = 1;
         return;
     }
     ph_semi("expected ; after namespace");
@@ -176,8 +192,8 @@ void ph_ns_stmt(uptr fl, i64 line) {
 
 // the `}` of a braced namespace, read by the top-level loop
 i64 ph_ns_close() {
-    if (!ph_ns_brace || !ph_at("}", 1)) return 0;
-    ph_ns_brace = 0;
+    if (!ph_ns_open_here() || !ph_at("}", 1)) return 0;
+    ph_nnsbr = ph_nnsbr - 1;
     ph_ns_set("", ph_tfile, ph_tline);
     ph_next();
     return 1;

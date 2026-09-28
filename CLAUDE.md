@@ -1069,3 +1069,13 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   766 -> **828** (+62: `namespaces/*`, `use_function/*`, `use_const/*`, `group_use/*`,
   `class_alias/*` and the rest a qualified name was blocking), `ext/standard/tests/strings`
   273 = 273, no loss.
+  Review of #32, six findings, all fixed: a method's mc name maps the backslash too
+  (`ph_mangle(cname, "m_")`); `namespace` and `use` are read by `src/program.mc`'s top-level
+  loop only and refused in a function body or a block (`src/lvalue.mc`), a namespace inside a
+  braced one of the SAME file is refused before the namespace changes (the open blocks are a stack of the
+  files that opened them, so a file required inside a braced block declares its own namespace --
+  `tests/g/inc-ns.inc`, and `use_const/shadow_global`, `use_function/shadow_global` stay green); the forward-declaration scan resets to
+  the global namespace on `namespace {` (a function called before its declaration in the
+  global block, `tests/g/121`); the C twin frees a sync object's handle with the object
+  (`free_obj`, no clone) and its arg info says `parallel` needs 2 and `http_get_many` 1.
+  `tests/fixtures.sh` asserts the four scope refusals.

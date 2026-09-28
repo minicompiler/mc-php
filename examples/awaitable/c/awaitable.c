@@ -340,14 +340,14 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(ai_await, 0, 1, awaitable\\Intent, 0)
     ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
     ZEND_ARG_VARIADIC_TYPE_INFO(0, args, IS_MIXED, 0)
 ZEND_END_ARG_INFO()
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_parallel, 0, 1, IS_ARRAY, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_parallel, 0, 2, IS_ARRAY, 0)
     ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
     ZEND_ARG_VARIADIC_TYPE_INFO(0, args, IS_MIXED, 0)
 ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_http_get, 0, 1, IS_STRING, 0)
     ZEND_ARG_TYPE_INFO(0, url, IS_STRING, 0)
 ZEND_END_ARG_INFO()
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_http_get_many, 0, 0, IS_ARRAY, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_http_get_many, 0, 1, IS_ARRAY, 0)
     ZEND_ARG_VARIADIC_TYPE_INFO(0, urls, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_int, 0, 0, IS_LONG, 0)
@@ -394,6 +394,30 @@ static const zend_function_entry mx_methods[] = {
     PHP_FE_END
 };
 
+/* A sync object frees its native handle with itself, and cannot be cloned:
+ * a clone would share the handle and free it twice. `__h` is the class's only
+ * declared property, so it is property slot 0. */
+static zend_object_handlers sync_handlers;
+static zend_object *sync_new(zend_class_entry *ce) {
+    zend_object *o = zend_objects_new(ce);
+    object_properties_init(o, ce);
+    o->handlers = &sync_handlers;
+    return o;
+}
+static void sync_free(zend_object *o) {
+    zval *z = OBJ_PROP_NUM(o, 0);
+    void *p = Z_TYPE_P(z) == IS_LONG ? (void *)(uintptr_t)Z_LVAL_P(z) : NULL;
+    if (p && o->ce == ce_mx) pthread_mutex_destroy(p);
+    else if (p) {
+        sync_t *s = p;
+        if (s == gsem) gsem = NULL;
+        pthread_cond_destroy(&s->c);
+        pthread_mutex_destroy(&s->m);
+    }
+    free(p);
+    zend_object_std_dtor(o);
+}
+
 static zend_class_entry *reg(const char *name, const zend_function_entry *m) {
     zend_class_entry ce;
     INIT_CLASS_ENTRY_EX(ce, name, strlen(name), m);
@@ -405,12 +429,18 @@ static zend_class_entry *reg(const char *name, const zend_function_entry *m) {
 static PHP_MINIT_FUNCTION(awaitable) {
     curl_global_init(CURL_GLOBAL_ALL);
     sync_init(&gwg, 0);
+    memcpy(&sync_handlers, zend_get_std_object_handlers(), sizeof sync_handlers);
+    sync_handlers.free_obj = sync_free;
+    sync_handlers.clone_obj = NULL;
     ce_sem = reg("awaitable\\Semaphore", sem_methods);
     zend_declare_property_long(ce_sem, "__h", 3, 0, ZEND_ACC_PRIVATE);
+    ce_sem->create_object = sync_new;
     ce_wg = reg("awaitable\\WaitGroup", wg_methods);
     zend_declare_property_long(ce_wg, "__h", 3, 0, ZEND_ACC_PRIVATE);
+    ce_wg->create_object = sync_new;
     ce_mx = reg("awaitable\\Mutex", mx_methods);
     zend_declare_property_long(ce_mx, "__h", 3, 0, ZEND_ACC_PRIVATE);
+    ce_mx->create_object = sync_new;
     ce_intent = reg("awaitable\\Intent", NULL);
     zend_declare_property_bool(ce_intent, "done", 4, 0, ZEND_ACC_PUBLIC);
     zend_declare_property_bool(ce_intent, "failed", 6, 0, ZEND_ACC_PUBLIC);

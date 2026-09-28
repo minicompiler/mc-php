@@ -1396,9 +1396,10 @@ i64 ph_stmt_1() {
         ph_accept(";", 1);
         return ph_empty();
     }
-    // namespaces and imports, php's rules (src/ns.mc)
-    if (ph_is("namespace")) { ph_ns_stmt(fl, line); return ph_empty(); }
-    if (ph_is("use")) { ph_ns_use_stmt(fl, line); return ph_empty(); }
+    // namespaces and imports are declarations of a file's top level, read by
+    // src/program.mc's loop; here they sit inside a block or a function body
+    if (ph_is("namespace") || ph_is("use"))
+        err_at2(fl, line, "mc-php: a declaration of a file's top level, not a statement", ph_tname);
     if (ph_is("const")) {
         ph_next();
         loop {

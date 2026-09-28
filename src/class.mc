@@ -423,7 +423,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             if (ph_tid != T_IDENT) err_at2(mfl, mline, "mc-php: a php method needs a name", ph_tname);
             uptr mname = ph_tname;
             ph_next();
-            uptr mcname = p_cat("m_", cname, 0, cstrlen(cname));
+            uptr mcname = ph_mangle(cname, "m_");      // `\` is `$`, as for the class global
             mcname = p_cat(mcname, "_", 0, 1);
             mcname = p_cat(mcname, mname, 0, cstrlen(mname));
             mcname = p_cat(mcname, php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));

@@ -63,7 +63,9 @@ constant falls back to the global one -- the source's own `aw\util\f` when it de
 php's `f`, and on the extension road a name neither the source nor the library has is looked up
 in php's function table as `aw\util\f` and then `f`, as php does. `__NAMESPACE__`, `X::class`
 and `get_class()` answer the qualified names, and both forms are read, `namespace X;` and the
-braced `namespace X { ... }` / `namespace { ... }`. A leading underscore
+braced `namespace X { ... }` / `namespace { ... }`, at a file's top level only, as php reads
+them: in a function body or a block, and a namespace inside a braced one, they are refused while
+compiling. A leading underscore
 makes a function module-private under its namespace too (`aw\util\_h`).
 
 The body is the whole language. Classes, closures, `match`, exceptions, the 272-row library --
