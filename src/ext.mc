@@ -292,6 +292,8 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     set_nd_type(f, TY_VOID);
     set_nd_a(f, p0);
     set_nd_b(f, ph_ext_block(pre));
+    // phx_enter/phx_leave's fast paths written in place (src/opt.mc)
+    phr_fn(f);
     top_add(f);
 }
 

@@ -215,11 +215,11 @@ i64 ph_function() {
     // scanned before the body is compiled, and put back after it for the
     // body a nested declaration interrupted
     uptr spk = pkx_names;
-    uptr spi = pkx_inames;
+    uptr spf = pkx_fixed;
     if (ph_at("{", 1)) ph_pk_scan();
     i64 body = ph_block();
     pkx_names = spk;
-    pkx_inames = spi;
+    pkx_fixed = spf;
     ph_in_try = sit;
     ph_frv = sfv;
     ph_frf = sff;
@@ -302,6 +302,7 @@ i64 ph_function() {
         kd = kd + 1;
     }
     ph_inl_fn(f, inl);
+    ph_rope_fn(f);
     ph_rc_fn(f);
     ph_opt_fn(f);
     return f;

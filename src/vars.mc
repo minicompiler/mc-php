@@ -230,7 +230,6 @@ i64 ph_var_bind(uptr d, i64 ty) {
         ph_local(ph_mangle(d, "v_"), ph_mcty(ty));
         // a packed element held in a variable: the value and php's null
         // (src/packed.mc), two locals
-        if (ty == PT_INULL) ph_local(ph_mangle(d, "vn_"), TY_I64);
         return 1;
     }
     i64 was = ld64(ph_vtype + i * 8);

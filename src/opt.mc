@@ -614,6 +614,82 @@ i64 phi_decl_ty(uptr name) {
     return phi_decl_ty1(nd_b(phi_cf), name);
 }
 
+// ---- an argument read once is the expression, not a local of its own ----------
+// A parameter the copy reads exactly once and never assigns, bound to an
+// argument that reads nothing but the caller's locals and integers, is
+// replaced by the argument itself: a local of its own is one more value for
+// mc's ten registers to hold, and in a loop that is inlined code a C compiler
+// keeps in registers spilled to the frame. Evaluating the argument where the
+// copy reads it instead of before the copy moves nothing observable: it reads
+// no memory and calls nothing, and the copy cannot assign a caller's local.
+i64 phi_pure_n;
+i64 phi_pure1(i64 a) {
+    phi_pure_n = phi_pure_n + 1;
+    if (phi_pure_n > 16 || nd_next(a)) return 0;
+    i64 k = nd_kind(a);
+    if (k == N_INT) return 1;
+    if (k == N_IDENT) return phi_local_of_caller(nd_name(a));
+    if (k == N_UNARY) {
+        if (nd_op(a) != ph_tok("-", 1) && nd_op(a) != ph_tok("~", 1)) return 0;
+        return phi_pure1(nd_a(a));
+    }
+    if (k == N_BINARY) {
+        i64 o = nd_op(a);
+        if (o != ph_tok("+", 1) && o != ph_tok("-", 1) && o != ph_tok("*", 1) && o != ph_tok("&", 1)
+            && o != ph_tok("|", 1) && o != ph_tok("^", 1) && o != ph_tok("<<", 2) && o != ph_tok(">>", 2)) return 0;
+        return phi_pure1(nd_a(a)) && phi_pure1(nd_b(a));
+    }
+    return 0;
+}
+i64 phi_pure(i64 a) { phi_pure_n = 0; return phi_pure1(a); }
+
+i64 phi_uses(i64 s, uptr name) {
+    i64 u = 0;
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_IDENT && str_eq(nd_name(s), name)) u = u + 1;
+        u = u + phi_uses(nd_a(s), name) + phi_uses(nd_b(s), name) + phi_uses(nd_c(s), name) + phi_uses(nd_d(s), name);
+        s = nd_next(s);
+    }
+    return u;
+}
+
+// the list with every read of `name` replaced by a copy of `a`
+i64 phi_subl(i64 s, uptr name, i64 a) {
+    i64 h = s;
+    i64 pv = 0;
+    loop {
+        if (!s) break;
+        i64 nx = nd_next(s);
+        if (nd_kind(s) == N_IDENT && str_eq(nd_name(s), name)) {
+            i64 c = phi_copy1(a);
+            set_nd_next(c, nx);
+            if (pv) set_nd_next(pv, c);
+            if (!pv) h = c;
+            s = c;
+        } else {
+            set_nd_a(s, phi_subl(nd_a(s), name, a));
+            set_nd_b(s, phi_subl(nd_b(s), name, a));
+            set_nd_c(s, phi_subl(nd_c(s), name, a));
+            set_nd_d(s, phi_subl(nd_d(s), name, a));
+        }
+        pv = s;
+        s = nx;
+    }
+    return h;
+}
+
+// does the expression call anything but mc's loads and stores?
+i64 phi_calls_any(i64 n) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_CALL && !phi_intrinsic(nd_name(n))) return 1;
+        if (phi_calls_any(nd_a(n)) || phi_calls_any(nd_b(n)) || phi_calls_any(nd_c(n)) || phi_calls_any(nd_d(n))) return 1;
+        n = nd_next(n);
+    }
+    return 0;
+}
+
 // the statements that replace the call: arguments, then the body. The call
 // itself becomes the local its returns store into.
 i64 phi_expand(i64 c) {
@@ -628,6 +704,9 @@ i64 phi_expand(i64 c) {
     i64 body = phi_copy(nd_a(nd_b(fc)));
     i64 ph = 0;
     i64 pt = 0;
+    uptr sn = xalloc(512);            // the substituted parameters: names, then arguments
+    uptr sa = sn + 256;
+    i64 ns = 0;
     i64 p = nd_a(fc);
     i64 a = nd_a(c);
     loop {
@@ -638,6 +717,14 @@ i64 phi_expand(i64 c) {
         if (nd_kind(a) == N_IDENT && phi_same_ty(nd_type(a), nd_type(p)) && phi_local_of_caller(nd_name(a))
             && !ph_rc_assigned(body, pn)) {
             phi_rn_add(pn, nd_name(a));
+        } else if (nd_kind(a) != N_IDENT && phi_same_ty(nd_type(a), nd_type(p)) && phi_pure(a)
+            && !ph_rc_assigned(body, pn) && phi_uses(body, pn) == 1) {
+            // renamed to a name of this copy's own, then replaced by the argument
+            uptr ln = phi_local(pn);
+            phi_rn_add(pn, ln);
+            st64(sn + ns * 8, ln);
+            st64(sa + ns * 8, a);
+            ns = ns + 1;
         } else {
             uptr ln = phi_local(pn);
             phi_rn_add(pn, ln);
@@ -654,7 +741,25 @@ i64 phi_expand(i64 c) {
     }
     phi_vars(body);
     phi_rename(body);
+    // the substituted parameters: their reads become the arguments
+    i64 si = 0;
+    loop {
+        if (si >= ns) break;
+        body = phi_subl(body, ld64(sn + si * 8), ld64(sa + si * 8));
+        si = si + 1;
+    }
     body = phi_hoist(body);
+    // a copy that is one `return E`, E reading and computing but calling
+    // nothing: E itself takes the call's place, and no local holds the answer
+    if (nd_kind(body) == N_RETURN && !nd_next(body) && nd_a(body) && !phi_calls_any(nd_a(body))
+        && nd_type(fc) != TY_VOID && !(nd_kind(phi_hold) == N_EXPRSTMT && nd_a(phi_hold) == c)) {
+        i64 cv = node_new(N_CAST, line, fl);
+        set_nd_type(cv, nd_type(fc));
+        set_nd_a(cv, nd_a(body));
+        phi_put(phi_hold, phi_field, c, cv);
+        phi_drop = 0;
+        return phi_list(ph);
+    }
     uptr rv = 0;
     // a runtime routine whose answer is the whole value of `x = call(...)`,
     // x a local of the caller: its returns store into x itself, and the
@@ -801,6 +906,240 @@ void ph_inl_fn(i64 f, i64 ok) {
     phi_n = phi_n + 1;
 }
 
+// ---- a string built by appends is built once ---------------------------------
+// `$o = X; ... $o .= A; ... $o .= B; ... return $o;` in a function that does
+// not loop (examples/decimal's _dec_fmt) made a new string at every `.=`:
+// three allocations and three copies of a growing prefix for one answer. When
+// the local's first occurrence is that store, at the top of the body, and its
+// every other occurrence is an append to itself or a `return $o;`, it is not
+// a string until the return: each piece is a (string, start, length) window
+// kept in a small array -- a substr() piece is its window, so that substring
+// is never built either -- and the return makes ONE string of the final
+// length (php_str_rope). The pieces stay alive for it: a function that does
+// not loop drains nothing before it returns (src/rc.mc), and one with no zval
+// can have no string written in place under it. Code with no loop runs its
+// appends in the order they are written, so the pieces are in that order; an
+// append that did not run is a piece with no string.
+#define RP_MAX 16
+i64 rp_bad;
+i64 rp_first;
+i64 rp_npc;
+
+i64 rp_ment(i64 n, uptr name) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_IDENT && str_eq(nd_name(n), name)) return 1;
+        if (rp_ment(nd_a(n), name) || rp_ment(nd_b(n), name) || rp_ment(nd_c(n), name) || rp_ment(nd_d(n), name)) return 1;
+        n = nd_next(n);
+    }
+    return 0;
+}
+i64 rp_ment1(i64 n, uptr name) {
+    if (nd_kind(n) == N_IDENT && str_eq(nd_name(n), name)) return 1;
+    return rp_ment(nd_a(n), name) || rp_ment(nd_b(n), name) || rp_ment(nd_c(n), name) || rp_ment(nd_d(n), name);
+}
+
+// the pieces of `name = name . a [. b [. c]]`, 0 when s is not one
+i64 rp_app(i64 s, uptr name) {
+    if (nd_kind(s) != N_ASSIGN || !str_eq(nd_name(s), name)) return 0;
+    i64 v = nd_a(s);
+    if (nd_kind(v) != N_CALL) return 0;
+    uptr f = nd_name(v);
+    if (!str_eq(f, "php_str_concat") && !str_eq(f, "php_str_cat3") && !str_eq(f, "php_str_cat4")) return 0;
+    i64 a = nd_a(v);
+    if (nd_kind(a) != N_IDENT || !str_eq(nd_name(a), name)) return 0;
+    if (rp_ment(nd_next(a), name)) return 0;
+    return phi_len(nd_a(v)) - 1;
+}
+
+void rp_check(i64 s, uptr name, i64 top) {
+    loop {
+        if (!s || rp_bad) break;
+        i64 k = nd_kind(s);
+        if (k == N_ASSIGN && str_eq(nd_name(s), name)) {
+            if (!rp_first) {
+                if (!top || rp_ment(nd_a(s), name)) { rp_bad = 1; return; }
+                rp_first = 1;
+                rp_npc = rp_npc + 1;
+            } else {
+                i64 p = rp_app(s, name);
+                if (!p) { rp_bad = 1; return; }
+                rp_npc = rp_npc + p;
+            }
+        } else if (k == N_RETURN && nd_a(s) && nd_kind(nd_a(s)) == N_IDENT && str_eq(nd_name(nd_a(s)), name)) {
+            if (!rp_first) { rp_bad = 1; return; }
+        } else if (k == N_IF) {
+            if (rp_ment(nd_a(s), name)) { rp_bad = 1; return; }
+            rp_check(nd_b(s), name, 0);
+            rp_check(nd_c(s), name, 0);
+        } else if (k == N_BLOCK) {
+            rp_check(nd_a(s), name, 0);
+        } else if (rp_ment1(s, name)) { rp_bad = 1; return; }
+        s = nd_next(s);
+    }
+}
+
+uptr rp_arr;
+i64  rp_j;
+
+i64 rp_id(uptr name, i64 ty, i64 line, uptr fl) {
+    i64 v = node_new(N_IDENT, line, fl);
+    set_nd_name(v, name);
+    set_nd_type(v, ty);
+    return v;
+}
+i64 rp_int(i64 v, i64 line, uptr fl) {
+    i64 n = node_new(N_INT, line, fl);
+    set_nd_val(n, v);
+    set_nd_type(n, TY_I64);
+    return n;
+}
+// st64(rope + off, v);
+i64 rp_st(i64 off, i64 v, i64 line, uptr fl) {
+    i64 ad = node_new(N_BINARY, line, fl);
+    set_nd_op(ad, ph_tok("+", 1));
+    set_nd_type(ad, TY_UPTR);
+    set_nd_a(ad, rp_id(rp_arr, TY_UPTR, line, fl));
+    set_nd_b(ad, rp_int(off, line, fl));
+    set_nd_next(ad, v);
+    i64 c = node_new(N_CALL, line, fl);
+    set_nd_name(c, "st64");
+    set_nd_type(c, TY_VOID);
+    set_nd_a(c, ad);
+    i64 st = node_new(N_EXPRSTMT, line, fl);
+    set_nd_a(st, c);
+    return st;
+}
+// the three stores of piece j: a substr() is its own window, anything else whole
+i64 rp_piece(i64 y, i64 line, uptr fl) {
+    i64 o = rp_j * 24;
+    rp_j = rp_j + 1;
+    i64 s = y;
+    i64 st = rp_int(0, line, fl);
+    i64 ln = rp_int(9223372036854775807, line, fl);
+    if (nd_kind(y) == N_CALL && str_eq(nd_name(y), "php_substr")) {
+        s = nd_a(y);
+        st = nd_next(s);
+        i64 l2 = nd_next(st);
+        i64 has = nd_next(l2);
+        set_nd_next(s, 0);
+        set_nd_next(st, 0);
+        set_nd_next(l2, 0);
+        if (!(nd_kind(has) == N_INT && nd_val(has) == 0)) ln = l2;
+    }
+    set_nd_next(s, 0);
+    i64 a = rp_st(o, s, line, fl);
+    i64 b = rp_st(o + 8, st, line, fl);
+    i64 c = rp_st(o + 16, ln, line, fl);
+    set_nd_next(a, b);
+    set_nd_next(b, c);
+    return a;
+}
+
+i64 rp_xform(i64 s, uptr name) {
+    i64 h = 0;
+    i64 t = 0;
+    loop {
+        if (!s) break;
+        i64 nx = nd_next(s);
+        set_nd_next(s, 0);
+        i64 k = nd_kind(s);
+        i64 line = nd_line(s);
+        uptr fl = nd_file(s);
+        i64 r = s;
+        if (k == N_ASSIGN && str_eq(nd_name(s), name)) {
+            if (rp_j == 0) {
+                // the first store: piece 0, and every later piece empty
+                r = rp_piece(nd_a(s), line, fl);
+                i64 lt = phi_last(r);
+                i64 q = 1;
+                loop {
+                    if (q >= rp_npc) break;
+                    i64 z = rp_st(q * 24, rp_int(0, line, fl), line, fl);
+                    set_nd_next(lt, z);
+                    lt = z;
+                    q = q + 1;
+                }
+            } else {
+                i64 y = nd_next(nd_a(nd_a(s)));
+                r = 0;
+                i64 rt = 0;
+                loop {
+                    if (!y) break;
+                    i64 yn = nd_next(y);
+                    set_nd_next(y, 0);
+                    i64 p = rp_piece(y, line, fl);
+                    if (rt) set_nd_next(rt, p);
+                    if (!rt) r = p;
+                    rt = phi_last(p);
+                    y = yn;
+                }
+            }
+        } else if (k == N_RETURN && nd_a(s) && nd_kind(nd_a(s)) == N_IDENT && str_eq(nd_name(nd_a(s)), name)) {
+            i64 a0 = rp_id(rp_arr, TY_UPTR, line, fl);
+            set_nd_next(a0, rp_int(rp_npc, line, fl));
+            i64 c = node_new(N_CALL, line, fl);
+            set_nd_name(c, "php_str_rope");
+            set_nd_type(c, ty_pstr);
+            set_nd_a(c, a0);
+            set_nd_a(s, c);
+        } else if (k == N_IF) {
+            set_nd_b(s, rp_xform(nd_b(s), name));
+            set_nd_c(s, rp_xform(nd_c(s), name));
+        } else if (k == N_BLOCK) {
+            set_nd_a(s, rp_xform(nd_a(s), name));
+        }
+        if (r) {
+            if (t) set_nd_next(t, r);
+            if (!t) h = r;
+            t = phi_last(r);
+        }
+        s = nx;
+    }
+    return h;
+}
+
+i64 rp_nzv(i64 s) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if ((k == N_VAR || k == N_PARAM) && nd_type(s) == ty_pzv) return 1;
+        if (rp_nzv(nd_a(s)) || rp_nzv(nd_b(s)) || rp_nzv(nd_c(s))) return 1;
+        s = nd_next(s);
+    }
+    return 0;
+}
+
+void ph_rope_fn(i64 f) {
+    i64 body = nd_b(f);
+    if (!body) return;
+    if (ph_rc_has_loop(nd_a(body)) || rp_nzv(nd_a(f)) || rp_nzv(nd_a(body))) return;
+    i64 v = nd_a(body);
+    loop {
+        if (!v) break;
+        if (nd_kind(v) == N_VAR && nd_type(v) == ty_pstr && !nd_val(v)) {
+            uptr name = nd_name(v);
+            rp_bad = 0;
+            rp_first = 0;
+            rp_npc = 0;
+            rp_check(nd_a(body), name, 1);
+            if (!rp_bad && rp_first && rp_npc > 1 && rp_npc <= RP_MAX) {
+                ph_nonce = ph_nonce + 1;
+                rp_arr = p_cat("ph_rope_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+                i64 d = node_new(N_VAR, nd_line(v), nd_file(v));
+                set_nd_name(d, rp_arr);
+                set_nd_type(d, TY_I64);
+                set_nd_val(d, rp_npc * 3);
+                rp_j = 0;
+                set_nd_a(body, rp_xform(nd_a(body), name));
+                set_nd_next(d, nd_a(body));
+                set_nd_a(body, d);
+            }
+        }
+        v = nd_next(v);
+    }
+}
+
 // ---- the runtime's small leaf routines are inlined too -------------------------
 // After src/rc.mc, a compiled function still calls lib/php_rt.mc for the
 // smallest operations -- a string offset's byte, a packed array element, an
@@ -837,17 +1176,23 @@ void phr_add(uptr name) {
 
 void phr_init() {
     phr_done = 1;
-    phr_name = xalloc(16 * 8);
-    phr_fn_ = xalloc(16 * 8);
+    phr_name = xalloc(32 * 8);
+    phr_fn_ = xalloc(32 * 8);
     phr_add("php_str_byte");
     phr_add("php_str_sets_own");
     phr_add("php_str_setb_own");
+    phr_add("php_str_setb_f");
     phr_add("php_str_byte_c");
     phr_add("php_str_byte_d");
     phr_add("php_pk_get_c");
     phr_add("php_pk_get_d");
     phr_add("php_pk_set");
+    phr_add("php_pk_get_f");
+    phr_add("php_pk_set_f");
     phr_add("php_intdiv");
+    phr_add("php_rc_ret");
+    phr_add("phx_enter");
+    phr_add("phx_leave");
 }
 
 // ---- the position and the unwinding check go where a call can raise ---------
@@ -1255,7 +1600,7 @@ void phr_tail(i64 f) {
 // pool by one string an iteration (tests/ext.sh step 12b), and
 // neither is anything that copies a string or calls the counting's push.
 i64 phr_throws_only(uptr nm) {
-    return str_eq(nm, "php_intdiv_slow");
+    return str_eq(nm, "php_intdiv_slow") || str_eq(nm, "php_str_setb_f_slow");
 }
 
 i64 phr_builds(i64 n) {

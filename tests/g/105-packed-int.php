@@ -104,6 +104,14 @@ function pk_arg(int $d) {
     echo count($x), " ", $x[0], "\n";
 }
 
+function pk_elem(): string {            // an element read stored as it is: an int, so $x is packed too
+    $s = [];
+    $s[] = 1;
+    $x = [];
+    $x[] = $s[0];
+    return var_export($x[0], true);
+}
+
 echo pk_mul("123456789012345678", "98765432109876543210"), "\n";
 echo pk_mul("9999", "9999"), " ", pk_mul("0", "5"), " ", pk_mul("1", "1"), "\n";
 pk_sparse();
@@ -120,3 +128,4 @@ pk_re(2);
 pk_re(-1);
 pk_arg(2);
 pk_arg(0);
+echo pk_elem(), "\n";
