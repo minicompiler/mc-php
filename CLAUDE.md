@@ -1031,3 +1031,24 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   casts, `madd`, bigger inlining, big handler copies, libc `memcpy`. The floor is per-call
   overhead in short scans, copies and allocation, and the inner and carry loops of `_dec_umul`
   (examples/decimal/README.md, "Under 2x").
+- two-extensions (2026-09-28, branch `two-extensions` from main 652401b): `examples/two-extensions`
+  compiled from PHP. On the extension road a call to a function the source does not declare is
+  looked up in php's function table when it runs (`zend_fetch_function_str`, cached per call site
+  and request in words the compiler emits beside it -- the name, the calling function and the
+  packed argument kinds live there too) and made with `zend_call_known_function` on engine zvals
+  laid out on the stack (`lib/php_ext.mc` `phx_fcall`/`phx_fcall_l`/`phx_fcall_l2`,
+  `src/builtin.mc` `ph_ftable_call`); an int, a string and a bool cross as themselves, null and
+  float through a runtime zval, an array/object is refused while compiling and an array/object/
+  resource answer where it arrives; an exception the callee throws is mirrored for the module's
+  own catch and handed back to php as the engine's object when uncaught; undefined is php's own
+  Error. The PROGRAM road still refuses such a call. Handlers: the BARE road -- a published
+  function whose copied body calls nothing (or only a lazy int-answer table call) runs with no
+  call context, its slow road a second function it tail-calls, so a pure handler is a leaf;
+  `RETURN_LONG` is two stores; the inliner substitutes a pure load (and a handler's own argument
+  always) and copies `return E` whose dead tail follows it. P11 fix: it dropped every frame
+  access of a moved register, now only its save and restore. Bench (through B, 15 rounds
+  interleaved): module / C twins 1.083 (1.038-1.174), module / interpreted 0.882 (0.830-0.987);
+  per call b_use 131 -> 67 cycles against the twins' 64. `tests/ext.sh` step 14; the example's
+  gate in `tests/examples.sh` (both load orders, B alone, the twins, the bench row). The leftover
+  `tests/g/104-callable-value.php` and `tests/r/d6-callable-string.php` (callable values, $f()
+  of a string) are untracked and not part of this.

@@ -1064,11 +1064,12 @@ its code is written.
    example is DONE only when it is compiled from its PHP source AND it is faster than the same
    PHP interpreted (> 1x), and each one has a C TWIN -- the same functions written as an ordinary
    C extension -- measured beside it on the same harness, because the target is to come as close
-   as possible to C.** `decimal` has its twin (`examples/decimal/c/`, batch A); `two-extensions`
-   and `awaitable` get theirs when they are compiled from PHP. By that rule `decimal` is
-   DONE since batch E -- compiled from PHP and faster than interpreted on all five legs, 1.52x to
-   2.99x (macos/arm64 2.19x here, the twin 13.8x; § 7 item 1 below has the profile and the
-   table) -- and the other two are not. The decimal-c batch took the module from 6.3x the C twin's
+   as possible to C.** `decimal` has its twin (`examples/decimal/c/`, batch A) and
+   `two-extensions` its twins (`examples/two-extensions/c/`); `awaitable` gets its own when it is
+   compiled from PHP. By that rule `decimal` is DONE since batch E -- compiled from PHP and
+   faster than interpreted on all five legs, 1.52x to 2.99x (macos/arm64 2.19x here, the twin
+   13.8x; § 7 item 1 below has the profile and the table) -- `two-extensions` since 2026-09-28,
+   and `awaitable` is not. The decimal-c batch took the module from 6.3x the C twin's
    time to 4.1x (1.51 -> 0.98 ms here), § 7 item 1. The zend-mm batch put its strings on php's
    own refcount and Zend's allocator, the owner's direction, and paid for it on this workload:
    0.524 -> 0.606 ms on a quiet run of this Mac with the interpreter at 1.70-1.79 ms and the C
@@ -1103,11 +1104,16 @@ interpreter on the same source), § 7 item 1. What already has code moves into
      at 13.8x, and on the pull request's CI run macos/arm64 1.70x (twin 12.2x), linux/aarch64
      1.74x, linux/x86_64 1.52x, windows/x86_64 2.29x, windows/arm64 2.99x -- all from the compiler
      and its runtime, `decimal.php` unchanged (item 1 of the list below).
-   - `two-extensions` -- DONE as **hand-written mc**: `extA.mc`/`extB.mc` from `reference/`,
-     loaded in both orders and compared byte for byte with `extA.php` + `extB.php` interpreted.
-     `extB.php` is refused -- `a php function mc-php does not have: a_add` -- because a call to a
-     function the source does not declare is not lowered to a lookup in php's function table at
-     call time, and the gate pins that refusal. On Windows the pair SKIPS by name (`dlsym`).
+   - `two-extensions` -- DONE, and **compiled from PHP** (2026-09-28, the two-extensions
+     branch): `extA.php` and `extB.php`, where B calls a function A publishes and B's source
+     does not declare. On the extension road such a call is looked up in php's function table
+     when it runs, cached per call site and request, and made with `zend_call_known_function`
+     (`docs/php-extension.md` § A call to a function the source does not declare), which is what
+     the C twins (`examples/two-extensions/c/`) do. Differential in both load orders and B
+     alone, on all five hosts; the twins graded the same way. Bench (through B, fifteen rounds
+     interleaved): module / twins **1.083 (1.038-1.174)**, faster than the interpreter in every
+     round (0.882, 0.830-0.987). The hand-written `extA.mc`/`extB.mc` went back to `reference/`
+     only (they were copies) and the pinned refusal is gone.
    - `awaitable` -- DONE as **hand-written mc**: `awaitable.mc` from `reference/aw6.mc`, 37 lines
      against `check.expect` (await, forked `parallel` over any callable, libcurl on pthreads under
      a semaphore, the sync primitives), and `awaitable.src.php` refused at its first line, pinned.
