@@ -258,15 +258,22 @@ i64 ph_lit_finish(uptr fl, i64 line) {
 // one uptr global the runtime fills once and reads ever after -- the shape a
 // literal's cache has, for anything else built once per literal site (a
 // byte map, below). The IDENT is the global's address, as for php_str_lit.
-i64 ph_cache_slot(uptr pfx) {
+i64 ph_cache_init(uptr pfx, i64 words, i64 init);
+i64 ph_cache_slot(uptr pfx) { return ph_cache_init(pfx, 1, 0); }
+
+// the same, `words` words wide and laid out as `init` says (a list of int and
+// string nodes, as a global array's initializer): a call through php's
+// function table keeps its name and its own function's beside what it found
+// (src/builtin.mc's ph_ftable_call)
+i64 ph_cache_init(uptr pfx, i64 words, i64 init) {
     ph_nonce = ph_nonce + 1;
     uptr nm = p_cat(pfx, "", 0, 0);
     nm = p_cat(nm, php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
     i64 g = node_new(N_GLOBAL, ph_tline, ph_tfile);
     set_nd_name(g, nm);
     set_nd_type(g, TY_UPTR);
-    set_nd_val(g, 1);
-    set_nd_a(g, 0);
+    set_nd_val(g, words);
+    set_nd_a(g, init);
     top_add(g);
     i64 cache = node_new(N_IDENT, ph_tline, ph_tfile);
     set_nd_name(cache, nm);

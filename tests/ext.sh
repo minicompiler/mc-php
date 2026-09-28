@@ -462,5 +462,86 @@ else
 fi
 rm -rf "$tmp/build"
 
+# --- 14. a call through php's function table, in the module as interpreted ---
+# A function the module's source does not declare is looked up in php's
+# function table when the call runs (lib/php_ext.mc's phx_fcall): here the
+# callees are the SCRIPT's own php functions. Every value that crosses --
+# int, string, float, bool, null, and a string handed back; the answer as an
+# int on the `: int` road and as a value elsewhere; php's return-value rule
+# (a numeric string coerced, a word refused); an exception the callee throws,
+# caught by the module's own catch (class, message, code) and uncaught across
+# it (the engine's own object); an undefined function; output ordered around
+# the call; and the module RE-ENTERED through the callee. Then what cannot
+# cross: an array argument is refused while compiling, an array answer when
+# it arrives. examples/two-extensions is the same road between two modules.
+cat > "$tmp/r.php" <<'EOF2'
+<?php
+function ft_one(int $a): int { return cb_add($a, 1); }
+function ft_two(int $a, int $b): int { return cb_add($a, $b); }
+function ft_str(string $s): string { return cb_str($s) . "|" . cb_str("lit") . "|" . cb_str($s . "x"); }
+function ft_mix(float $x, bool $b): string { return (string) cb_mix($x, $b, null) . (string) cb_mix(1.5, false, "v"); }
+function ft_numstr(): int { return cb_numstr(); }
+function ft_word(): int { return cb_word(); }
+function ft_catch(int $n): string {
+    try { return "no " . cb_throw($n); }
+    catch (InvalidArgumentException $e) { return "caught " . get_class($e) . " " . $e->getMessage() . " " . $e->getCode(); }
+}
+function ft_uncaught(int $n): int { return cb_throw($n); }
+function ft_undef(int $n): int { return no_such_fn($n); }
+function ft_echo(int $n): int { echo "before "; $r = cb_echo($n); echo " after "; return $r; }
+function ft_reent(int $n): int { return cb_back($n); }
+function ft_two_calls(int $n): int { $x = cb_throw($n); return cb_add($x, 1); }
+EOF2
+cat > "$tmp/ft.php" <<'EOF2'
+<?php
+if (!function_exists('ft_one')) { require __DIR__ . '/r.php'; }
+function cb_add(int $a, int $b): int { return $a + $b; }
+function cb_str(string $s): string { return strtoupper($s); }
+function cb_mix($x, $b, $n) { return ($b ? $x * 2 : $x) . ($n === null ? "n" : $n); }
+function cb_throw(int $n) { throw new InvalidArgumentException("bad $n", 40 + $n); }
+function cb_numstr() { return "7"; }
+function cb_word() { return "x"; }
+function cb_echo(int $n): int { echo "[cb $n]"; return $n * 3; }
+function cb_back(int $n): int { return $n > 0 ? ft_reent($n - 1) + 1 : 100; }
+for ($k = 0; $k < 3; $k++) {
+    echo ft_one(41), " ", ft_two(40, $k), " ", ft_str("ab$k"), " ", ft_mix(2.25, true), " ", ft_numstr(), "\n";
+    try { ft_word(); } catch (TypeError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+    echo ft_catch($k), "\n";
+    try { ft_uncaught($k); } catch (InvalidArgumentException $e) { echo get_class($e), " ", $e->getMessage(), " ", $e->getCode(), "\n"; }
+    try { ft_undef($k); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+    try { ft_two_calls($k); } catch (Exception $e) { echo "stopped at the first: ", $e->getMessage(), "\n"; }
+    echo ft_echo($k), " ", ft_reent(3 + $k), "\n";
+}
+EOF2
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/ft.build" 2>&1; then
+    "$PHP" -d extension="$tmp/build/r.$sx" "$tmp/ft.php" > "$tmp/ft.n" 2>&1; fnrc=$?
+    "$PHP" "$tmp/ft.php" > "$tmp/ft.i" 2>&1; firc=$?
+    if [ "$fnrc" = "$firc" ] && cmp -s "$tmp/ft.n" "$tmp/ft.i"; then
+        say "function table: $(wc -l < "$tmp/ft.n" | tr -d ' ') lines of calls into the script's own functions, byte for byte php's own"
+    else
+        bad "function table: the module (exit $fnrc) and the interpreted source (exit $firc) differ"
+        diff "$tmp/ft.i" "$tmp/ft.n" | head -12 | sed 's/^/      /'
+    fi
+    # an array answer is refused where it arrives, by name
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" -r 'function cb_add($a, $b) { return [$a]; }
+        try { ft_two(1, 2); } catch (Error $e) { echo $e->getMessage(); }' 2>&1 | tr -d '\r')
+    want="mc-php: a php array, object or resource returned by cb_add(): only null, bool, int, float and string cross php's function table"
+    [ "$got" = "$want" ] && say "function table: an array answer refused by name" \
+        || { bad "function table: an array answer"; printf '      want %s\n      got  %s\n' "$want" "$got"; }
+else
+    bad "function table: it would not build"; sed 's/^/      /' "$tmp/ft.build"
+fi
+printf '<?php\nfunction ft_arr(int $n): int { $a = [$n]; return cb_count($a); }\n' > "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+"$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/fa.out" 2>&1; rc=$?
+got=$(grep -o "mc-php: .*" "$tmp/fa.out" | head -1)
+case "$rc:$got" in
+    0:*) bad "function table: an array argument built anyway" ;;
+    *"an array or object argument to a function php's function table answers"*) say "function table: an array argument refused while compiling" ;;
+    *) bad "function table: an array argument: got $got" ;;
+esac
+rm -rf "$tmp/build"
+
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }
 echo "  ext: the extension road is green"
