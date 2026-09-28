@@ -94,9 +94,159 @@ void ph_opt_walk(i64 n) {
     }
 }
 
+// ---- a short circuit is mc's own && and || again ------------------------------
+// php's `a && b` is lowered through a u8 temporary (src/expr.mc): `t = a;
+// if (t) { t = b; }` -- the right side may need statements of its own, and
+// an mc expression has none. When it needed none, the temporary is only a
+// value that goes through the frame: these rewrites, on adjacent statements,
+// give mc the expression back, and mc's && and || short-circuit it the same
+// way, in the same order, with no store and no load.
+//   S1  t = a; if (t) { t = b; }         ->  t = a && b;     (b does not read t)
+//   S2  t = a; if (!t) { t = b; }        ->  t = a || b;
+//   S3  t = a; u = t;                    ->  u = a;          (t read nowhere else)
+//   S4  t = a; if (t) X else Y           ->  if (a) X else Y (t read nowhere else;
+//       and `if (!t)` alike)
+uptr sc_body;
+
+// a short circuit's temporary: phs_N, or an inlined copy's piK_phs_N
+i64 sc_temp(i64 s) {
+    if (nd_kind(s) != N_ASSIGN) return 0;
+    uptr n = nd_name(s);
+    loop {
+        if (!ld8(n)) return 0;
+        if (ld8(n) == 'p' && ld8(n + 1) == 'h' && ld8(n + 2) == 's' && ld8(n + 3) == '_') return 1;
+        n = n + 1;
+    }
+    return 0;
+}
+
+// the if's condition is t (1) or !t (2), else 0
+i64 sc_cond(i64 c, uptr t) {
+    if (nd_kind(c) == N_IDENT && str_eq(nd_name(c), t)) return 1;
+    if (nd_kind(c) == N_UNARY && nd_op(c) == ph_tok("!", 1) && nd_kind(nd_a(c)) == N_IDENT && str_eq(nd_name(nd_a(c)), t)) return 2;
+    return 0;
+}
+
+i64 sc_list(i64 s);
+
+// field f (0 a, 1 b, 2 c) of s: a block's list, or a lone statement
+void sc_sub(i64 s, i64 f) {
+    i64 x = nd_a(s);
+    if (f == 1) x = nd_b(s);
+    if (f == 2) x = nd_c(s);
+    if (nd_kind(x) == N_BLOCK) { set_nd_a(x, sc_list(nd_a(x))); return; }
+    x = sc_list(x);
+    if (f == 0) set_nd_a(s, x);
+    if (f == 1) set_nd_b(s, x);
+    if (f == 2) set_nd_c(s, x);
+}
+
+void sc_inner(i64 s) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_IF) {
+            if (nd_b(s)) sc_sub(s, 1);
+            if (nd_c(s)) sc_sub(s, 2);
+        }
+        if (k == N_BLOCK) set_nd_a(s, sc_list(nd_a(s)));
+        if (k == N_LOOP && nd_a(s)) sc_sub(s, 0);
+        s = nd_next(s);
+    }
+}
+
+i64 sc_list(i64 s) {
+    sc_inner(s);
+    i64 h = s;
+    i64 pv = 0;
+    loop {
+        if (!s) break;
+        i64 n2 = nd_next(s);
+        if (sc_temp(s) && n2) {
+            uptr t = nd_name(s);
+            i64 k2 = nd_kind(n2);
+            // S1 / S2
+            if (k2 == N_IF && !nd_c(n2)) {
+                i64 w = sc_cond(nd_a(n2), t);
+                i64 b = phi_blist(nd_b(n2));
+                if (w && b && !nd_next(b) && nd_kind(b) == N_ASSIGN && str_eq(nd_name(b), t) && !phi_uses(nd_a(b), t)) {
+                    i64 op = node_new(N_BINARY, nd_line(s), nd_file(s));
+                    if (w == 1) set_nd_op(op, ph_tok("&&", 2));
+                    if (w == 2) set_nd_op(op, ph_tok("||", 2));
+                    set_nd_type(op, TY_U8);
+                    set_nd_a(op, nd_a(s));
+                    set_nd_b(op, nd_a(b));
+                    set_nd_a(s, op);
+                    set_nd_next(s, nd_next(n2));
+                    continue;
+                }
+            }
+            if (phi_uses(sc_body, t) == 1) {
+                // S3
+                if (k2 == N_ASSIGN && nd_kind(nd_a(n2)) == N_IDENT && str_eq(nd_name(nd_a(n2)), t)) {
+                    set_nd_a(n2, nd_a(s));
+                    if (pv) set_nd_next(pv, n2);
+                    if (!pv) h = n2;
+                    s = n2;
+                    continue;
+                }
+                // S4
+                if (k2 == N_IF) {
+                    i64 w2 = sc_cond(nd_a(n2), t);
+                    if (w2 == 1) set_nd_a(n2, nd_a(s));
+                    if (w2 == 2) set_nd_a(nd_a(n2), nd_a(s));
+                    if (w2) {
+                        if (pv) set_nd_next(pv, n2);
+                        if (!pv) h = n2;
+                        s = n2;
+                        continue;
+                    }
+                }
+            }
+        }
+        pv = s;
+        s = n2;
+    }
+    return h;
+}
+
+// `if (a && b) X` with no else is `if (a) { if (b) X }`: the branches
+// themselves, where mc's && would first make the value
+void sc_nest(i64 s) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_IF) {
+            loop {
+                i64 c = nd_a(s);
+                if (nd_c(s) || nd_kind(c) != N_BINARY || nd_op(c) != ph_tok("&&", 2)) break;
+                i64 in = node_new(N_IF, nd_line(s), nd_file(s));
+                set_nd_a(in, nd_b(c));
+                set_nd_b(in, nd_b(s));
+                set_nd_a(s, nd_a(c));
+                set_nd_b(s, phi_block(in, nd_line(s), nd_file(s)));
+            }
+            sc_nest(phi_blist(nd_b(s)));
+            if (nd_c(s)) sc_nest(phi_blist(nd_c(s)));
+        }
+        if (k == N_BLOCK) sc_nest(nd_a(s));
+        if (k == N_LOOP) sc_nest(phi_blist(nd_a(s)));
+        s = nd_next(s);
+    }
+}
+
+void ph_sc_fn(i64 f) {
+    i64 body = nd_b(f);
+    if (!body) return;
+    sc_body = body;
+    set_nd_a(body, sc_list(nd_a(body)));
+    sc_nest(nd_a(body));
+}
+
 void phr_fn(i64 f);
 
 void ph_opt_fn(i64 f) {
+    ph_sc_fn(f);
     ph_opt_walk(nd_b(f));
     phr_fn(f);
 }
