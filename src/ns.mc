@@ -155,15 +155,32 @@ uptr ph_ns_fc(uptr raw, i64 cst, uptr fb) {
 }
 
 // ---- the statements -----------------------------------------------------------
-// `namespace X;` -- and `namespace X { ... }`, the braced form, refused by
-// name (its end would have to put the file back in the namespace it had)
+// `namespace X;`, and the braced form `namespace X { ... }` / `namespace { }`:
+// its statements are the file's top-level ones (src/program.mc's loop reads
+// them, so a function declared in it is a top-level declaration), and its
+// `}` puts the file back in the global namespace
+i64 ph_ns_brace;
 void ph_ns_stmt(uptr fl, i64 line) {
     ph_next();
     uptr name = "";
     if (ph_tid == T_IDENT) { name = ph_tname; if (ld8(name) == 92) name = name + 1; ph_next(); }
-    if (ph_at("{", 1)) ph_todo(fl, line, "a braced namespace block (namespace X { ... })");
     ph_ns_set(name, fl, line);
+    if (ph_at("{", 1)) {
+        if (ph_ns_brace || !ph_toplevel) err_at(fl, line, "mc-php: a namespace block inside another block");
+        ph_next();
+        ph_ns_brace = 1;
+        return;
+    }
     ph_semi("expected ; after namespace");
+}
+
+// the `}` of a braced namespace, read by the top-level loop
+i64 ph_ns_close() {
+    if (!ph_ns_brace || !ph_at("}", 1)) return 0;
+    ph_ns_brace = 0;
+    ph_ns_set("", ph_tfile, ph_tline);
+    ph_next();
+    return 1;
 }
 
 // `use A\B;`, `use A\B as C, D;`, `use function A\f;`, `use const A\X;`,

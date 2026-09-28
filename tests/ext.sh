@@ -182,7 +182,7 @@ nref=0
 # the last line names the reason, and it carries the classification. This
 # repository distinguishes two (docs/plan.md): `is refused by design` with
 # exit 3 is a DESIGN answer, and `is not implemented yet` with exit 1 is a
-# construct that has not been built. These eight are the second kind -- the
+# construct that has not been built. These seven are the second kind -- the
 # schema promises them -- so that is what is required, and a message alone is
 # not enough (found by the reviewer of #15: a compile error that happened to
 # contain the phrase passed).
@@ -210,7 +210,6 @@ refuse 'function f(int $x = 1): int { return $x; }'  'parameter whose type is no
 refuse 'function f(int ...$x): int { return 1; }'    'a variadic parameter in an exported function'
 refuse 'function f(int $x): array { return []; }'    'return type is not a declared scalar'
 refuse 'function &f(int $x): int { return $x; }'     'a by-reference return in an exported function'
-refuse 'namespace aw { function f(): int { return 1; } }' 'a braced namespace block'
 # php HOISTS a global function, so this is ordinary php -- and D4 builds the
 # call against a zval signature and widens the declaration to match, which the
 # back end cannot export. The refusal has to say THAT and not "not a declared

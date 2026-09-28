@@ -40,7 +40,6 @@ hello.php:7: mc-php: an exported parameter whose type is not a declared scalar: 
 hello.php:7: mc-php: a variadic parameter in an exported function: f
 hello.php:7: mc-php: a by-reference return in an exported function: f
 hello.php:7: mc-php: an exported function whose return type is not a declared scalar: f
-hello.php:3: mc-php: a braced namespace block (namespace X { ... })
 ```
 
 A parameter with a **default** and an **untyped** parameter are both `mixed` by
@@ -63,8 +62,8 @@ constant, alone, aliased or grouped; a class name has no fallback, and an unqual
 constant falls back to the global one -- the source's own `aw\util\f` when it declares one, else
 php's `f`, and on the extension road a name neither the source nor the library has is looked up
 in php's function table as `aw\util\f` and then `f`, as php does. `__NAMESPACE__`, `X::class`
-and `get_class()` answer the qualified names. The braced form, `namespace X { ... }`, is refused
-by name; a namespace statement per file is the form this compiler reads. A leading underscore
+and `get_class()` answer the qualified names, and both forms are read, `namespace X;` and the
+braced `namespace X { ... }` / `namespace { ... }`. A leading underscore
 makes a function module-private under its namespace too (`aw\util\_h`).
 
 The body is the whole language. Classes, closures, `match`, exceptions, the 272-row library --

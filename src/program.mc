@@ -20,6 +20,7 @@ void ph_program() {
     if (!ph_at("<?=", 3)) ph_next();              // <?php
     loop {
         if (ph_tid == T_EOF) break;
+        if (ph_ns_close()) continue;
         if (ph_is("function")) {
             i64 fn = ph_function();
             top_add(fn);

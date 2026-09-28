@@ -1061,7 +1061,8 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   constant falls back to the global one, and on the extension road an undeclared name goes to
   php's function table as `ns\f` then `f` (bit 48 of the call site's packed word).
   `__NAMESPACE__`, `X::class` and `get_class()` answer qualified names; an mc name carries `$`
-  for the backslash (`ph_mangle`). The braced `namespace X { }` form is refused by name.
-  `tests/g/120-namespaces.php`, `tests/ext.sh` step 15. `examples/awaitable` gained its C twin
+  for the backslash (`ph_mangle`); the runtime keys a class by its qualified name
+  (`php_clskey`). Both forms, `namespace X;` and braced. `tests/g/120-namespaces.php`,
+  `121-namespace-blocks.php`, `tests/ext.sh` step 15. `examples/awaitable` gained its C twin
   (`c/awaitable.c`, graded against `check.expect`), and its pinned refusal moved to line 13
   (`#[Extern]`).
