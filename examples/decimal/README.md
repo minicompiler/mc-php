@@ -359,6 +359,83 @@ the answer built in one expression (7 strings a call to 6) 0.363 ms, and the ans
 by byte into one `str_repeat` of its final length (2 888 strings fewer a `work()`) 0.367-0.368 ms,
 against 0.358-0.360 ms.
 
+**Toward 2x: decimal-2x** (2026-09-27, macos/arm64, php 8.5.10, one host, one sitting, fifteen
+rounds interleaved, best of nine each; `decimal.php` and `bench.php` unchanged in this round). Each change was
+built alone and measured against the build before it -- time with `bench.php`, and instructions
+and cycles per call with `/usr/bin/time -l` over a million calls of each function -- and one
+that did not gain was reverted.
+
+| change | where | the module |
+|---|---|---|
+| c-only (the start) | | 0.367 ms |
+| an argument read once is the expression, and a copy that is one `return E` is E (the inliner's locals were spilled in the loops it was copied into) | `src/opt.mc` | 0.348 ms |
+| an element read is an int, never php's null: no null flag, no `ph_pkabs` store | `src/packed.mc`, `src/expr.mc` | 0.346 ms |
+| a FIXED array -- every keyed store is `$a[K] = ... $a[K] ...` -- is never a hash: C's read and store, no packed-state test, no bound; `_dec_umul`'s inner loop has no call left, so it has no drain either | `src/packed.mc` | 0.328 ms |
+| the answer of `return f(...)` stays on the caller's side of the pool: no take, no push (`php_rc_ret`) | `src/rc.mc` | 0.324 ms |
+| a FRESH buffer -- made by `str_repeat` and written only byte by byte -- is written with the bound as the one test: no refcount, flags, counter or hash reset, and its slow half leaves the pool as it was, so the loop has no drain | `src/rc.mc` | 0.315 ms |
+| a string built by appends is ONE string of the final length (a rope of windows, `php_str_rope`), with the window test in place | `src/opt.mc` | 0.301 ms |
+| `phx_enter`/`phx_leave`'s fast paths copied into the handler | `lib/php_ext.mc`, `src/ext.mc` | 0.295 ms |
+| `&&`/`||` folded back from their u8 temporaries into mc's own, and `if (a && b) X` into nested ifs | `src/opt.mc` | 0.289 ms |
+| P11, a leaf keeps its locals in caller-saved registers; then a tail call allowed in one | `src/mach.mc` | 0.287, 0.283 ms |
+| the fold moved after the runtime copies, so a byte read on a right side is a copy and not a call | `src/opt.mc` | 0.277 ms |
+| `$d . str_repeat('0', n)` in one string (`php_str_catrep`) | `src/opt.mc`, `lib/php_rt.mc` | 0.276 ms |
+| `php_memcpy` without overlapping stores: 8 bytes a step, then 4, 2 and 1 | `lib/php_rt.mc` | 0.271 ms |
+| `strspn` over a set that is one run of bytes compares a range (`php_spn_r`) | `src/builtin.mc` | **0.266-0.267 ms** |
+
+Measured and NOT built (no gain in time, or slower):
+
+| change | measured |
+|---|---|
+| appends in place with `_erealloc` for a local only its own `.=` reads | 0.333 ms against 0.328: SLOWER. A bin change is an allocation, a copy and a free, and the frees no longer go in one pass of the pool |
+| small copies as two OVERLAPPING word or halfword stores in `php_str_rope`/`php_memcpy` | 0.325 against 0.294: SLOWER by 10%. The bytes just written are read back at once, and a load that spans two stores is not forwarded |
+| small copies as a byte loop | 0.312 and 0.298 against 0.309 and 0.295: slower (a taken branch a byte) |
+| a static array's buffer address in a local, and an element's address computed once for its read and its store (`_dec_umul`'s inner loop 26 -> 18 instructions, `dec_mul` 8641 -> 8035 instructions a call) | 1099 against 1094 cycles a `dec_mul`: no gain. The loop is not bound by its instruction count |
+| `strspn`'s loop two bytes a turn; `_dec_umul`'s inner loop unrolled by two in the source | 0.268 against 0.266 and 0.274 against 0.266: slower |
+| `$s === 'c'` as the length and the byte in place | 0.267 against 0.267 |
+
+Per call against the twin, a million calls each (instructions / cycles, `/usr/bin/time -l`, the
+loop's own cost taken out):
+
+| | c-only | this branch | the C twin | cycles, branch / C |
+|---|---|---|---|---|
+| `dec_add` | 5151 / 653 | 3937 / 493 | 1658 / 242 | 2.04 |
+| `dec_sub` | 5419 / 702 | 4161 / 512 | 1662 / 256 | 2.00 |
+| `dec_mul` | 12308 / 1575 | 8470 / 1079 | 2737 / 430 | 2.51 |
+| `dec_cmp` | 2390 / 302 | 1712 / 206 | 830 / 121 | 1.70 |
+| `dec_div` | 65885 / 8216 | 56004 / 7221 | 6191 / 1220 | 5.92 |
+
+**The three causes, attacked** (2026-09-28, the same host and method; the owner's rule that mc
+already lets a module teach whatever instruction it needs). Each was bounded before it was built:
+
+| cause | bound (measured first) | built | measured |
+|---|---|---|---|
+| `dec_div` builds a remainder string per step of its long division | representation, not a floor: the twin keeps one buffer | `_dec_udivmod` keeps the twin's one remainder buffer of nb + 2 digits, compared and subtracted where it lies (`decimal.php`; the answers are the same, 20000 random divisions byte for byte) | `dec_div` 7217 -> 3130 cycles a call, 10300 -> 1300 strings for 100 calls; bench 0.266 -> 0.259 ms |
+| the carry loop's two `sdiv` against the twin's multiply-high | division made free (a shift in its place, wrong answers, timing only): -75 cycles a `dec_mul` | P12 (`src/mach.mc`): a signed `/` or `%` by a constant is `smulh` by the magic number, an immediate shift, the sign added back (Hacker's Delight 10-1, what clang writes); `intdiv()` by a positive literal is mc's own `/`. `smulh` and the immediate shifts are new forms in the machine's band | `dec_mul` -13 to -33 cycles; the bench within its noise. The loop is bound by its spills and the chain through the carry, not by the division any more |
+| the twin's inner loop is NEON | clang vectorises only the digit loads (`rev64`): a 64-bit multiply has no NEON form, so the multiplies stay scalar. Removing the loop costs the twin 195 cycles a `dec_mul`; our loop, hand-written into the `.so` as 8 scalar instructions, costs less than that. So no SIMD: the bound is a short scalar loop | the element address once (`ph_addm64`, `src/lvalue.mc`), an address's constants summed into the load's offset (`src/opt.mc`), and `x + (y << 3)` as one add (P13): the loop from 26 instructions to 15. Measured with the loop patched by hand first: 16 and 17 instructions gained nothing, 15 did, and each of the three changes alone gains nothing | `dec_mul` 1055 -> 946 cycles; bench 0.259 -> 0.250 ms |
+
+Measured and not built: a leaf's frame dropped when nothing uses it (no gain); `48 + x` with the
+constant on the left as an immediate (slower); `php_spn_r` copied with its loop into its callers
+(+75 cycles a `dec_add`: the callers spill); `php_memcpy` inline in the rope (-7 cycles, noise);
+the fresh buffer's bound test removed in the digit loops (-1%, a range proof not worth its code).
+
+| | this branch before | now | the C twin | cycles, now / C |
+|---|---|---|---|---|
+| `dec_add` | 3937 / 493 | 3936 / 487 | 1658 / 241 | 2.02 |
+| `dec_sub` | 4161 / 512 | 4153 / 510 | 1662 / 244 | 2.09 |
+| `dec_mul` | 8470 / 1079 | 7700 / 945 | 2737 / 427 | 2.21 |
+| `dec_cmp` | 1712 / 206 | 1692 / 200 | 829 / 116 | 1.72 |
+| `dec_div` | 56004 / 7221 | 24077 / 3153 | 6191 / 1190 | 2.65 |
+
+**The floor, now.** `bench.php` is 0.250 ms against the twin's 0.125 (2.00x; 1.97x to 2.02x over
+the runs of this sitting). None of the three named causes is the floor any more: what is left is
+spread thin. The largest single items of a run are `_dec_umul` (10%), `php_memcpy` and
+`php_spn_r` (8% each), `_dec_addsub`, the rope, the allocator and `_dec_fmt` (5-8% each), and
+their cost is per call and per spill rather than per loop: `_dec_addsub`, with the helpers it
+copies in, is 10722 instructions long with an 832-byte frame; the carry loop keeps `$t` and the
+carry in the frame because ten callee-saved registers go to the inner loop's variables (mc's
+allocator gives a local one register for the whole function), and making the carried values
+registers by hand (`$t` in `$j`, the carry in `$x`) moved 9 cycles.
+
 ## What it cannot do yet
 
 * **A wrong TYPE** is an internal function's message in the module and a userland one

@@ -987,3 +987,35 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   the pool, still drained). The grid always runs compiled as C and is a GATE now: green must be
   `tests/grid/green-*.txt` minus `tests/grid/expected-differences.txt` (exactly
   `Zend/tests/bug39018_2`, `str_offset_001`, `string_offset_int_min_max`, each with a reason).
+- decimal-2x (2026-09-27, branch `decimal-2x` stacked on `c-only`): the module from 0.367 ms to
+  0.266-0.267 ms against the twin's 0.125 (2.94x -> 2.14x), fifteen rounds interleaved. Built,
+  each measured alone: the inliner substitutes an argument read once and a one-`return E` copy
+  (`src/opt.mc`); an element read is an int (PT_INULL, `ph_pkabs`, `php_zinull` gone); FIXED
+  arrays -- every keyed store `$a[K] = ... $a[K] ...` -- read and write the buffer with no test
+  (`src/packed.mc` `pkx_isfixed`, `php_pk_get_f`/`php_pk_set_f`); `php_rc_ret` keeps a returned
+  temporary on the pool; FRESH buffers (`str_repeat` + byte writes only) write with the bound as
+  the one test (`src/rc.mc` `ph_rc_fb_scan`, `php_str_setb_f`, `php_str_repeat_f`); ropes build
+  an appended string once (`ph_rope_fn`, `php_str_rope`); `phx_enter`/`phx_leave` fast paths
+  copied into handlers; `&&`/`||` temporaries folded after the runtime copies (`ph_sc_fn`);
+  P11 in `src/mach.mc` (a leaf, tail calls allowed, keeps locals in caller-saved registers;
+  `MCPHP_LEAF=0`); `php_str_catrep`; `php_memcpy` without overlapping stores; `php_spn_r` for a
+  literal set that is one byte run. Not built (measured): in-place appends via `_erealloc`
+  (slower), overlapping small-copy stores (10% slower: store forwarding), byte loops, a static
+  buffer pointer and one address per RMW (instructions -7% in `dec_mul`, cycles 0), unrolling
+  (slower). Per call vs the twin in cycles: add 2.04, sub 2.00, mul 2.51, cmp 1.70; the floor is
+  `_dec_umul` (NEON in the twin, and two `sdiv` per carry step where the twin multiplies high).
+  `tests/g/116-lowered-forms.php` + its read-back in `tests/fixtures.sh`; the strings gate in
+  `tests/examples.sh` re-recorded 500 500 600 200 10300.
+  Second round (2026-09-28, the three causes, each bounded first): `_dec_udivmod` keeps the
+  twin's one remainder buffer (`decimal.php`; dec_div 7217 -> 3130 cycles, strings gate 10300 ->
+  1300); P12 in `src/mach.mc` (a signed `/`/`%` by a constant 2..65535 is `smulh` by the magic
+  number, Hacker's Delight 10-1; `intdiv()` by a positive literal is mc's `/`; `MCPHP_DIVK=0`);
+  P13 (a constant shift is the immediate form, `x + (y << k)` one shifted add;
+  `MCPHP_SHIFT=0`); `ph_addm64` (`src/lvalue.mc`: a FIXED `$a[K] = $a[K] + E` computes the
+  element address once; `MCPHP_ADDM=0`) and `ph_ac_walk` (`src/opt.mc`: an address's integer
+  terms summed into the load offset; `MCPHP_AC=0`). New forms in the band 502..506 (`smulh`,
+  `lsl`/`asr`/`lsr` immediate, shifted `add`), swept by llvm-mc. No NEON: clang vectorises only
+  the digit loads, and a 15-instruction scalar loop beats the twin's. Bench 0.267 -> 0.250 ms
+  against 0.125 (2.00x, 1.97-2.02 over the sitting): under 2x is not reached; the floor is
+  diffuse (calls, spills in the big inlined functions, allocation). `tests/g/117`, `118` + the
+  "second round" read-back in `tests/fixtures.sh`.

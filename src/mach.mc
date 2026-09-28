@@ -44,6 +44,23 @@
 //       moved past the epilogue once the function is finished, so the fast
 //       path falls through its guards (see the section below; both machines,
 //       MCPHP_LAYOUT=0 turns it off alone).
+//   P11 a LEAF (no call but a tail call, no raw word) keeps its locals in
+//       registers nobody saves: a parameter's own argument register or a free
+//       one of x1..x7 and x10..x15, and the saves and restores of the callee-
+//       saved ones it no longer uses go (arm64; MCPHP_LEAF=0 turns it off alone).
+//   P12 a signed division or remainder by a constant 2..65535 a lone movz
+//       made is a multiply-high by the magic number (Hacker's Delight 10-1):
+//       smulh, an arithmetic shift, the sign added back, and an msub for the
+//       remainder -- what clang writes for `t / 10` (arm64; MCPHP_DIVK=0).
+//   P13 a shift by a constant is the immediate form (lsl, asr, lsr), and
+//       `x + (y << k)` just after it is one add with a shifted operand
+//       (arm64; MCPHP_SHIFT=0).
+//   P12 and P13 ARE new forms, smulh, the three immediate shifts and the
+//   shifted add, in this machine's band (502..506) with their encoder, size and
+//   dump; every one is re-assembled byte for byte by llvm-mc in the sweep.
+//   ph_addm64(p, v), the intrinsic src/lvalue.mc writes for a FIXED array's
+//   `$x[K] = $x[K] + E`, is `*p = *p + v` on both machines in forms they
+//   already have (MCPHP_ADDM=0 stops src/lvalue.mc writing it).
 //
 // The x86-64 half (both ABIs, over <float>'s) is the same idea in that
 // machine's forms: `lea rd, [rl + k]` is the add or sub of a constant, and a
@@ -58,6 +75,10 @@ i64  pm_ad[MAXDEPTH];                 // P2: where the last address add for a de
 i64  pm_ad_at(i64 d) { return ld64(pm_ad + d * 8); }
 void pm_ad_set(i64 d, i64 v) { st64(pm_ad + d * 8, v); }
 i64  pm_nolay;                        // MCPHP_LAYOUT=0: P10 alone off
+i64  pm_nolf;                         // MCPHP_LEAF=0: P11 alone off
+i64  pm_nodiv;                        // MCPHP_DIVK=0: P12 alone off
+i64  pm_noaddm;                       // MCPHP_ADDM=0: ph_addm64 not used
+i64  pm_nosh;                         // MCPHP_SHIFT=0: P13 alone off
 i64  pm_off;                          // MCPHP_PEEP=0 in the compiler's environment
 
 uptr pm_of(i64 task) { return ld64(pm_orig + task * 8); }
@@ -65,7 +86,12 @@ uptr pm_of(i64 task) { return ld64(pm_orig + task * 8); }
 // P6's band: ins_rm holds the bundled I_LDR*/I_STR* it stands for
 #define PM_LDG   500
 #define PM_STG   501
-#define PM_MAXOP 502
+#define PM_SMULH 502                  // P12: smulh rd, rn, rm (the high 64 bits)
+#define PM_LSLI  503                  // P13: lsl rd, rn, #imm (ubfm)
+#define PM_ADDSH 504                  // P13: add rd, rn, rm, lsl #imm
+#define PM_ASRI  505                  // P13: asr rd, rn, #imm (sbfm)
+#define PM_LSRI  506                  // P13: lsr rd, rn, #imm (ubfm)
+#define PM_MAXOP 507
 i64 pm_mine(i64 op) { return op >= PM_LDG && op < PM_MAXOP; }
 
 i64 pm_int(i64 d) {
@@ -101,11 +127,88 @@ i64 pm_mask(i64 m) {
     return (m & (m + 1)) == 0;
 }
 
+// ---- P12: a signed division by a constant is a multiply-high -------------------
+// Hacker's Delight 10-1 for 64 bits: n / d == ((smulh(n, M) [+ n when M < 0]) >> s)
+// + 1 when n < 0, for every n and every d >= 2; the remainder is n - q * d.
+// This is what clang writes for `t / 10`; tests/g/117's companion checks it
+// against the machine's own sdiv over the edges.
+i64 pm_mg_m;
+i64 pm_mg_s;
+void pm_magic(i64 d) {
+    u64 two63 = ((u64) 1) << 63;
+    u64 ad = d;
+    u64 anc = two63 - 1 - two63 % ad;
+    i64 p = 63;
+    u64 q1 = two63 / anc;
+    u64 r1 = two63 - q1 * anc;
+    u64 q2 = two63 / ad;
+    u64 r2 = two63 - q2 * ad;
+    loop {
+        p = p + 1;
+        q1 = q1 + q1;
+        r1 = r1 + r1;
+        if (r1 >= anc) { q1 = q1 + 1; r1 = r1 - anc; }
+        q2 = q2 + q2;
+        r2 = r2 + r2;
+        if (r2 >= ad) { q2 = q2 + 1; r2 = r2 - ad; }
+        u64 delta = ad - r2;
+        if (q1 < delta) continue;
+        if (q1 == delta && r1 == 0) continue;
+        break;
+    }
+    pm_mg_m = q2 + 1;
+    pm_mg_s = p - 64;
+}
+
+// d = d / k or d % k, k >= 2 the constant a movz just put in d2's register
+void pm_divk(i64 op, i64 d, i64 k) {
+    pm_magic(k);
+    i64 rl = val_reg(d, REG_S1);
+    i64 rd = dst_reg(d);
+    u64 m = pm_mg_m;
+    ei(I_MOVZ, REG_S2, 0, m & 0xffff);
+    i64 hw = 1;
+    loop {
+        if (hw >= 4) break;
+        u64 part = (m >> (16 * hw)) & 0xffff;
+        if (part) ei(I_MOVK, REG_S2, hw, part);
+        hw = hw + 1;
+    }
+    e3(PM_SMULH, REG_TMP, rl, REG_S2);
+    if (pm_mg_m < 0) e3(I_ADD, REG_TMP, REG_TMP, rl);
+    if (pm_mg_s > 0) ei(PM_ASRI, REG_TMP, REG_TMP, pm_mg_s);
+    ei(PM_LSRI, REG_S2, rl, 63);
+    if (op == MOP_SDIV) {
+        e3(I_ADD, rd, REG_TMP, REG_S2);
+    } else {
+        e3(I_ADD, REG_TMP, REG_TMP, REG_S2);
+        ei(I_MOVZ, REG_S2, 0, k);
+        ins_add(I_MSUB, rd, REG_TMP, REG_S2, rl, 0, 0);
+    }
+    dst_done(d, rd);
+}
+
 void pm_bin(i64 op, i64 d, i64 d2) {
     if (pm_off || !pm_int(d)) { callp(pm_of(MTASK_BIN), op, d, d2); return; }
     i64 j = pm_konst(d2);
     if (j >= 0) {
         i64 k = ins_imm(ins_at(j));
+        if ((op == MOP_SDIV || op == MOP_SMOD) && k >= 2 && !pm_nodiv) {
+            set_ins_op(ins_at(j), I_NOP);
+            pm_divk(op, d, k);
+            return;
+        }
+        if ((op == MOP_SHL || op == MOP_SAR || op == MOP_SHR) && k > 0 && k < 64 && !pm_nosh) {
+            set_ins_op(ins_at(j), I_NOP);
+            i64 rs = val_reg(d, REG_S1);
+            i64 rs_d = dst_reg(d);
+            i64 sop = PM_LSLI;
+            if (op == MOP_SAR) sop = PM_ASRI;
+            if (op == MOP_SHR) sop = PM_LSRI;
+            ei(sop, rs_d, rs, k);
+            dst_done(d, rs_d);
+            return;
+        }
         i64 iop = 0;
         if (op == MOP_ADD && k <= 4095) iop = I_ADDI;
         if (op == MOP_SUB && k <= 4095) iop = I_SUBI;
@@ -118,6 +221,25 @@ void pm_bin(i64 op, i64 d, i64 d2) {
             if (iop == I_ADDI && in_reg(d)) pm_ad_set(d, nins - 1);
             dst_done(d, rd);
             return;
+        }
+    }
+    // P13: `x + (y << k)` is one add with a shifted operand, when the shift
+    // was the instruction just emitted into d2's own register
+    if (op == MOP_ADD && !pm_nosh && in_reg(d2) && dalias_at(d2) < 0) {
+        i64 js = pm_last();
+        if (js >= 0) {
+            uptr e = ins_at(js);
+            i64 sr = ins_rn(e);
+            if (ins_op(e) == PM_LSLI && ins_rd(e) == REG_BASE + d2
+                && sr != REG_S1 && sr != REG_S2 && sr != REG_TMP) {
+                i64 sk = ins_imm(e);
+                set_ins_op(e, I_NOP);
+                i64 rl = val_reg(d, REG_S1);
+                i64 rd = dst_reg(d);
+                ins_add(PM_ADDSH, rd, rl, sr, sk, 0, 0);
+                dst_done(d, rd);
+                return;
+            }
         }
     }
     callp(pm_of(MTASK_BIN), op, d, d2);
@@ -339,11 +461,28 @@ i64 pm_ins_size(uptr e) {
 
 void pm_encode(uptr e, i64 pc, uptr lab, uptr b) {
     if (!pm_mine(ins_op(e))) { callp(pm_of(MTASK_ENCODE), e, pc, lab, b); return; }
+    if (ins_op(e) == PM_SMULH) { buf_u32(b, 0x9B407C00 | (ins_rm(e) << 16) | (ins_rn(e) << 5) | ins_rd(e)); return; }
+    if (ins_op(e) == PM_LSLI) {
+        i64 k = ins_imm(e);
+        buf_u32(b, 0xD3400000 | (((64 - k) & 63) << 16) | ((63 - k) << 10) | (ins_rn(e) << 5) | ins_rd(e));
+        return;
+    }
+    if (ins_op(e) == PM_ASRI || ins_op(e) == PM_LSRI) {
+        i64 w = 0x9340FC00;
+        if (ins_op(e) == PM_LSRI) w = 0xD340FC00;
+        buf_u32(b, w | ((ins_imm(e) & 63) << 16) | (ins_rn(e) << 5) | ins_rd(e));
+        return;
+    }
+    if (ins_op(e) == PM_ADDSH) {
+        buf_u32(b, 0x8B000000 | (ins_rm(e) << 16) | ((ins_imm(e) & 63) << 10) | (ins_rn(e) << 5) | ins_rd(e));
+        return;
+    }
     i64 mi = mem_slot(ins_rm(e));
     buf_u32(b, mem_base_at(mi) | (ins_rn(e) << 5) | ins_rd(e));
 }
 
 i64 pm_reloc_kind(uptr e) {
+    if (ins_op(e) >= PM_SMULH) return 0 - 1;
     if (pm_mine(ins_op(e))) return R_PAGEOFF12;
     return callp(pm_of(MTASK_RELOC_KIND), e);
 }
@@ -355,6 +494,21 @@ i64 pm_reloc_off(uptr e) {
 
 void pm_dump(uptr e) {
     if (!pm_mine(ins_op(e))) { callp(pm_of(MTASK_DUMP), e); return; }
+    if (ins_op(e) == PM_SMULH || ins_op(e) == PM_ADDSH) {
+        if (ins_op(e) == PM_SMULH) d_head("smulh"); else d_head("add");
+        d_reg(ins_rd(e)); out_str(1, ", "); d_reg(ins_rn(e)); out_str(1, ", "); d_reg(ins_rm(e));
+        if (ins_op(e) == PM_ADDSH) { out_str(1, ", lsl #"); out_num(1, ins_imm(e)); }
+        out_str(1, "\n");
+        return;
+    }
+    if (ins_op(e) == PM_LSLI || ins_op(e) == PM_ASRI || ins_op(e) == PM_LSRI) {
+        if (ins_op(e) == PM_LSLI) d_head("lsl");
+        if (ins_op(e) == PM_ASRI) d_head("asr");
+        if (ins_op(e) == PM_LSRI) d_head("lsr");
+        d_reg(ins_rd(e)); out_str(1, ", "); d_reg(ins_rn(e)); out_str(1, ", #"); out_num(1, ins_imm(e));
+        out_str(1, "\n");
+        return;
+    }
     i64 mi = mem_slot(ins_rm(e));
     d_head(mem_name_at(mi));
     if (mem_wreg(mi)) { out_str(1, "w"); out_num(1, ins_rd(e)); } else d_reg(ins_rd(e));
@@ -365,7 +519,27 @@ void pm_dump(uptr e) {
     out_str(1, "@PAGEOFF]\n");
 }
 
+// ---- ph_addm64(p, v): *p = *p + v, one read, add and write ---------------------
+// src/lvalue.mc's `$x[K] = $x[K] + E` on a FIXED array. The address is
+// computed once and held in a register: the read and the store both go
+// through it, where the two php_pk_*_f copies each recomputed it from the
+// buffer pointer (a load) -- examples/decimal's _dec_umul inner loop, whose
+// store address came late enough to hold the next iteration's load behind
+// it. The machine in effect claims the handler in its prologue, as <float>'s
+// intrinsics do. No new instruction form: a 64-bit load, add and store.
+uptr ph_addm_fn;
+void ph_addm_i(i64 d, i64 na) { callp(ph_addm_fn, d); }
+
+void pm_addm(i64 d) {
+    i64 rp = val_reg(d, REG_S1);
+    i64 rv = val_reg(d + 1, REG_S2);
+    em(mem_op(TY_I64, 0), REG_TMP, rp, 0);
+    e3(I_ADD, REG_TMP, REG_TMP, rv);
+    em(mem_op(TY_I64, 1), REG_TMP, rp, 0);
+}
+
 void pm_prologue() {
+    ph_addm_fn = &pm_addm;
     i64 d = 0;
     loop { if (d >= MAXDEPTH) break; pm_ad_set(d, 0 - 1); d = d + 1; }
     callp(pm_of(MTASK_PROLOGUE));
@@ -380,6 +554,10 @@ void pm_env() {
         if (!s) return;
         if (str_eq(s, "MCPHP_PEEP=0")) pm_off = 1;
         if (str_eq(s, "MCPHP_LAYOUT=0")) pm_nolay = 1;
+        if (str_eq(s, "MCPHP_LEAF=0")) pm_nolf = 1;
+        if (str_eq(s, "MCPHP_DIVK=0")) pm_nodiv = 1;
+        if (str_eq(s, "MCPHP_ADDM=0")) pm_noaddm = 1;
+        if (str_eq(s, "MCPHP_SHIFT=0")) pm_nosh = 1;
         i = i + 1;
     }
 }
@@ -566,7 +744,16 @@ i64 px_fuse(i64 d, i64 l, i64 take) {
 void px_jz(i64 d, i64 l)  { if (!px_fuse(d, l, 0)) callp(px_of(MTASK_JZ), d, l); }
 void px_jnz(i64 d, i64 l) { if (!px_fuse(d, l, 1)) callp(px_of(MTASK_JNZ), d, l); }
 
+void px_addm(i64 d) {
+    i64 rp = x86_val_reg(d, XREG_S1);
+    i64 rv = x86_val_reg(d + 1, XREG_S2);
+    em(x86_mem_op(TY_I64, 0), XR_RDX, rp, 0);
+    e2(X_ADD, XR_RDX, rv);
+    em(x86_mem_op(TY_I64, 1), XR_RDX, rp, 0);
+}
+
 void px_prologue_at(uptr orig) {
+    ph_addm_fn = &px_addm;
     px_cur = orig;
     i64 d = 0;
     loop { if (d >= MAXDEPTH) break; px_ad_set(d, 0 - 1); d = d + 1; }
@@ -779,7 +966,149 @@ void lay_run() {
     }
 }
 
-void pm_frame_fix(i64 frame) { callp(pm_of(MTASK_FRAME_FIX), frame); lay_x86 = 0; lay_run(); }
+// ---- P11: a leaf keeps its locals in registers nobody saves --------------------
+// mc's allocator hands a function's locals x19..x28, which the callee must
+// save and restore: a store and a load per register in every call. A LEAF --
+// no bl, no blr, no raw word -- calls nothing that could want x0..x7 or a
+// depth register kept, so a local can live in a register the function does
+// not otherwise touch: a parameter's own argument register (its `mov xR, xi`
+// then moves nothing) or a free one of x1..x7 and x10..x15. The saves and the
+// restores of every register moved go. Any opcode this pass does not know
+// the operands of leaves the function as it is. (C's leaf functions are
+// compiled this way; examples/decimal's runtime string routines are leaves.)
+u8  pm_map[32];
+
+// which fields of the instruction are registers: 1 rd, 2 rn, 4 rm, 8 imm (msub's ra); -1 unknown
+i64 pm_rfields(i64 op) {
+    if (op == 0 || op == I_NOP || op == I_RET || op == I_B || op == I_BCOND) return 0;
+    if (op == I_ADD || op == I_SUB || op == I_MUL || op == I_SDIV || op == I_UDIV || op == I_AND
+        || op == I_ORR || op == I_EOR || op == I_LSLV || op == I_LSRV || op == I_ASRV) return 7;
+    if (op == I_MSUB) return 15;
+    if (mem_slot(op) >= 0) return 3;
+    if (op == PM_LDG || op == PM_STG) return 3;
+    if (op == PM_SMULH || op == PM_ADDSH) return 7;
+    if (op == PM_LSLI || op == PM_ASRI || op == PM_LSRI) return 3;
+    if (op == I_MOVZ || op == I_MOVK || op == I_CSET || op == I_CBZ || op == I_CBNZ || op == I_ADRP) return 1;
+    if (op == I_MOV || op == I_MOVW || op == I_MVN || op == I_NEG || op == I_SXTB || op == I_SXTH
+        || op == I_SXTW || op == I_ANDI || op == I_ADDI || op == I_SUBI || op == I_ADDLO) return 3;
+    if (op == I_CMP) return 6;
+    if (op == I_CMPI) return 2;
+    if (op == I_STP_PRE || op == I_LDP_POST) return 7;
+    return 0 - 1;
+}
+
+i64 pm_rget(uptr e, i64 f) {
+    if (f == 1) return ins_rd(e);
+    if (f == 2) return ins_rn(e);
+    if (f == 4) return ins_rm(e);
+    return ins_imm(e) & 31;
+}
+void pm_rset(uptr e, i64 f, i64 r) {
+    if (f == 1) st64(e + INS_RD, r);
+    if (f == 2) st64(e + INS_RN, r);
+    if (f == 4) st64(e + INS_RM, r);
+    if (f == 8) st64(e + INS_IMM, r);
+}
+
+void pm_leaf() {
+    if (pm_off || pm_nolf) return;
+    u8 used[33];
+    i64 r = 0;
+    loop { if (r > 32) break; st8(used + r, 0); r = r + 1; }
+    r = 0;
+    loop { if (r >= 32) break; st8(pm_map + r, r); r = r + 1; }
+    // the epilogue's label: the last label of the function
+    i64 lepi = 0 - 1;
+    i64 q = nins - 1;
+    loop { if (q < ins_base) break; if (ins_op(ins_at(q)) == 0) { lepi = ins_label(ins_at(q)); break; } q = q - 1; }
+    i64 i = ins_base;
+    loop {
+        if (i >= nins) break;
+        uptr e = ins_at(i);
+        i64 fs = pm_rfields(ins_op(e));
+        // a call is allowed when it is a TAIL: after it only its answer moves
+        // (x0 and the depth registers) on its way to the epilogue, so no local
+        // is read once the callee may have clobbered its register
+        if (ins_op(e) == I_BL) {
+            i64 j = i + 1;
+            i64 ok = 0;
+            loop {
+                if (j >= nins) break;
+                uptr t = ins_at(j);
+                i64 o = ins_op(t);
+                if (o == 0 && ins_label(t) == lepi) { ok = 1; break; }
+                if (o == I_B && ins_label(t) == lepi) { ok = 1; break; }
+                if (o == I_NOP || o == 0) { j = j + 1; continue; }
+                if (o == I_MOV && (ins_rd(t) == 0 || (ins_rd(t) >= 9 && ins_rd(t) <= 14))
+                    && (ins_rn(t) == 0 || (ins_rn(t) >= 9 && ins_rn(t) <= 14))) { j = j + 1; continue; }
+                break;
+            }
+            if (!ok) return;
+            fs = 0;
+        }
+        if (fs < 0) return;
+        i64 f = 1;
+        loop {
+            if (f > 8) break;
+            if (fs & f) { i64 x = pm_rget(e, f); if (x >= 0 && x <= 32) st8(used + x, 1); }
+            f = f * 2;
+        }
+        i = i + 1;
+    }
+    // a parameter's register to its argument register: `mov xR, xi` in a leaf
+    i64 any = 0;
+    i = ins_base;
+    loop {
+        if (i >= nins) break;
+        uptr m = ins_at(i);
+        i64 rd = ins_rd(m);
+        if (ins_op(m) == I_MOV && rd >= 19 && rd <= 28 && ins_rn(m) >= 0 && ins_rn(m) < 8 && ld8(pm_map + rd) == rd) {
+            st8(pm_map + rd, ins_rn(m));
+            any = 1;
+        }
+        i = i + 1;
+    }
+    // every other one to a register the function does not touch
+    u8 cand[16];
+    i64 nc = 0;
+    r = 1;
+    loop { if (r > 7) break; if (!ld8(used + r)) { st8(cand + nc, r); nc = nc + 1; } r = r + 1; }
+    r = 15;
+    loop { if (r < 10) break; if (!ld8(used + r)) { st8(cand + nc, r); nc = nc + 1; } r = r - 1; }
+    i64 ci = 0;
+    r = 19;
+    loop {
+        if (r > 28) break;
+        if (ld8(used + r) && ld8(pm_map + r) == r && ci < nc) { st8(pm_map + r, ld8(cand + ci)); ci = ci + 1; any = 1; }
+        r = r + 1;
+    }
+    if (!any) return;
+    i = ins_base;
+    loop {
+        if (i >= nins) break;
+        uptr e2 = ins_at(i);
+        i64 op = ins_op(e2);
+        // the save and the restore of a register that moved: nothing to keep
+        if ((op == I_STR || op == I_LDR) && ins_rn(e2) == REG_FRAME && ins_rd(e2) >= 19 && ins_rd(e2) <= 28
+            && ld8(pm_map + ins_rd(e2)) != ins_rd(e2)) {
+            set_ins_op(e2, I_NOP);
+            i = i + 1;
+            continue;
+        }
+        i64 fs2 = pm_rfields(op);
+        i64 g = 1;
+        loop {
+            if (g > 8) break;
+            if (fs2 & g) { i64 y = pm_rget(e2, g); if (y >= 19 && y <= 28) pm_rset(e2, g, ld8(pm_map + y)); }
+            g = g * 2;
+        }
+        // the parameter's move onto itself
+        if (op == I_MOV && ins_rd(e2) == ins_rn(e2)) set_ins_op(e2, I_NOP);
+        i = i + 1;
+    }
+}
+
+void pm_frame_fix(i64 frame) { pm_leaf(); callp(pm_of(MTASK_FRAME_FIX), frame); lay_x86 = 0; lay_run(); }
 void px_frame_fix(i64 frame) { callp(px_of(MTASK_FRAME_FIX), frame); lay_x86 = 1; lay_run(); }
 
 // The derivation reads the Ins record, opcode numbers and machine helpers
@@ -837,4 +1166,6 @@ void ph_mach_init() {
     px_cur = px_orig;
     machine("x86_64", px_tab);
     machine("x86_64-win", px_tab_win);
+    intrinsic("ph_addm64", 2, TY_VOID, &ph_addm_i);
+    ph_addm_on = !pm_noaddm;
 }

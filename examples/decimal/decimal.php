@@ -155,25 +155,50 @@ function _dec_umul(string $a, string $b): string {
 }
 
 // long division, b not zero: the quotient (na digits) and then the remainder,
-// in one string -- the caller knows where the quotient ends
+// in one string -- the caller knows where the quotient ends. The remainder is
+// the twin's: one buffer of nb + 2 digits, its first $rn in use, compared and
+// subtracted where it lies.
 function _dec_udivmod(string $a, string $b): string {
     $b = substr($b, _dec_skip0($b));
+    $nb = strlen($b);
     $na = strlen($a);
     $q = str_repeat('0', $na);
-    $r = '';
+    $r = str_repeat('0', $nb + 2);
+    $rn = 0;
     for ($i = 0; $i < $na; $i++) {
-        if ($r === '0') { $r = ''; }
-        $r .= $a[$i];
+        if ($rn === 1 && $r[0] === '0') { $rn = 0; }
+        $r[$rn] = $a[$i];
+        $rn++;
         $k = 0;
-        while (_dec_ucmp($r, $b) >= 0) {
-            $r = _dec_usub(substr($r, _dec_skip0($r)), $b);
+        while (true) {
+            // skip0, in place: the leading zeros go, one digit stays
+            $z = 0;
+            while ($z < $rn - 1 && $r[$z] === '0') { $z++; }
+            if ($z > 0) {
+                for ($m = 0; $m < $rn - $z; $m++) { $r[$m] = $r[$m + $z]; }
+                $rn -= $z;
+            }
+            // ucmp(r, b) < 0 ends the step
+            if ($rn < $nb) { break; }
+            if ($rn === $nb) {
+                $m = 0;
+                while ($m < $nb && $r[$m] === $b[$m]) { $m++; }
+                if ($m < $nb && ord($r[$m]) < ord($b[$m])) { break; }
+            }
+            // usub(r, b) into r
+            $borrow = 0;
+            for ($m = 0; $m < $rn; $m++) {
+                $d = ord($r[$rn - 1 - $m]) - 48 - $borrow;
+                if ($m < $nb) { $d -= ord($b[$nb - 1 - $m]) - 48; }
+                $borrow = $d < 0 ? 1 : 0;
+                $r[$rn - 1 - $m] = chr(48 + ($d + 10) % 10);
+            }
             $k++;
         }
-        $r = substr($r, _dec_skip0($r));
         $q[$i] = chr(48 + $k);
     }
-    if ($r === '') { $r = '0'; }
-    return $q . $r;
+    if ($rn === 0) { return $q . '0'; }
+    return $q . substr($r, 0, $rn);
 }
 
 // ---- the ONE place a result is rounded and written: half-even ----------------

@@ -667,8 +667,24 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) {
 }
 
 // ---- around every handler --------------------------------------------------
+// The common call: the runtime is up, no call is open and the home chunk
+// exists -- a handful of stores, written in place by src/opt.mc (the first
+// call and a nested one take phx_enter_slow)
+uptr phx_zalloc_fn;
+void phx_enter_slow();
 void phx_enter() {
+    if (ph_boot_done && !phx_depth && phx_home) {
+        ph_pin = 0;
+        ph_zcur = phx_home;
+        ph_zpos = phx_floor;
+        ph_zlim = PHX_CK;
+        phx_depth = 1;
+        ph_zalloc = phx_zalloc_fn;
+    } else phx_enter_slow();
+}
+void phx_enter_slow() {
     php_bootstrap();
+    phx_zalloc_fn = &phx_zalloc;
     if (!phx_depth) {
         ph_pin = 0;
         if (!phx_home) phx_home = phx_em(PHX_CK);
@@ -718,7 +734,21 @@ void phx_throw() {
     zend_throw_exception(ce, s + ZSX_VAL, 0);
 }
 
+// The common return: nothing echoed, nothing thrown, the outermost call, nothing
+// pinned and nothing kept past the floors -- the call's strings go and the
+// allocator is put back. Written in place by src/opt.mc; the rest is
+// phx_leave_slow, which is the whole story.
+void phx_leave_slow();
 void phx_leave() {
+    if (!ph_outn && !ph_exc && phx_depth == 1 && !ph_nob && !ph_pin && ph_en == phx_efloor && phx_cn == phx_keep) {
+        phx_depth = 0;
+        php_rc_drain(0);
+        ph_zalloc = 0;
+        ph_zcur = 0;
+        ph_zlim = 0;
+    } else phx_leave_slow();
+}
+void phx_leave_slow() {
     php_flush();
     phx_throw();
     // MINIT's own end: not a call

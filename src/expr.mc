@@ -358,8 +358,11 @@ i64 ph_index(i64 base, i64 bt) {
     if (bt == PT_PK) {
         if (kt != PT_INT) ph_pk_disagree(ph_tfile, ph_tline, "a key that is not an int");
         if (ph_at("??", 2)) return ph_c2("php_pk_getq", base, kx, ty_pzv);
-        ph_ety = PT_INULL;
+        // an element is an int: C's read answers what the buffer holds
+        ph_ety = PT_INT;
         if (ph_checked_reads) return ph_c2("php_pk_get_d", base, kx, TY_I64);
+        // a FIXED array (src/packed.mc) is never a hash: the buffer's element
+        if (ph_pk_fixed(base)) return ph_quiet("php_pk_get_f", 2, base, kx, 0, 0, TY_I64);
         return ph_quiet("php_pk_get_c", 2, base, kx, 0, 0, TY_I64);
     }
     // an int key on an array needs no key zval: php_arr_iget(_w) is the
@@ -385,10 +388,6 @@ i64 ph_index(i64 base, i64 bt) {
 // get the same one.
 i64 ph_postfix(i64 v, i64 vt) {
     loop {
-        if (vt == PT_INULL && (ph_at("[", 1) || ph_at("->", 2) || ph_at("?->", 3) || ph_at("(", 1))) {
-            v = ph_inull_zv(v);
-            vt = PT_MIXED;
-        }
         if (ph_at("[", 1)) {
             // php reads an offset of a scalar as null with a warning; D4
             // knows the static type, so the conversion to a zval is the
@@ -580,15 +579,8 @@ i64 ph_primary() {
     if (ph_at("[", 1)) { ph_next(); return ph_array_lit("]"); }
     if (ph_at("-", 1)) {
         ph_next();
-        ph_inull_ok = 1;
         i64 v = ph_expr(70);
         i64 t = ph_ety;
-        // -null is int(0); an element's negation wraps as C's does, so
-        // -PHP_INT_MIN is PHP_INT_MIN (docs/semantics.md)
-        if (t == PT_INULL) {
-            ph_ety = PT_INT;
-            return ph_bin(ph_tok("-", 1), ph_int(0), v, TY_I64);
-        }
         if (t == PT_FLOAT) return ph_c1("php_fneg", v, ty_f64);
         // -"1.2" is float(-1.2) and -"abc" is a TypeError: a zval keeps its
         // own rules, and converting to int first threw the fraction away.
@@ -904,17 +896,6 @@ i64 ph_numeric(i64 t) {
 }
 
 i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
-    // a packed element beside another NUMBER is an int: php's null is 0 to
-    // every operator here, and with a number on the other side neither the
-    // value nor an error message can tell the two apart (src/packed.mc).
-    // Beside anything else it is the zval php has.
-    // `**` keeps its zval road for an element: php_pow_i has no overflow test.
-    if (op == ph_tok("**", 2)) {
-        if (lt == PT_INULL) { lhs = ph_inull_zv(lhs); lt = PT_MIXED; }
-        if (rt == PT_INULL) { rhs = ph_inull_zv(rhs); rt = PT_MIXED; }
-    }
-    if (lt == PT_INULL) { if (ph_numeric(rt) || rt == PT_INULL) { lt = PT_INT; } else { lhs = ph_inull_zv(lhs); lt = PT_MIXED; } }
-    if (rt == PT_INULL) { if (ph_numeric(lt)) { rt = PT_INT; } else { rhs = ph_inull_zv(rhs); rt = PT_MIXED; } }
     // anything a static type cannot answer exactly goes to the zval
     if (!ph_numeric(lt) || !ph_numeric(rt)) return ph_arith_zv(op, lhs, lt, rhs, rt);
     if (lt == PT_BOOL) { lhs = ph_to_int(lhs, lt); lt = PT_INT; }
@@ -1132,16 +1113,9 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
 }
 
 i64 ph_expr(i64 minp) {
-    // a packed element (PT_INULL) leaves only when the caller asked for it:
-    // an arithmetic operand, and the two statements src/packed.mc names.
-    // Everywhere else it is the zval php has, as it was before that file.
-    i64 keep = ph_inull_ok;
-    ph_inull_ok = 0;
     ph_efresh = 0;
     i64 lhs0 = ph_postfix(ph_primary(), ph_ety);
-    i64 r = ph_expr_tail(lhs0, ph_ety, minp);
-    if (ph_ety == PT_INULL && !keep) { r = ph_inull_zv(r); ph_ety = PT_MIXED; }
-    return r;
+    return ph_expr_tail(lhs0, ph_ety, minp);
 }
 
 // the operators php's null takes as 0: + - * / % ** & | ^ << >>
@@ -1158,7 +1132,6 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
     loop {
         if (ph_is("instanceof")) {
             if (minp > 65) break;
-            if (lt == PT_INULL) { lhs = ph_inull_zv(lhs); lt = PT_MIXED; }
             ph_next();
             ph_accept("\\", 1);
             uptr cn = ph_tname;
@@ -1176,7 +1149,6 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
         uptr fl = ph_tfile;
         ph_next();
         i64 arop = ph_arith_op(t);
-        if (!arop && lt == PT_INULL) { lhs = ph_inull_zv(lhs); lt = PT_MIXED; }
         // php SHORT-CIRCUITS && and ||: the right operand is not evaluated at
         // all when the left already decides the answer. An mc expression has
         // no branch, so the value is a u8 temporary and the right side is an
@@ -1216,7 +1188,6 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
         // is 2 ** 9, not (2 ** 3) ** 2 (found while fixing `2 ** -1`).
         i64 rp = pr + 1;
         if (t == ph_tok("**", 2)) rp = pr;
-        if (arop) ph_inull_ok = 1;
         i64 rhs = ph_expr(rp);
         i64 rt = ph_ety;
         if (t == ph_tok(".", 1)) {
@@ -1247,10 +1218,6 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
         }
         lhs = ph_arith(t, lhs, lt, rhs, rt, fl, line);
         lt = ph_ety;
-    }
-    if (lt == PT_INULL && ((minp <= 26 && ph_at("??", 2)) || (minp <= 20 && ph_at("?", 1)))) {
-        lhs = ph_inull_zv(lhs);
-        lt = PT_MIXED;
     }
     ph_ety = lt;
     // ?? and the conditional, both right-associative and both short-circuiting.

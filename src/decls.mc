@@ -21,7 +21,6 @@
 #define PT_ARR     8      // php's ordered hash; every element is a zval
 #define PT_OBJ     9      // a raw object handle: $this, and nothing else
 #define PT_PK      10     // a PACKED int array src/packed.mc proved: php_pk_*, never a zval
-#define PT_INULL   11     // a packed array's element READ: an i64, and ph_pkabs says null
 
 // the visibility codes, shared with php_rt.txt
 #define V_PUBLIC    0
@@ -35,6 +34,9 @@
 // the project file, checks those reads again as a hard trap that names the
 // file and line (src/program.mc ph_checked_config).
 i64 ph_checked_reads;
+// src/mach.mc registered ph_addm64 (a read-modify-write of one word): the
+// derived machines are in effect, and MCPHP_ADDM=0 is not set
+i64 ph_addm_on;
 
 i64 ty_pstr;              // the mc type `string` lowers to (D10)
 i64 ty_parr;
@@ -197,12 +199,9 @@ i64  ph_type_tail(i64 t);
 i64  ph_vd(i64 v, i64 t, uptr fl, i64 line);
 i64  ph_echo_of(i64 v, i64 t, uptr fl, i64 line);
 i64  ph_inline_html(uptr fl, i64 line);
-i64  ph_inull_zv(i64 n);
 i64  ph_pk_has(uptr d);
-i64  ph_pin_has(uptr d);
 void ph_pk_scan();
 void ph_pk_disagree(uptr fl, i64 line, uptr what);
-i64  ph_inull_ok;          // src/packed.mc: the next ph_expr may answer PT_INULL
 
 i64 ph_is_arr(i64 t) { if (t == PT_ARR) return 1; return 0; }
 
@@ -233,7 +232,6 @@ uptr ph_tyname(i64 t) {
     if (t == PT_ARR)    return "array";
     if (t == PT_OBJ)    return "object";
     if (t == PT_PK)     return "array";
-    if (t == PT_INULL)  return "?int";
     return "?";
 }
 

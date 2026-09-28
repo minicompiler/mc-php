@@ -299,6 +299,92 @@ i64 ph_rc_releases(uptr tl) {
     return h;
 }
 
+// ---- a FRESH buffer: a string the function makes and writes in place -------
+// A slot whose every store is `$s = str_repeat(...)` or a byte written into
+// itself (`$s[$i] = chr(c)`), and whose every read is a byte of it, its
+// length, or part of a `return` -- examples/decimal's `$out` in
+// _dec_uadd/_usub/_umul and `$q` in _dec_udivmod -- holds a string no other
+// name ever has: it came from str_repeat (php_str_repeat_f, never the shared
+// one-byte string) and nothing it was handed to kept it. So a byte written
+// inside it is C's store, the length the one test left (php_str_setb_f);
+// nobody else can hold it, it is not interned, and its hash was never asked.
+// Past the end the write is php's (php_str_setb_f_slow, which leaves the pool
+// as it found it, so a loop around the write has nothing to drain).
+i64 ph_rc_is_param(uptr name);
+uptr ph_rc_fbs;
+i64  ph_rc_nfb;
+i64  ph_rc_fb_bad;
+
+i64 ph_rc_is_fb(uptr name) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_rc_nfb) break;
+        if (str_eq(ld64(ph_rc_fbs + i * 8), name)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+i64 ph_rc_pfx(uptr s, uptr p) {
+    i64 i = 0;
+    loop { i64 c = ld8(p + i); if (!c) return 1; if (ld8(s + i) != c) return 0; i = i + 1; }
+    return 0;
+}
+
+i64 ph_rc_arg0_is(i64 v, uptr name) {
+    i64 a = nd_a(v);
+    return a && nd_kind(a) == N_IDENT && str_eq(nd_name(a), name);
+}
+
+void ph_rc_fb_walk(i64 s, uptr name) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_RETURN) { s = nd_next(s); continue; }
+        if (k == N_IDENT && str_eq(nd_name(s), name)) ph_rc_fb_bad = 1;
+        i64 skip = 0;
+        if (k == N_ASSIGN && str_eq(nd_name(s), name)) {
+            i64 v = nd_a(s);
+            if (nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_repeat")) {
+            } else if (nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_setb") && ph_rc_arg0_is(v, name)) {
+                ph_rc_fb_walk(nd_next(nd_a(v)), name);
+                skip = 1;
+            } else ph_rc_fb_bad = 1;
+        }
+        if (!skip && k == N_CALL && (ph_rc_pfx(nd_name(s), "php_str_byte") || ph_rc_pfx(nd_name(s), "php_str_off"))
+            && ph_rc_arg0_is(s, name)) {
+            ph_rc_fb_walk(nd_next(nd_a(s)), name);
+            skip = 1;
+        }
+        if (!skip && k == N_CALL && str_eq(nd_name(s), "ld64")) {
+            i64 b = nd_a(s);
+            if (b && nd_kind(b) == N_BINARY && ph_rc_arg0_is(b, name) && nd_kind(nd_b(b)) == N_INT && nd_val(nd_b(b)) == 16) skip = 1;
+        }
+        if (!skip) {
+            ph_rc_fb_walk(nd_a(s), name);
+            ph_rc_fb_walk(nd_b(s), name);
+            ph_rc_fb_walk(nd_c(s), name);
+            ph_rc_fb_walk(nd_d(s), name);
+        }
+        s = nd_next(s);
+    }
+}
+
+void ph_rc_fb_scan(i64 body) {
+    ph_rc_nfb = 0;
+    if (!ph_rc_nslot) return;
+    ph_rc_fbs = xalloc(ph_rc_nslot * 8 + 8);
+    i64 i = 0;
+    loop {
+        if (i >= ph_rc_nslot) break;
+        uptr nm = ld64(ph_rc_slots + i * 8);
+        ph_rc_fb_bad = ph_rc_is_param(nm) || ph_rc_assigned(body, nm) == 0;
+        if (!ph_rc_fb_bad) ph_rc_fb_walk(body, nm);
+        if (!ph_rc_fb_bad) { st64(ph_rc_fbs + ph_rc_nfb * 8, nm); ph_rc_nfb = ph_rc_nfb + 1; }
+        i = i + 1;
+    }
+}
+
 // ---- the rewrite -----------------------------------------------------------
 i64 ph_rc_list(i64 s);
 i64 ph_rc_is_param(uptr name);
@@ -335,6 +421,17 @@ i64 ph_rc_return(i64 r) {
         h = ph_rc_stmt(e);
         t = h;
         e = 0;
+    }
+    // no counted slot to release: the answer and the drain in one routine
+    if (e && str && ph_rc_nslot == 0) {
+        h = ph_rc_set("ph_rv", e);
+        i64 a0 = ph_rc_id("ph_pm", TY_I64);
+        set_nd_next(a0, ph_rc_id("ph_rv", ph_rc_fty));
+        set_nd_next(h, ph_rc_stmt(ph_rc_call("php_rc_ret", a0, TY_VOID)));
+        i64 rt = node_new(N_RETURN, ph_rc_ln, ph_rc_fl);
+        set_nd_a(rt, ph_rc_id("ph_rv", ph_rc_fty));
+        set_nd_next(nd_next(h), rt);
+        return ph_rc_block(h);
     }
     if (e) {
         h = ph_rc_set("ph_rv", e);
@@ -394,6 +491,10 @@ i64 ph_rc_one(i64 s) {
     if (k == N_ASSIGN && ph_rc_is_slot(nd_name(s))) {
         uptr nm = nd_name(s);
         i64 v = nd_a(s);
+        if (ph_rc_is_fb(nm)) {
+            if (ph_rc_is_call(v, "php_str_setb", nm)) { set_nd_name(v, "php_str_setb_f"); return s; }
+            if (nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_repeat")) set_nd_name(v, "php_str_repeat_f");
+        }
         if (ph_rc_is_call(v, "php_str_concat", nm)) { set_nd_name(v, "php_str_append"); return s; }
         // `$s = $s . a . b [. c]`: the chain php_str_cat3/cat4 folded
         if (ph_rc_is_call(v, "php_str_cat3", nm)) {
@@ -514,6 +615,7 @@ void ph_rc_fn(i64 f) {
         q = nd_next(q);
     }
     if (ph_rc_counting) ph_rc_scan_vars(nd_a(body));
+    ph_rc_fb_scan(nd_a(body));
     // the string parameters the body assigns are slots too; the ones it never
     // assigns stay borrowed
     i64 entry = 0;

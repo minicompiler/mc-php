@@ -1011,6 +1011,12 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "intdiv")) {
         ph_need(na, 2, name, fl, line);
         ph_ety = PT_INT;
+        // a divisor the compiler can see is a positive literal can neither be
+        // zero nor turn PHP_INT_MIN into an overflow: mc's own `/`, which
+        // cannot raise -- `%`'s rule in src/expr.mc, and no position store,
+        // no test and no temporary around it
+        if (nd_kind(ph_a(av, 1)) == N_INT && nd_val(ph_a(av, 1)) > 0)
+            return ph_bin(ph_tok("/", 1), ph_to_int(a0, t0), ph_a(av, 1), TY_I64);
         return ph_c2("php_intdiv", ph_to_int(a0, t0), ph_to_int(ph_a(av, 1), ph_aty(av, 1)), TY_I64);
     }
     if (str_eq(name, "abs")) {
@@ -1167,6 +1173,38 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         st64(sa + 40, ph_int(want));
         uptr sf = "php_spn_s";
         i64 nargs = 6;
+        // a literal set that is one run of bytes: php_spn_r, no byte map
+        if (ph_is_strlit(set) && want && !hasl && ph_lit_len(set) > 0) {
+            uptr lb = nd_name(nd_next(nd_a(set)));
+            i64 ll = ph_lit_len(set);
+            u8 seen[256];
+            i64 q = 0;
+            loop { if (q >= 256) break; st8(seen + q, 0); q = q + 1; }
+            i64 lo = 255;
+            i64 hi = 0;
+            q = 0;
+            loop {
+                if (q >= ll) break;
+                i64 c = ld8(lb + q);
+                st8(seen + c, 1);
+                if (c < lo) lo = c;
+                if (c > hi) hi = c;
+                q = q + 1;
+            }
+            i64 run = 1;
+            q = lo;
+            loop { if (q > hi) break; if (!ld8(seen + q)) run = 0; q = q + 1; }
+            if (run) {
+                st64(sa + 8, ph_int(lo));
+                st64(sa + 16, ph_int(hi - lo));
+                st64(sa + 24, so);
+                i64 save0 = ph_can_throw;
+                i64 sr = ph_calln("php_spn_r", sa, 4, TY_I64);
+                ph_can_throw = save0;
+                ph_ety = PT_INT;
+                return sr;
+            }
+        }
         if (ph_is_strlit(set)) {
             sf = "php_spn";
             set = ph_bmap_of(set, 0);

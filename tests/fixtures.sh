@@ -219,6 +219,31 @@ else
     echo "  FAIL  runtime copies: g/115's lowering reads $* (want 0 1 1: no php_pk_get_c/pk_set/str_byte call, a php_pk_get_c_slow, a break to the tail)"
     fail=1
 fi
+# decimal-2x's lowerings, read back from g/116 compiled the counting way
+# (MCPHP_RC=check, so src/rc.mc runs as on the extension road): fmt() builds
+# its answer as one rope, acc()'s array is fixed (no hash test, no bound),
+# pad() is one string, fresh() writes its buffer in place with the slow half
+# the only call, and sign()'s short circuits are mc's && and || again (no
+# temporary is assigned; sc()'s right sides are calls, which keep theirs). The differential passes without any of it.
+MCPHP_RC=check "$MCPHP_BIN" --dump-ast $P/g/116-lowered-forms.php > "$tmp/lf.ast" 2>&1
+set -- $(awk '/^FUNC/ { f = $NF }
+    f == "name=f_fmt" && /CALL .*name=php_str_rope$/ { r++ } f == "name=f_fmt" && /CALL .*name=php_str_(concat|catw2)$/ { c++ }
+    f == "name=f_acc" && /CALL .*name=php_pk_(get_c|set|get_c_slow|set_slow)$/ { p++ }
+    f == "name=f_pad" && /CALL .*name=php_str_catrep$/ { d++ }
+    f == "name=f_fresh" && /CALL .*name=php_str_setb_f_slow$/ { w++ } f == "name=f_fresh" && /CALL .*name=php_str_setb(_own)?$/ { o++ }
+    f == "name=f_sign" && /ASSIGN name=.*phs_/ { t++ }
+    END { print r + 0, c + 0, p + 0, (d > 0), (w > 0), o + 0, t + 0 }' "$tmp/lf.ast")
+# A Windows-hosted compiler reads no environment (below, the out-of-line
+# block says why), so MCPHP_RC=check cannot turn the counting on there and
+# fresh() keeps php's write: that host checks the other four.
+want="1 0 0 1 1 0 0"; fb="fresh buffer"
+if [ "$sfx" = .exe ]; then want="1 0 0 1 0 1 0"; fb="php's write in fresh() (the counting switch is not readable on a Windows host)"; fi
+if [ "$*" = "$want" ]; then
+    echo "  lowered forms: g/116's rope, fixed array, pad, $fb and folded short circuits"
+else
+    echo "  FAIL  lowered forms: g/116 reads $* (want $want: one rope and no concatenation, no packed call, a pad, a fresh buffer's slow half and no php write, no short-circuit temporary)"
+    fail=1
+fi
 # src/mach.mc's peepholes, read back on BOTH machines whatever the host (the
 # dump takes --machine=): in g/114's sums() a constant that fits is the
 # immediate (4095) and one that does not stays a register (4096), `$i < $n`
@@ -241,6 +266,25 @@ if [ "$*" = "1 1 1 1 1 1 1" ]; then
     echo "  peephole: g/114 has its immediates, one branch per loop exit and a global's page offset, on arm64 and x86-64"
 else
     echo "  FAIL  peephole: g/114's dump reads $* (want 1 1 1 1 1 1 1: arm64 add #4095, movz #4096, b.ge, @PAGEOFF]; x86-64 lea +4095, lea -4096, jge)"
+    fail=1
+fi
+# decimal-2x's second round, read back on arm64 whatever the host: in g/118
+# a division by a constant is a multiply-high and no sdiv (P12) whose shift is
+# the immediate form (P13), the FIXED array's `$a[K] = $a[K] + E` is
+# ph_addm64 (src/lvalue.mc), its element address one add with a shifted
+# operand (P13) and its byte read's constants the load's own offset
+# (src/opt.mc's ph_ac_walk). The differential passes without any of it.
+set -- $("$MCPHP_BIN" --machine=arm64 --dump-asm $P/g/118-divk-shift-rmw.php 2>&1 | awk '
+    /^_/ { u = $0 }
+    u == "_f_divs:" && /smulh/ { a++ } u == "_f_divs:" && /sdiv/ { b++ }
+    u == "_f_divs:" && /asr x[0-9]+, x[0-9]+, #2$/ { c++ }
+    u == "_f_rmw:" && /, lsl #3$/ { d++ } u == "_f_rmw:" && /ldrb w[0-9]+, \[x[0-9]+, #23\]$/ { e++ }
+    END { print (a > 0), b + 0, (c > 0), (d > 0), (e > 0) }')
+set -- "$@" $("$MCPHP_BIN" --dump-ast $P/g/118-divk-shift-rmw.php 2>&1 | grep -c 'name=ph_addm64')
+if [ "$*" = "1 0 1 1 1 2" ]; then
+    echo "  second round: g/118's multiply-high, immediate shifts, shifted add, load offset and ph_addm64"
+else
+    echo "  FAIL  second round: g/118 reads $* (want 1 0 1 1 1 2: smulh and no sdiv, asr #2, an add lsl #3, ldrb [x, #23], two ph_addm64)"
     fail=1
 fi
 # src/mach.mc's P10, read back on the three machines: every slow half in g/115's

@@ -44,17 +44,10 @@
 // inside the same handle (php_pk_hash), and from then on a read is the hash's
 // own lookup (php_pk_get_c).
 //
-// A variable whose only assignment is `$v = $x[K];` (the FIRST occurrence, a
-// statement, every read after it in its block, never written again) is kept
-// native too: an i64 plus the null flag (PT_INULL, two locals). That is
-// `$xi = $x[$i]` in examples/decimal's _dec_umul, the operand of its inner
-// loop's multiply.
-//
-// An element read or such a variable is PT_INULL: ph_arith treats it as an
-// int beside another number -- php's null IS 0 there, `null + 1` and
-// `null * 5` are ints -- and everywhere else (a call's argument, a
-// comparison, echo, `.`) it becomes the zval php has (php_zinull), which is
-// exactly what the read was before this file existed.
+// An element read is an int (C's read answers what the buffer holds; php's
+// null for a key the array does not have is a read outside it, undefined
+// under C's rules -- docs/semantics.md), so `$v = $x[$i]` makes $v an int
+// like any other: `$xi = $x[$i]` in examples/decimal's _dec_umul.
 //
 // Like every int, an element's + - * wraps as C's does (docs/semantics.md):
 // php would promote the result to a float, and neither a native int nor C does.
@@ -72,12 +65,10 @@
 #define PKF_KILL  2        // inside unset( / list( / a destructuring [ ]
 
 #define PKS_CAND  1
-#define PKS_INULL 2
 #define PKS_INT   4
 
 // ---- the current function's answer -------------------------------------------
 uptr pkx_names;             // the packed arrays, "$x", 0-terminated list
-uptr pkx_inames;            // the PT_INULL variables
 
 i64 pkx_in(uptr lst, uptr d) {
     if (!lst) return 0;
@@ -92,19 +83,6 @@ i64 pkx_in(uptr lst, uptr d) {
 }
 
 i64 ph_pk_has(uptr d) { return pkx_in(pkx_names, d); }
-i64 ph_pin_has(uptr d) { return pkx_in(pkx_inames, d); }
-
-// a PT_INULL node, as the zval php has for it
-i64 ph_inull_zv(i64 n) {
-    if (nd_kind(n) == N_IDENT) {
-        uptr vn = nd_name(n);
-        i64 f = node_new(N_IDENT, nd_line(n), nd_file(n));
-        set_nd_name(f, p_cat("vn_", vn + 2, 0, cstrlen(vn + 2)));
-        set_nd_type(f, TY_I64);
-        return ph_quiet("php_zinull2", 2, n, f, 0, 0, ty_pzv);
-    }
-    return ph_quiet("php_zinull", 1, n, 0, 0, 0, ty_pzv);
-}
 
 // ---- the token scan ------------------------------------------------------------
 i64  pkx_n;
@@ -380,7 +358,7 @@ void pkx_nest() {
     }
 }
 
-// ---- the static answer: 1 an int, 2 a packed element (int or null), 0 other --
+// ---- the static answer: 1 an int, 0 other ------------------------------------
 i64 pkx_st(i64 i) { return ld64(pkx_vs + ld64(pkx_vi + i * 8) * 8); }
 
 i64 pkx_postfix(i64 j) {
@@ -434,12 +412,11 @@ i64 pkx_prim(i64 i) {
         i64 s = pkx_st(i);
         if (pkx_isp(i + 1, "[") && (s & PKS_CAND)) {
             i64 m = pkx_mat(i + 1);
-            if (!pkx_postfix(m + 1)) { pkx_at = m + 1; return 2; }
+            if (!pkx_postfix(m + 1)) { pkx_at = m + 1; return 1; }
         }
         if (pkx_postfix(i + 1)) { pkx_at = pkx_skip(i + 1); return 0; }
         pkx_at = i + 1;
         if (s & PKS_INT) return 1;
-        if (s & PKS_INULL) return 2;
         return 0;
     }
     if (k == PKK_ID) {
@@ -488,8 +465,6 @@ i64 pkx_prim(i64 i) {
         if (r4 < 0 || pkx_at != m2) r4 = 0;
         pkx_at = m2 + 1;
         if (pkx_postfix(m2 + 1)) { pkx_at = pkx_skip(m2 + 1); return 0; }
-        // a parenthesised element read is normalised to a zval by ph_expr
-        if (r4 == 2) return 0;
         return r4;
     }
     if (pkx_isp(i, "[")) { pkx_at = pkx_skip(pkx_mat(i) + 1); return 0; }
@@ -629,7 +604,7 @@ i64 pkx_check(i64 v, i64 s) {
     if (s == PKS_INT && param) {
         if (ph_var_type(d) != PT_INT || ph_is_ref(d)) return 0;
     }
-    if ((s == PKS_CAND || s == PKS_INULL) && param) return 0;
+    if (s == PKS_CAND && param) return 0;
     i64 first = 0 - 1;
     i64 nasg = 0;
     i64 i = 0;
@@ -685,17 +660,10 @@ i64 pkx_check(i64 v, i64 s) {
             && !pkx_isp(i - 1, "++") && !pkx_isp(i - 1, "--")) return 0;
         if (pkx_isp(nx, "=")) {
             nasg = nasg + 1;
-            if (s == PKS_INULL) {
-                if (!isfirst || !pkx_stmt_start(i) || nasg > 1) return 0;
-                if (pkx_rhs(nx + 1, 0) != 2) return 0;
-                if (!(pkx_kind(nx + 1) == PKK_VAR && (pkx_st(nx + 1) & PKS_CAND))) return 0;
-            } else {
-                if (pkx_rhs(nx + 1, 1) != 1) return 0;
-            }
+            if (pkx_rhs(nx + 1, 1) != 1) return 0;
             i = i + 1;
             continue;
         }
-        if (s == PKS_INULL && (fl & PKF_ISSET)) return 0;
         if (pkx_isp(nx, "+=") || pkx_isp(nx, "-=") || pkx_isp(nx, "*=") || pkx_isp(nx, "%=")) {
             if (s != PKS_INT || isfirst && !param) return 0;
             if (pkx_rhs(nx + 1, 1) < 1) return 0;
@@ -720,14 +688,86 @@ i64 pkx_check(i64 v, i64 s) {
         if (!pkx_read_prev(i)) return 0;
         i = i + 1;
     }
-    if (s == PKS_INULL && nasg != 1) return 0;
     return 1;
 }
 
-// Scan the body whose `{` the parser is on, and set pkx_names/pkx_inames.
+// ---- a packed array that never becomes a hash ----------------------------------
+// A store outside the range turns the array into php's hash (php_pk_set_slow),
+// and from then on every read must look for the hash first. An array whose
+// every keyed store is `$x[K] = ... $x[K] ...` -- the same key, read on the
+// right-hand side of the same statement -- never does: under C's rules a read
+// outside the array is undefined, so the read says K is inside it, and so is
+// the store. K is compared token for token and may name only variables and
+// integers under + - * and parentheses; the right-hand side assigns nothing,
+// so K means the same thing at the read and at the store. A call there cannot
+// change K either: it could only through a reference, and a name any source
+// takes by reference is a zval everywhere (the whole-source scans in
+// program.mc), never the int a key must be (tests/g/117). `$x[] = E` grows the
+// dense buffer and is allowed too. Such an array (FIXED) is read and written
+// as C reads and writes a buffer: no hash test, no bound test.
+uptr pkx_fixed;             // the fixed arrays, by their mangled names ("v_x")
+
+i64 ph_pk_fixed(i64 base) { return nd_kind(base) == N_IDENT && pkx_in(pkx_fixed, nd_name(base)); }
+
+i64 pkx_keytok(i64 j) {
+    i64 k = pkx_kind(j);
+    if (k == PKK_VAR) return 1;
+    if (k == PKK_NUM) return ld64(pkx_t + j * 8) == 1;
+    return pkx_isp(j, "+") || pkx_isp(j, "-") || pkx_isp(j, "*") || pkx_isp(j, "(") || pkx_isp(j, ")");
+}
+
+i64 pkx_sametok(i64 a, i64 b) {
+    if (pkx_kind(a) != pkx_kind(b)) return 0;
+    if (pkx_kind(a) == PKK_VAR) return ld64(pkx_vi + a * 8) == ld64(pkx_vi + b * 8);
+    return ld64(pkx_t + a * 8) == ld64(pkx_t + b * 8) && ld64(pkx_v + a * 8) == ld64(pkx_v + b * 8);
+}
+
+// the store `$x[K] = RHS;` whose `[` is at o reads $x[K] in RHS, which assigns nothing
+i64 pkx_rmw(i64 v, i64 o) {
+    i64 m = pkx_mat(o);
+    i64 kl = m - o - 1;
+    if (kl <= 0 || !pkx_isp(m + 1, "=")) return 0;
+    i64 j = o + 1;
+    loop { if (j >= m) break; if (!pkx_keytok(j)) return 0; j = j + 1; }
+    i64 e = m + 2;
+    loop { if (e >= pkx_n) return 0; if (pkx_isp(e, ";")) break; e = e + 1; }
+    i64 seen = 0;
+    j = m + 2;
+    loop {
+        if (j >= e) break;
+        if (pkx_kind(j) == PKK_P) {
+            i64 c = ld64(pkx_t + j * 8);
+            if (pkx_isp(j, "=") || pkx_isp(j, "++") || pkx_isp(j, "--")) return 0;
+            if (((c >> 8) & 255) == 61 && (c & 255) != 61 && (c & 255) != 33 && (c & 255) != 60 && (c & 255) != 62) return 0;
+            if (((c >> 16) & 255) == 61 && !pkx_isp(j, "===") && !pkx_isp(j, "!==") && !pkx_isp(j, "<=>")) return 0;
+        }
+        if (!seen && pkx_kind(j) == PKK_VAR && ld64(pkx_vi + j * 8) == v && pkx_isp(j + 1, "[") && pkx_mat(j + 1) - j - 2 == kl) {
+            i64 q = 0;
+            loop { if (q >= kl) break; if (!pkx_sametok(o + 1 + q, j + 2 + q)) break; q = q + 1; }
+            if (q == kl) seen = 1;
+        }
+        j = j + 1;
+    }
+    return seen;
+}
+
+i64 pkx_isfixed(i64 v) {
+    i64 i = 0;
+    loop {
+        if (i >= pkx_n) break;
+        if (pkx_kind(i) == PKK_VAR && ld64(pkx_vi + i * 8) == v && pkx_isp(i + 1, "[")) {
+            i64 m = pkx_mat(i + 1);
+            if (pkx_isp(m + 1, "=") && m != i + 2 && !pkx_rmw(v, i + 1)) return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Scan the body whose `{` the parser is on, and set pkx_names.
 void ph_pk_scan() {
     pkx_names = 0;
-    pkx_inames = 0;
+    pkx_fixed = 0;
     pkx_bad = 0;
     pkx_n = 0;
     pkx_nv = 0;
@@ -761,7 +801,6 @@ void ph_pk_scan() {
         i64 s = PKS_INT;
         if (f < pkx_n && pkx_isp(f + 1, "=") && pkx_stmt_start(f)) {
             if (pkx_isp(f + 2, "[") || pkx_isid(f + 2, "array") || pkx_isid(f + 2, "array_fill")) s = PKS_CAND;
-            if (pkx_kind(f + 2) == PKK_VAR && pkx_isp(f + 3, "[")) s = PKS_INULL;
         }
         st64(pkx_vs + v * 8, s);
         v = v + 1;
@@ -772,10 +811,8 @@ void ph_pk_scan() {
         loop {
             if (v >= pkx_nv) break;
             i64 s2 = ld64(pkx_vs + v * 8);
-            // a failed PT_INULL may still be an int (`$t = $x[$i] + 1;`)
             if (s2 && !pkx_check(v, s2)) {
                 i64 ns = 0;
-                if (s2 == PKS_INULL) ns = PKS_INT;
                 st64(pkx_vs + v * 8, ns);
                 changed = 1;
             }
@@ -783,21 +820,24 @@ void ph_pk_scan() {
         }
         if (!changed) break;
     }
-    // the answer, as two 0-terminated lists
+    // the answer, a 0-terminated list
     pkx_names = xalloc(pkx_nv * 8 + 8);
-    pkx_inames = xalloc(pkx_nv * 8 + 8);
+    pkx_fixed = xalloc(pkx_nv * 8 + 8);
+    i64 fx = 0;
     i64 a = 0;
-    i64 b = 0;
     v = 0;
     loop {
         if (v >= pkx_nv) break;
         i64 s3 = ld64(pkx_vs + v * 8);
-        if (s3 == PKS_CAND) { st64(pkx_names + a * 8, ld64(pkx_vn + v * 8)); a = a + 1; }
-        if (s3 == PKS_INULL) { st64(pkx_inames + b * 8, ld64(pkx_vn + v * 8)); b = b + 1; }
+        if (s3 == PKS_CAND) {
+            st64(pkx_names + a * 8, ld64(pkx_vn + v * 8));
+            a = a + 1;
+            if (pkx_isfixed(v)) { st64(pkx_fixed + fx * 8, ph_mangle(ld64(pkx_vn + v * 8), "v_")); fx = fx + 1; }
+        }
         v = v + 1;
     }
     st64(pkx_names + a * 8, 0);
-    st64(pkx_inames + b * 8, 0);
+    st64(pkx_fixed + fx * 8, 0);
 }
 
 // a prediction the lowering does not meet: the scan above is wrong, and the

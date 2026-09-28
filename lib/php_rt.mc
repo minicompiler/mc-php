@@ -248,6 +248,27 @@ uptr php_str_esc(uptr s) {
 // _efree in the loop itself, lib/php_prog.mc poisons in check mode)
 void php_rc_drain(i64 m);
 
+// `return E;` of a string from a function with no counted slot (src/rc.mc):
+// E stays the caller's temporary and whatever else the call left above its
+// mark m goes. When E is the pool's top -- a call's answer, the last string
+// built -- it moves down to the mark and the rest drains, with no reference
+// taken or dropped (the take's pop and the push after the drain, which
+// cancel). The fast path alone, so src/opt.mc copies it into the caller.
+void php_rc_ret_slow(i64 m, uptr v);
+void php_rc_ret(i64 m, uptr v) {
+    if (ph_pn > m && ld64(ph_pool + (ph_pn << 3) - 8) == v) {
+        st64(ph_pool + (ph_pn << 3) - 8, ld64(ph_pool + (m << 3)));
+        st64(ph_pool + (m << 3), v);
+        if (ph_pn > m + 1) php_rc_drain(m + 1);
+    } else php_rc_ret_slow(m, v);
+}
+void php_rc_ret_slow(i64 m, uptr v) {
+    i64 counted = v && !(ld32(v + 4) & ZS_INTERNED);
+    if (counted) php_rc_take(v);
+    php_rc_drain(m);
+    if (counted) php_pool_push(v);
+}
+
 // may this string be written in place? Ours (not interned, not persistent)
 // and nobody else's: php's own test before zend_string_extend reallocates.
 i64 php_str_mine(uptr s) {
@@ -282,22 +303,15 @@ uptr php_str_val(uptr s) { return s + ZS_HDR; }
 // halves of four, or single bytes. A decimal's strings are ten to twenty
 // bytes long, and the byte loop for the tail was most of what a copy cost.
 void php_memcpy(uptr d, uptr s, i64 n) {
-    if (n >= 8) {
-        u64 t = ld64(s + n - 8);
-        i64 i = 0;
-        loop { if (i + 8 > n) break; st64(d + i, ld64(s + i)); i = i + 8; }
-        st64(d + n - 8, t);
-        return;
-    }
-    if (n >= 4) {
-        i64 a = ld32(s);
-        i64 b = ld32(s + n - 4);
-        st32(d, a);
-        st32(d + n - 4, b);
-        return;
-    }
-    i64 j = 0;
-    loop { if (j >= n) break; st8(d + j, ld8(s + j)); j = j + 1; }
+    // eight bytes a step, then the tail as 4, 2 and 1 byte pieces: no store
+    // overlaps another, so a load of the bytes just written is forwarded
+    // from one store (two overlapping stores under one load are not), and a
+    // string of a few bytes is copied with no loop at all
+    i64 i = 0;
+    loop { if (i + 8 > n) break; st64(d + i, ld64(s + i)); i = i + 8; }
+    if (n & 4) { st32(d + i, ld32(s + i)); i = i + 4; }
+    if (n & 2) { st16(d + i, ld16(s + i)); i = i + 2; }
+    if (n & 1) st8(d + i, ld8(s + i));
 }
 
 // the first byte c in p[0..n), or -1: eight bytes a step, the has-a-zero-byte
@@ -381,6 +395,63 @@ uptr php_str_concat(uptr a, uptr b) {
     php_memcpy(s + ZS_HDR, a + ZS_HDR, la);
     php_memcpy(s + ZS_HDR + la, b + ZS_HDR, lb);
     return s;
+}
+
+// a string built by appends (src/opt.mc's rope): n pieces, each a (string,
+// start, length) window with php's substr bounds, 0 for an append that did
+// not run -- one allocation of the final length, one copy a piece
+uptr php_str_rope(uptr r, i64 n) {
+    i64 t = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        uptr p = r + i * 24;
+        uptr s = ld64(p);
+        if (s) {
+            i64 st = ld64(p + 8);
+            i64 ln = ld64(p + 16);
+            i64 sl = ld64(s + 16);
+            // a window inside its string, the common case: no php_win call
+            if ((u64) st <= (u64) sl && ln >= 0) {
+                if (ln > sl - st) ln = sl - st;
+            } else ln = php_win(s, st, ln, p + 8);
+            st64(p + 16, ln);
+            t = t + ln;
+        }
+        i = i + 1;
+    }
+    uptr o = php_str_alloc(t);
+    uptr d = o + ZS_HDR;
+    i = 0;
+    loop {
+        if (i >= n) break;
+        uptr q = r + i * 24;
+        uptr w = ld64(q);
+        if (w) {
+            i64 m = ld64(q + 16);
+            uptr f = w + ZS_HDR + ld64(q + 8);
+            php_memcpy(d, f, m);
+            d = d + m;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+// `a . str_repeat(c, n)` (src/opt.mc): one string of the final length. A
+// count str_repeat refuses, or a pattern of more than one byte, is the
+// two calls it stands for, so what they raise is raised the same way.
+uptr php_str_repeat(uptr s, i64 times);
+uptr php_str_catrep(uptr a, uptr c, i64 n) {
+    if (n < 0 || ld64(c + 16) != 1) return php_str_concat(a, php_str_repeat(c, n));
+    if (!n) return a;
+    i64 la = ld64(a + 16);
+    uptr o = php_str_alloc(la + n);
+    php_memcpy(o + ZS_HDR, a + ZS_HDR, la);
+    i64 b = ld8(c + ZS_HDR);
+    i64 i = 0;
+    loop { if (i >= n) break; st8(o + ZS_HDR + la + i, b); i = i + 1; }
+    return o;
 }
 
 // `a . b . c` and `a . b . c . d` in one allocation (the compiler folds a
@@ -587,6 +658,20 @@ uptr php_str_setb_own(uptr s, i64 i, i64 c) {
     return php_str_setoff_own(s, i, php_zstr(php_chr(c)));
 }
 uptr php_str_setb(uptr s, i64 i, i64 c) { return php_str_setoff(s, i, php_zstr(php_chr(c))); }
+
+// a FRESH buffer's byte (src/rc.mc): the string is this function's own, so the
+// bound is the one test; past it, php_str_setb_own's road, and every
+// temporary that made goes before the call returns, so the pool is as it was
+uptr php_str_setb_f_slow(uptr s, i64 i, i64 c) {
+    i64 m = ph_pn;
+    uptr r = php_str_setb_own(s, i, c);
+    php_rc_drain(m);
+    return r;
+}
+uptr php_str_setb_f(uptr s, i64 i, i64 c) {
+    if ((u64) i < (u64) ld64(s + 16)) { st8(s + ZS_HDR + i, c); return s; }
+    return php_str_setb_f_slow(s, i, c);
+}
 
 // memcmp over the bytes, then the length: PHP's own strcmp ordering.
 i64 php_str_cmp(uptr a, uptr b) {
@@ -1773,11 +1858,9 @@ uptr php_arr_copy(uptr src) {
 // then on every operation takes the hash. The elements are ints either way,
 // so what a read answers never changes, only where it was found.
 //  0 len i64 | 8 cap i64 | 16 data uptr | 24 hash uptr (0 while dense)
-// A read that finds nothing is php's warning and null. The null cannot
-// travel in an i64, so the read answers 0 and leaves ph_pkabs set: the
-// compiler reads the flag right after the call wherever a null and a 0 would
-// differ (php_zinull), and nowhere else -- `null + 1` and `0 + 1` do not.
-i64 ph_pkabs;
+// A read of a key the array does not have is a read outside it, undefined
+// under C's rules (docs/semantics.md): it answers an int and says nothing, and
+// `[php] checked_reads` makes it a trap (php_pk_get_d).
 
 uptr php_pk_new(i64 cap) {
     if (cap < 8) cap = 8;
@@ -1847,11 +1930,18 @@ void php_pk_push(uptr p, i64 v) {
     st64(p, n + 1);
 }
 
+// a FIXED array (src/packed.mc): never a hash, and its keyed stores are to a
+// key the same statement read, so neither test is needed; C's read and store
+i64 php_pk_get_f(uptr p, i64 k) { return ld64(ld64(p + 16) + (k << 3)); }
+void php_pk_set_f(uptr p, i64 k, i64 v) { st64(ld64(p + 16) + (k << 3), v); }
+// the element's address, for src/lvalue.mc's read-modify-write (ph_addm64)
+uptr php_pk_ea(uptr p, i64 k) { return ld64(p + 16) + (k << 3); }
+
 void php_pk_set_slow(uptr p, i64 k, i64 v);
 // the fast path alone, and no early return: src/opt.mc copies it into the
 // caller as one if/else
 void php_pk_set(uptr p, i64 k, i64 v) {
-    if ((u64) k < (u64) ld64(p)) st64(ld64(p + 16) + k * 8, v);
+    if ((u64) k < (u64) ld64(p)) st64(ld64(p + 16) + (k << 3), v);
     else php_pk_set_slow(p, k, v);
 }
 
@@ -1876,23 +1966,21 @@ void php_pk_set_slow(uptr p, i64 k, i64 v) {
 i64 php_pk_get_c_slow(uptr p, i64 k);
 i64 php_pk_get_c(uptr p, i64 k) {
     if (ld64(p + 24)) return php_pk_get_c_slow(p, k);
-    ph_pkabs = 0;
-    return ld64(ld64(p + 16) + k * 8);
+    return ld64(ld64(p + 16) + (k << 3));
 }
 i64 php_pk_get_c_slow(uptr p, i64 k) {
     uptr b = php_ht_find(ld64(p + 24), k, 0);
-    if (!b) { ph_pkabs = 1; return 0; }
-    ph_pkabs = 0;
+    if (!b) return 0;
     return ld64(b);
 }
 // checked_reads: a hashed array's length is 0, so its read falls to the second
 // test; a key neither the buffer nor the hash has is the trap
 void php_oob_slow(i64 i, i64 n);
 i64 php_pk_get_d(uptr p, i64 k) {
-    if ((u64) k < (u64) ld64(p)) { ph_pkabs = 0; return ld64(ld64(p + 16) + k * 8); }
+    if ((u64) k < (u64) ld64(p)) return ld64(ld64(p + 16) + (k << 3));
     if (ld64(p + 24)) {
         uptr b = php_ht_find(ld64(p + 24), k, 0);
-        if (b) { ph_pkabs = 0; return ld64(b); }
+        if (b) return ld64(b);
         php_oob_slow(k, php_count(ld64(p + 24)));
     }
     php_oob_slow(k, ld64(p));
@@ -1912,10 +2000,6 @@ i64 php_pk_count(uptr p) {
     if (ld64(p + 24)) return php_count(ld64(p + 24));
     return ld64(p);
 }
-
-// an element read where null and 0 differ: the value php has
-uptr php_zinull(i64 v) { if (ph_pkabs) return php_znull(); return php_zlong(v); }
-uptr php_zinull2(i64 v, i64 abs) { if (abs) return php_znull(); return php_zlong(v); }
 
 // ---- the zval conversions, php's own rules ---------------------------------
 i64 php_zv_bool(uptr z) {
@@ -2871,6 +2955,16 @@ i64 php_strpos(uptr h, uptr nd, i64 off) {
 // strpos($h, 'c') from the start: the byte scan alone
 i64 php_strpos1(uptr h, i64 c) { return php_memchr(h + ZS_HDR, c, ld64(h + 16)); }
 
+uptr php_str_repeat(uptr s, i64 times);
+// str_repeat for a FRESH buffer (src/rc.mc): never the shared one-byte string
+uptr php_str_repeat_f(uptr s, i64 times) {
+    if (times == 1 && ld64(s + 16) == 1) {
+        uptr o = php_str_alloc(1);
+        st8(o + ZS_HDR, ld8(s + ZS_HDR));
+        return o;
+    }
+    return php_str_repeat(s, times);
+}
 uptr php_str_repeat(uptr s, i64 times) {
     // nothing to repeat, or one byte once: the shared empty and one-byte
     // strings, not a new one (`$w . str_repeat('0', $to - $from)` is most
@@ -7083,6 +7177,30 @@ i64 php_spn_o(uptr s, uptr bm, i64 o) {
         if (i >= n) break;
         i64 c = ld8(s + ZS_HDR + i);
         if (!((ld8(bm + (c >> 3)) >> (c & 7)) & 1)) break;
+        i = i + 1;
+    }
+    return i - o;
+}
+
+// strspn($s, 'lit', $o) where the set is one run of bytes lo..lo+w
+// ('0123456789', '0'): a subtraction and one unsigned compare a byte, where
+// the byte map is a load, a shift and a mask
+i64 php_spn_r_slow(uptr s, i64 lo, i64 w, i64 o) {
+    u8 bm[32];
+    i64 k = 0;
+    loop { if (k >= 32) break; st8(bm + k, 0); k = k + 1; }
+    k = lo;
+    loop { if (k > lo + w) break; st8(bm + (k >> 3), ld8(bm + (k >> 3)) | (1 << (k & 7))); k = k + 1; }
+    return php_spn(s, bm, o, 0, 0, 1);
+}
+i64 php_spn_r(uptr s, i64 lo, i64 w, i64 o) {
+    i64 n = ld64(s + 16);
+    if ((u64) o > (u64) n) return php_spn_r_slow(s, lo, w, o);
+    uptr p = s + ZS_HDR;
+    i64 i = o;
+    loop {
+        if (i >= n) break;
+        if ((u64) (ld8(p + i) - lo) > (u64) w) break;
         i = i + 1;
     }
     return i - o;
