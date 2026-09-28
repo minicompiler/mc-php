@@ -219,6 +219,26 @@ else
     echo "  FAIL  runtime copies: g/115's lowering reads $* (want 0 1 1: no php_pk_get_c/pk_set/str_byte call, a php_pk_get_c_slow, a break to the tail)"
     fail=1
 fi
+# decimal-2x's lowerings, read back from g/116 compiled the counting way
+# (MCPHP_RC=check, so src/rc.mc runs as on the extension road): fmt() builds
+# its answer as one rope, acc()'s array is fixed (no hash test, no bound),
+# pad() is one string, fresh() writes its buffer in place with the slow half
+# the only call, and sign()'s short circuits are mc's && and || again (no
+# temporary is assigned; sc()'s right sides are calls, which keep theirs). The differential passes without any of it.
+MCPHP_RC=check "$MCPHP_BIN" --dump-ast $P/g/116-lowered-forms.php > "$tmp/lf.ast" 2>&1
+set -- $(awk '/^FUNC/ { f = $NF }
+    f == "name=f_fmt" && /CALL .*name=php_str_rope$/ { r++ } f == "name=f_fmt" && /CALL .*name=php_str_(concat|catw2)$/ { c++ }
+    f == "name=f_acc" && /CALL .*name=php_pk_(get_c|set|get_c_slow|set_slow)$/ { p++ }
+    f == "name=f_pad" && /CALL .*name=php_str_catrep$/ { d++ }
+    f == "name=f_fresh" && /CALL .*name=php_str_setb_f_slow$/ { w++ } f == "name=f_fresh" && /CALL .*name=php_str_setb(_own)?$/ { o++ }
+    f == "name=f_sign" && /ASSIGN name=.*phs_/ { t++ }
+    END { print r + 0, c + 0, p + 0, (d > 0), (w > 0), o + 0, t + 0 }' "$tmp/lf.ast")
+if [ "$*" = "1 0 0 1 1 0 0" ]; then
+    echo "  lowered forms: g/116's rope, fixed array, pad, fresh buffer and folded short circuits"
+else
+    echo "  FAIL  lowered forms: g/116 reads $* (want 1 0 0 1 1 0 0: one rope and no concatenation, no packed call, a pad, a fresh buffer's slow half and no php write, no short-circuit temporary)"
+    fail=1
+fi
 # src/mach.mc's peepholes, read back on BOTH machines whatever the host (the
 # dump takes --machine=): in g/114's sums() a constant that fits is the
 # immediate (4095) and one that does not stays a register (4096), `$i < $n`
