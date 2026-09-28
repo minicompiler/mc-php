@@ -168,6 +168,22 @@ if "$BIN" build "$t/ft" --config "$t/ft/r.toml" > "$t/f.out" 2>&1; then
 else
     bad "the function-table calls: it would not build"; sed "s/^/      /" "$t/f.out"
 fi
+# php arrays and objects inside the module (the module of tests/ext.sh step 17):
+# every reference a proxy or a copy took is given back when the call ends,
+# and an array through the function table both ways
+mkdir -p "$t/val"
+cp tests/ext/values/values.php "$t/val/r.php"
+{ cat tests/ext/values/check.php
+  printf "%s\n" "function cb_twice(\$a) { return [\$a, \$a]; }" \
+    "for (\$k = 0; \$k < 300; \$k++) { xa\\wrap(new M); xa\\keys([\$k => [\$k], \"s\" => \"v\$k\"]); xa\\prop(new M); xa\\va(\",\", \$k, \"x\"); xa\\unser(xa\\ser([\$k, [\"x\" => \$k]])); }"
+} > "$t/val/run.php"
+sed -i "s#__DIR__ . \x27/values.php\x27#__DIR__ . \x27/r.php\x27#" "$t/val/run.php"
+sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.so\"|" examples/hello/mcphp.linux.toml | dbg /dev/stdin > "$t/val/r.toml"
+if "$BIN" build "$t/val" --config "$t/val/r.toml" > "$t/v.out" 2>&1; then
+    leakfree "arrays, objects and a callable across the boundary (tests/ext/values), 300 rounds" -d extension="$t/val/build/r.so" "$t/val/run.php"
+else
+    bad "the values module: it would not build"; sed "s/^/      /" "$t/v.out"
+fi
 [ "$fail" = 0 ] || { echo "  leaks: something failed"; exit 1; }
 echo "  leaks: every request ended with nothing of the module still allocated"
 '

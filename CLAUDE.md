@@ -1105,3 +1105,25 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   identifier, checked at the attribute), aliases of one symbol share ONE C declaration (a
   table of the ones emitted, `ph_xsym_*`, then the runtime's `extern`s), fewer argument words
   than the declaration padded with zeros, more refused; `;` as a body is read too.
+- awaitable, step 3 (2026-09-28, branch `awaitable-classes`, stacked on #33): **signatures beyond
+  the scalars, and php's arrays and objects inside the module**. An exported function takes any
+  parameter but a reference -- `array`/`?array`, `mixed`/untyped/unions, `callable`, `object`, a
+  class, a default, `T ...$rest` -- and returns `array`/`mixed`/an object too, each argument
+  checked with php's own parameter-parsing words (`phx_chk2`, `phx_chk_rest`, `phx_arity2`;
+  `must be a valid callback, function "nope" not found...`, `expects at least 1 argument`), the
+  declared types recorded per row (`ph_fdpt`/`ph_fbk`/`ph_fbn`/`ph_fbnul`, set from
+  `ph_type_word`'s new `ph_lt_*`) and in the argument records. A php array crosses as a copy
+  (`phx_e2r_arr`/`phx_r2e_arr`, through the engine's hash iterator), a php object as a PROXY: a
+  runtime object of one class (flag 32) holding the `zend_object`, whose property read/write,
+  method call, class name, instanceof and `===` go to the engine (`lib/php_rt.mc`'s `ph_eng`
+  table, 0 on the program road); every engine array or object held is a reference on the `ph_esc`
+  list, tagged by bit 0 and given back with the call's memory. The pending exception is read from
+  `executor_globals` (`php_dlsym` in each host layer). The same crossing serves php's function
+  table, so the compile-time refusal of an array argument is gone. Found on the way and fixed on
+  both roads: a zval stored into an array bucket with a whole-word type store cut the bucket's
+  collision chain into a loop, and `return <zval>` in a `: array` function stored the zval as the
+  array (now php's return rule, then the array). A class an extension would publish is REFUSED
+  while compiling (the back end registers none yet) -- the pin moves to line 26
+  (`awaitable\Intent`), Windows's stays at 13. `tests/ext.sh` step 17 (`tests/ext/values`),
+  step 14 (arrays through the function table), `tests/leaks.sh` (the values module, 300 rounds,
+  nothing left).

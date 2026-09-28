@@ -2591,7 +2591,12 @@ i64 php_zv_identical(uptr a, uptr b) {
     if (ta == IS_LONG) { if (ld64(a) == ld64(b)) return 1; return 0; }
     if (ta == IS_DOUBLE) { if (ldf64(a) == ldf64(b)) return 1; return 0; }
     if (ta == IS_STRING) return php_str_eq(ld64(a), ld64(b));
-    if (ta == IS_OBJECT) { if (ld64(a) == ld64(b)) return 1; return 0; }
+    if (ta == IS_OBJECT) {
+        if (ld64(a) == ld64(b)) return 1;
+        // two proxies of one engine object are one object
+        if (php_is_proxy(ld64(a)) && php_is_proxy(ld64(b)) && ld64(ld64(a) + 40) == ld64(ld64(b) + 40)) return 1;
+        return 0;
+    }
     if (ta == IS_ARRAY) {
         uptr x = ld64(a);
         uptr y = ld64(b);
@@ -3521,6 +3526,21 @@ uptr php_obj_tostr(uptr o) {
 uptr php_obj_ce(uptr o) { return ld64(o + 16); }
 uptr php_obj_props(uptr o) { return ld64(o + 24); }
 
+// ---- an ENGINE object inside the runtime -------------------------------------
+// On the extension road a php object crosses into the module as a PROXY: a
+// runtime object whose class carries flag 32 and whose zend_object sits after
+// the header (lib/php_ext.mc § engine values). Its properties, its methods,
+// its class name and instanceof are the ENGINE's, so the few operations that
+// read them ask lib/php_ext.mc through ph_eng -- a table of five functions,
+// 0 on the program road, where no proxy is ever made:
+//   0 class name   1 property read   2 property write   3 method call
+//   4 instanceof
+uptr ph_eng;
+i64 php_is_proxy(uptr o) {
+    if (!ph_eng) return 0;
+    return (ld64(ld64(o + 16) + 64) & 32) != 0;
+}
+
 // The per-object "this readonly property has been written" set. It is its
 // OWN table: D7 has no bitmap, and the value cannot stand in for it (a
 // property deliberately initialised to null has been written), but a mark
@@ -3529,7 +3549,10 @@ uptr php_obj_romarks(uptr o) {
     if (!ld64(o + 32)) st64(o + 32, php_arr_new(4));
     return ld64(o + 32);
 }
-uptr php_obj_cname(uptr o) { return ld64(ld64(o + 16)); }
+uptr php_obj_cname(uptr o) {
+    if (php_is_proxy(o)) return callp(ld64(ph_eng), o);
+    return ld64(ld64(o + 16));
+}
 
 // ---- errors ----------------------------------------------------------------
 // php's uncaught-throwable text, on stdout as the cli sapi prints it.
@@ -5308,7 +5331,17 @@ uptr php_clskey(uptr name) {
     return php_case(name, 0);
 }
 
+uptr php_ce_alloc(uptr name);
 uptr php_ce_new(uptr name) {
+    uptr ce = php_ce_alloc(name);
+    uptr lk = php_clskey(name);
+    php_zv_cp(php_arr_sslot(php_ce_reg(), lk), php_zlong(ce));
+    return ce;
+}
+
+// a class entry nothing looks up by name: the one every engine object's
+// proxy has (lib/php_ext.mc)
+uptr php_ce_alloc(uptr name) {
     uptr ce = php_alloc(CE_SIZE);
     st64(ce, php_str_esc(name));
     st64(ce + 8, 0);
@@ -5323,8 +5356,6 @@ uptr php_ce_new(uptr name) {
     st64(ce + 80, php_arr_new(8));
     st64(ce + 88, php_arr_new(8));
     st64(ce + 96, php_arr_new(8));
-    uptr lk = php_clskey(name);
-    php_zv_cp(php_arr_sslot(php_ce_reg(), lk), php_zlong(ce));
     return ce;
 }
 
@@ -5457,6 +5488,7 @@ i64 php_ce_is(uptr ce, uptr name) {
 
 i64 php_instanceof(uptr z, uptr name) {
     if (php_zv_type(z) != IS_OBJECT) return 0;
+    if (php_is_proxy(ld64(z))) return callp(ld64(ph_eng + 32), ld64(z), name);
     return php_ce_is(php_obj_ce(ld64(z)), name);
 }
 
@@ -5606,6 +5638,7 @@ void php_vis_mdie(uptr ce, uptr lname, uptr name, uptr scope) {
 uptr php_obj_slot(uptr o, uptr name) { return php_arr_sslot(php_obj_props(o), name); }
 
 uptr php_obj_get(uptr o, uptr name, uptr scope) {
+    if (php_is_proxy(o)) return callp(ld64(ph_eng + 8), o, name, scope, 0);
     uptr ce = php_obj_ce(o);
     uptr b = php_ht_find(php_obj_props(o), php_str_hash(name), name);
     if (b) {
@@ -5630,6 +5663,7 @@ uptr php_obj_get(uptr o, uptr name, uptr scope) {
 }
 
 uptr php_obj_get_q(uptr o, uptr name, uptr scope) {
+    if (php_is_proxy(o)) return callp(ld64(ph_eng + 8), o, name, scope, 1);
     uptr ce = php_obj_ce(o);
     uptr b = php_ht_find(php_obj_props(o), php_str_hash(name), name);
     if (b && !php_vis_ok(ce, name, scope)) return php_znull();
@@ -5640,6 +5674,7 @@ uptr php_obj_get_q(uptr o, uptr name, uptr scope) {
 }
 
 void php_obj_set(uptr o, uptr name, uptr v, uptr scope) {
+    if (php_is_proxy(o)) { callp(ld64(ph_eng + 16), o, name, v, scope); return; }
     uptr ce = php_obj_ce(o);
     uptr b = php_ht_find(php_obj_props(o), php_str_hash(name), name);
     if (!b) {
@@ -5733,6 +5768,7 @@ uptr php_f_called_class(uptr decl) {
 }
 
 uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    if (php_is_proxy(o)) return callp(ld64(ph_eng + 24), o, name, n, a1, a2, a3, a4, a5, a6);
     uptr ce = php_obj_ce(o);
     uptr lk = php_case(name, 0);
     uptr b = php_ce_lookup(ce, 24, lk);

@@ -1,0 +1,7 @@
+TypeError: xa\sum(): Argument #1 ($a) must be of type array, int given
+TypeError: xa\cnt(): Argument #1 must be of type int, string given
+TypeError: xa\cb(): Argument #1 ($f) must be a valid callback, function "nope" not found or invalid function name
+TypeError: xa\typed(): Argument #1 ($o) must be of type ArrayObject, M given
+ArgumentCountError: xa\dflt() expects at least 1 argument, 0 given
+ArgumentCountError: xa\dflt() expects at most 2 arguments, 3 given
+TypeError: xa\nul(): Argument #1 ($a) must be of type ?array, int given

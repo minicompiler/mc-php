@@ -13,6 +13,18 @@
 // re-measured after T6 built one. `?T`, `T|U`, `A&B`, a class name,
 // `iterable`, `callable`, `object`, `self`, `static`, `never` and `null` are
 // all a zval, which is exactly what D9 says the lowering is.
+// What the last type word SAID beyond its lowering, for the extension
+// boundary (src/ext.mc), which checks an argument against it: BK_ANY for no
+// check (mixed, an untyped parameter, a union), a callable, an object, a class
+// by its qualified name; and whether null is allowed. The caller resets it.
+#define BK_ANY      0
+#define BK_CALLABLE 1
+#define BK_OBJECT   2
+#define BK_CLASS    3
+i64  ph_lt_k;
+uptr ph_lt_n;
+i64  ph_lt_null;
+
 i64 ph_type_tail(i64 t) {
     // `?T` and `T|U` and `A&B` are all one thing here: a zval. An `&` before
     // a `$` is a by-reference parameter and NOT an intersection.
@@ -32,7 +44,7 @@ i64 ph_type_tail(i64 t) {
         }
         break;
     }
-    if (un) return PT_MIXED;
+    if (un) { ph_lt_k = BK_ANY; ph_lt_n = 0; ph_lt_null = 1; return PT_MIXED; }
     return t;
 }
 
@@ -45,7 +57,15 @@ i64 ph_type_word(i64 must) {
         ph_type_tail(PT_MIXED);
         return PT_MIXED;
     }
-    if (ph_accept("?", 1)) { ph_type_word(1); ph_type_tail(PT_MIXED); return PT_MIXED; }
+    if (ph_accept("?", 1)) {
+        i64 qt = ph_type_word(1);
+        ph_type_tail(PT_MIXED);
+        ph_lt_null = 1;
+        // `?int`: the scalar, and null allowed -- the boundary checks it as
+        // declared, the body sees a zval
+        if (qt <= PT_BOOL || qt == PT_ARR) ph_lt_k = 10 + qt;
+        return PT_MIXED;
+    }
     ph_accept("\\", 1);
     if (ph_is("int"))      { ph_next(); return ph_type_tail(PT_INT); }
     if (ph_is("float"))    { ph_next(); return ph_type_tail(PT_FLOAT); }
@@ -56,12 +76,17 @@ i64 ph_type_word(i64 must) {
     if (ph_is("mixed") || ph_is("iterable") || ph_is("callable") || ph_is("object")
         || ph_is("null") || ph_is("static") || ph_is("self") || ph_is("parent")
         || ph_is("never") || ph_is("true") || ph_is("false")) {
+        if (ph_is("callable")) ph_lt_k = BK_CALLABLE;
+        if (ph_is("object")) ph_lt_k = BK_OBJECT;
+        if (ph_is("mixed") || ph_is("null")) ph_lt_null = 1;
         ph_next();
         ph_type_tail(PT_MIXED);
         return PT_MIXED;
     }
     // a class name is an object, and an object is a zval
     if (ph_tid == T_IDENT) {
+        ph_lt_k = BK_CLASS;
+        ph_lt_n = ph_ns_class(ph_tname);
         ph_next();
         loop { if (!ph_accept("\\", 1)) break; if (ph_tid == T_IDENT) ph_next(); }
         ph_type_tail(PT_MIXED);

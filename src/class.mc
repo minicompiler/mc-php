@@ -272,6 +272,12 @@ void ph_class(uptr fl, i64 line, i64 flags) {
         if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php class needs a name", ph_tname);
         cname = ph_ns_decl(ph_tname);               // `ns\Name` inside a namespace
         ph_next();
+        // An extension publishes what the source names without a leading
+        // underscore; a class is not published yet (the back end registers
+        // none), so one that would be is refused rather than compiled into a
+        // module php cannot see it in. `_Name` is module-private and fine.
+        if (ph_ext && ld8(ph_ns_last(cname)) != 95)
+            ph_todo2(fl, line, "a class an extension would publish", cname);
     }
     if (kind == 3) { if (ph_accept(":", 1)) ph_skip_type(); }
 

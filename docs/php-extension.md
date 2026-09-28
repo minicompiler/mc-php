@@ -22,29 +22,54 @@ and is what it always was.
 
 ## What a source may say today
 
-Plain functions, with **declared scalar parameters and a declared scalar return**:
+Plain functions, with any parameter and return a php function may declare -- **except a
+reference** across the boundary:
 
 | | parameter | return |
 |---|---|---|
-| `int` | yes | yes |
-| `string` | yes | yes |
-| `float` | yes | yes |
-| `bool` | yes | yes |
-| `void` | — | yes |
+| `int`, `float`, `string`, `bool` | yes, read in place (the fast road) | yes |
+| `void` | -- | yes |
+| `array`, `?array` | yes | yes |
+| `mixed`, untyped, a union | yes | yes |
+| `callable` | yes | -- |
+| `object`, a class, `?Class` | yes | yes |
+| a default value | yes | -- |
+| `T ...$rest` | yes | -- |
 
-Everything else is a **named refusal at the declaration's own position**, never a silent
-lowering -- because a silent one would publish a signature php does not have:
+Each argument is checked the way php's own parameter parsing checks an internal function's, with
+its words: `f(): Argument #1 ($a) must be of type array, int given`, `must be of type ?array`,
+`must be a valid callback, function "nope" not found or invalid function name`,
+`f() expects at least 1 argument, 0 given`, `... at most 2 arguments, 3 given`. A variadic
+argument is named by number alone (`Argument #2 must be of type int`), as php names it. The
+argument records say the same types, so Reflection reads what the source declared. What a
+USERLAND function says differently -- a `called in FILE on line N` tail, `Too few arguments to
+function`, extra arguments ignored -- is not what an internal function says, and the module is
+one (`tests/ext.sh` step 17 compares its answers with the interpreted source's and its errors with
+a recording).
+
+php's **arrays and objects** cross both ways (`lib/php_ext.mc` § engine values). An array is a
+VALUE in php and crosses as a copy: into the runtime's own array on the way in, into a new engine
+array on the way out. An object crosses as ITSELF: inside the module a php object is a proxy of
+the engine's -- its properties read and written, its methods called, `get_class`, `instanceof`
+and `===` answered by the engine, with the engine's rules and errors -- and the same object goes
+back out. Every array or object the module holds is a reference it took, given back when the
+call's memory goes (or at RSHUTDOWN for a call that pinned); `tests/leaks.sh` runs the same module
+300 times under a debug php and nothing is left. The same crossing serves a call through php's
+function table (§ A call to a function the source does not declare): an array or an object is an
+argument and an answer there too. What does not cross: a php resource, and an object of a class
+the module declares, since the back end publishes no class yet -- a class that WOULD be published
+(its name does not begin with `_`) is refused while compiling:
 
 ```
-hello.php:7: mc-php: an exported parameter whose type is not a declared scalar: f is not implemented yet
-hello.php:7: mc-php: a variadic parameter in an exported function: f
-hello.php:7: mc-php: a by-reference return in an exported function: f
-hello.php:7: mc-php: an exported function whose return type is not a declared scalar: f
+hello.php:3: mc-php: a class an extension would publish: Box is not implemented yet
+hello.php:7: mc-php: a by-reference parameter in an exported function: f is not implemented yet
+hello.php:7: mc-php: a by-reference return in an exported function: f is not implemented yet
 ```
 
-A parameter with a **default** and an **untyped** parameter are both `mixed` by
-`docs/plan.md` D4 (c), so both land on the first of those. One more is worth naming because it
-is ordinary php and the reason is not obvious:
+A php `count()` of an engine object that is `Countable` is not the object's count yet (the
+runtime has no Countable), and `var_dump` of a proxy shows no properties.
+
+One more is worth naming because it is ordinary php and the reason is not obvious:
 
 ```
 hello.php:4: mc-php: an exported function called before it is declared (move it above its first call): b
@@ -412,11 +437,10 @@ is also what a C extension does to call another extension's function
   name php does not have is php's own `Error`, `Call to undefined function NAME()`;
 - the module may be re-entered through the callee (tests/ext.sh step 14).
 
-What does not cross, by name: an array or object argument is refused while compiling (`an array or
-object argument to a function php's function table answers`), an array, object or resource answer
-when it arrives (`mc-php: a php array, object or resource returned by NAME(): only null, bool,
-int, float and string cross php's function table`); argument unpacking and more than 4 arguments
-are refused while compiling. A by-reference parameter of the callee gets a value, and php warns.
+What does not cross, by name: a php resource, either way (`mc-php: a php resource returned by
+NAME(): a resource does not cross php's function table`); an array or an object crosses as
+§ What a source may say today describes. Argument unpacking and more than 4 arguments are refused
+while compiling. A by-reference parameter of the callee gets a value, and php warns.
 On the PROGRAM road there is no other module to call, and such a call stays the refusal it was.
 
 **A handler that needs no runtime.** A published function whose body, copied into its handler,

@@ -95,3 +95,9 @@ i64 php_dir_sep() { return '/'; }
 i64 php_drive_len(uptr p, i64 n) { return 0; }
 i64 php_base_colon(uptr s, i64 pos) { return 0; }
 uptr php_setlocale(i64 cat, uptr name) { return setlocale(cat, name); }
+
+// A symbol of the process by name: only the extension road asks, for the
+// engine's executor_globals (lib/php_ext.mc § engine values). dlsym's "search
+// every global image" handle is (void *)-2 here.
+extern uptr dlsym(i64 h, uptr name);
+uptr php_dlsym(uptr name) { return dlsym(0 - 2, name); }

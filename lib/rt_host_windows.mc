@@ -359,3 +359,10 @@ uptr php_setlocale(i64 cat, uptr p) {
     }
     return setlocale(cat, p);
 }
+
+// A symbol of php's DLL by name: only the extension road asks, for the
+// engine's executor_globals (lib/php_ext.mc § engine values). php8.dll is the
+// NTS build's, the only one a module here loads into (docs/php-extension.md).
+extern uptr GetModuleHandleA(uptr name);
+extern uptr GetProcAddress(uptr h, uptr name);
+uptr php_dlsym(uptr name) { return GetProcAddress(GetModuleHandleA("php8.dll"), name); }
