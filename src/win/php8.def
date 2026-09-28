@@ -30,6 +30,7 @@ zend_hash_get_current_key_ex == zend_hash_get_current_key_ex@@32
 zend_hash_get_current_data_ex == zend_hash_get_current_data_ex@@16
 zend_hash_move_forward_ex == zend_hash_move_forward_ex@@16
 instanceof_function_slow == instanceof_function_slow@@16
+object_init_ex
 php_output_discard
 php_output_end
 php_output_flush
@@ -42,11 +43,13 @@ zend_argument_count_error
 zend_call_known_function
 zend_call_method_if_exists
 zend_clear_exception
+zend_declare_property
 zend_get_exception_base
 zend_is_callable_ex
 zend_lookup_class
 zend_lookup_class_ex
 zend_read_property
+zend_register_internal_class_ex
 zend_throw_exception
 zend_throw_exception_internal
 zend_type_error

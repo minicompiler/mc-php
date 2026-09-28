@@ -1142,3 +1142,9 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   pin became a PROGRESS count on non-Windows hosts: check.php through the compiled module agrees
   with check.expect for 6 of 37 lines (`AW_PROGRESS` in `tests/examples.sh`; it stops at a
   callable string). `tests/ext.sh` step 18 (`tests/ext/classes`), four refusals, `tests/leaks.sh`.
+  On Windows the three names a published class calls (`object_init_ex`, `zend_declare_property`,
+  `zend_register_internal_class_ex`) are listed in `src/win/php8.def` and `php8ts.def`, and
+  `tests/ext.sh` step 1b grades every php name `lib/php_ext.mc` imports against both files on
+  every host -- #34's windows/x86_64 failure (two kernel32 names below the runtime's
+  `#dylib "ucrtbase.dll"`, exit 127 before `main`) was the same class of miss, found only on a
+  Windows runner.

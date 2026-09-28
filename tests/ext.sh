@@ -82,6 +82,21 @@ else
     say "layout: SKIPPED (no php-config or no $CC -- the COMPILER needs neither)"
 fi
 
+# --- 1b. every php name the module imports, in the Windows import library --
+# On Windows the module links against an import library tests/winsys.sh makes
+# from src/win/php8.def and php8ts.def; a php name lib/php_ext.mc declares and
+# those files do not list is an undefined symbol at lld-link -- found only on
+# a Windows runner. Graded here, on every host. `free` is the C library's.
+wn=0
+for nm in $(sed -n 's/^extern [a-zA-Z0-9_ ]* \([a-zA-Z_][a-zA-Z_0-9]*\)(.*/\1/p' lib/php_ext.mc | sort -u); do
+    [ "$nm" = free ] && continue
+    wn=$((wn + 1))
+    for d in src/win/php8.def src/win/php8ts.def; do
+        grep -Eq "^$nm( |\$)" "$d" || bad "$d does not list $nm, which lib/php_ext.mc imports"
+    done
+done
+say "windows imports: $wn php names lib/php_ext.mc declares, each in src/win/php8.def and php8ts.def"
+
 # --- 2. the project file names the php it is being graded against ----------
 # php -i writes CRLF on Windows; the values are compared without it.
 pv() { "$PHP" -i | tr -d '\r' | sed -n "s/^$1 => //p" | head -1; }
