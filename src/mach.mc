@@ -58,6 +58,7 @@ i64  pm_ad[MAXDEPTH];                 // P2: where the last address add for a de
 i64  pm_ad_at(i64 d) { return ld64(pm_ad + d * 8); }
 void pm_ad_set(i64 d, i64 v) { st64(pm_ad + d * 8, v); }
 i64  pm_nolay;                        // MCPHP_LAYOUT=0: P10 alone off
+i64  pm_nolf;                         // MCPHP_LEAF=0: P11 alone off
 i64  pm_off;                          // MCPHP_PEEP=0 in the compiler's environment
 
 uptr pm_of(i64 task) { return ld64(pm_orig + task * 8); }
@@ -380,6 +381,7 @@ void pm_env() {
         if (!s) return;
         if (str_eq(s, "MCPHP_PEEP=0")) pm_off = 1;
         if (str_eq(s, "MCPHP_LAYOUT=0")) pm_nolay = 1;
+        if (str_eq(s, "MCPHP_LEAF=0")) pm_nolf = 1;
         i = i + 1;
     }
 }
@@ -779,7 +781,147 @@ void lay_run() {
     }
 }
 
-void pm_frame_fix(i64 frame) { callp(pm_of(MTASK_FRAME_FIX), frame); lay_x86 = 0; lay_run(); }
+// ---- P11: a leaf keeps its locals in registers nobody saves --------------------
+// mc's allocator hands a function's locals x19..x28, which the callee must
+// save and restore: a store and a load per register in every call. A LEAF --
+// no bl, no blr, no raw word -- calls nothing that could want x0..x7 or a
+// depth register kept, so a local can live in a register the function does
+// not otherwise touch: a parameter's own argument register (its `mov xR, xi`
+// then moves nothing) or a free one of x1..x7 and x10..x15. The saves and the
+// restores of every register moved go. Any opcode this pass does not know
+// the operands of leaves the function as it is. (C's leaf functions are
+// compiled this way; examples/decimal's runtime string routines are leaves.)
+u8  pm_map[32];
+
+// which fields of the instruction are registers: 1 rd, 2 rn, 4 rm, 8 imm (msub's ra); -1 unknown
+i64 pm_rfields(i64 op) {
+    if (op == 0 || op == I_NOP || op == I_RET || op == I_B || op == I_BCOND) return 0;
+    if (op == I_ADD || op == I_SUB || op == I_MUL || op == I_SDIV || op == I_UDIV || op == I_AND
+        || op == I_ORR || op == I_EOR || op == I_LSLV || op == I_LSRV || op == I_ASRV) return 7;
+    if (op == I_MSUB) return 15;
+    if (mem_slot(op) >= 0) return 3;
+    if (op == PM_LDG || op == PM_STG) return 3;
+    if (op == I_MOVZ || op == I_MOVK || op == I_CSET || op == I_CBZ || op == I_CBNZ || op == I_ADRP) return 1;
+    if (op == I_MOV || op == I_MOVW || op == I_MVN || op == I_NEG || op == I_SXTB || op == I_SXTH
+        || op == I_SXTW || op == I_ANDI || op == I_ADDI || op == I_SUBI || op == I_ADDLO) return 3;
+    if (op == I_CMP) return 6;
+    if (op == I_CMPI) return 2;
+    if (op == I_STP_PRE || op == I_LDP_POST) return 7;
+    return 0 - 1;
+}
+
+i64 pm_rget(uptr e, i64 f) {
+    if (f == 1) return ins_rd(e);
+    if (f == 2) return ins_rn(e);
+    if (f == 4) return ins_rm(e);
+    return ins_imm(e) & 31;
+}
+void pm_rset(uptr e, i64 f, i64 r) {
+    if (f == 1) st64(e + INS_RD, r);
+    if (f == 2) st64(e + INS_RN, r);
+    if (f == 4) st64(e + INS_RM, r);
+    if (f == 8) st64(e + INS_IMM, r);
+}
+
+void pm_leaf() {
+    if (pm_off || pm_nolf) return;
+    u8 used[33];
+    i64 r = 0;
+    loop { if (r > 32) break; st8(used + r, 0); r = r + 1; }
+    r = 0;
+    loop { if (r >= 32) break; st8(pm_map + r, r); r = r + 1; }
+    // the epilogue's label: the last label of the function
+    i64 lepi = 0 - 1;
+    i64 q = nins - 1;
+    loop { if (q < ins_base) break; if (ins_op(ins_at(q)) == 0) { lepi = ins_label(ins_at(q)); break; } q = q - 1; }
+    i64 i = ins_base;
+    loop {
+        if (i >= nins) break;
+        uptr e = ins_at(i);
+        i64 fs = pm_rfields(ins_op(e));
+        // a call is allowed when it is a TAIL: after it only its answer moves
+        // (x0 and the depth registers) on its way to the epilogue, so no local
+        // is read once the callee may have clobbered its register
+        if (ins_op(e) == I_BL) {
+            i64 j = i + 1;
+            i64 ok = 0;
+            loop {
+                if (j >= nins) break;
+                uptr t = ins_at(j);
+                i64 o = ins_op(t);
+                if (o == 0 && ins_label(t) == lepi) { ok = 1; break; }
+                if (o == I_B && ins_label(t) == lepi) { ok = 1; break; }
+                if (o == I_NOP || o == 0) { j = j + 1; continue; }
+                if (o == I_MOV && (ins_rd(t) == 0 || (ins_rd(t) >= 9 && ins_rd(t) <= 14))
+                    && (ins_rn(t) == 0 || (ins_rn(t) >= 9 && ins_rn(t) <= 14))) { j = j + 1; continue; }
+                break;
+            }
+            if (!ok) return;
+            fs = 0;
+        }
+        if (fs < 0) return;
+        i64 f = 1;
+        loop {
+            if (f > 8) break;
+            if (fs & f) { i64 x = pm_rget(e, f); if (x >= 0 && x <= 32) st8(used + x, 1); }
+            f = f * 2;
+        }
+        i = i + 1;
+    }
+    // a parameter's register to its argument register: `mov xR, xi` in a leaf
+    i64 any = 0;
+    i = ins_base;
+    loop {
+        if (i >= nins) break;
+        uptr m = ins_at(i);
+        i64 rd = ins_rd(m);
+        if (ins_op(m) == I_MOV && rd >= 19 && rd <= 28 && ins_rn(m) >= 0 && ins_rn(m) < 8 && ld8(pm_map + rd) == rd) {
+            st8(pm_map + rd, ins_rn(m));
+            any = 1;
+        }
+        i = i + 1;
+    }
+    // every other one to a register the function does not touch
+    u8 cand[16];
+    i64 nc = 0;
+    r = 1;
+    loop { if (r > 7) break; if (!ld8(used + r)) { st8(cand + nc, r); nc = nc + 1; } r = r + 1; }
+    r = 15;
+    loop { if (r < 10) break; if (!ld8(used + r)) { st8(cand + nc, r); nc = nc + 1; } r = r - 1; }
+    i64 ci = 0;
+    r = 19;
+    loop {
+        if (r > 28) break;
+        if (ld8(used + r) && ld8(pm_map + r) == r && ci < nc) { st8(pm_map + r, ld8(cand + ci)); ci = ci + 1; any = 1; }
+        r = r + 1;
+    }
+    if (!any) return;
+    i = ins_base;
+    loop {
+        if (i >= nins) break;
+        uptr e2 = ins_at(i);
+        i64 op = ins_op(e2);
+        // the save and the restore of a register that moved: nothing to keep
+        if ((op == I_STR || op == I_LDR) && ins_rn(e2) == REG_FRAME && ins_rd(e2) >= 19 && ins_rd(e2) <= 28
+            && ld8(pm_map + ins_rd(e2)) != ins_rd(e2)) {
+            set_ins_op(e2, I_NOP);
+            i = i + 1;
+            continue;
+        }
+        i64 fs2 = pm_rfields(op);
+        i64 g = 1;
+        loop {
+            if (g > 8) break;
+            if (fs2 & g) { i64 y = pm_rget(e2, g); if (y >= 19 && y <= 28) pm_rset(e2, g, ld8(pm_map + y)); }
+            g = g * 2;
+        }
+        // the parameter's move onto itself
+        if (op == I_MOV && ins_rd(e2) == ins_rn(e2)) set_ins_op(e2, I_NOP);
+        i = i + 1;
+    }
+}
+
+void pm_frame_fix(i64 frame) { pm_leaf(); callp(pm_of(MTASK_FRAME_FIX), frame); lay_x86 = 0; lay_run(); }
 void px_frame_fix(i64 frame) { callp(px_of(MTASK_FRAME_FIX), frame); lay_x86 = 1; lay_run(); }
 
 // The derivation reads the Ins record, opcode numbers and machine helpers
