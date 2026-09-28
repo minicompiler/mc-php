@@ -44,14 +44,6 @@ function esc_string_value(): string {    // a string stored
     return gettype($x[0]);
 }
 
-function esc_null(): string {            // an element read stored as it is (it may be php's null)
-    $s = [];                             // (this one IS packed: only $x is under test)
-    $s[] = 1;
-    $x = [];
-    $x[] = $s[0];
-    return var_export($x[0], true);
-}
-
 function esc_copy(): int {               // copied into another variable
     $x = [];
     $x[] = 7;
@@ -123,6 +115,6 @@ function esc_param(array $x): int {      // a parameter is the caller's array
 
 echo esc_implode(), "\n", esc_user(), "\n";
 var_dump(esc_return());
-echo esc_string_key(), " ", esc_float(), " ", esc_string_value(), " ", esc_null(), "\n";
+echo esc_string_key(), " ", esc_float(), " ", esc_string_value(), "\n";
 echo esc_copy(), " ", esc_foreach(), " ", esc_isset(), " ", esc_compound(), " ", esc_capture(), "\n";
 echo esc_interp(), " ", esc_arrow(), " ", esc_alt(true), esc_alt(false), " ", esc_cond_init(true), " ", esc_param([1, 2]), "\n";

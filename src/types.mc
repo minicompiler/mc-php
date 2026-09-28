@@ -76,7 +76,6 @@ i64 ph_type_word(i64 must) {
 // makes an array element, an untyped parameter and `int / int` expressible.
 i64 ph_to_mixed(i64 n, i64 t) {
     if (t == PT_MIXED || t == PT_NULL) return n;
-    if (t == PT_INULL)  return ph_inull_zv(n);
     if (t == PT_PK)     ph_pk_disagree(ph_tfile, ph_tline, "a packed array used as a value");
     if (t == PT_INT)    return ph_c1("php_zlong", n, ty_pzv);
     if (t == PT_IFALSE) return ph_c1("php_zifalse", n, ty_pzv);
@@ -95,7 +94,6 @@ i64 ph_zkey(i64 n, i64 t) { return ph_to_mixed(n, t); }
 
 i64 ph_to_str(i64 n, i64 t) {
     if (t == PT_STRING) return n;
-    if (t == PT_INULL)  return ph_to_str(ph_inull_zv(n), PT_MIXED);
     // quiet: an int's digits raise nothing
     if (t == PT_INT)    return ph_quiet("php_itos", 1, n, 0, 0, 0, ty_pstr);
     if (t == PT_IFALSE) return ph_quiet("php_itos", 1, n, 0, 0, 0, ty_pstr);
@@ -109,7 +107,6 @@ i64 ph_to_str(i64 n, i64 t) {
 
 i64 ph_to_int(i64 n, i64 t) {
     if (t == PT_INT || t == PT_IFALSE) return n;
-    if (t == PT_INULL)  return ph_to_int(ph_inull_zv(n), PT_MIXED);
     if (t == PT_BOOL)   return ph_cast(TY_I64, n);
     if (t == PT_FLOAT)  return ph_cast(TY_I64, n);
     if (t == PT_STRING) return ph_c1("php_stoi", n, TY_I64);
@@ -121,7 +118,6 @@ i64 ph_to_int(i64 n, i64 t) {
 
 i64 ph_to_float(i64 n, i64 t) {
     if (t == PT_FLOAT) return n;
-    if (t == PT_INULL)  return ph_to_float(ph_inull_zv(n), PT_MIXED);
     if (t == PT_INT || t == PT_IFALSE || t == PT_BOOL) return ph_cast(ty_f64, n);
     if (t == PT_STRING) return ph_c1("php_stof", n, ty_f64);
     if (t == PT_MIXED || t == PT_NULL) return ph_c1("php_zv_double", n, ty_f64);
@@ -131,7 +127,6 @@ i64 ph_to_float(i64 n, i64 t) {
 
 i64 ph_to_bool(i64 n, i64 t) {
     if (t == PT_BOOL) return n;
-    if (t == PT_INULL)  return ph_to_bool(ph_inull_zv(n), PT_MIXED);
     if (t == PT_INT || t == PT_IFALSE)
         return ph_cast(TY_U8, ph_bin(ph_tok("!=", 2), n, ph_int(0), TY_U8));
     if (t == PT_FLOAT)  return ph_cast(TY_U8, ph_c1("php_truthy_f", n, TY_I64));

@@ -267,6 +267,9 @@ i64 ph_pk_store(uptr d, uptr fl, i64 line, i64 semi) {
     ph_can_throw = before;
     if (semi) ph_semi("expected ; after a php assignment");
     if (!k) return ph_expr_stmt_of(ph_quiet("php_pk_push", 2, base, v, 0, 0, TY_VOID));
+    // a FIXED array's keyed store is to a key its own right-hand side read
+    // (src/packed.mc), so the key is inside the buffer
+    if (ph_pk_fixed(base)) return ph_expr_stmt_of(ph_quiet("php_pk_set_f", 3, base, k, v, 0, TY_VOID));
     return ph_expr_stmt_of(ph_quiet("php_pk_set", 3, base, k, v, 0, TY_VOID));
 }
 
@@ -464,7 +467,6 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         i64 lv = node_new(N_IDENT, line, fl);
         set_nd_name(lv, ph_mangle(d, "v_"));
         set_nd_type(lv, ph_mcty(lt));
-        ph_inull_ok = 1;                      // `$v += $x[$i]`: ph_arith's to answer
         i64 r = ph_expr(0);
         i64 rt = ph_ety;
         if (semi) ph_semi("expected ; after a php assignment");
@@ -594,20 +596,6 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         return ph_wrap(ph_set(ph_mangle(d, "v_"), sr));
     }
     if (ph_pk_has(d)) return ph_pk_init(d, fl, line, semi);
-    if (ph_pin_has(d)) {
-        // `$v = $x[$k];` (src/packed.mc): the value and php's null, kept
-        ph_inull_ok = 1;
-        i64 iv = ph_expr(0);
-        if (ph_ety != PT_INULL || ph_var_find(d) >= 0) ph_pk_disagree(fl, line, "a packed element variable");
-        if (semi) ph_semi("expected ; after a php assignment");
-        ph_var_bind(d, PT_INULL);
-        i64 s1 = ph_set(ph_mangle(d, "v_"), iv);
-        i64 fr = node_new(N_IDENT, line, fl);
-        set_nd_name(fr, "ph_pkabs");
-        set_nd_type(fr, TY_I64);
-        set_nd_next(s1, ph_set(ph_mangle(d, "vn_"), fr));
-        return ph_wrap(s1);
-    }
     i64 v = ph_expr(0);
     i64 vt = ph_ety;
     if (semi) ph_semi("expected ; after a php assignment");
