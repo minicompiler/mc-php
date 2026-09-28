@@ -1141,7 +1141,7 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   body (`new Intent`, `$fn(...$args)`, the Throwable kept); the build succeeds, so the example's
   pin became a PROGRESS count on non-Windows hosts: check.php through the compiled module agrees
   with check.expect for 6 of 37 lines (`AW_PROGRESS` in `tests/examples.sh`; it stops at a
-  callable string). `tests/ext.sh` step 18 (`tests/ext/classes`), four refusals, `tests/leaks.sh`.
+  callable string). Windows's pin moves to line 14: the source's header grew a line. `tests/ext.sh` step 18 (`tests/ext/classes`), four refusals, `tests/leaks.sh`.
   On Windows the three names a published class calls (`object_init_ex`, `zend_declare_property`,
   `zend_register_internal_class_ex`) are listed in `src/win/php8.def` and `php8ts.def`, and
   `tests/ext.sh` step 1b grades every php name `lib/php_ext.mc` imports against both files on

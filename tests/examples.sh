@@ -376,7 +376,7 @@ fi
 # so there the first C declaration's refusal is pinned.
 AW_PROGRESS=6
 if [ "$host" = windows ]; then
-    pin "$EX" "awaitable.src.php:13: mc-php: an #[Extern] function on Windows: the link names no library for it: awaitable\\curl_easy_init"
+    pin "$EX" "awaitable.src.php:14: mc-php: an #[Extern] function on Windows: the link names no library for it: awaitable\\curl_easy_init"
 elif ! "$PHP" -m | tr -d '\r' | grep -qix curl; then
     skip "awaitable.src.php compiled: this php has no curl, and the module resolves libcurl from php's own process"
 elif build "$EX" "$EX/mcphp$suf.toml" "awaitable.$sx"; then
