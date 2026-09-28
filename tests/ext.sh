@@ -694,5 +694,23 @@ else
 fi
 rm -rf "$tmp/build"
 
+# --- 19. a module that calls php's callables, as interpreted -----------------
+cp tests/ext/callables/callables.php "$tmp/r.php"
+sed "s#__DIR__ . '/callables.php'#__DIR__ . '/r.php'#" tests/ext/callables/check.php > "$tmp/kc.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/k.build" 2>&1; then
+    "$PHP" -d extension="$tmp/build/r.$sx" "$tmp/kc.php" > "$tmp/k.m" 2>&1; km=$?
+    "$PHP" "$tmp/kc.php" > "$tmp/k.i" 2>&1; ki=$?
+    if [ "$km" = "$ki" ] && cmp -s "$tmp/k.m" "$tmp/k.i"; then
+        say "callables: a name, an array, a closure, __invoke and a spread called; throwables both ways -- $(wc -l < "$tmp/k.m" | tr -d ' ') lines, the interpreted source's"
+    else
+        bad "callables: the module (exit $km) and the interpreted source (exit $ki) differ"
+        diff "$tmp/k.i" "$tmp/k.m" | sed -n '1,12p' | sed 's/^/      /'
+    fi
+else
+    bad "callables: it would not build"; sed 's/^/      /' "$tmp/k.build"
+fi
+rm -rf "$tmp/build"
+
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }
 echo "  ext: the extension road is green"

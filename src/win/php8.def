@@ -30,6 +30,7 @@ zend_hash_get_current_key_ex == zend_hash_get_current_key_ex@@32
 zend_hash_get_current_data_ex == zend_hash_get_current_data_ex@@16
 zend_hash_move_forward_ex == zend_hash_move_forward_ex@@16
 instanceof_function_slow == instanceof_function_slow@@16
+_call_user_function_impl
 object_init_ex
 php_output_discard
 php_output_end

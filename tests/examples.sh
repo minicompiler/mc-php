@@ -374,7 +374,7 @@ fi
 # record in the same commit, and all of them means the hand-written
 # awaitable.mc can retire. Windows refuses #[Extern] by name (src/extern.mc),
 # so there the first C declaration's refusal is pinned.
-AW_PROGRESS=6
+AW_PROGRESS=9
 if [ "$host" = windows ]; then
     pin "$EX" "awaitable.src.php:14: mc-php: an #[Extern] function on Windows: the link names no library for it: awaitable\\curl_easy_init"
 elif ! "$PHP" -m | tr -d '\r' | grep -qix curl; then

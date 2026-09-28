@@ -1148,3 +1148,21 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   every host -- #34's windows/x86_64 failure (two kernel32 names below the runtime's
   `#dylib "ucrtbase.dll"`, exit 127 before `main`) was the same class of miss, found only on a
   Windows runner.
+- awaitable, step 5 (2026-09-28, branch `awaitable-call`, stacked on the step-4 PR): **php's
+  callables called, throwables both ways**. On the extension road `$fn(...)` on a value that is
+  not the runtime's own closure -- a name, `"C::m"`, an array callable, an engine `Closure`, an
+  `__invoke` object -- goes to php (`ph_eng` slot 6, `phx_vcall` over `_call_user_function_impl`),
+  a spread's trailing "not passed" slots dropped so php counts the real arguments; what it throws
+  is the module's to catch (`phx_zcatch`), and a non-callable is php's own `Error` wording for a
+  name, an object and a scalar. A runtime throwable crossing into php -- stored, returned, or
+  thrown out of a handler -- is the engine's object of its class with message and code
+  (`phx_exc_obj`, which `phx_throw` now uses too). Found on the way and fixed: `phx_zmirror`
+  outlived the call whose memory held it, so a later call's runtime exception at the same
+  address was taken for the mirror and php got the OLD engine exception rethrown; the mirror
+  is now dropped at the end of the outermost call. On the program road an object is called
+  through `__invoke` (`$g("x")` on a `new Greeter`), and a callable STRING is refused by design
+  (D6, `tests/r/d6-callable-string.php`) where an extension calls it through php;
+  `tests/g/104-callable-value.php` is green, and the grid gains three `__invoke` tests
+  (`bug70179`, `dereference_004`, `bug46409`).
+  `AW_PROGRESS` 6 -> 9 (`reset()` is next: the bodies). `tests/ext.sh` step 19
+  (`tests/ext/callables`), `tests/leaks.sh` (the callables module, 300 rounds).

@@ -38,10 +38,10 @@ off as the compiler learns it:
 | 36 | `function await(callable $fn, mixed ...$args): Intent` | DONE (the awaitable-classes branch): a signature beyond the scalars -- `callable`, `mixed ...$args`, a class, `array` -- checked as php's own parameter parsing checks it, and php's arrays and objects inside the module (`lib/php_ext.mc` § engine values, `tests/ext.sh` step 17) |
 | 65 | `function parallel(callable $fn, mixed ...$args): array` | DONE with it |
 | 26 | `final class Intent` and the three sync classes | DONE (the awaitable-published branch): published, the engine's own classes (`lib/php_ext.mc` § published classes, `tests/ext.sh` step 18) |
-| 36 | `await`'s body | written: `new Intent`, `$fn(...$args)`, the Throwable kept. A closure is called; a callable STRING (`'strtoupper'`) or array, and a runtime exception crossing back, are not yet -- that is where `check.php` stops (line 7 of `check.expect`) |
+| 36 | `await`'s body | DONE (the awaitable-call branch): `$fn(...$args)` calls any php callable -- a name (`'strtoupper'`), an array, a closure, an `__invoke` object -- through php's own `_call_user_function_impl`, and what it throws is kept in the Intent as the engine's object (`lib/php_ext.mc`'s `phx_vcall` and `phx_exc_obj`, `tests/ext.sh` step 19). `check.php` now stops at line 10: `\awaitable\reset()` is not declared |
 
-Behind the classes the BODIES need what the source does not say yet: a php callable called from
-the module (`$fn(...$args)`), `fork`, `pipe` and pthreads -- the C library itself is `#[Extern]`'s,
+Behind the classes the BODIES need what the source does not say yet: the counters
+(`reset`, `peak`, `completed`, `errors`, `wait_all`), `fork`, `pipe` and pthreads -- the C library itself is `#[Extern]`'s,
 with `variadic:` placing curl's variadic argument.
 
 ## How it is checked -- `tests/examples.sh`

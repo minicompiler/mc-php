@@ -423,8 +423,14 @@ i64 ph_postfix(i64 v, i64 vt) {
             vt = PT_MIXED;
             continue;
         }
-        if (ph_at("(", 1) && vt == PT_MIXED) {
-            // a callable value: $f(...) and (expr)(...)
+        // a callable STRING names a function to look up at run time: a
+        // program has no function table to look it up in (D6), an extension
+        // has php's (lib/php_ext.mc's phx_vcall)
+        if (ph_at("(", 1) && vt == PT_STRING && !ph_ext) ph_refuse(ph_tfile, ph_tline, "a callable string", "D6");
+        if (ph_at("(", 1) && (vt == PT_MIXED || vt == PT_OBJ || vt == PT_STRING)) {
+            // a callable value: $f(...) and (expr)(...); an object is called
+            // through its __invoke
+            if (vt != PT_MIXED) v = ph_to_mixed(v, vt);
             u8 nb[8];
             uptr av = ph_read_args(5, ph_tfile, ph_tline, nb);
             u8 all[64];

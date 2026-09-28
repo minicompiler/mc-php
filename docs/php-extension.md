@@ -75,6 +75,19 @@ method's check (`Too few arguments to function Box::add()`), and a published met
 most six. `tests/ext.sh` step 18 runs a module that publishes a class, loaded and interpreted,
 byte for byte.
 
+**A php callable is called** as a C extension calls one (`lib/php_ext.mc`'s `phx_vcall`): a
+value the module received -- a function's name (`'strtoupper'`), `"C::m"`, an array callable, a
+`Closure`, an object with `__invoke` -- called with `$fn(...)` goes through php's own
+`_call_user_function_impl`, a spread's arguments counted as php counts them. What the callable
+throws is the module's to catch, as the same source interpreted would catch it; a value that is
+not callable is php's own `Error` in the words `$f()` uses (`Call to undefined function nope()`,
+`Object of type stdClass is not callable`, `Value of type int is not callable`) -- except for an
+array and a `"C::m"` string, where it is `zend_call_function`'s `Invalid callback ...`. A
+**throwable the module keeps** -- caught and stored, or made with `new` and returned -- crosses
+back as the engine's object of that class with its message and code (`phx_exc_obj`), and one
+the module caught from php crosses back as the very object php threw. `tests/ext.sh` step 19
+runs such a module, loaded and interpreted, byte for byte.
+
 ```
 hello.php:3: mc-php: an interface an extension would publish: I is not implemented yet
 hello.php:7: mc-php: a by-reference parameter in an exported function: f is not implemented yet
@@ -255,10 +268,14 @@ each stream and exit the same. These are the places where they would not:
   open captures the script's echo after the call, as an internal function's would
   (`tests/ext.sh` step 10). The runtime's own stack stays for what it captures itself
   (`print_r($x, true)`).
-* **An exception the body throws** crosses as its own class when php has one of that name --
-  every built-in does, so `throw new InvalidArgumentException(...)` arrives as itself. A class
-  the SOURCE declares is not in the engine's class table (the back end registers no class yet),
-  and the fallback is a plain `Exception` whose message names it.
+* **An exception the body throws** -- or a throwable it returns or stores -- crosses as its own
+  class when php has one of that name, with its message and code: every built-in does, so
+  `throw new InvalidArgumentException(...)` arrives as itself. A throwable class the SOURCE
+  declares is not published (a published class may not `extends`), and the fallback is a plain
+  `Exception` whose message names it. Its file and line are the statement php was running when
+  it crossed, not the module's `new`.
+* **Calling a non-callable array or `"C::m"` string** is php's `Error` with
+  `zend_call_function`'s message (`Invalid callback ...`), not the one `$f()` says in a script.
 * **Destructors and `register_shutdown_function`** do not run. A program runs them when it ends;
   a module's request end (RSHUTDOWN) restores state and does not call back into php code, and
   `module_shutdown_func` is 0 on purpose -- running `php_shutdown`'s destructors into a stdout

@@ -3531,10 +3531,11 @@ uptr php_obj_props(uptr o) { return ld64(o + 24); }
 // runtime object whose class carries flag 32 and whose zend_object sits after
 // the header (lib/php_ext.mc § engine values). Its properties, its methods,
 // its class name and instanceof are the ENGINE's, so the few operations that
-// read them ask lib/php_ext.mc through ph_eng -- a table of five functions,
+// read them ask lib/php_ext.mc through ph_eng -- a table of seven functions,
 // 0 on the program road, where no proxy is ever made:
 //   0 class name   1 property read   2 property write   3 method call
 //   4 instanceof   5 `new` of a class the module publishes
+//   6 a call of a php callable that is not the runtime's own closure
 uptr ph_eng;
 i64 php_is_proxy(uptr o) {
     if (!ph_eng) return 0;
@@ -6088,6 +6089,10 @@ uptr php_closure_new(i64 fn, uptr bound, uptr thisp) {
 }
 
 uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
+    // an extension: a name, an array callable or an engine object is php's to
+    // call (lib/php_ext.mc's phx_vcall), the way the C twin calls it
+    if (ph_eng && (php_zv_type(z) != IS_OBJECT || php_is_proxy(ld64(z))))
+        return callp(ld64(ph_eng + 48), z, n, a1, a2, a3, a4, a5);
     if (php_zv_type(z) != IS_OBJECT) {
         php_throw_str(php_str_new("Error", 5), php_str_new("Value not callable", 18));
         return php_znull();

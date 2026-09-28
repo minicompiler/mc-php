@@ -109,6 +109,7 @@ php-src/Zend/tests/bug69892.phpt
 php-src/Zend/tests/bug69893.phpt
 php-src/Zend/tests/bug69957.phpt
 php-src/Zend/tests/bug70117.phpt
+php-src/Zend/tests/bug70179.phpt
 php-src/Zend/tests/bug70262.phpt
 php-src/Zend/tests/bug70288.phpt
 php-src/Zend/tests/bug70478.phpt
@@ -220,6 +221,7 @@ php-src/Zend/tests/dead_array_type_inference.phpt
 php-src/Zend/tests/declare/bug43027.phpt
 php-src/Zend/tests/dereference/dereference_001.phpt
 php-src/Zend/tests/dereference/dereference_003.phpt
+php-src/Zend/tests/dereference/dereference_004.phpt
 php-src/Zend/tests/dereference/dereference_014.phpt
 php-src/Zend/tests/div_002.phpt
 php-src/Zend/tests/div_by_zero_in_static.phpt
@@ -438,6 +440,7 @@ php-src/Zend/tests/magic_methods/bug32429.phpt
 php-src/Zend/tests/magic_methods/bug37707.phpt
 php-src/Zend/tests/magic_methods/bug38146.phpt
 php-src/Zend/tests/magic_methods/bug38234.phpt
+php-src/Zend/tests/magic_methods/bug46409.phpt
 php-src/Zend/tests/magic_methods/bug47353.phpt
 php-src/Zend/tests/magic_methods/bug52879.phpt
 php-src/Zend/tests/magic_methods/bug54372.phpt
