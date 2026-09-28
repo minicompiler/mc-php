@@ -842,15 +842,11 @@ void phr_init() {
     phr_add("php_str_byte");
     phr_add("php_str_sets_own");
     phr_add("php_str_setb_own");
-    phr_add("php_pk_get");
     phr_add("php_str_byte_c");
     phr_add("php_str_byte_d");
     phr_add("php_pk_get_c");
     phr_add("php_pk_get_d");
     phr_add("php_pk_set");
-    phr_add("php_add_ck");
-    phr_add("php_sub_ck");
-    phr_add("php_mul_ck");
     phr_add("php_intdiv");
 }
 
@@ -1259,7 +1255,7 @@ void phr_tail(i64 f) {
 // pool by one string an iteration (tests/ext.sh step 12b), and
 // neither is anything that copies a string or calls the counting's push.
 i64 phr_throws_only(uptr nm) {
-    return str_eq(nm, "php_pk_overflow") || str_eq(nm, "php_intdiv_slow");
+    return str_eq(nm, "php_intdiv_slow");
 }
 
 i64 phr_builds(i64 n) {

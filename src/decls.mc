@@ -28,18 +28,13 @@
 #define V_PROTECTED 1
 #define V_PRIVATE   2
 
-// What a compiled program does where C and php part ways (docs/semantics.md):
-// SEM_C, the default -- an int that overflows wraps, an in-range read is the
-// read and nothing else; SEM_PHP, php's own rules (the phpt grid's mode); and
-// SEM_CDEBUG, C's rules with every read it made unchecked checked again as a
-// hard trap. Chosen, the first that says: a `// mc-php: semantics=...` line
-// comment in a php source, MCPHP_SEMANTICS in the compiler's environment,
-// [php] semantics in the project file (src/program.mc, ph_sem_*).
-#define SEM_C      0
-#define SEM_PHP    1
-#define SEM_CDEBUG 2
-i64 ph_sem;
-i64 ph_sem_by;            // who chose it: 0 nobody, 1 the project, 2 the environment, 3 a source
+// A compiled program behaves as C does where C and php part ways
+// (docs/semantics.md): an int that overflows wraps, and a string offset or a
+// packed array element read in range is the read and nothing else -- outside
+// the range it is undefined. ph_checked_reads, `[php] checked_reads = true` in
+// the project file, checks those reads again as a hard trap that names the
+// file and line (src/program.mc ph_checked_config).
+i64 ph_checked_reads;
 
 i64 ty_pstr;              // the mc type `string` lowers to (D10)
 i64 ty_parr;
@@ -69,7 +64,6 @@ i64  ph_isof(i64 na, i64 t0, i64 a0, i64 want, i64 ztype, uptr fl, i64 line, upt
 i64  ph_a(uptr av, i64 i);
 i64  ph_aty(uptr av, i64 i);
 i64  ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line);
-i64  ph_is_ck(i64 n);
 i64  ph_assign_stmt(uptr fl, i64 line, i64 semi);
 i64  ph_strlit(uptr bytes, i64 len);
 i64  ph_digit(i64 c, i64 base);

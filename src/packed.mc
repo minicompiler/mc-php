@@ -38,11 +38,11 @@
 // file, never a wrong answer. Whatever the scan cannot show is an int keeps
 // the array a php array: the proof fails in the safe direction.
 //
-// Keys are NOT proved in range, and do not need to be. A read of a key the
-// array does not have is php's warning and null (php_pk_get raises it and
-// sets ph_pkabs); a store past the end or below zero makes the array php's
-// ordered hash inside the same handle (php_pk_hash). So every key php allows
-// behaves as php says.
+// Keys are NOT proved in range. A read of a key the array does not have is
+// C's undefined behaviour (docs/semantics.md; `[php] checked_reads` makes it a
+// trap); a store past the end or below zero makes the array php's ordered hash
+// inside the same handle (php_pk_hash), and from then on a read is the hash's
+// own lookup (php_pk_get_c).
 //
 // A variable whose only assignment is `$v = $x[K];` (the FIRST occurrence, a
 // statement, every read after it in its block, never written again) is kept
@@ -56,13 +56,8 @@
 // comparison, echo, `.`) it becomes the zval php has (php_zinull), which is
 // exactly what the read was before this file existed.
 //
-// One deviation, named: php promotes an int that overflows to a float, and
-// the zval road this replaces did. So + - * on an element, and on what such
-// an operation answered in the same expression, are php_add_ck/sub_ck/mul_ck:
-// php's overflow test, and where php would make a float an ArithmeticError
-// that says so -- a refusal at run time, never a wrapped int. (An int
-// VARIABLE assigned from one is the native int road's own, which wraps; that
-// is D10's gap, docs/plan.md § 7.)
+// Like every int, an element's + - * wraps as C's does (docs/semantics.md):
+// php would promote the result to a float, and neither a native int nor C does.
 
 #define PK_MAXT 16384
 #define PK_MAXV 512

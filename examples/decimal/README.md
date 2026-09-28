@@ -288,6 +288,11 @@ So of the four instruction-selection items only the layout moved the time: the l
 its taken branches, not by its instruction count, and removing 17 more instructions from it
 bought 0.004 ms. What is left of the (b) row is below the noise on this host.
 
+**C only** (the `c-only` branch, after #26). The owner's correction: a compiled program ALWAYS
+behaves like C. The `php` mode below, its source comment and `MCPHP_SEMANTICS` are gone, and
+`c-debug` is now the one project key `[php] checked_reads = true`. The measurements below are
+kept as they were taken; the modes they name are history.
+
 **Three columns, C semantics** (2026-09-27, macos/arm64, php 8.5.10, one host, one sitting,
 fifteen rounds interleaved, best of nine each; `decimal.php` and `bench.php` unchanged). The
 owner's decision: a compiled mc-php program behaves as C does where C and php part ways, BY

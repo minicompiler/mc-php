@@ -1,5 +1,5 @@
 <?php
-// C semantics, the default: a store outside a packed array makes it php's
+// mc-php behaves as C does, and a store outside a packed array makes it php's
 // hash under the same handle, and a read after that is the hash's -- a valid
 // key answers its value, not the stale dense buffer's. (docs/semantics.md § 3)
 function h(int $n): string {

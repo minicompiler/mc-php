@@ -1,6 +1,4 @@
 <?php
-// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
-// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // The packed int array (src/packed.mc): an array the compiler proves holds
 // only ints under keys 0..n-1 and never leaves its function is a native i64
 // buffer. Every function here is one the proof ACCEPTS for its $x (the end
@@ -34,24 +32,6 @@ function pk_mul(string $a, string $b): string {
     return ltrim($out, '0');
 }
 
-// a key the array does not have: php's warning, and null wherever null and
-// 0 differ -- a comparison, a string, var_dump, a call's argument
-function pk_absent(): void {
-    $x = [];
-    $x[] = 5;
-    $x[] = 7;
-    var_dump($x[0] + $x[1], $x[9] + 1, $x[9] * 2, -$x[9], $x[9] ** 2, $x[1] / 2, $x[0] + 1.5);
-    var_dump($x[9] < -1, $x[9] == 0, $x[9] === 0, "a" . $x[9] . "b", $x[1]);
-    var_dump($x[0] === $x[9], $x[9] === $x[8], $x[9] === null, $x[0] !== $x[9]);
-    $v = $x[4];
-    var_dump($v, $v + 3, $v * 2);
-    $w = $x[1];
-    var_dump($w, $w * $w);
-    echo $x[8], "|", $x[0], "\n";
-}
-
-// keys past the end and below zero: the array becomes php's ordered hash in
-// the same handle, keys in php's order, and push continues after the largest
 function pk_sparse(): void {
     $x = array_fill(0, 3, 1);
     $x[3] = 4;
@@ -59,7 +39,7 @@ function pk_sparse(): void {
     $x[-2] = 99;
     $x[] = 12;
     $x[0] = 2;
-    var_dump(count($x), $x[10], $x[11], $x[-2], $x[0], $x[5] + 0);
+    var_dump(count($x), $x[10], $x[11], $x[-2], $x[0], $x[3] + 0);
     $y = array();
     $y[-1] = 3;
     $y[] = 4;
@@ -78,7 +58,7 @@ function pk_sum(int $n): int {
     $x = [];
     for ($i = 0; $i < $n; $i++) { $x[] = $i * $i; }
     $s = 0;
-    for ($i = 0; $i <= $n; $i++) { $s += $x[$i]; }
+    for ($i = 0; $i < $n; $i++) { $s += $x[$i]; }
     return $s;
 }
 
@@ -93,8 +73,8 @@ function pk_grow(int $n): int {
     return $t;
 }
 
-// `**` on a packed read and on a checked sum: php's pow_function_base, so
-// the first product that overflows turns into a float instead of wrapping
+// `**` on a packed read and on a sum of one (an int that overflows wraps,
+// docs/semantics.md, so only values in range are php's answer)
 function pk_pow(int $n) {
     $x = [];
     $x[] = $n;
@@ -126,7 +106,6 @@ function pk_arg(int $d) {
 
 echo pk_mul("123456789012345678", "98765432109876543210"), "\n";
 echo pk_mul("9999", "9999"), " ", pk_mul("0", "5"), " ", pk_mul("1", "1"), "\n";
-pk_absent();
 pk_sparse();
 echo pk_fill(3), "\n";
 try { echo pk_fill(-1), "\n"; } catch (ValueError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
@@ -135,7 +114,6 @@ try { echo pk_fill(1 << 31), "\n"; } catch (ValueError $e) { echo get_class($e),
 echo pk_sum(10), "\n";
 echo pk_grow(100), "\n";
 pk_pow(3);
-pk_pow(PHP_INT_MAX - 1);
 pk_key(1);
 pk_key(0);
 pk_re(2);

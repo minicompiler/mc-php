@@ -1,0 +1,9 @@
+# The .phpt tests php passes and mc-php does not ONLY because mc-php behaves as
+# C does (docs/semantics.md): each reads a string offset outside the string on
+# purpose, which is php's warning and "" and, compiled, an undefined read.
+# tests/grid.sh removes these from the green baseline (green-*.txt, php's
+# answers as of the recording) and requires the rest to be exactly what the
+# grid finds green. One per line: the test, a tab, the reason.
+php-src/Zend/tests/bug39018_2.phpt	@$foo[6], $foo[100] and $foo[130] on 'test': php prints "", compiled they read past the string
+php-src/Zend/tests/str_offset_001.phpt	$str[3] on "abc": php warns and gives "", compiled it reads past the string
+php-src/Zend/tests/string_offset_int_min_max.phpt	$str[PHP_INT_MAX] and $str[PHP_INT_MIN] on "": php warns, compiled they read outside the string

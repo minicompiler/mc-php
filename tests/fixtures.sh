@@ -135,11 +135,13 @@ for f in $P/r/*.php; do
     esac
 done
 echo "  refusals: $nrok / $nr parse under php and are named by mc-php, exit 3"
-# c/*.php: C semantics (docs/semantics.md), which php does not have, so each
+# c/*.php: C's behaviour (docs/semantics.md), where php's differs, so each
 # is graded against its own recording and not against php: NAME.out is
 # stdout, NAME.err stderr (empty when absent; the path of the file is
 # spelled tests/c/NAME.php whatever the host wrote) and NAME.code the exit
-# code (0 when absent).
+# code (0 when absent). A NAME.toml beside it is the project file's own
+# tables (`[php] checked_reads = true`), and tests/mcphp.sh builds it the
+# project road.
 nc=0; ncok=0
 for f in $P/c/*.php; do
     nc=$((nc + 1))
@@ -159,7 +161,7 @@ for f in $P/c/*.php; do
         fail=1
     fi
 done
-echo "  C semantics: $ncok / $nc answer their recording (wrap, in-range reads, the debug trap)"
+echo "  C behaviour: $ncok / $nc answer their recording (wrap, in-range reads, a hash, checked_reads)"
 # The packed int array (src/packed.mc) is a LOWERING, and a differential only
 # says the answers are php's -- a proof that silently never fires would pass
 # it too. So the lowering is read back: every pk_* function of g/105 must
@@ -208,13 +210,13 @@ fi
 # break out to (acc()'s two loops plus the tail's own: `break 3`).
 "$MCPHP_BIN" --dump-ast $P/g/115-hot-paths.php > "$tmp/hp.ast" 2>&1
 set -- $(awk '/^FUNC/ { u = ($0 ~ / name=f_(acc|bytes)$/) }
-               u && /CALL .*name=php_(pk_get|pk_set|str_byte)$/ { f++ }
-               u && /CALL .*name=php_pk_get_slow$/ { s++ } u && /BREAK val=3$/ { b++ }
+               u && /CALL .*name=php_(pk_get_c|pk_set|str_byte|str_byte_c)$/ { f++ }
+               u && /CALL .*name=php_pk_get_c_slow$/ { s++ } u && /BREAK val=3$/ { b++ }
                END { print f + 0, (s > 0), (b > 0) }' "$tmp/hp.ast")
 if [ "$*" = "0 1 1" ]; then
     echo "  runtime copies: g/115's byte and element reads and writes are inline, their slow halves calls, one unwind tail"
 else
-    echo "  FAIL  runtime copies: g/115's lowering reads $* (want 0 1 1: no php_pk_get/pk_set/str_byte call, a php_pk_get_slow, a break to the tail)"
+    echo "  FAIL  runtime copies: g/115's lowering reads $* (want 0 1 1: no php_pk_get_c/pk_set/str_byte call, a php_pk_get_c_slow, a break to the tail)"
     fail=1
 fi
 # src/mach.mc's peepholes, read back on BOTH machines whatever the host (the
@@ -242,7 +244,7 @@ else
     fail=1
 fi
 # src/mach.mc's P10, read back on the three machines: every slow half in g/115's
-# acc() -- the element read and write outside the array, the overflow -- is
+# acc() -- the element read of a hash, the store outside the array -- is
 # laid out after the function's ret, and the fast path falls through its
 # guards. MCPHP_LAYOUT=0 is the off switch and puts every one back in line; the
 # "on" half unsets it, so this reads the same under a run with the switch off.
@@ -251,7 +253,7 @@ for m in arm64 x86_64 x86_64-win; do
     for e in "-u MCPHP_LAYOUT" "MCPHP_LAYOUT=0"; do
         set -- "$@" $(env $e "$MCPHP_BIN" --machine=$m --dump-asm $P/g/115-hot-paths.php 2>&1 | awk '
             /^_/ { u = ($0 == "_f_acc:"); r = 0 } u && / ret$/ { r = 1 }
-            u && /(_slow|_php_pk_overflow)$/ { if (r) a++; else b++ }
+            u && /_slow$/ { if (r) a++; else b++ }
             END { print ((a > 0 && b == 0) ? "out" : ((a == 0 && b > 0) ? "in" : "mixed")) }')
     done
 done
@@ -286,13 +288,12 @@ else
     echo "  FAIL  reach: $(head -1 "$tmp/far.err") (a function main compiles)"
     fail=1
 fi
-# The one place the packed lowering is NOT php: an int that overflows on an
-# element. php makes a float; a native int cannot hold one, so it is a named
-# ArithmeticError and never a wrapped int. Not a differential -- php's answer
-# is the float -- so the refusal's text is what is checked.
-cat > "$tmp/pko.php" <<'PKO'
+# An int that overflows on a packed element wraps as C's does
+# (docs/semantics.md): php would make a float, so this is not a differential
+# and the answers are checked. Nothing is thrown -- so `throw` of the product
+# is php's "Can only throw objects" over an int, and each store is made.
+cat > "$tmp/pkc.php" <<'PKC'
 <?php
-// mc-php: semantics=php
 function pko(int $n): string {
     $x = [];
     $x[] = $n;
@@ -303,7 +304,6 @@ function pkn(int $n): string {
     $x[] = $n;
     try { return (string) (-($x[0] + 1) * 2); } catch (ArithmeticError $e) { return get_class($e); }
 }
-// the store is not reached when the value throws: $x is as it was
 function pks(int $n): string {
     $x = [];
     $x[] = $n;
@@ -312,15 +312,13 @@ function pks(int $n): string {
     return count($x) . " " . $x[0];
 }
 echo pko(5), "\n", pko(PHP_INT_MAX), "\n", pkn(5), " ", pkn(PHP_INT_MAX - 1), "\n";
-// PHP_INT_MIN * -1 in both orders: the one product whose DIVISION check
-// would trap on x86-64 (idiv of PHP_INT_MIN by -1); it must be the named error
+// PHP_INT_MIN * -1 in both orders: the one product whose division would trap
+// on x86-64 (idiv of PHP_INT_MIN by -1); a multiplication wraps and does not
 function pkm(int $n, int $o): string {
     $x = [];
     $x[] = $n;
     try { if ($o) return (string) (-1 * $x[0]); return (string) ($x[0] * -1); } catch (ArithmeticError $e) { return "A"; }
 }
-// `throw` of an element product that overflows is that ArithmeticError,
-// not "Can only throw objects" over the wrapped value
 function pkt(int $n): string {
     $x = [];
     $x[] = $n;
@@ -329,28 +327,15 @@ function pkt(int $n): string {
 echo pks(5), " ", pks(PHP_INT_MAX), "\n";
 echo pkt(5), " ", pkt(PHP_INT_MAX), "\n";
 echo pkm(5, 0), " ", pkm(5, 1), " ", pkm(PHP_INT_MIN, 0), " ", pkm(PHP_INT_MIN, 1), "\n";
-PKO
-lim $P/mcphp.sh "$tmp/pko.php" > "$tmp/pko.out" 2> "$tmp/pko.err"
-rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
-pko=$(tr -d '\r' < "$tmp/pko.out")
-pkw=$(printf '15\nArithmeticError: mc-php: an int overflowed in * on a packed array'"'"'s element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)\n-12 ArithmeticError\n2 10 1 9223372036854775807\nE A\n-5 -5 A A')
-if [ "$pko" = "$pkw" ]; then
-    echo "  packed: an overflow on an element is the named ArithmeticError, not a wrapped int, and no store"
-else
-    echo "  FAIL  packed overflow: want [$pkw], got [$pko]"; fail=1
-fi
-# ... and its C twin, the same source with C's rules (docs/semantics.md, the
-# default): each operation wraps as C's does and nothing is thrown -- so
-# `throw` of the product is php's "Can only throw objects" over an int.
-grep -v 'mc-php: semantics=' "$tmp/pko.php" > "$tmp/pkc.php"
+PKC
 lim $P/mcphp.sh "$tmp/pkc.php" > "$tmp/pkc.out" 2> "$tmp/pkc.err"
 rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
 pkc=$(tr -d '\r' < "$tmp/pkc.out")
 pcw=$(printf '15\n9223372036854775805\n-12 2\n2 10 2 -2\nE E\n-5 -5 -9223372036854775808 -9223372036854775808')
 if [ "$pkc" = "$pcw" ]; then
-    echo "  packed, C: the same overflows wrap as C's do, and nothing is thrown"
+    echo "  packed: an overflow on an element wraps as C's does, nothing is thrown, and every store is made"
 else
-    echo "  FAIL  packed overflow, C: want [$pcw], got [$pkc]"; fail=1
+    echo "  FAIL  packed overflow: want [$pcw], got [$pkc]"; fail=1
 fi
 # A size near PHP_INT_MAX on the program road is "arena exhausted", never a
 # bump past the arena: `a + n` wrapped and moved the top to a wild address

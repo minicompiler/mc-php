@@ -1,6 +1,4 @@
 <?php
-// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
-// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // The string lowerings batch E made native (docs/plan.md § 7): strspn and
 // strcspn over native strings with a literal or a computed set, the trim
 // family with a mask (ranges included), $s[$i] === 'c' compared in place,
@@ -26,7 +24,7 @@ $mask = "a..z";
 var_dump(trim("hello, World", $mask), trim("", "x"), ltrim("nothing", "z"));
 
 $w = "-12.5";
-var_dump($w[0] === '-', $w[0] !== '-', '.' === $w[3], $w[1] === '-', $w[-1] === '5', $w[40] === '5', $w[-40] !== '5');
+var_dump($w[0] === '-', $w[0] !== '-', '.' === $w[3], $w[1] === '-', $w[-1] === '5', $w[4] === '5', $w[-40] !== '5');
 $n = 0;
 for ($i = 0; $i < strlen($w); $i++) { if ($w[$i] === '.') { $n = $i; } }
 echo $n, " ", strlen($w), " ", strlen(""), "\n";

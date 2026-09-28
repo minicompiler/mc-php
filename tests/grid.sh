@@ -13,11 +13,6 @@ cd "$root"
 bin=${1:-build/mc-php}; out=${2:-build/grid}; full=${3:-}
 MCPHP_BIN=$(CDPATH= cd -- "$(dirname -- "$bin")" && pwd)/$(basename "$bin")
 export MCPHP_BIN
-# php's rules (docs/semantics.md): the grid is php's own tests, so it grades
-# the compiler in the mode that promises php's answers. A caller that wants
-# the default, C's rules, says MCPHP_SEMANTICS=c and reads the differences.
-MCPHP_SEMANTICS=${MCPHP_SEMANTICS:-php}
-export MCPHP_SEMANTICS
 . "$(dirname -- "$0")/tmp.sh"
 mcphp_tmp_init mcphp-grid
 mcphp_tmp_watch
@@ -35,8 +30,35 @@ for d in tests/lang Zend/tests ext/standard/tests/strings; do
     find "php-src/$d" -name '*.phpt' | python3 probes/t0/phpt-run.py \
         --candidate "$root/tests/mcphp.sh" --jobs "${MCPHP_JOBS:-12}" --quiet --out "$out/$n"
 done
+# The gate: what is green must be tests/grid/green-<dir>.txt (the recording)
+# minus tests/grid/expected-differences.txt -- the tests php passes that
+# mc-php does not because it behaves as C does (docs/semantics.md). A test
+# lost, a test gained and an expected difference that no longer differs all
+# fail, by name; a gain is the recording to update in the same commit.
+gate=0
+exp=tests/grid/expected-differences.txt
+for d in tests/lang Zend/tests ext/standard/tests/strings; do
+    n=$(echo "$d" | tr '/' '_')
+    grep -v '^#' "$exp" | cut -f1 | grep -v '^$' | LC_ALL=C sort > "$out/$n.exp"
+    LC_ALL=C comm -23 "tests/grid/green-$n.txt" "$out/$n.exp" > "$out/$n.want"
+    cut -f1 "$out/$n/green.txt" | LC_ALL=C sort > "$out/$n.got"
+    lost=$(LC_ALL=C comm -23 "$out/$n.want" "$out/$n.got")
+    won=$(LC_ALL=C comm -13 "$out/$n.want" "$out/$n.got")
+    for t in $lost; do echo "  FAIL  $t: green in the recording, not now"; gate=1; done
+    for t in $won; do
+        if grep -q "^$t	" "$exp"; then echo "  FAIL  $t: an expected difference that no longer differs"
+        else echo "  FAIL  $t: green now and not in the recording (update tests/grid/green-$n.txt)"; fi
+        gate=1
+    done
+done
+if [ "$gate" = 0 ]; then
+    echo "grid: green is the recording minus the $(grep -v '^#' "$exp" | grep -c .) expected differences, in all three directories"
+else
+    echo "grid: FAILED against the recording"
+fi
 if [ -n "$full" ]; then
     printf '== the whole corpus ==\n'
     find php-src -name '*.phpt' -not -path '*/sapi/*' | python3 probes/t0/phpt-run.py \
         --candidate "$root/tests/mcphp.sh" --jobs "${MCPHP_JOBS:-12}" --quiet --out "$out/all"
 fi
+exit $gate

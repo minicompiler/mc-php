@@ -40,7 +40,7 @@
 //       writer already patch a page offset into (they classify the access by
 //       its size bits).
 //   P10 a slow half the walker jumps over -- a straight-line region whose
-//       first call is a *_slow routine, php_rc_drain or php_pk_overflow -- is
+//       first call is a *_slow routine or php_rc_drain -- is
 //       moved past the epilogue once the function is finished, so the fast
 //       path falls through its guards (see the section below; both machines,
 //       MCPHP_LAYOUT=0 turns it off alone).
@@ -598,9 +598,10 @@ void px_fill(uptr tab, uptr orig, uptr src, uptr pro) {
 }
 
 // ---- P10: the slow path out of line (both machines) -------------------------
-// The runtime's fast paths come with a slow half -- `if (k < n) <load> else
-// php_pk_get_slow(...)`, `if (ph_pn > ph_pm) php_rc_drain(ph_pm)`, `if
-// (<overflow>) php_pk_overflow(0)` -- and mc lays an if out in source order:
+// The runtime's fast paths come with a slow half -- `if (<hashed>)
+// php_pk_get_c_slow(...) else <load>`, `if (k < n) <store> else
+// php_pk_set_slow(...)`, `if (ph_pn > ph_pm) php_rc_drain(ph_pm)` -- and mc
+// lays an if out in source order:
 // the fast half ends in a jump over the slow one, and an if with no else is a
 // jump over its body. So the path that runs takes a branch for every guard:
 // six taken branches in examples/decimal's _dec_umul inner loop, where one
@@ -609,7 +610,7 @@ void px_fill(uptr tab, uptr orig, uptr src, uptr pro) {
 // Once the function is finished (after the frame fixup, which reads the
 // prologue's own index), a region the walker jumps over is moved past the
 // epilogue when its first call is a cold routine: one whose name ends in
-// _slow, or php_rc_drain or php_pk_overflow. Precisely, a branch P to a label
+// _slow, or php_rc_drain. Precisely, a branch P to a label
 // T further on, where everything between them is labels up front, then code
 // with no label and no call before that cold call (after it the slow half may
 // branch within itself), and no branch anywhere in it back to before P -- a
@@ -641,7 +642,7 @@ void lay_invert(uptr e) {
 i64 pm_cold_sym(i64 si) {
     uptr n = sym_name(sym_at(si));
     if (ld8(n) == '_') n = n + 1;
-    if (str_eq(n, "php_rc_drain") || str_eq(n, "php_pk_overflow")) return 1;
+    if (str_eq(n, "php_rc_drain")) return 1;
     i64 k = cstrlen(n);
     return k > 5 && str_eq(n + k - 5, "_slow");
 }

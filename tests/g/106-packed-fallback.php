@@ -1,6 +1,4 @@
 <?php
-// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
-// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // The packed int array's proof FAILING (src/packed.mc): each function below
 // builds an int array the way tests/g/105 does and then does ONE thing the
 // proof does not allow, so the array stays php's own ordered hash of zvals
@@ -46,11 +44,11 @@ function esc_string_value(): string {    // a string stored
     return gettype($x[0]);
 }
 
-function esc_null(): string {            // an element read stored as it is: null when absent
+function esc_null(): string {            // an element read stored as it is (it may be php's null)
     $s = [];                             // (this one IS packed: only $x is under test)
     $s[] = 1;
     $x = [];
-    $x[] = $s[5];
+    $x[] = $s[0];
     return var_export($x[0], true);
 }
 
