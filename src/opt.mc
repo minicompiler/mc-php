@@ -37,7 +37,20 @@ i64 ph_opt_i0(i64 line, uptr fl) {
     return n;
 }
 
+// `$s . str_repeat('0', $n)` -- a pad: one string of the final length, where
+// the repeat was a string of its own and the concatenation a second
+void ph_opt_catrep(i64 c) {
+    if (!ph_opt_is(c, "php_str_concat")) return;
+    i64 a = nd_a(c);
+    i64 r = nd_next(a);
+    if (!r || nd_next(r) || !ph_opt_is(r, "php_str_repeat")) return;
+    i64 ch = nd_a(r);
+    set_nd_next(a, ch);
+    set_nd_name(c, "php_str_catrep");
+}
+
 void ph_opt_catw(i64 c) {
+    ph_opt_catrep(c);
     i64 k = ph_opt_catn(c);
     if (!k) return;
     i64 p = nd_a(c);
@@ -246,9 +259,11 @@ void ph_sc_fn(i64 f) {
 void phr_fn(i64 f);
 
 void ph_opt_fn(i64 f) {
-    ph_sc_fn(f);
     ph_opt_walk(nd_b(f));
     phr_fn(f);
+    // after the runtime's copies: a read the short circuit's right side made
+    // is a copy by now, so the right side is still one expression
+    ph_sc_fn(f);
 }
 
 // ---- small php functions are inlined -----------------------------------------
