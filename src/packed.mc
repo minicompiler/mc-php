@@ -699,7 +699,10 @@ i64 pkx_check(i64 v, i64 s) {
 // outside the array is undefined, so the read says K is inside it, and so is
 // the store. K is compared token for token and may name only variables and
 // integers under + - * and parentheses; the right-hand side assigns nothing,
-// so K means the same thing at the read and at the store. `$x[] = E` grows the
+// so K means the same thing at the read and at the store. A call there cannot
+// change K either: it could only through a reference, and a name any source
+// takes by reference is a zval everywhere (the whole-source scans in
+// program.mc), never the int a key must be (tests/g/117). `$x[] = E` grows the
 // dense buffer and is allowed too. Such an array (FIXED) is read and written
 // as C reads and writes a buffer: no hash test, no bound test.
 uptr pkx_fixed;             // the fixed arrays, by their mangled names ("v_x")
