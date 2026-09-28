@@ -65,6 +65,25 @@ against the twins' 64 / 428 (the first compiled `b_use` was 131 / 973); `a_add` 
 11 / 111 -- a per-call noise of about ±5 cycles in this sitting, where earlier sittings gave
 12 against 20.
 
+On the pull request's CI run (`tests/examples.sh`, three rounds interleaved, minimums; the twins
+are built only where the host has `php-config` and `cc`):
+
+| host | interpreted | compiled | compiled / interpreted |
+|---|---|---|---|
+| macos/arm64 (`macos-15`) | 3.430 ms | 2.786 ms (twins 2.488) | **1.23x** faster |
+| windows/x86_64 | 9.859 ms | 6.780 ms | **1.45x** faster |
+| windows/arm64 (x64 php emulated) | 16.378 ms | 11.257 ms | **1.45x** faster |
+| linux/aarch64 (`php:8.5-alpine`) | 3.644 ms | 4.110 ms | 0.89x -- slower |
+| linux/x86_64 (`php:8.5-alpine`) | 3.346 ms | 4.034 ms | 0.83x -- slower |
+
+**On the Linux image the C twins are slower than the interpreter too.** Measured on
+`php:8.5-alpine` in the Lima VM `mc-k7` (linux/aarch64), with the twins built there with `cc`,
+nine rounds: twins / interpreted 1.10 (0.96-1.51), compiled / twins 1.09 (0.81-1.15), compiled /
+interpreted 1.19 (1.01-1.24). There a call from one extension into another through
+`zend_call_function` costs more than php's own userland call, and the module and the twin both
+pay it: the row straight into A, which has no such call, is faster compiled on both Linux legs
+(1.484 against 2.273 ms, 1.576 against 1.894 ms).
+
 This is not an arithmetic benchmark. Almost all of a call's time is php's -- the VM's call of an
 internal function and `zend_call_function`, the same in all three columns -- so the interpreted
 column is only ~1.2x the twins', and "faster than interpreted" left the module ~20% of room.
