@@ -233,10 +233,15 @@ set -- $(awk '/^FUNC/ { f = $NF }
     f == "name=f_fresh" && /CALL .*name=php_str_setb_f_slow$/ { w++ } f == "name=f_fresh" && /CALL .*name=php_str_setb(_own)?$/ { o++ }
     f == "name=f_sign" && /ASSIGN name=.*phs_/ { t++ }
     END { print r + 0, c + 0, p + 0, (d > 0), (w > 0), o + 0, t + 0 }' "$tmp/lf.ast")
-if [ "$*" = "1 0 0 1 1 0 0" ]; then
-    echo "  lowered forms: g/116's rope, fixed array, pad, fresh buffer and folded short circuits"
+# A Windows-hosted compiler reads no environment (below, the out-of-line
+# block says why), so MCPHP_RC=check cannot turn the counting on there and
+# fresh() keeps php's write: that host checks the other four.
+want="1 0 0 1 1 0 0"; fb="fresh buffer"
+if [ "$sfx" = .exe ]; then want="1 0 0 1 0 1 0"; fb="php's write in fresh() (the counting switch is not readable on a Windows host)"; fi
+if [ "$*" = "$want" ]; then
+    echo "  lowered forms: g/116's rope, fixed array, pad, $fb and folded short circuits"
 else
-    echo "  FAIL  lowered forms: g/116 reads $* (want 1 0 0 1 1 0 0: one rope and no concatenation, no packed call, a pad, a fresh buffer's slow half and no php write, no short-circuit temporary)"
+    echo "  FAIL  lowered forms: g/116 reads $* (want $want: one rope and no concatenation, no packed call, a pad, a fresh buffer's slow half and no php write, no short-circuit temporary)"
     fail=1
 fi
 # src/mach.mc's peepholes, read back on BOTH machines whatever the host (the
