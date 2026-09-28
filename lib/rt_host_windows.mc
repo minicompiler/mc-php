@@ -38,6 +38,8 @@ extern i64  CloseHandle(uptr h);
 extern void ExitProcess(i64 code);
 extern uptr GetCommandLineA();
 extern i64  SetFilePointerEx(uptr h, i64 dist, uptr newpos, i64 method);
+extern uptr GetModuleHandleA(uptr name);
+extern uptr GetProcAddress(uptr h, uptr name);
 extern i64  GetFileAttributesA(uptr name);
 extern i64  GetFileAttributesExA(uptr name, i64 level, uptr info);
 extern i64  SetFileAttributesA(uptr name, i64 attrs);
@@ -363,6 +365,7 @@ uptr php_setlocale(i64 cat, uptr p) {
 // A symbol of php's DLL by name: only the extension road asks, for the
 // engine's executor_globals (lib/php_ext.mc § engine values). php8.dll is the
 // NTS build's, the only one a module here loads into (docs/php-extension.md).
-extern uptr GetModuleHandleA(uptr name);
-extern uptr GetProcAddress(uptr h, uptr name);
+// GetModuleHandleA and GetProcAddress are declared with the kernel32 names at
+// the top: below the `#dylib` they would be imports of ucrtbase.dll, which has
+// neither, and the loader refuses the whole program before it starts.
 uptr php_dlsym(uptr name) { return GetProcAddress(GetModuleHandleA("php8.dll"), name); }
