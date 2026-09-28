@@ -436,6 +436,58 @@ carry in the frame because ten callee-saved registers go to the inner loop's var
 allocator gives a local one register for the whole function), and making the carried values
 registers by hand (`$t` in `$j`, the carry in `$x`) moved 9 cycles.
 
+**Under 2x: decimal-under-2x** (2026-09-28, the same host and method; every ratio below is the
+module's best of nine over the twin's in the SAME round, and the range is over 15 rounds).
+Each lead was bounded first; what gained was built, and the rest was measured and reverted.
+
+| change | where | module / twin per round (median, min-max) |
+|---|---|---|
+| the start (#29) | | 2.008 (1.961-2.048) |
+| P15: a branch on `&&`/`\|\|` branches on its terms -- mc's walker made every `&&` a value, a cset, a jump and a move per term before the one test (the handlers' enter/leave fast paths, the runtime's range tests) | `src/mach.mc` | 1.992 (1.953-2.024) |
+| a handler copies in the php function it wraps when that one is small and loop-free (`dec_add`, `dec_sub` forward to `_dec_addsub`) | `src/ext.mc` | 1.945 (1.929-1.984) |
+| `_dec_fmt` carries the index of its first kept digit, as the twin moves its pointer, where it built `substr($c, skip0)`: add, sub and a scale-up read the magnitude where it lies and build only the answer (40000 random pairs through all six functions: one md5 from the old file, the new one, the module and the twin) | `decimal.php` | **1.794 (1.756-1.848)** |
+
+`bench.php`: 0.225 ms median (0.222-0.230) against the twin's 0.126 (0.125-0.128), from 0.254.
+Per call (instructions / cycles): `dec_add` 3397 / 427 against 1658 / 236 (1.81), `dec_sub`
+3614 / 448 against 1662 / 243 (1.84), `dec_mul` 7037 / 854 against 2737 / 428 (2.00), `dec_cmp`
+1651 / 198 against 829 / 109 (1.82), `dec_div` 22693 / 2905 against 6191 / 1181 (2.46).
+
+Where the gap was, stage by stage (each operation cut short after one stage, both sides, cycles a
+`dec_add` at the start of the round): entry 47 against 15, parse 43 and the digits 107 against
+the twin's parse-and-copy 52, the addition 96 against 40, and `_dec_fmt` 177 against 77 -- of
+which 30 were the call and 102 the rope. The index is what closed most of `_dec_fmt`'s share.
+
+Measured and not built (each against the build before it; no gain, or slower):
+
+| change | measured |
+|---|---|
+| a throw's block moved out of line with the slow halves (P10) | 0.250 against 0.251: no gain; `_dec_addsub`'s cost is its stack traffic, not its cold code |
+| loop heads aligned to 16, 32 or 64 bytes (nop padding, functions padded, `__text` aligned), and the same with the padding jumped over | 0.250-0.253 against 0.250: no gain, and the executed nops cost more than they align |
+| `_dec_fmt`'s answer written byte by byte into a `str_repeat` buffer instead of the rope | +5 cycles a `dec_add`: the byte loops cost what the rope does |
+| the kept digits of a rounding `_dec_fmt` read where they lie too | no gain: the bench's rounding goes up, which builds them anyway |
+| a local read right after it was written taken from the register (P16) | 0.254 against 0.246: slower |
+| a loop tested at its bottom, clang's rotation (P17) | median 2.016 against 1.961: slower (the jump in on every entry of a short loop) |
+| a full-width cast emitting nothing | `dec_mul` +60 cycles |
+| `madd` for the multiply loop's `+=` | 849 against 843 cycles a `dec_mul` |
+| raising the inliner's size limit (`_dec_fmt` copied in) | +200 instructions, no gain |
+| the big public functions (`dec_mul`, `dec_cmp`) copied into their handlers too | `dec_mul` +127, `dec_cmp` +106 cycles |
+| libc's `memcpy` for `php_memcpy` | +26 cycles a `dec_add` |
+
+**The floor, now.** 1.79x (1.76-1.85 over the rounds), never above 2x. What remains is spread
+over per-call overheads, and none of it moved when attacked directly:
+
+* `_dec_umul` (12% of a run): the inner loop is 15 instructions and runs at about 1.7 cycles a
+  step; `madd` and rotating it (measured by hand in the `.so`) move it by 0-2%. The carry loop
+  divides twice by 10 where clang divides once: doing it once in the source made the function
+  28% slower, because the new local took a register from the inner loop's (mc's allocator gives a
+  local one register for the whole function).
+* `php_spn_r` and `php_memcpy` (8% each), the rope, the allocator and the pool's drain (4-6%
+  each): short scans and short copies, a few per operation, whose cost is the call itself.
+  Copying `php_spn_r` into its callers made them spill (+75 cycles a `dec_add`); a byte loop,
+  overlapping stores and libc's `memcpy` were all slower than `php_memcpy`.
+* The code's layout: an unrelated change moves a hot loop and the result by 2-7%, which is also
+  why several changes that remove instructions measured slower.
+
 ## What it cannot do yet
 
 * **A wrong TYPE** is an internal function's message in the module and a userland one
