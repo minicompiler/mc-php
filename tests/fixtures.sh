@@ -287,6 +287,17 @@ else
     echo "  FAIL  second round: g/118 reads $* (want 1 0 1 1 1 2: smulh and no sdiv, asr #2, an add lsl #3, ldrb [x, #23], two ph_addm64)"
     fail=1
 fi
+# P15: a branch on a && or || branches on its terms, so a whole program's
+# arm64 dump keeps a cset only where a boolean is a VALUE -- 38 in g/119's,
+# where mc's value form of every && in the runtime made about 500. The
+# differential passes without it.
+set -- $("$MCPHP_BIN" --machine=arm64 --dump-asm $P/g/119-branch-terms.php 2>&1 | awk '/cset/ { n++ } END { print n + 0 }')
+if [ "${1:-999}" -lt 100 ]; then
+    echo "  branch terms: g/119's program keeps $1 csets on arm64, each one a boolean value"
+else
+    echo "  FAIL  branch terms: g/119's arm64 dump has ${1:-?} csets (want under 100: a branch on && and || is on its terms)"
+    fail=1
+fi
 # src/mach.mc's P10, read back on the three machines: every slow half in g/115's
 # acc() -- the element read of a hash, the store outside the array -- is
 # laid out after the function's ret, and the fast path falls through its
