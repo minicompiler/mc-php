@@ -1,0 +1,3 @@
+# the reads C leaves unchecked, checked again as a trap (docs/semantics.md)
+[php]
+checked_reads = true

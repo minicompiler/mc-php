@@ -1,0 +1,1 @@
+mc-php: out-of-range read: offset 5, length 5 (tests/c/07-trap-strcmp.php:9)
