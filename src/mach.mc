@@ -79,6 +79,7 @@ i64  pm_nolf;                         // MCPHP_LEAF=0: P11 alone off
 i64  pm_nodiv;                        // MCPHP_DIVK=0: P12 alone off
 i64  pm_noaddm;                       // MCPHP_ADDM=0: ph_addm64 not used
 i64  pm_nosh;                         // MCPHP_SHIFT=0: P13 alone off
+i64  pm_nolg;                         // MCPHP_LOGIC=0: P15 alone off
 i64  pm_off;                          // MCPHP_PEEP=0 in the compiler's environment
 
 uptr pm_of(i64 task) { return ld64(pm_orig + task * 8); }
@@ -398,8 +399,64 @@ i64 pm_fuse(i64 d, i64 l, i64 take) {
     ins_add(I_BCOND, 0, 0, 0, cc, l, 0);
     return 1;
 }
-void pm_jz(i64 d, i64 l)  { if (!pm_fuse(d, l, 0)) callp(pm_of(MTASK_JZ), d, l); }
-void pm_jnz(i64 d, i64 l) { if (!pm_fuse(d, l, 1)) callp(pm_of(MTASK_JNZ), d, l); }
+// P15: `if (a && b)` -- mc's walker makes a && b a VALUE (gen_logic: a's
+// shortcut jumps to Lalt, b's boolean falls to `b Lend`, Lalt puts the
+// shortcut constant in, and Lend is where the if's own test reads it), so a
+// condition of n terms paid a cset, a jump and a move per term before the
+// branch it feeds. When the branch comes right after that tail, the tail goes:
+// b's boolean is branched on where it was made, and a's shortcut jumps
+// straight to where the constant would have sent it -- the branch's target, or
+// the code after it. MCPHP_LOGIC=0 turns it off alone.
+i64 pm_prev(i64 i) {
+    loop { if (i < ins_base) return 0 - 1; if (ins_op(ins_at(i)) != I_NOP) return i; i = i - 1; }
+    return 0 - 1;
+}
+i64 pm_logic(i64 d, i64 l, i64 take) {
+    if (pm_off || pm_nolg || !pm_int(d) || !in_reg(d) || dalias_at(d) >= 0) return 0;
+    i64 r = REG_BASE + d;
+    i64 i4 = pm_prev(nins - 1);
+    if (i4 < 0 || ins_op(ins_at(i4)) != I_LABEL) return 0;
+    i64 lend = ins_label(ins_at(i4));
+    i64 i3 = pm_prev(i4 - 1);
+    if (i3 < 0) return 0;
+    uptr mz = ins_at(i3);
+    if (ins_op(mz) != I_MOVZ || ins_rd(mz) != r || ins_rn(mz) != 0 || ins_imm(mz) > 1) return 0;
+    i64 k = ins_imm(mz);
+    i64 i2 = pm_prev(i3 - 1);
+    if (i2 < 0 || ins_op(ins_at(i2)) != I_LABEL) return 0;
+    i64 lalt = ins_label(ins_at(i2));
+    i64 i1 = pm_prev(i2 - 1);
+    if (i1 < 0 || ins_op(ins_at(i1)) != I_B || ins_label(ins_at(i1)) != lend) return 0;
+    // Lend is gen_logic's own: nothing but that jump names it
+    i64 i = ins_base;
+    loop {
+        if (i >= nins) break;
+        uptr e = ins_at(i);
+        if (i != i1 && ins_op(e) != I_LABEL && ins_label(e) == lend) return 0;
+        i = i + 1;
+    }
+    set_ins_op(ins_at(i1), I_NOP);
+    set_ins_op(ins_at(i2), I_NOP);
+    set_ins_op(mz, I_NOP);
+    set_ins_op(ins_at(i4), I_NOP);
+    if (!pm_fuse(d, l, take)) {
+        if (take) callp(pm_of(MTASK_JNZ), d, l); else callp(pm_of(MTASK_JZ), d, l);
+    }
+    i64 taken = (k == 0);
+    if (take) taken = (k != 0);
+    if (taken) {
+        i = ins_base;
+        loop {
+            if (i >= nins) break;
+            uptr e2 = ins_at(i);
+            if (ins_op(e2) != I_LABEL && ins_label(e2) == lalt) set_ins_label(e2, l);
+            i = i + 1;
+        }
+    } else callp(pm_of(MTASK_LABEL), lalt);
+    return 1;
+}
+void pm_jz(i64 d, i64 l)  { if (!pm_logic(d, l, 0) && !pm_fuse(d, l, 0)) callp(pm_of(MTASK_JZ), d, l); }
+void pm_jnz(i64 d, i64 l) { if (!pm_logic(d, l, 1) && !pm_fuse(d, l, 1)) callp(pm_of(MTASK_JNZ), d, l); }
 
 i64 pm_is_branch(i64 op) { return op == I_BCOND || op == I_CBZ || op == I_CBNZ; }
 
@@ -558,6 +615,7 @@ void pm_env() {
         if (str_eq(s, "MCPHP_DIVK=0")) pm_nodiv = 1;
         if (str_eq(s, "MCPHP_ADDM=0")) pm_noaddm = 1;
         if (str_eq(s, "MCPHP_SHIFT=0")) pm_nosh = 1;
+        if (str_eq(s, "MCPHP_LOGIC=0")) pm_nolg = 1;
         i = i + 1;
     }
 }

@@ -1019,3 +1019,15 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   against 0.125 (2.00x, 1.97-2.02 over the sitting): under 2x is not reached; the floor is
   diffuse (calls, spills in the big inlined functions, allocation). `tests/g/117`, `118` + the
   "second round" read-back in `tests/fixtures.sh`.
+- decimal-under-2x (2026-09-28, branch `decimal-under-2x` from main e097215): module / twin per
+  round (15 rounds interleaved, best of nine each) 2.008 (1.961-2.048) -> **1.794 (1.756-1.848)**,
+  never above 2x; `bench.php` 0.254 -> 0.225 ms against 0.126. Built: P15 in `src/mach.mc` (a
+  branch on `&&`/`||` branches on its terms instead of on mc's value form; `MCPHP_LOGIC=0`;
+  `tests/g/119` + the "branch terms" read-back), a handler copies in the small loop-free php
+  function it wraps (`src/ext.mc`), and `_dec_fmt` carries the index of its first kept digit as
+  the twin moves its pointer (`decimal.php`; strings gate 400 400 500 200 1200). Measured and
+  reverted: throw blocks out of line, loop-head alignment (16/32/64, nops or jumped over), byte
+  writes for `_dec_fmt`, store-forwarded locals (P16), loop rotation (P17), silent full-width
+  casts, `madd`, bigger inlining, big handler copies, libc `memcpy`. The floor is per-call
+  overhead in short scans, copies and allocation, and the inner and carry loops of `_dec_umul`
+  (examples/decimal/README.md, "Under 2x").
