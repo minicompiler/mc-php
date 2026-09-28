@@ -152,6 +152,13 @@ module in its leak report, which is what `tests/leaks.sh` reads.
 | `void zend_argument_count_error(const char *fmt, ...)` | an `ArgumentCountError` -- **not** a `TypeError`; php distinguishes them and so does the gate |
 | `zend_object *zend_throw_exception(zend_class_entry *, const char *, zend_long)` | with a null class entry it is `Exception` |
 | `zend_class_entry *zend_lookup_class(zend_string *)` | so a php-level `throw` crosses the boundary as its own class |
+| `zend_function *zend_fetch_function_str(const char *, size_t)` | a call through php's function table finds its function, by the lowercased name; `ZEND_FASTCALL`, so `@@16` in `src/win/php8.def` |
+| `void zend_call_known_function(zend_function *, zend_object *, zend_class_entry *, zval *retval, uint32_t, zval *params, HashTable *)` | the call itself, with no object, no scope and no named arguments -- the arguments engine zvals on the module's stack, the answer written into `retval` |
+| `void zval_ptr_dtor(zval *)` | an answer that cannot cross (an array, an object, a resource) and a reference once followed, released |
+| `zval *zend_read_property(zend_class_entry *, zend_object *, const char *, size_t, bool silent, zval *rv)` | an exception the callee threw: its `previous`, `message`, `code`, `file` and `line` |
+| `zend_class_entry *zend_get_exception_base(const zend_object *)` | the scope `zend_read_property` reads those as (`Exception` or `Error`) |
+| `void zend_clear_exception(void)` | the engine's pending exception released, once the module holds its own reference |
+| `void zend_throw_exception_internal(zend_object *)` | the engine's object handed back when the module did not catch it; it takes the module's reference |
 
 The first two are variadic. A call with **no** varargs and a format carrying no `%` is safe on
 every ABI here, because the named argument travels in a register and only varargs go on the
@@ -163,6 +170,18 @@ cannot appear in one.
 `zend_object.ce` is at 16 and `zend_class_entry.name` at 8, so the class NAME php puts after
 "given" in a `TypeError` is two loads from the zval's value. Measured: php says `stdClass given`
 and `Closure given`, not `object given` -- and for a bool it says `true`/`false`, not `bool`.
+
+## A call through php's function table
+
+`zend_reference.val` is at 8 (after the gc header): an answer that is a reference -- a `function &f()`
+-- is read there. `zend_class_entry.parent` is at 16, once the class is linked: an exception the
+callee threw stands in the runtime as the nearest class the runtime knows, found by walking up
+from the engine's class. `IS_OBJECT_EX` is 776 (`IS_OBJECT` | (`IS_TYPE_REFCOUNTED` |
+`IS_TYPE_COLLECTABLE`) << 8), the tag of the zval the module keeps the engine's object in.
+
+There is no exported way to READ `EG(exception)`. What the module does (`phx_zcatch`): throw a
+second exception on top of it -- php makes the pending one its `previous` -- read `previous`,
+take a reference, and clear the second, which releases it and nothing else.
 
 ## The link
 
