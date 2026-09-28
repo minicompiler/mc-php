@@ -182,17 +182,19 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
     # 700, 700, 800, 300 and 10700: _dec_fmt's answer is one string (src/opt.mc's
     # rope) and `$d . str_repeat('0', n)` one (php_str_catrep); and dec_div's
     # from 10300 to 1300 when _dec_udivmod took the twin's one remainder
-    # buffer, compared and subtracted in place.
+    # buffer, compared and subtracted in place; and 400 400 500 200 1200 when
+    # _dec_fmt carried the index of its first kept digit, as the twin moves
+    # its pointer, instead of a substr() of the rest.
     sb=
     for op in "dec_add('123456.78', '1093.75', 2)" "dec_sub('123456.78', '2682.24', 2)" \
               "dec_mul('123456.78', '0.004375000000', 2)" "dec_cmp('123456.78', '0')" "dec_div('5.25', '1200', 12)"; do
         n=$(MCPHP_STATS=1 "$PHP" -d extension="$dso" -r "for (\$i = 0; \$i < 100; \$i++) $op;" 2>&1 | tr -d '\r' | sed -n 's/.*strings built //p')
         sb="$sb${sb:+ }${n:-?}"
     done
-    if [ "$sb" = "500 500 600 200 1300" ]; then
+    if [ "$sb" = "400 400 500 200 1200" ]; then
         say "strings: 100 calls of add, sub, mul, cmp, div build $sb strings"
     else
-        bad "strings: 100 calls of add, sub, mul, cmp, div built $sb strings (want 500 500 600 200 1300)"
+        bad "strings: 100 calls of add, sub, mul, cmp, div built $sb strings (want 400 400 500 200 1200)"
     fi
     # the C twin (c/decimal.c): the same six functions written the ordinary
     # way, graded by the same check.php, and the reference the bench compares

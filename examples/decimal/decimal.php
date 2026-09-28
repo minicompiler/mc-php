@@ -205,38 +205,44 @@ function _dec_udivmod(string $a, string $b): string {
 // $c: a magnitude at scale $from; the answer has exactly $to digits after the
 // point, and a zero is never negative
 function _dec_fmt(bool $neg, string $c, int $from, int $to): string {
-    $c = substr($c, _dec_skip0($c));
-    $n = strlen($c);
+    // skip0 is the index of the first digit kept: the twin moves its pointer
+    // there, and $w0 below is where $w's digits begin
+    $c0 = _dec_skip0($c);
+    $n = strlen($c) - $c0;
     if ($from > $to) {
         $k = $from - $to;
         // the digits kept are the first n - k, each a zero where n <= k
         $kn = $n > $k ? $n - $k : 0;
-        $first = $n >= $k ? ord($c[$n - $k]) : 48;
+        $first = $n >= $k ? ord($c[$c0 + $n - $k]) : 48;
         $up = false;
         if ($first > 53) {
             $up = true;
         } elseif ($first === 53) {
-            $up = strspn($c, '0', $n - $k + 1) < $k - 1;
-            if (!$up) { $up = $kn > 0 && (ord($c[$kn - 1]) - 48) % 2 === 1; }
+            $up = strspn($c, '0', $c0 + $n - $k + 1) < $k - 1;
+            if (!$up) { $up = $kn > 0 && (ord($c[$c0 + $kn - 1]) - 48) % 2 === 1; }
         }
-        $w = $kn === 0 ? '0' : substr($c, 0, $kn);
+        $w = $kn === 0 ? '0' : substr($c, $c0, $kn);
+        $w0 = 0;
         if ($up) {
             $w = _dec_uadd($w, '1');
-            $w = substr($w, _dec_skip0($w));
+            $w0 = _dec_skip0($w);
         }
+    } elseif ($to > $from && ($n !== 1 || $c[$c0] !== '0')) {
+        $w = substr($c, $c0) . str_repeat('0', $to - $from);
+        $w0 = 0;
     } else {
         $w = $c;
-        if ($w !== '0') { $w .= str_repeat('0', $to - $from); }
+        $w0 = $c0;
     }
-    if (strspn($w, '0') === strlen($w)) { $neg = false; }
-    $wn = strlen($w);
+    $wn = strlen($w) - $w0;
+    if (strspn($w, '0', $w0) === $wn) { $neg = false; }
     $il = $wn > $to ? $wn - $to : 1;          // digits before the point
     $o = $neg ? '-' : '';
-    if ($wn > $to) { $o .= substr($w, 0, $il); } else { $o .= '0'; }
+    if ($wn > $to) { $o .= substr($w, $w0, $il); } else { $o .= '0'; }
     if ($to > 0) {
         $o .= '.';
         if ($wn < $to) { $o .= str_repeat('0', $to - $wn); }
-        if ($wn > $to) { $o .= substr($w, $il, $to); } else { $o .= $w; }
+        if ($wn > $to) { $o .= substr($w, $w0 + $il, $to); } else { $o .= substr($w, $w0); }
     }
     return $o;
 }
