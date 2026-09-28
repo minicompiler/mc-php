@@ -1124,6 +1124,27 @@ i64 ph_stmt_1() {
             if (ph_fn_ret == PT_FLOAT)  rw = 2;
             if (ph_fn_ret == PT_STRING) rw = 3;
             if (ph_fn_ret == PT_BOOL)   rw = 4;
+            // a call through php's function table in a function declared
+            // `: int` reads its int straight out of the engine's answer, as
+            // the C twin does (lib/php_ext.mc's phx_fcall_l)
+            if (rw == 1 && ph_ety == PT_MIXED && nd_kind(e) == N_CALL && str_eq(nd_name(e), "phx_fcall")) {
+                // (cache, nt, v1..v4) -> (cache, nt, v1..v4, lazy): src/ext.mc
+                // marks the copy on a handler's bare road lazy
+                set_nd_name(e, "phx_fcall_l");
+                set_nd_type(e, TY_I64);
+                i64 la = nd_a(e);
+                loop { if (!nd_next(la)) break; la = nd_next(la); }
+                set_nd_next(la, ph_int(0));
+                // two ints, the common case: (cache, v1, v2, lazy)
+                i64 nta = nd_next(nd_a(e));
+                if (nd_val(nta) == 263170) {                // 2 | IS_LONG << 8 | IS_LONG << 16
+                    set_nd_name(e, "phx_fcall_l2");
+                    set_nd_next(nd_a(e), nd_next(nta));
+                    i64 v2n = nd_next(nd_next(nta));
+                    set_nd_next(v2n, nd_next(nd_next(nd_next(v2n))));
+                }
+                ph_ety = PT_INT;
+            }
             if (rw && ph_ety != ph_fn_ret) {
                 if (rw == 2 && ph_ety == PT_INT) e = ph_to_float(e, ph_ety);
                 if (!(rw == 2 && ph_ety == PT_INT)) {

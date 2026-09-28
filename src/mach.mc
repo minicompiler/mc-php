@@ -1141,6 +1141,23 @@ void pm_leaf() {
         r = r + 1;
     }
     if (!any) return;
+    // A register's SAVE is its first store to the frame (mc saves them all
+    // before anything else, the parameters included), and its RESTORE a load
+    // from that same slot. Any other frame access naming it -- a local that
+    // lives in the register copied from one that lives in the frame -- is
+    // the function's own and is renamed like the rest, never dropped.
+    i64 soff[32];
+    r = 0;
+    loop { if (r >= 32) break; st64(soff + r * 8, 0 - 1); r = r + 1; }
+    i = ins_base;
+    loop {
+        if (i >= nins) break;
+        uptr es = ins_at(i);
+        i64 sr = ins_rd(es);
+        if (ins_op(es) == I_STR && ins_rn(es) == REG_FRAME && sr >= 19 && sr <= 28 && ld64(soff + sr * 8) < 0)
+            st64(soff + sr * 8, ins_imm(es));
+        i = i + 1;
+    }
     i = ins_base;
     loop {
         if (i >= nins) break;
@@ -1148,7 +1165,7 @@ void pm_leaf() {
         i64 op = ins_op(e2);
         // the save and the restore of a register that moved: nothing to keep
         if ((op == I_STR || op == I_LDR) && ins_rn(e2) == REG_FRAME && ins_rd(e2) >= 19 && ins_rd(e2) <= 28
-            && ld8(pm_map + ins_rd(e2)) != ins_rd(e2)) {
+            && ld8(pm_map + ins_rd(e2)) != ins_rd(e2) && ins_imm(e2) == ld64(soff + ins_rd(e2) * 8)) {
             set_ins_op(e2, I_NOP);
             i = i + 1;
             continue;

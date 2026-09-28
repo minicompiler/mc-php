@@ -1,0 +1,31 @@
+# two-extensions, A -- extA.php compiled into build/extA.so; the macOS linker line.
+#
+#     mc-php build examples/two-extensions --config examples/two-extensions/extA.toml
+#
+# One file per extension and per host, exactly as examples/decimal has one per
+# host: mc's [linker] is flat, and one project file builds one module.
+# examples/decimal/mcphp.toml says what each key is.
+
+[project]
+entry = "extA.php"
+out = "build/extA.so"
+kind = "exe"
+opt = 1
+
+[linker]
+cmd = "ld"
+args = ["-bundle", "-undefined", "dynamic_lookup",
+        "-arch", "arm64", "-platform_version", "macos", "13.0", "13.0",
+        "-syslibroot", "{sdk}", "-lSystem",
+        "-o", "{out}", "{obj}"]
+
+[extension]
+name = "extA"
+version = "0.1.0"
+
+[php]
+api = 20250925
+build_id = "API20250925,NTS"
+thread_safety = false
+debug = false
+checked_reads = false

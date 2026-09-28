@@ -12,10 +12,12 @@
 #                    on both streams and the exit), bcmath as a second oracle
 #                    where the host php has it, and the bench row against the
 #                    interpreted source -- whose ratio is printed, not gated.
-#   two-extensions   (a) hand-written mc: extA and extB loaded into one php in
-#                    BOTH orders, differential against extA.php + extB.php,
-#                    and B alone; (b) two mc-php extensions -- hello and
-#                    decimal -- loaded together; (c) extB.php's refusal, pinned.
+#   two-extensions   PHP compiled by mc-php: extA and extB, where B calls A
+#                    through php's function table. The differential in BOTH
+#                    load orders and B alone, the C twins graded the same way,
+#                    and the bench row against the interpreted source and the
+#                    twins -- printed, not gated. Then hello and decimal, two
+#                    mc-php extensions that do not call each other, together.
 #   awaitable        hand-written mc: check.php against check.expect, and the
 #                    demo; then awaitable.src.php's first refusal, pinned.
 #
@@ -239,20 +241,71 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
 fi
 
 # --- two-extensions -------------------------------------------------------------
+# Two extensions compiled from PHP, and B calls a function A publishes and
+# B's source does not declare: looked up in php's function table when the
+# call runs, as php does and as the C twins (c/extA.c, c/extB.c) do.
 echo "  -- two-extensions"
 EX=examples/two-extensions
-if hand_ok "the hand-written pair"; then
-    a=$tmp/extA.$sx; b=$tmp/extB.$sx
-    if handbuild "$EX/extA.mc" "$a" && handbuild "$EX/extB.mc" "$b"; then
-        differential "check.php (A then B)" "$EX/check.php" -d extension="$a" -d extension="$b"
-        differential "check.php (B then A)" "$EX/check.php" -d extension="$b" -d extension="$a"
-        got=$("$PHP" -d extension="$b" -r 'echo b_use(2, 3);' 2>&1)
-        [ "$got" = -1 ] && say "B alone: b_use answers -1, found nothing to call" \
-            || bad "B alone: want -1, got $got"
+aso=$rootn/$EX/build/extA.$sx; bso=$rootn/$EX/build/extB.$sx
+if build "$EX" "$EX/extA$suf.toml" "extA.$sx" && build "$EX" "$EX/extB$suf.toml" "extB.$sx"; then
+    say "built: extA $(wc -c < "$aso" | tr -d ' ') and extB $(wc -c < "$bso" | tr -d ' ') bytes from $EX/extA.php and extB.php"
+    differential "check.php (A then B)" "$EX/check.php" -d extension="$aso" -d extension="$bso"
+    differential "check.php (B then A)" "$EX/check.php" -d extension="$bso" -d extension="$aso"
+    # B alone: php's own Error, "Call to undefined function a_add()", twice
+    # (a failed lookup caches nothing)
+    differential "alone.php (B without A)" "$EX/alone.php" -d extension="$bso"
+    cao=; cbo=
+    CC=${CC:-cc}
+    if command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; then
+        inc=$(php-config --includes)
+        for x in A B; do
+            if "$CC" -O2 -bundle -undefined dynamic_lookup -o "$tmp/c-ext$x.so" "$EX/c/ext$x.c" $inc 2>"$tmp/c.err" ||
+               "$CC" -O2 -shared -fPIC -o "$tmp/c-ext$x.so" "$EX/c/ext$x.c" $inc 2>>"$tmp/c.err"; then
+                :
+            else
+                bad "the C twin ext$x would not build:"; sed 's/^/      /' "$tmp/c.err"
+            fi
+        done
+        if [ -f "$tmp/c-extA.so" ] && [ -f "$tmp/c-extB.so" ]; then
+            cao=$tmp/c-extA.so; cbo=$tmp/c-extB.so
+            differential "check.php (the C twins)" "$EX/check.php" -d extension="$cao" -d extension="$cbo"
+            differential "alone.php (the C twin of B)" "$EX/alone.php" -d extension="$cbo"
+        fi
+    else
+        skip "the C twins: no php-config or no $CC here -- the bench has no C column"
+    fi
+    # the bench row: the call through B into A, three rounds, the processes
+    # interleaved, minimums; and the same work straight into A beside it
+    bi=; bc=; bt=; di=; dc=; dt=; ai=
+    for r in 1 2 3; do
+        set -- $("$PHP" "$EX/bench.php" | tr -d '\r')
+        [ "$1" = interpreted ] || { bad "bench.php (interpreted): $*"; break; }
+        bi=$(awk -v a="$bi" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }')
+        di=$(awk -v a="$di" -v b="$3" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 3; ai=$*
+        set -- $("$PHP" -d extension="$aso" -d extension="$bso" "$EX/bench.php" | tr -d '\r')
+        [ "$1" = compiled ] || { bad "bench.php (compiled): $*"; break; }
+        bc=$(awk -v a="$bc" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }')
+        dc=$(awk -v a="$dc" -v b="$3" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 3
+        [ "$ai" = "$*" ] || bad "bench.php: the two answers differ: $ai / $*"
+        if [ -n "$cao" ]; then
+            set -- $("$PHP" -d extension="$cao" -d extension="$cbo" "$EX/bench.php" c | tr -d '\r')
+            [ "$1" = c ] || { bad "bench.php (the C twins): $*"; break; }
+            bt=$(awk -v a="$bt" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }')
+            dt=$(awk -v a="$dt" -v b="$3" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 3
+            [ "$ai" = "$*" ] || bad "bench.php: the C twins' answer differs: $*"
+        fi
+    done
+    if [ -n "$bc" ]; then
+        row="through B: interpreted $bi ms, compiled $bc ms $(awk -v i="$bi" -v c="$bc" 'BEGIN { printf "(%.2fx)", i / c }')"
+        [ -n "$bt" ] && row="$row, C twins $bt ms $(awk -v i="$bi" -v c="$bt" 'BEGIN { printf "(%.2fx)", i / c }')"
+        say "bench: $row -- best of nine, three rounds interleaved; not gated"
+        row="straight into A: interpreted $di ms, compiled $dc ms"
+        [ -n "$dt" ] && row="$row, C twin $dt ms"
+        say "bench: $row"
     fi
 fi
-# (b) two mc-php extensions in one php: each carries the whole runtime, and
-# each must keep using its own.
+# two mc-php extensions that do NOT call each other, in one php: each carries
+# the whole runtime, and each must keep using its own.
 hso=$rootn/examples/hello/build/hello.$sx
 # Built here and not reused: a .so an earlier run left behind may be another
 # host's (the checkout is shared with the Linux container).
@@ -268,7 +321,6 @@ if build examples/hello "examples/hello/mcphp$suf.toml" "hello.$sx" && [ -f "$ds
         fi
     done
 fi
-pin "$EX" "extB.php:8: mc-php: a php function mc-php does not have: a_add is not implemented yet (probes/t10/RESULTS.md)"
 
 # --- awaitable -----------------------------------------------------------------
 echo "  -- awaitable"

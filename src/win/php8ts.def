@@ -10,12 +10,15 @@
 ; are the same convention: a string's own block, grown in place and released
 ; at zero (lib/php_rt.mc § who owns a string), and the call's chunk.
 ; Measured: without it php refused the module with "The specified procedure
-; could not be found".
+; could not be found". zend_fetch_function_str (a pointer and a size_t) is the
+; same convention again: a call through php's function table finds its
+; function with it (lib/php_ext.mc's phx_flook).
 LIBRARY php8ts.dll
 EXPORTS
 _emalloc == _emalloc@@8
 _erealloc == _erealloc@@16
 _efree == _efree@@8
+zend_fetch_function_str == zend_fetch_function_str@@16
 php_output_discard
 php_output_end
 php_output_flush
@@ -25,6 +28,12 @@ php_output_get_level
 php_output_start_default
 php_output_write
 zend_argument_count_error
+zend_call_known_function
+zend_clear_exception
+zend_get_exception_base
 zend_lookup_class
+zend_read_property
 zend_throw_exception
+zend_throw_exception_internal
 zend_type_error
+zval_ptr_dtor

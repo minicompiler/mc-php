@@ -453,6 +453,63 @@ i64 ph_fn_exists(uptr n) {
     return 0;
 }
 
+// ---- a call through php's function table (the extension road) -------------
+// A function the source does not declare and the library does not have is
+// php's to find when the call runs (lib/php_ext.mc's phx_fcall), which is
+// what a C extension does to call another extension's function. The
+// arguments cross as engine zvals built on the stack: an int, a string and a
+// bool as themselves, anything else through a runtime zval. The callee is not
+// visible here, so the answer is a zval and the context types it with php's
+// rules (a declared `: int` return checks it).
+i64 ph_ftable_call(uptr name, uptr av, i64 na, uptr fl, i64 line) {
+    if (ph_had_spread) ph_todo2(fl, line, "argument unpacking into a function php's function table answers", name);
+    // ponytail: four, the (value, what) pairs of one mc call; a staging
+    // buffer if a real source needs more
+    if (na > 4) ph_todo2(fl, line, "more than 4 arguments to a function php's function table answers", name);
+    // the count and each argument's kind packed in one word (phx_zin), so the
+    // call travels in registers
+    u8 cv[56];
+    i64 nt = na;
+    i64 i = 0;
+    loop {
+        if (i >= 4) break;
+        i64 v = ph_int(0);
+        if (i < na) {
+            i64 t = ph_aty(av, i);
+            v = ph_a(av, i);
+            if (ph_is_arr(t) || t == PT_OBJ)
+                ph_todo2(fl, line, "an array or object argument to a function php's function table answers", name);
+            i64 w = 0;
+            if (t == PT_INT) w = 4;                         // IS_LONG
+            if (t == PT_STRING) w = 6;                      // IS_STRING
+            if (t == PT_BOOL) { w = 2; v = ph_cast(TY_I64, v); }   // IS_FALSE + the value
+            if (!w) v = ph_to_mixed(v, t);
+            nt = nt | (w << (8 + i * 8));
+        }
+        st64(cv + 16 + i * 8, v);
+        i = i + 1;
+    }
+    // The call site's own words (lib/php_ext.mc's phx_fcall): the function
+    // found and the request it was found in, then what only a slow road reads
+    // -- the name as the source spells it, the function this call is in (a
+    // TypeError names it), the packed word -- so the common call passes
+    // nothing but the arguments.
+    uptr fn = ph_cur_fn;
+    if (!fn) fn = "";
+    i64 i0 = ph_int(0);
+    i64 i1 = ph_int(0);
+    i64 sn = ph_raw(name, cstrlen(name));
+    i64 sf = ph_raw(fn, cstrlen(fn));
+    set_nd_next(i0, i1);
+    set_nd_next(i1, sn);
+    set_nd_next(sn, sf);
+    set_nd_next(sf, ph_int(nt));
+    st64(cv, ph_cache_init("phf_", 5, i0));
+    st64(cv + 8, ph_int(nt));
+    ph_ety = PT_MIXED;
+    return ph_calln("phx_fcall", cv, 6, ty_pzv);
+}
+
 i64 ph_builtin(uptr name, i64 line, uptr fl) {
     // D1 and D6: the named refusals, before anything else
     if (str_eq(name, "eval")) ph_refuse(fl, line, "eval", "D1");
@@ -1315,6 +1372,10 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             if (lr == PT_ARR) ph_efresh = 1;
             return lc;
         }
+        // An EXTENSION is loaded into a php that has a function table, and
+        // php looks a call up there when it runs: another module may define
+        // the name. A PROGRAM has no other module, so there it stays refused.
+        if (ph_ext) return ph_ftable_call(name, av, na, fl, line);
         ph_todo2(fl, line, "a php function mc-php does not have", name);
     }
     i64 np = ld64(ph_fnp + fi * 8);

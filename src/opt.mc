@@ -869,6 +869,48 @@ i64 phi_pure1(i64 a) {
 }
 i64 phi_pure(i64 a) { phi_pure_n = 0; return phi_pure1(a); }
 
+// A LOAD of a pure address is pure too when the body it is copied into can
+// write no memory: it calls nothing but mc's loads. A handler's argument read,
+// `ld64(ex + 80)`, then goes where the parameter is read and needs no local
+// of its own (examples/two-extensions: `a_add` is `return $a + $b;`).
+i64 phi_loads_only(i64 n) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_CALL) {
+            uptr c = nd_name(n);
+            if (ld8(c) != 'l' || !phi_intrinsic(c)) return 0;
+        }
+        if (!phi_loads_only(nd_a(n)) || !phi_loads_only(nd_b(n)) || !phi_loads_only(nd_c(n)) || !phi_loads_only(nd_d(n))) return 0;
+        n = nd_next(n);
+    }
+    return 1;
+}
+i64 phi_pure_load(i64 a, i64 body) {
+    if (nd_next(a) || nd_kind(a) != N_CALL || ld8(nd_name(a)) != 'l' || !phi_intrinsic(nd_name(a))) return 0;
+    if (!nd_a(a) || nd_next(nd_a(a)) || !phi_pure(nd_a(a))) return 0;
+    // An extension handler's own argument, `ld64(ex + K)`: nothing the body
+    // calls writes the engine frame of THIS call (a nested call is a frame of
+    // its own, and no parameter here is by reference), so the load may go
+    // where the parameter is read whatever the body does.
+    i64 ad = nd_a(a);
+    if (phi_cf && ld8(nd_name(phi_cf)) == 'x' && ld8(nd_name(phi_cf) + 1) == '_' && nd_kind(ad) == N_BINARY
+        && nd_kind(nd_a(ad)) == N_IDENT && str_eq(nd_name(nd_a(ad)), "ex") && nd_kind(nd_b(ad)) == N_INT)
+        return 1;
+    // what follows a return at the top of the body never runs (a declared
+    // return's `none returned` is there for the fall-through)
+    loop {
+        if (!body) break;
+        i64 nx = nd_next(body);
+        set_nd_next(body, 0);
+        i64 ok = phi_loads_only(body);
+        set_nd_next(body, nx);
+        if (!ok) return 0;
+        if (nd_kind(body) == N_RETURN) break;
+        body = nx;
+    }
+    return 1;
+}
+
 i64 phi_uses(i64 s, uptr name) {
     i64 u = 0;
     loop {
@@ -943,7 +985,7 @@ i64 phi_expand(i64 c) {
         if (nd_kind(a) == N_IDENT && phi_same_ty(nd_type(a), nd_type(p)) && phi_local_of_caller(nd_name(a))
             && !ph_rc_assigned(body, pn)) {
             phi_rn_add(pn, nd_name(a));
-        } else if (nd_kind(a) != N_IDENT && phi_same_ty(nd_type(a), nd_type(p)) && phi_pure(a)
+        } else if (nd_kind(a) != N_IDENT && phi_same_ty(nd_type(a), nd_type(p)) && (phi_pure(a) || phi_pure_load(a, body))
             && !ph_rc_assigned(body, pn) && phi_uses(body, pn) == 1) {
             // renamed to a name of this copy's own, then replaced by the argument
             uptr ln = phi_local(pn);
@@ -977,7 +1019,9 @@ i64 phi_expand(i64 c) {
     body = phi_hoist(body);
     // a copy that is one `return E`, E reading and computing but calling
     // nothing: E itself takes the call's place, and no local holds the answer
-    if (nd_kind(body) == N_RETURN && !nd_next(body) && nd_a(body) && !phi_calls_any(nd_a(body))
+    // (what follows a return at the top never runs: a declared return's
+    // `none returned` is there for the fall-through)
+    if (nd_kind(body) == N_RETURN && nd_a(body) && !phi_calls_any(nd_a(body))
         && nd_type(fc) != TY_VOID && !(nd_kind(phi_hold) == N_EXPRSTMT && nd_a(phi_hold) == c)) {
         i64 cv = node_new(N_CAST, line, fl);
         set_nd_type(cv, nd_type(fc));

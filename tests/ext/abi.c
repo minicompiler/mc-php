@@ -106,5 +106,12 @@ int main(void) {
     /* the class name a TypeError puts after "given" */
     P("ZOX_CE",              offsetof(zend_object, ce));
     P("ZCX_NAME",            offsetof(zend_class_entry, name));
+
+    /* a call through php's function table (lib/php_ext.mc's phx_fcall): an
+       answer that is a reference, and the class walk and the object zval an
+       exception the callee threw needs (phx_zcatch) */
+    P("ZRX_VAL",             offsetof(zend_reference, val));
+    P("ZCX_PARENT",          offsetof(zend_class_entry, parent));
+    P("IZ_OBJECT_EX",        IS_OBJECT_EX);
     return 0;
 }

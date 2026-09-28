@@ -633,9 +633,19 @@ void phx_stat_line() {
 // RSHUTDOWN: the request's state goes back to what MINIT left, and what the
 // request's pinned calls kept is freed -- Zend would free it anyway at the
 // end of the request; freeing it here keeps a debug php's leak report quiet.
+// the request a call through php's function table cached its function in,
+// and the engine exception one of them holds (both below)
+i64 phx_gen;
+void phx_zexc_drop();
+u8   phx_zexcz[16];                 // the engine exception a call took off it
+uptr phx_zmirror;                   // and the runtime object that stands for it
+
 i64 phx_rshutdown(i64 mtype, i64 mnum) {
     php_flush();
     php_request_reset();
+    // a userland function a call site cached is gone with the request
+    phx_gen = phx_gen + 1;
+    phx_zexc_drop();
     if (phx_dirty) {
         phx_copy(ph_heap, phx_snap, phx_mark);
         phx_dirty = 0;
@@ -708,6 +718,17 @@ void phx_enter_slow() {
 void phx_throw() {
     if (!ph_exc) return;
     uptr o = ld64(ph_exc);
+    // the engine's own, taken off it by phx_zcatch and not caught here (or
+    // rethrown as it was): the engine's object goes back, trace and all
+    if (phx_zmirror && o == phx_zmirror) {
+        ph_exc = 0;
+        uptr e = ld64(phx_zexcz);
+        st64(phx_zexcz, 0);
+        st64(phx_zexcz + 8, 0);
+        phx_zmirror = 0;
+        zend_throw_exception_internal(e);
+        return;
+    }
     uptr cn = php_obj_cname(o);
     uptr m = php_zv_str(php_exm_message(o));
     ph_exc = 0;
@@ -784,4 +805,313 @@ void phx_leave_slow() {
     // those blocks are still there, then the blocks go
     phx_esc_from(phx_efloor);
     phx_free_from(phx_keep);
+}
+
+// ---- a call through php's function table -----------------------------------
+// A function the source does not declare and the runtime's library does not
+// have is looked up where php looks it up: EG(function_table), when the call
+// RUNS. Another extension, php itself or the script may define it. It is what
+// a C extension does to call a function that belongs to another one
+// (examples/two-extensions/c/extB.c): the zend_function found once and
+// cached, the arguments laid out as engine zvals on the stack, and
+// zend_call_known_function. Each call site caches what it found in two words
+// the compiler emits beside it -- the pointer and the request it was found in
+// -- because a function table does not shrink during a request and a userland
+// function is gone at its end (RSHUTDOWN moves phx_gen on).
+//
+// zend_function's common.function_name and zend_reference.val: tests/ext/abi.c
+// prints both from the installed headers, as it does the rest of this file.
+#define ZRX_VAL             8       // zend_reference: the zval after its gc header
+#define ZCX_PARENT          16      // zend_class_entry.parent, once linked
+#define IZ_OBJECT_EX        776     // IS_OBJECT | (REFCOUNTED | COLLECTABLE) << 8
+
+// ZEND_FASTCALL, which is __vectorcall in an MSVC php: an alias on Windows
+// (src/win/php8.def), the ordinary convention for its two integer arguments.
+extern uptr zend_fetch_function_str(uptr name, i64 len);
+extern void zend_call_known_function(uptr fn, uptr obj, uptr scope, uptr rv, i64 n, uptr params, uptr named);
+extern void zval_ptr_dtor(uptr zv);
+extern uptr zend_read_property(uptr scope, uptr obj, uptr name, i64 len, i64 silent, uptr rv);
+extern uptr zend_get_exception_base(uptr obj);
+extern void zend_clear_exception();
+extern void zend_throw_exception_internal(uptr obj);
+
+// An exception the CALLEE threw, taken off the engine so that the module's
+// own `catch` sees it, as the same source interpreted would: phx_zexcz holds
+// a reference to the engine's object and phx_zmirror is the runtime object
+// that stands for it -- the nearest class the runtime knows (every throwable
+// descends from one it does), the same message, code, file and line.
+// Uncaught, or rethrown as it is, the ENGINE's object goes back with its own
+// class and trace (phx_throw).
+//
+// ponytail: one slot, released by the next one or at RSHUTDOWN -- not when
+// the module's catch is done with it, which would put a test on every
+// handler's return. A second one taken while an outer mirror is still
+// pending crosses as the runtime exception it was converted to (its class
+// and message, not its trace), and an exception class with a destructor
+// sees it run late.
+
+void phx_zexc_drop() {
+    if (phx_type(phx_zexcz) == IZ_OBJECT) zval_ptr_dtor(phx_zexcz);
+    st64(phx_zexcz, 0);
+    st64(phx_zexcz + 8, 0);
+    phx_zmirror = 0;
+}
+
+// a declared property of an engine throwable, read as its base class sees it
+uptr phx_zprop(uptr e, uptr name, uptr rv) {
+    return zend_read_property(zend_get_exception_base(e), e, name, php_cstrlen(name), 1, rv);
+}
+
+// the property's string, or "" when it is not one
+uptr phx_zpstr(uptr e, uptr name) {
+    u8 rv[16];
+    uptr z = phx_zprop(e, name, rv);
+    if (phx_type(z) != IZ_STRING) return php_str_new("", 0);
+    uptr s = ld64(z);
+    return php_str_new(s + ZSX_VAL, ld64(s + ZSX_LEN));
+}
+
+void phx_zcatch() {
+    // There is no exported way to read EG(exception); throwing a second one
+    // on top of it is: php makes the pending one its `previous`, which can be
+    // read, and clearing the second releases it and nothing else.
+    uptr x = zend_throw_exception(0, "", 0);
+    u8 rv[16];
+    uptr pz = phx_zprop(x, "previous", rv);
+    if (phx_type(pz) != IZ_OBJECT) {
+        // the call failed and threw nothing php can hand over
+        zend_clear_exception();
+        php_throw_cls(php_str_new("Error", 5),
+                      php_str_new("mc-php: a call through php's function table failed", 50));
+        return;
+    }
+    uptr e = ld64(pz);
+    phx_zexc_drop();
+    st32(e, ld32(e) + 1);                   // GC_ADDREF: our reference
+    st64(phx_zexcz, e);
+    st32(phx_zexcz + 8, IZ_OBJECT_EX);
+    zend_clear_exception();
+    // the nearest class the runtime has, walking up from the engine's
+    uptr ce = ld64(e + ZOX_CE);
+    uptr cn = php_str_new("Exception", 9);
+    loop {
+        if (!ce) break;
+        uptr n = ld64(ce + ZCX_NAME);
+        uptr cs = php_str_new(n + ZSX_VAL, ld64(n + ZSX_LEN));
+        if (php_ce_find(cs)) { cn = cs; break; }
+        ce = ld64(ce + ZCX_PARENT);
+    }
+    php_throw_cls(cn, phx_zpstr(e, "message"));
+    uptr pr = php_obj_props(ld64(ph_exc));
+    u8 r2[16];
+    uptr cz = phx_zprop(e, "code", r2);
+    if (phx_type(cz) == IZ_LONG) php_zv_cp(php_arr_sslot(pr, php_str_new("code", 4)), php_zlong(ld64(cz)));
+    php_zv_cp(php_arr_sslot(pr, php_str_new("file", 4)), php_zstr(phx_zpstr(e, "file")));
+    u8 r3[16];
+    uptr lz = phx_zprop(e, "line", r3);
+    if (phx_type(lz) == IZ_LONG) php_zv_cp(php_arr_sslot(pr, php_str_new("line", 4)), php_zlong(ld64(lz)));
+    phx_zmirror = ld64(ph_exc);
+}
+
+// "Call to undefined function a_add()", thrown as the RUNTIME's own Error at
+// the position the compiler announced: catchable by the module's source, and
+// crossing into php at leave with that message (phx_throw).
+uptr phx_undefined(uptr name) {
+    uptr m = php_str_new("Call to undefined function ", 27);
+    m = php_str_concat(m, php_str_new(name, php_cstrlen(name)));
+    m = php_str_concat(m, php_str_new("()", 2));
+    php_throw_cls(php_str_new("Error", 5), m);
+    return php_znull();
+}
+
+uptr phx_nocross(uptr what, uptr name) {
+    uptr m = php_str_new("mc-php: a php ", 14);
+    m = php_str_concat(m, php_str_new(what, php_cstrlen(what)));
+    m = php_str_concat(m, php_str_new(name, php_cstrlen(name)));
+    m = php_str_concat(m, php_str_new("(): only null, bool, int, float and string cross php's function table", 69));
+    php_throw_cls(php_str_new("Error", 5), m);
+    return php_znull();
+}
+
+// One argument into an engine zval at d. The compiler says what it is (t,
+// one byte of the call's packed word): an int or a string as itself
+// (IZ_LONG, IZ_STRING), a bool as IZ_FALSE with the value 0 or 1, and
+// anything else (0) as a runtime zval, whose scalar layout is the engine's.
+// A string -- the runtime's IS a zend_string -- is passed as it stands: the
+// engine copies the zval into the callee's frame and takes its own reference
+// there, so the callee may keep it. 0 is "cannot cross".
+i64 phx_zin(uptr d, i64 v, i64 t) {
+    if (t == IZ_LONG) { st64(d, v); st32(d + ZVX_TYPE_INFO, t); return 1; }
+    if (!t) {
+        t = ld8(v + 8);
+        if (t == IZ_UNDEF) t = IZ_NULL;
+        if (t > IZ_STRING) return 0;
+        v = ld64(v);
+    }
+    if (t == IZ_FALSE) t = t + v;
+    st64(d, v);
+    if (t == IZ_STRING && !(ld32(v + 4) & ZSX_INTERNED)) t = IZ_STRING_EX;
+    st32(d + ZVX_TYPE_INFO, t);
+    return 1;
+}
+
+// A handler's BARE road (src/ext.mc) runs with no call context at all; a
+// call through the function table is the one thing it may do that can need
+// one, and only on its slow side. The compiler marks such a call LAZY (its
+// last argument): its slow side takes a context then (phx_enter_lz) and
+// phx_lz says so, so the handler's end gives it back (phx_leave_lz). phx_lz
+// is cleared around the engine call, because the callee may be one of this
+// module's own handlers, and restored after.
+i64 phx_lz;
+void phx_enter_lz() { if (phx_lz) return; phx_enter(); phx_lz = 1; }
+void phx_leave_lz() { phx_lz = 0; phx_leave(); }
+
+// A call site's words, emitted beside it by the compiler: what it found and
+// the request it found it in, then what only a slow road reads -- the name as
+// the source spells it, the function the call is in (a TypeError names it)
+// and the packed word below.
+#define PHF_FN      0
+#define PHF_GEN     8
+#define PHF_NAME    16
+#define PHF_IN      24
+#define PHF_NT      32
+
+// The function a call site names, found and cached: 0 when php has none, and
+// then php's own Error is pending in the runtime.
+uptr phx_flook(uptr c, i64 lazy) {
+    if (lazy) phx_enter_lz();
+    // the table's key is lowercase: php compares a name case-insensitively
+    uptr name = ld64(c + PHF_NAME);
+    i64 len = php_cstrlen(name);
+    uptr l = php_case(php_str_new(name, len), 0);
+    uptr f = zend_fetch_function_str(l + ZSX_VAL, len);
+    if (!f) { phx_undefined(name); return 0; }
+    st64(c + PHF_FN, f);
+    st64(c + PHF_GEN, phx_gen);
+    return f;
+}
+
+// The call itself: the site's packed word has the argument count in its low
+// byte and each argument's kind in the next four (phx_zin). The answer is
+// left in the engine zval r; 0 when an argument could not cross (and the
+// runtime's Error is pending).
+i64 phx_fcall_do(uptr f, uptr c, i64 v1, i64 v2, i64 v3, i64 v4, uptr r, i64 lazy) {
+    u8 pz[64];
+    i64 nt = ld64(c + PHF_NT);
+    i64 n = nt & 255;
+    i64 ok = 1;
+    if (n > 0) ok = phx_zin(pz, v1, (nt >> 8) & 255);
+    if (n > 1 && ok) ok = phx_zin(pz + 16, v2, (nt >> 16) & 255);
+    if (n > 2 && ok) ok = phx_zin(pz + 32, v3, (nt >> 24) & 255);
+    if (n > 3 && ok) ok = phx_zin(pz + 48, v4, (nt >> 32) & 255);
+    if (!ok) {
+        if (lazy) phx_enter_lz();
+        phx_nocross("array, object or resource passed to ", ld64(c + PHF_NAME));
+        return 0;
+    }
+    st32(r + ZVX_TYPE_INFO, IZ_UNDEF);
+    // what the module echoed so far goes out BEFORE the callee's own output
+    if (ph_outn) php_flush();
+    i64 lz = phx_lz;
+    phx_lz = 0;
+    zend_call_known_function(f, 0, 0, r, n, pz, 0);
+    phx_lz = lz;
+    return 1;
+}
+
+// The engine's answer in r, as a runtime zval z (r may be z): a scalar as it
+// is, a string with the engine's reference now the call's, a reference
+// followed; an exception the callee threw taken off the engine
+// (phx_zcatch), and what cannot cross refused.
+uptr phx_fres(uptr r, uptr z, uptr name) {
+    i64 t = ld8(r + ZVX_TYPE_INFO);
+    st64(z, ld64(r));
+    if (t <= IZ_DOUBLE) {
+        if (t == IZ_UNDEF) { phx_zcatch(); t = IZ_NULL; }
+        st64(z + ZVX_TYPE_INFO, t);
+        return z;
+    }
+    if (t == IZ_REFERENCE) {
+        // `function &f()`: the value it refers to, and the reference released
+        u8 rz[16];
+        st64(rz, ld64(r));
+        st64(rz + 8, ld64(r + 8));
+        uptr in = ld64(rz) + ZRX_VAL;
+        t = ld8(in + ZVX_TYPE_INFO);
+        if (t > IZ_STRING) {
+            zval_ptr_dtor(rz);
+            return phx_nocross("array, object or resource returned by ", name);
+        }
+        st64(z, ld64(in));
+        st64(z + ZVX_TYPE_INFO, t);
+        if (t == IZ_STRING && !(ld32(ld64(in) + 4) & ZSX_INTERNED)) st32(ld64(in), ld32(ld64(in)) + 1);
+        zval_ptr_dtor(rz);
+        if (t != IZ_STRING) return z;
+    }
+    if (t != IZ_STRING) {
+        zval_ptr_dtor(r);
+        return phx_nocross("array, object or resource returned by ", name);
+    }
+    // the engine's reference becomes the call's: kept until the call's
+    // memory goes, as every string a runtime zval holds (php_str_esc)
+    uptr s = ld64(z);
+    st64(z + ZVX_TYPE_INFO, IZ_STRING);
+    if (!(ld32(s + 4) & ZSX_INTERNED)) { php_str_esc(s); st32(s, ld32(s) - 1); }
+    return z;
+}
+
+// A call site that names the function, `a_add($x, $y)` the source does not
+// declare: the answer as a runtime zval, which the context types. `nt` is the
+// site's packed word again, for src/lvalue.mc to read off the call.
+uptr phx_fcall(uptr c, i64 nt, i64 v1, i64 v2, i64 v3, i64 v4) {
+    uptr f = ld64(c + PHF_FN);
+    if (!f || ld64(c + PHF_GEN) != phx_gen) f = phx_flook(c, 0);
+    if (!f) return php_znull();
+    uptr z = php_alloc(ZVX_SIZE);
+    if (!phx_fcall_do(f, c, v1, v2, v3, v4, z, 0)) return php_znull();
+    return phx_fres(z, z, ld64(c + PHF_NAME));
+}
+
+// The same call as the value of `return` in a function declared `: int`:
+// what the C twin does -- the arguments laid out as engine zvals, the call,
+// and the answer read out of the zval on the stack when it is an int.
+// Anything else takes php's return-value rule (php_param_coerce, argno 0),
+// in a call context (phx_enter_lz when the call is lazy).
+i64 phx_fl_slow(uptr r, uptr c, i64 lazy) {
+    if (lazy) phx_enter_lz();
+    uptr z = phx_fres(r, php_alloc(ZVX_SIZE), ld64(c + PHF_NAME));
+    if (ph_exc) return 0;
+    uptr fn = ld64(c + PHF_IN);
+    z = php_param_coerce(z, PC_INT, php_str_new("", 0), php_str_new(fn, php_cstrlen(fn)), 0, php_str_new("", 0));
+    if (ph_exc) return 0;
+    return php_zv_long(z);
+}
+
+i64 phx_fcall_l(uptr c, i64 nt, i64 v1, i64 v2, i64 v3, i64 v4, i64 lazy) {
+    uptr f = ld64(c + PHF_FN);
+    if (!f || ld64(c + PHF_GEN) != phx_gen) f = phx_flook(c, lazy);
+    if (!f) return 0;
+    u8 r[16];
+    if (!phx_fcall_do(f, c, v1, v2, v3, v4, r, lazy)) return 0;
+    if (ld8(r + ZVX_TYPE_INFO) == IZ_LONG) return ld64(r);
+    return phx_fl_slow(r, c, lazy);
+}
+
+// and its common case, two ints, written in place: one call, as the twin's
+i64 phx_fcall_l2(uptr c, i64 v1, i64 v2, i64 lazy) {
+    uptr f = ld64(c + PHF_FN);
+    if (!f || ld64(c + PHF_GEN) != phx_gen) return phx_fcall_l(c, 0, v1, v2, 0, 0, lazy);
+    u8 pz[48];                                  // the two arguments, then the answer
+    st64(pz, v1);
+    st32(pz + ZVX_TYPE_INFO, IZ_LONG);
+    st64(pz + 16, v2);
+    st32(pz + 16 + ZVX_TYPE_INFO, IZ_LONG);
+    st32(pz + 32 + ZVX_TYPE_INFO, IZ_UNDEF);
+    if (ph_outn) php_flush();
+    i64 lz = phx_lz;
+    if (lz) phx_lz = 0;
+    zend_call_known_function(f, 0, 0, pz + 32, 2, pz, 0);
+    if (lz) phx_lz = lz;
+    if (ld8(pz + 32 + ZVX_TYPE_INFO) == IZ_LONG) return ld64(pz + 32);
+    return phx_fl_slow(pz + 32, c, lazy);
 }

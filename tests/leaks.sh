@@ -28,7 +28,9 @@
 #   loop that builds strings inside one call, a string shared by two names, a
 #   parameter written, strings kept by an array, a closure and a static, an
 #   exception thrown from the middle of a loop -- and a function that pins
-#   (a static and a global), whose references live until RSHUTDOWN.
+#   (a static and a global), whose references live until RSHUTDOWN;
+#   examples/two-extensions (check.php, alone.php, bench.php) and a call
+#   through php's function table with strings and exceptions both ways.
 # A module built for this php has to say so: [php].debug = true and a build
 # id ending ",debug", or the loader refuses it by name.
 set -u
@@ -122,6 +124,49 @@ if "$BIN" build "$t/own" --config "$t/own/r.toml" > "$t/o.out" 2>&1; then
     leakfree "the ownership shapes, a pinned call and a loop inside one call" -d extension="$t/own/build/r.so" "$t/own/run.php"
 else
     bad "the ownership shapes: it would not build"; sed "s/^/      /" "$t/o.out"
+fi
+cp -R examples/two-extensions "$t/two"
+rm -rf "$t/two/build"
+dbg examples/two-extensions/extA.linux.toml > "$t/two/dbgA.toml"
+dbg examples/two-extensions/extB.linux.toml > "$t/two/dbgB.toml"
+if "$BIN" build "$t/two" --config "$t/two/dbgA.toml" > "$t/b.out" 2>&1 &&
+   "$BIN" build "$t/two" --config "$t/two/dbgB.toml" >> "$t/b.out" 2>&1; then
+    a=$t/two/build/extA.so; b=$t/two/build/extB.so
+    leakfree "two-extensions check.php" -d extension="$a" -d extension="$b" "$t/two/check.php"
+    leakfree "two-extensions alone.php (an undefined function, twice)" -d extension="$b" "$t/two/alone.php"
+    leakfree "two-extensions bench.php" -d extension="$a" -d extension="$b" "$t/two/bench.php"
+else
+    bad "two-extensions: it would not build"; sed "s/^/      /" "$t/b.out"
+fi
+
+# a call through the php function table with strings both ways and an
+# exception the callee throws, caught in the module and uncaught across it
+# (tests/ext.sh step 14 is the differential of the same road)
+mkdir -p "$t/ft"
+cat > "$t/ft/r.php" <<"EOF"
+<?php
+function ft_str(string $s): string { return cb_str($s) . "|" . cb_str($s . "x"); }
+function ft_catch(int $n): string {
+    try { return "no " . cb_throw($n); }
+    catch (InvalidArgumentException $e) { return "caught " . $e->getMessage() . " " . $e->getCode(); }
+}
+function ft_uncaught(int $n): int { return cb_throw($n); }
+EOF
+cat > "$t/ft/run.php" <<"EOF"
+<?php
+function cb_str(string $s): string { return strtoupper($s) . str_repeat("-", 40); }
+function cb_throw(int $n) { throw new InvalidArgumentException("bad $n", 40 + $n); }
+for ($k = 0; $k < 200; $k++) {
+    $s = ft_str("ab$k") . ft_catch($k);
+    try { ft_uncaught($k); } catch (InvalidArgumentException $e) { $s .= $e->getMessage(); }
+}
+echo $s, "\n";
+EOF
+sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.so\"|" examples/hello/mcphp.linux.toml | dbg /dev/stdin > "$t/ft/r.toml"
+if "$BIN" build "$t/ft" --config "$t/ft/r.toml" > "$t/f.out" 2>&1; then
+    leakfree "a call through the function table: strings, a caught and an uncaught exception" -d extension="$t/ft/build/r.so" "$t/ft/run.php"
+else
+    bad "the function-table calls: it would not build"; sed "s/^/      /" "$t/f.out"
 fi
 [ "$fail" = 0 ] || { echo "  leaks: something failed"; exit 1; }
 echo "  leaks: every request ended with nothing of the module still allocated"

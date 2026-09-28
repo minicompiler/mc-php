@@ -13,7 +13,7 @@
 //         phx_enter();
 //         if (phx_arity(ex, 1, "addone")) {
 //             if (phx_chk(ex, 0, 0, "addone", "n")) {
-//                 phx_ret_int(rv, f_addone(phx_i(ex, 0)));
+//                 st64(rv, f_addone(ld64(ex + 80))); st32(rv + 8, 4);
 //             }
 //         }
 //         phx_leave();
@@ -227,18 +227,73 @@ i64 ph_ext_read(i64 pt, i64 k) {
 i64 ph_ext_write(i64 rt, i64 call) {
     i64 rv = ph_ext_ident("rv", TY_UPTR);
     if (rt == PT_VOID)   return ph_stmt_of(call);
-    if (rt == PT_INT)    return ph_stmt_of(ph_c2("phx_ret_int", rv, call, TY_VOID));
+    if (rt == PT_INT) {
+        // RETURN_LONG in place: the value, then IS_LONG in its type word
+        i64 sv = ph_stmt_of(ph_c2("st64", rv, call, TY_VOID));
+        set_nd_next(sv, ph_stmt_of(ph_c2("st32", ph_bin(ph_tok("+", 1), ph_ext_ident("rv", TY_UPTR), ph_int(8), TY_UPTR),
+                                         ph_int(4), TY_VOID)));
+        return ph_ext_block(sv);
+    }
     if (rt == PT_FLOAT)  return ph_stmt_of(ph_c2("phx_ret_float", rv, call, TY_VOID));
     if (rt == PT_STRING) return ph_stmt_of(ph_c2("phx_ret_str", rv, call, TY_VOID));
     return ph_stmt_of(ph_c2("phx_ret_bool", rv, call, TY_VOID));
 }
 
-void ph_ext_handler(i64 fi, uptr fl, i64 line) {
-    uptr name = ld64(ph_fname + fi * 8);
-    i64 np = ld64(ph_fnp + fi * 8);
-    i64 rt = ld64(ph_fret + fi * 8);
+// ---- the bare road ------------------------------------------------------
+// A php function whose body, copied into its handler, calls NOTHING -- mc's
+// loads and the return writer only -- needs none of the runtime: no string
+// is built, nothing is echoed, nothing can throw. Its handler is then what a
+// C extension's is: the count and the tags tested in place, the body, the
+// answer written, returned -- and phx_enter/phx_leave run only on the road
+// where a check fails and php's own error has to be raised
+// (examples/two-extensions: `a_add` is `return $a + $b;`).
+i64 ph_ext_lazy;
+i64 ph_ext_pure(i64 n) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_CALL) {
+            uptr c = nd_name(n);
+            // a call through the function table whose answer is an int
+            // needs a context only on its slow side, and takes one there
+            // (lib/php_ext.mc's phx_enter_lz): marked LAZY, its last
+            // argument, and the road gives the context back at its end
+            if (str_eq(c, "phx_fcall_l") || str_eq(c, "phx_fcall_l2")) {
+                i64 w = nd_a(n);
+                loop { if (!nd_next(w)) break; w = nd_next(w); }
+                set_nd_val(w, 1);
+                ph_ext_lazy = 1;
+            } else if (!phi_intrinsic(c) && !str_eq(c, "phx_ret_int") && !str_eq(c, "phx_ret_bool")
+                && !str_eq(c, "phx_ret_float") && !str_eq(c, "phx_leave_lz")) return 0;
+        }
+        if (!ph_ext_pure(nd_a(n)) || !ph_ext_pure(nd_b(n)) || !ph_ext_pure(nd_c(n)) || !ph_ext_pure(nd_d(n))) return 0;
+        n = nd_next(n);
+    }
+    return 1;
+}
 
-    // the call to the php function, with every argument already checked
+// the statement list s without the position announcements
+// (ph_dfile/ph_dline), inside the blocks and ifs it holds too
+i64 ph_ext_noann(i64 s) {
+    i64 h = 0;
+    i64 t = 0;
+    loop {
+        if (!s) break;
+        i64 nx = nd_next(s);
+        i64 k = nd_kind(s);
+        if (k == N_ASSIGN && (str_eq(nd_name(s), "ph_dfile") || str_eq(nd_name(s), "ph_dline"))) { s = nx; continue; }
+        if (k == N_BLOCK) set_nd_a(s, ph_ext_noann(nd_a(s)));
+        if (k == N_IF) { set_nd_b(s, ph_ext_noann(nd_b(s))); set_nd_c(s, ph_ext_noann(nd_c(s))); }
+        if (t) set_nd_next(t, s);
+        if (!t) h = s;
+        t = s;
+        s = nx;
+    }
+    if (t) set_nd_next(t, 0);
+    return h;
+}
+
+// the call to the php function, with every argument already checked
+i64 ph_ext_body(i64 fi, uptr name, i64 np, i64 rt) {
     u8 av[96];
     i64 k = 0;
     loop {
@@ -246,7 +301,16 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
         st64(av + k * 8, ph_ext_read(ld64(ph_fpt + (fi * PH_MAXP + k) * 8), k));
         k = k + 1;
     }
-    i64 body = ph_ext_write(rt, ph_calln(ph_mangle(name, "f_"), av, np, ph_mcty(rt)));
+    return ph_ext_write(rt, ph_calln(ph_mangle(name, "f_"), av, np, ph_mcty(rt)));
+}
+
+void ph_ext_handler(i64 fi, uptr fl, i64 line) {
+    uptr name = ld64(ph_fname + fi * 8);
+    i64 np = ld64(ph_fnp + fi * 8);
+    i64 rt = ld64(ph_fret + fi * 8);
+
+    i64 body = ph_ext_body(fi, name, np, rt);
+    i64 k = 0;
 
     // one guard per parameter, innermost last, then the arity guard around
     // them all: php checks the COUNT before it looks at any argument
@@ -284,6 +348,35 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     i64 post = ph_stmt_of(ph_call("phx_leave", 0, 0, 0, 0, 0, TY_VOID));
     set_nd_next(body, post);
 
+    // the bare road, in front: taken when the count and every tag are what
+    // the signature says, and kept only if the body turns out to call
+    // nothing once it is copied in (below). A float or bool parameter has no
+    // one-tag test (an int widens to a float), so it is not offered one.
+    i64 bare = 0;
+    if (rt == PT_INT || rt == PT_FLOAT || rt == PT_BOOL || rt == PT_VOID) {
+        i64 cond = ph_bin(ph_tok("==", 2), ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR),
+                          ph_int(44), TY_UPTR), 0, 0, 0, TY_I64), ph_int(np), TY_U8);
+        k = 0;
+        loop {
+            if (k >= np) break;
+            i64 pk = ld64(ph_fpt + (fi * PH_MAXP + k) * 8);
+            i64 tag = 0;
+            if (pk == PT_INT) tag = 4;                    // IS_LONG
+            if (pk == PT_STRING) tag = 6;                 // IS_STRING
+            if (!tag) { cond = 0; break; }
+            i64 ty = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
+            cond = ph_bin(ph_tok("&&", 2), cond, ph_bin(ph_tok("==", 2), ty, ph_int(tag), TY_U8), TY_U8);
+            k = k + 1;
+        }
+        if (cond) {
+            i64 fast = ph_ext_body(fi, name, np, rt);
+            set_nd_next(fast, node_new(N_RETURN, line, fl));
+            bare = ph_ext_if(cond, fast);
+            set_nd_next(bare, pre);
+            pre = bare;
+        }
+    }
+
     i64 p0 = param_new(TY_UPTR, "ex");
     i64 p1 = param_new(TY_UPTR, "rv");
     set_nd_next(p0, p1);
@@ -296,8 +389,76 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     // (src/opt.mc's inliner: `dec_add` is a forwarder), then phx_enter/
     // phx_leave's fast paths written in place (src/opt.mc)
     ph_inl_fn(f, 0);
+    // the copy may have put declarations in front of it: unlinked where it is
+    ph_ext_lazy = 0;
+    if (bare && ph_ext_pure(nd_b(bare)) && ph_ext_lazy) {
+        // the context a lazy call took is given back before the return
+        i64 lb = phi_blist(nd_b(bare));
+        i64 lp = 0;
+        loop { if (!nd_next(lb)) break; lp = lb; lb = nd_next(lb); }
+        i64 gv = node_new(N_IDENT, line, fl);
+        set_nd_name(gv, "phx_lz");
+        set_nd_type(gv, TY_I64);
+        i64 give = ph_ext_if(ph_truthy(gv), ph_stmt_of(ph_call("phx_leave_lz", 0, 0, 0, 0, 0, TY_VOID)));
+        set_nd_next(give, lb);
+        if (lp) set_nd_next(lp, give);
+        if (!lp) set_nd_a(nd_b(bare), give);
+    }
+    // Out of the list, whichever way it goes: the declarations the copy put
+    // in front of it stay where they are.
+    i64 keep = bare && ph_ext_pure(nd_b(bare));
+    i64 dh = 0;
+    i64 dt = 0;
+    if (bare) {
+        i64 hb = nd_b(f);
+        i64 sb = nd_a(hb);
+        if (sb == bare) set_nd_a(hb, nd_next(bare));
+        loop {
+            if (!sb || sb == bare) break;
+            if (keep && nd_kind(sb) == N_VAR) {
+                i64 dc = phi_copy1(sb);
+                if (dt) set_nd_next(dt, dc);
+                if (!dt) dh = dc;
+                dt = dc;
+            }
+            if (nd_next(sb) == bare) { set_nd_next(sb, nd_next(bare)); break; }
+            sb = nd_next(sb);
+        }
+        set_nd_next(bare, 0);
+    }
+    if (!keep) {
+        phr_fn(f);
+        top_add(f);
+        return;
+    }
+    // The position a statement announces is for an exception the source
+    // could catch; on the bare road there is no catch (it would be a call),
+    // and whatever is raised crosses into php at the road's end, where php
+    // says where. The announcements go.
+    set_nd_a(nd_b(bare), ph_ext_noann(nd_a(nd_b(bare))));
+    // Kept: the handler IS the bare road, and everything else -- the
+    // context, the checks that raise php's errors, the body again -- is a
+    // second function it tail-calls. A handler that calls nothing else is
+    // then a leaf (src/mach.mc's P11): no register of the slow road's saved
+    // on the way in, as a C handler's.
+    uptr sname = ph_mangle(name, "x_s_");
+    set_nd_name(f, sname);
     phr_fn(f);
     top_add(f);
+    i64 tc = ph_stmt_of(ph_call(sname, 2, ph_ext_ident("ex", TY_UPTR), ph_ext_ident("rv", TY_UPTR), 0, 0, TY_VOID));
+    set_nd_next(bare, tc);
+    if (dt) set_nd_next(dt, bare);
+    if (!dt) dh = bare;
+    i64 q0 = param_new(TY_UPTR, "ex");
+    i64 q1 = param_new(TY_UPTR, "rv");
+    set_nd_next(q0, q1);
+    i64 h = node_new(N_FUNC, line, fl);
+    set_nd_name(h, ph_ext_hname(name));
+    set_nd_type(h, TY_VOID);
+    set_nd_a(h, q0);
+    set_nd_b(h, ph_ext_block(dh));
+    phr_fn(h);
+    top_add(h);
 }
 
 // ---- get_module ------------------------------------------------------------

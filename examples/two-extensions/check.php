@@ -1,8 +1,8 @@
 <?php
-// The differential driver: run TWICE -- once with extA and extB loaded (the
-// hand-written pair), once with extA.php and extB.php required -- and the two
-// runs must print the same bytes. The order the two are loaded in is the
-// gate's business: it runs the native half both ways.
+// The differential driver: run with extA and extB loaded (compiled, or the C
+// twins) and with extA.php and extB.php required, and the runs must print the
+// same bytes. The order the two are loaded in is the gate's business: it
+// runs the native pairs both ways.
 declare(strict_types=1);
 
 if (!extension_loaded('extA')) { require __DIR__ . '/extA.php'; }

@@ -341,12 +341,51 @@ loads `examples/hello` and `examples/decimal` into one php in both orders, on ev
 answers. mc calls a function and takes an address with a direct `bl`/`adrp`, and the Linux link
 is `-Bsymbolic`, so nothing inside a module is resolved through the loader and each keeps using
 its own runtime. What IS shared is the exported names: a third module that looked one up would
-find the first one loaded -- which is exactly how
-[`examples/two-extensions`](../examples/two-extensions/) reaches from one extension into the
-other on purpose. `docs/mcphp-toml.md` § The symbol prefix is the design that gives each module
+find the first one loaded. Nothing here looks one up: one extension reaches another through php's
+own function table (below), as a C extension does. `docs/mcphp-toml.md` § The symbol prefix is the design that gives each module
 names of its own; it is not implemented. The cheap half would be a linker argument --
 `-exported_symbols_list` naming only `_get_module` on macOS, a version script on Linux -- and it is
 not taken here because the schema's answer is the prefix.
+
+## A call to a function the source does not declare
+
+php resolves a call when it RUNS, in its function table; an extension's source may call a
+function another extension publishes, php itself has, or the script defines -- and on the
+extension road mc-php compiles such a call to exactly that (`lib/php_ext.mc`'s `phx_fcall`), which
+is also what a C extension does to call another extension's function
+([`examples/two-extensions`](../examples/two-extensions/) and its C twin, `c/extB.c`):
+
+- the function is looked up in php's table (`zend_fetch_function_str`, the lowercased name) the
+  first time the call site runs in a request, and cached in two words beside the call site for
+  the rest of it (a userland function is gone at the request's end, so RSHUTDOWN moves the
+  request counter on);
+- the arguments are laid out as engine zvals on the stack -- an int, a string and a bool as
+  themselves, anything else through a runtime zval -- and the call is
+  `zend_call_known_function`; what the module echoed so far is flushed first, so output keeps its
+  order;
+- the answer is a value, typed by its context with php's rules. As the value of `return` in a
+  function declared `: int` it is read straight out of the engine's zval when it is an int (two
+  int arguments take one call, `phx_fcall_l2`), and php's return-value rule applies otherwise;
+- an exception the callee throws is taken off the engine and stands in the runtime as the nearest
+  class the runtime knows, with the same message, code, file and line, so the module's own
+  `catch` sees it; uncaught, the ENGINE's object goes back into php, class and trace intact. A
+  name php does not have is php's own `Error`, `Call to undefined function NAME()`;
+- the module may be re-entered through the callee (tests/ext.sh step 14).
+
+What does not cross, by name: an array or object argument is refused while compiling (`an array or
+object argument to a function php's function table answers`), an array, object or resource answer
+when it arrives (`mc-php: a php array, object or resource returned by NAME(): only null, bool,
+int, float and string cross php's function table`); argument unpacking and more than 4 arguments
+are refused while compiling. A by-reference parameter of the callee gets a value, and php warns.
+On the PROGRAM road there is no other module to call, and such a call stays the refusal it was.
+
+**A handler that needs no runtime.** A published function whose body, copied into its handler,
+calls nothing but mc's loads -- `a_add`'s `return $a + $b;` -- is compiled as a C handler is: the
+count and the tags tested in place, the body, the answer stored, returned. Everything else (the
+call context, the checks that raise php's errors) is a second function the handler tail-calls when
+a check fails, so the handler is a leaf. A body whose only other call is one through the function
+table with an int answer (`b_use`) keeps that road too: the call takes a call context only on its
+slow side and gives it back before the handler returns (`phx_enter_lz`/`phx_leave_lz`).
 
 ## Windows
 
@@ -389,8 +428,8 @@ and mc's own `[project]`, `[linker]`, `[target]` and `[include]` carry the rest,
 `mc-php build` IS `mc build` and mc's driver ignores a table it does not know. One of mc's keys
 matters here more than on the program road: **`[project].opt = 1`**, mc's optimizer (its register
 allocator, branch peephole and loop hoisting), which the project file of every extension this
-repository BUILDS from php carries (`examples/hello`, `examples/decimal`; the files of
-`two-extensions` and `awaitable` exist to pin a refusal and compile nothing). An extension is called from a php that is already warm, so the generated code
+repository BUILDS from php carries (`examples/hello`, `examples/decimal`,
+`examples/two-extensions`; the file of `awaitable` exists to pin a refusal and compiles nothing). An extension is called from a php that is already warm, so the generated code
 is the whole cost: `examples/decimal` measured 2.79 ms without it and 1.64 ms with it
 (`docs/plan.md` § 7). A taught compiler cannot set it for you -- mc applies its optimizer level
 after the module's `user_init` has run -- so it is a line in the file. What is in the
