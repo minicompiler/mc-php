@@ -40,6 +40,7 @@
 #include "closure.mc"
 #include "class.mc"
 #include "decl.mc"
+#include "extern.mc"
 #include "ext.mc"
 #include "mach.mc"
 #include "program.mc"

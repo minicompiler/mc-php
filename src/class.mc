@@ -331,6 +331,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
         i64 stat = 0;
         i64 movr = ph_saw_override;
         ph_saw_override = 0;
+        if (ph_ext_ab) err_at(mfl, mline, "mc-php: #[Extern] on something that is not a function");
 
         if (ph_is("use")) {
             ph_next();

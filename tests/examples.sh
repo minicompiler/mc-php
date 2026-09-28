@@ -367,7 +367,7 @@ elif command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; 
 else
     skip "the C twin of awaitable: no php-config or no $CC here"
 fi
-pin "$EX" "awaitable.src.php:13: mc-php: an exported function whose return type is not a declared scalar: awaitable\\curl_easy_init is not implemented yet (probes/t10/RESULTS.md)"
+pin "$EX" "awaitable.src.php:36: mc-php: a variadic parameter in an exported function: awaitable\\await is not implemented yet (probes/t10/RESULTS.md)"
 
 [ "$fail" = 0 ] || { echo "  examples: something failed"; exit 1; }
 echo "  examples: green"

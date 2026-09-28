@@ -22,6 +22,8 @@ i64 ph_function() {
     if (ph_at("&", 1)) { ph_next(); retref = 1; }
     if (ph_tid != T_IDENT) ph_todo(fl, line, "an anonymous function or closure");
     uptr name = ph_ns_decl(ph_tname);                // `ns\name` inside a namespace
+    uptr xab = ph_ext_ab;
+    ph_ext_ab = 0;
     ph_next();
     // a call earlier in the file already made the row (php hoists the
     // declaration): take it over rather than refusing it as a duplicate, and
@@ -39,6 +41,7 @@ i64 ph_function() {
         ph_nfn = ph_nfn + 1;
     }
     ph_last_fn = fi;
+    if (xab) { ph_ext_ab = xab; return ph_extern_fn(name, fi, fwd, fl, line); }
     st64(ph_fname + fi * 8, name);
     st64(ph_fret + fi * 8, PT_MIXED);
     st64(ph_fnp + fi * 8, 0);

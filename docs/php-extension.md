@@ -68,6 +68,30 @@ them: in a function body or a block, and a namespace inside a braced one, they a
 compiling. A leading underscore
 makes a function module-private under its namespace too (`aw\util\_h`).
 
+**A C function** is declared in php with `#[Extern('lib')]` and an empty body
+(`src/extern.mc`, both roads), and called like any function the source declares:
+
+```php
+#[Extern('curl')] function curl_easy_init(): Ptr {}
+#[Extern('curl', variadic: 1)] function curl_easy_setopt(Ptr $h, int $opt, mixed $v): int {}
+#[Extern('c')] function strerror(int $e): string {}
+```
+
+The declaration is the ABI. `int` is C's `int` (a returned one is sign-extended from bit 31, since
+the ABI leaves the bits above it unspecified); `Ptr` is a pointer-sized integer (a pointer,
+`size_t`), php's `int` to the source; a `string` parameter is `const char *` to the string's own
+NUL-terminated bytes and a `string` return a C string copied into a php one (`""` for null); a
+`bool` parameter is 0 or 1; a `mixed` parameter is decided per call by the value -- an int, a
+string's bytes, a bool, null as 0, anything else php's `TypeError` with no C call. `void` returns
+nothing. `variadic: N` marks the last N parameters as the C variadic ones: Apple's arm64 passes
+those on the stack after the eight argument registers, so there the fixed arguments are padded to
+eight; elsewhere a variadic int travels as a fixed one. The C symbol is the function's name
+without its namespace, and the declaration is never published. On the extension road the symbol
+comes from php's own process, as every Zend name does; on the program road from the C library, so
+the library named is `c` or `pthread`. **Windows refuses it by name**
+(`an #[Extern] function on Windows: the link names no library for it`): its link names each
+import library, and none is named for a C function the source declares.
+
 The body is the whole language. Classes, closures, `match`, exceptions, the 272-row library --
 everything the program road compiles compiles here; it is the SIGNATURE that is narrow, because
 the signature is what crosses the boundary.

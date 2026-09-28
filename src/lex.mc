@@ -70,6 +70,9 @@ i64  ph_nopeek;           // set right after a p_push_source: cur is in the old 
 
 // `#[\Override]` just went past: the next class member is the one php checks
 i64  ph_saw_override;
+// #[Extern(...)] just went past: its bytes, for src/extern.mc
+uptr ph_ext_ab;
+uptr ph_ext_ae;
 
 // is the very next thing in the source `::`? The module has no token
 // lookahead, so this reads the cursor, which sits just past the current
@@ -517,6 +520,9 @@ void ph_next() {
                     q = q + 1;
                 }
                 if (ph_has_word(abeg, q, "Override", 8)) ph_saw_override = 1;
+                // #[Extern(...)]: the declaration that follows is a C function
+                // (src/extern.mc reads the bytes)
+                if (ph_has_word(abeg, q, "Extern", 6)) { ph_ext_ab = abeg; ph_ext_ae = q - 1; }
                 continue;
             }
             loop {

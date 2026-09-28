@@ -31,6 +31,7 @@ void ph_program() {
             ph_ext_export(ph_last_fn, nd_file(fn), nd_line(fn));
             continue;
         }
+        if (ph_ext_ab) err_at(ph_tfile, ph_tline, "mc-php: #[Extern] on something that is not a function");
         i64 s = ph_stmt_checked();
         if (ph_main_tail) set_nd_next(ph_main_tail, s);
         if (!ph_main_tail) ph_main_head = s;

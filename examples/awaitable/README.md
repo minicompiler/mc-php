@@ -33,9 +33,10 @@ off as the compiler learns it:
 |---|---|---|
 | 7 | `namespace awaitable;` | DONE (the awaitable branch, 2026-09-28): namespaces and `use` imports with php's rules, declarations published as `awaitable\...` (`src/ns.mc`, `tests/g/120-namespaces.php`) |
 | 30 | `public ?\Throwable $exception` | DONE with it: a fully-qualified name is one token |
-| 13-24 | `#[Extern('curl')] function curl_easy_init(): Ptr {}` and seven more | `an exported function whose return type is not a declared scalar: awaitable\curl_easy_init` -- the attribute means nothing to mc-php yet, so the declaration is read as a function to export -- **pinned by the gate** |
-| 37 | `function await(callable $fn, mixed ...$args): Intent` | `a variadic parameter in an exported function: await` -- and behind it a `callable` parameter and a class return, both outside the scalar signatures |
-| 66 | `function parallel(callable $fn, mixed ...$args): array` | the same, and an `array` return |
+| 13-18 | `#[Extern('curl')] function curl_easy_init(): Ptr {}` and five more | DONE (the awaitable-extern branch): a C function declared in php, `#[Extern('lib', variadic: N)]` (`src/extern.mc`, `tests/c/08-extern.php`, `tests/ext.sh` step 16) |
+| 23-24 (was) | `#[Extern(host: true, kind: 'data')] function executor_globals(): Ptr {}` and `zend_ce_exception` | REMOVED from the source: calling a php callable, catching what it throws and handing back an object are the compiler's own crossing, so the source never reads the engine's globals |
+| 36 | `function await(callable $fn, mixed ...$args): Intent` | `a variadic parameter in an exported function: awaitable\await` -- and behind it a `callable` parameter and a class return, both outside the scalar signatures -- **pinned by the gate** |
+| 65 | `function parallel(callable $fn, mixed ...$args): array` | the same, and an `array` return |
 
 With those five stubbed out it builds -- and the four classes are compiled and NOT published:
 `class_exists('awaitable\Semaphore')` is false in a php that loaded it, with no refusal, because

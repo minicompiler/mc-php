@@ -583,5 +583,47 @@ else
 fi
 rm -rf "$tmp/build"
 
+# --- 16. #[Extern]: a C function declared in php ------------------------------
+# The module calls C by the declaration alone -- ints, a C int's sign, a
+# pointer, a string both ways, a C variadic (Apple arm64 puts it on the stack)
+# -- and the declaration is not published. The symbols come from php's own
+# process. Windows refuses it by name: the link names no library for it.
+cat > "$tmp/r.php" <<'EOF2'
+<?php
+namespace xc;
+#[\Extern('c')] function atoi(string $s): int {}
+#[\Extern('c')] function strlen(string $s): Ptr {}
+#[\Extern('c')] function malloc(Ptr $n): Ptr {}
+#[\Extern('c')] function free(Ptr $p): void {}
+#[\Extern('c')] function strcat(Ptr $d, string $s): string {}
+#[\Extern('c', variadic: 2)] function snprintf(Ptr $b, Ptr $n, string $f, mixed $a, mixed $c): int {}
+function fmt(int $n, string $s): string {
+    $b = malloc(64);
+    $k = snprintf($b, 64, "%d-%s", $n, $s);
+    $r = strcat($b, "") . " " . $k . " " . strlen($s) . " " . atoi("-1");
+    free($b);
+    return $r;
+}
+EOF2
+rm -f "$tmp/build/r.$sx"
+"$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/xc.build" 2>&1; rc=$?
+if [ "${WINDOWS:-0}" = 1 ]; then
+    if [ "$rc" != 0 ] && grep -q "an #\[Extern\] function on Windows" "$tmp/xc.build"; then
+        say "#[Extern]: refused on Windows by name"
+    else
+        bad "#[Extern] on Windows: want the refusal"; sed 's/^/      /' "$tmp/xc.build"
+    fi
+elif [ "$rc" = 0 ]; then
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" -r 'echo xc\fmt(42, "abc"), " ", var_export(function_exists("xc\\atoi"), true), "\n";' 2>&1 | tr -d '\r')
+    if [ "$got" = "42-abc 6 3 -1 false" ]; then
+        say "#[Extern]: libc called from the module, a variadic placed, the declarations not published"
+    else
+        bad "#[Extern]: got [$got], want [42-abc 6 3 -1 false]"
+    fi
+else
+    bad "#[Extern]: it would not build"; sed 's/^/      /' "$tmp/xc.build"
+fi
+rm -rf "$tmp/build"
+
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }
 echo "  ext: the extension road is green"
