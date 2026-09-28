@@ -34,6 +34,9 @@
 // the project file, checks those reads again as a hard trap that names the
 // file and line (src/program.mc ph_checked_config).
 i64 ph_checked_reads;
+// src/mach.mc registered ph_addm64 (a read-modify-write of one word): the
+// derived machines are in effect, and MCPHP_ADDM=0 is not set
+i64 ph_addm_on;
 
 i64 ty_pstr;              // the mc type `string` lowers to (D10)
 i64 ty_parr;

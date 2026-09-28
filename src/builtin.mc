@@ -1011,6 +1011,12 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "intdiv")) {
         ph_need(na, 2, name, fl, line);
         ph_ety = PT_INT;
+        // a divisor the compiler can see is a positive literal can neither be
+        // zero nor turn PHP_INT_MIN into an overflow: mc's own `/`, which
+        // cannot raise -- `%`'s rule in src/expr.mc, and no position store,
+        // no test and no temporary around it
+        if (nd_kind(ph_a(av, 1)) == N_INT && nd_val(ph_a(av, 1)) > 0)
+            return ph_bin(ph_tok("/", 1), ph_to_int(a0, t0), ph_a(av, 1), TY_I64);
         return ph_c2("php_intdiv", ph_to_int(a0, t0), ph_to_int(ph_a(av, 1), ph_aty(av, 1)), TY_I64);
     }
     if (str_eq(name, "abs")) {

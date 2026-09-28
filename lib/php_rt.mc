@@ -1934,6 +1934,8 @@ void php_pk_push(uptr p, i64 v) {
 // key the same statement read, so neither test is needed; C's read and store
 i64 php_pk_get_f(uptr p, i64 k) { return ld64(ld64(p + 16) + (k << 3)); }
 void php_pk_set_f(uptr p, i64 k, i64 v) { st64(ld64(p + 16) + (k << 3), v); }
+// the element's address, for src/lvalue.mc's read-modify-write (ph_addm64)
+uptr php_pk_ea(uptr p, i64 k) { return ld64(p + 16) + (k << 3); }
 
 void php_pk_set_slow(uptr p, i64 k, i64 v);
 // the fast path alone, and no early return: src/opt.mc copies it into the

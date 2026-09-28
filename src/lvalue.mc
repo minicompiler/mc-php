@@ -260,6 +260,7 @@ i64 ph_pk_store(uptr d, uptr fl, i64 line, i64 semi) {
     // store the value's exception interrupts must leave $x as it was. The key
     // is taken first so php's
     // order -- key, then value -- survives the value moving ahead of the store.
+    i64 k0 = k;
     if (k && nd_kind(k) != N_INT && nd_kind(k) != N_IDENT) k = ph_temp(k, TY_I64, "phk_");
     ph_can_throw = 0;
     i64 v = ph_pk_int(fl, line);
@@ -269,7 +270,19 @@ i64 ph_pk_store(uptr d, uptr fl, i64 line, i64 semi) {
     if (!k) return ph_expr_stmt_of(ph_quiet("php_pk_push", 2, base, v, 0, 0, TY_VOID));
     // a FIXED array's keyed store is to a key its own right-hand side read
     // (src/packed.mc), so the key is inside the buffer
-    if (ph_pk_fixed(base)) return ph_expr_stmt_of(ph_quiet("php_pk_set_f", 3, base, k, v, 0, TY_VOID));
+    if (ph_pk_fixed(base)) {
+        // `$x[K] = $x[K] + E` on a FIXED array: the element's address is
+        // computed once, and one read, add and write go through it
+        // (ph_addm64, src/mach.mc) -- the read and the store no longer each
+        // recompute it from the buffer pointer, which kept the store's
+        // address late and the next iteration's load waiting behind it
+        if (ph_addm_on && nd_kind(v) == N_BINARY && nd_op(v) == ph_tok("+", 1)
+            && nd_kind(nd_a(v)) == N_CALL && str_eq(nd_name(nd_a(v)), "php_pk_get_f")
+            && ph_same_tree(nd_a(nd_a(v)), base) && ph_same_tree(nd_next(nd_a(nd_a(v))), k0))
+            return ph_expr_stmt_of(ph_quiet("ph_addm64", 2,
+                ph_quiet("php_pk_ea", 2, base, k, 0, 0, TY_UPTR), nd_b(v), 0, 0, TY_VOID));
+        return ph_expr_stmt_of(ph_quiet("php_pk_set_f", 3, base, k, v, 0, TY_VOID));
+    }
     return ph_expr_stmt_of(ph_quiet("php_pk_set", 3, base, k, v, 0, TY_VOID));
 }
 

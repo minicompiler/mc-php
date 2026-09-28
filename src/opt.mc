@@ -257,6 +257,7 @@ void ph_sc_fn(i64 f) {
 }
 
 void phr_fn(i64 f);
+void ph_ac_walk(i64 n);
 
 void ph_opt_fn(i64 f) {
     ph_opt_walk(nd_b(f));
@@ -264,6 +265,7 @@ void ph_opt_fn(i64 f) {
     // after the runtime's copies: a read the short circuit's right side made
     // is a copy by now, so the right side is still one expression
     ph_sc_fn(f);
+    if (!phi_noac) ph_ac_walk(nd_b(f));
 }
 
 // ---- small php functions are inlined -----------------------------------------
@@ -301,6 +303,8 @@ uptr phi_rn_new;
 i64  phi_rn_n;
 i64  phi_rn_cap;
 
+i64 phi_noac;                         // MCPHP_AC=0: addresses keep their constants where they are
+
 void phi_env() {
     uptr e = host_environ();
     if (!e) return;
@@ -309,6 +313,7 @@ void phi_env() {
         uptr s = ld64(e + i * 8);
         if (!s) return;
         if (str_eq(s, "MCPHP_INLINE=0")) { phi_off = 1; return; }
+        if (str_eq(s, "MCPHP_AC=0")) phi_noac = 1;
         i = i + 1;
     }
 }
@@ -640,6 +645,62 @@ i64 phi_copy1(i64 n) {
     set_nd_next(n, nx);
     return c;
 }
+
+// ---- the constant of an address goes to the top ---------------------------------
+// A copied byte read of `$s[$n - 1 - $j]` is ld8((s + 24) + ((n - 1) - j)): two
+// constants the machine adds one at a time, each an instruction on the path to
+// the load. Here the integer terms of the address are summed and put last,
+// ld8((s + (n - j)) + 23), and src/mach.mc's P2 makes that 23 the load's own
+// offset. The arithmetic wraps as C's does, so the sum is the same address.
+i64 ph_ac_c;
+i64 ph_ac_bad;
+i64 ph_ac_split(i64 n, i64 sgn) {
+    i64 k = nd_kind(n);
+    if (k == N_INT) { ph_ac_c = ph_ac_c + sgn * nd_val(n); return 0; }
+    if (k != N_BINARY) return n;
+    i64 add = nd_op(n) == ph_tok("+", 1);
+    if (!add && nd_op(n) != ph_tok("-", 1)) return n;
+    i64 ra = ph_ac_split(nd_a(n), sgn);
+    i64 sb = sgn;
+    if (!add) sb = 0 - sgn;
+    i64 rb = ph_ac_split(nd_b(n), sb);
+    if (!rb) return ra;
+    if (!ra) { if (!add) ph_ac_bad = 1; return rb; }
+    set_nd_a(n, ra);
+    set_nd_b(n, rb);
+    return n;
+}
+
+void ph_ac_walk(i64 n) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_CALL && phi_intrinsic(nd_name(n)) && nd_a(n) && nd_kind(nd_a(n)) == N_BINARY) {
+            i64 a = nd_a(n);
+            i64 nx = nd_next(a);
+            ph_ac_c = 0;
+            ph_ac_bad = 0;
+            i64 r = ph_ac_split(phi_copy1(a), 1);
+            if (!ph_ac_bad && r && ph_ac_c != 0) {
+                i64 t = node_new(N_BINARY, nd_line(a), nd_file(a));
+                set_nd_op(t, ph_tok("+", 1));
+                set_nd_a(t, r);
+                i64 c = node_new(N_INT, nd_line(a), nd_file(a));
+                set_nd_val(c, ph_ac_c);
+                set_nd_type(c, TY_I64);
+                set_nd_b(t, c);
+                set_nd_type(t, nd_type(a));
+                set_nd_next(t, nx);
+                set_nd_a(n, t);
+            }
+        }
+        ph_ac_walk(nd_a(n));
+        ph_ac_walk(nd_b(n));
+        ph_ac_walk(nd_c(n));
+        ph_ac_walk(nd_d(n));
+        n = nd_next(n);
+    }
+}
+
 
 // ---- where a call may be taken out of its statement ---------------------------
 // The first call to a candidate, in evaluation order, before which nothing
@@ -1354,6 +1415,7 @@ void phr_init() {
     phr_add("php_pk_set");
     phr_add("php_pk_get_f");
     phr_add("php_pk_set_f");
+    phr_add("php_pk_ea");
     phr_add("php_intdiv");
     phr_add("php_rc_ret");
     phr_add("phx_enter");
@@ -1406,7 +1468,7 @@ i64 phr_is_check(i64 s) {
 
 // a call that cannot raise: the counting's own, and mc's loads and stores
 i64 phr_quiet_call(uptr nm) {
-    if (phi_intrinsic(nm)) return 1;
+    if (phi_intrinsic(nm) || str_eq(nm, "ph_addm64")) return 1;
     return str_eq(nm, "php_str_free") || str_eq(nm, "php_pool_push") || str_eq(nm, "php_rc_drain");
 }
 

@@ -91,6 +91,19 @@ i64 ph_bin(i64 op, i64 a, i64 b, i64 ty) {
     return n;
 }
 
+// the same expression, node for node: identifiers by name, integers by value,
+// operators by operator (the arguments of a call are its nd_a chain)
+i64 ph_same_tree(i64 a, i64 b) {
+    if (!a || !b) return a == b;
+    if (nd_kind(a) != nd_kind(b)) return 0;
+    i64 k = nd_kind(a);
+    if (k == N_IDENT) return str_eq(nd_name(a), nd_name(b));
+    if (k == N_INT) return nd_val(a) == nd_val(b);
+    if (k == N_BINARY) return nd_op(a) == nd_op(b) && ph_same_tree(nd_a(a), nd_a(b)) && ph_same_tree(nd_b(a), nd_b(b));
+    if (k == N_CAST) return nd_type(a) == nd_type(b) && ph_same_tree(nd_a(a), nd_a(b));
+    return 0;
+}
+
 i64 ph_cast(i64 mcty, i64 a) {
     i64 n = node_new(N_CAST, ph_tline, ph_tfile);
     set_nd_type(n, mcty);
