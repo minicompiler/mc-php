@@ -1,1 +1,1 @@
-mc-php: out-of-range read: offset 4, length 4 (tests/c/04-trap-pk.php:7)
+mc-php: out-of-range read: offset 4, length 4 (tests/c/04-trap-pk.php:6)

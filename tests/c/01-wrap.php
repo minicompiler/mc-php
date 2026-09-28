@@ -1,5 +1,5 @@
 <?php
-// C semantics, the default (docs/semantics.md): + - * on an int wrap as C's
+// mc-php behaves as C does (docs/semantics.md): + - * on an int wrap as C's
 // do and nothing is thrown or promoted to float. What C would trap on still
 // throws: a division or a modulo by zero, and intdiv(PHP_INT_MIN, -1).
 function add(int $a, int $b): int { return $a + $b; }

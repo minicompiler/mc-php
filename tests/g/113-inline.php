@@ -1,6 +1,4 @@
 <?php
-// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
-// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // Small functions are copied into their callers (src/opt.mc): every shape a
 // copy has to keep -- an early return nested under an if whose other branch
 // goes on, a return in both branches, a parameter the callee assigns, the
@@ -34,8 +32,8 @@ function run(): void {
     echo sgn(5), sgn(500), sgn(-3), sgn(0), " ", both(3), both(4), " ", bump(4), "\n";
     echo two(note("ab"), note("c")), " ", $trace, "\n";
     try { echo chk(2), chk(-7), "never\n"; } catch (InvalidArgumentException $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
-    echo "[", off("abc"), "]\n";
-    $x = off("abc") . strlen("x") . (1 / 1);
+    echo "[", off("abcdef"), "]\n";
+    $x = off("abcdef") . strlen("x") . (1 / 1);
     $acc = "";
     for ($i = 0; $i < 4; $i++) { $acc .= same("s$i") . twice("xyz$i"); }
     echo $acc, " ", fact(6), "\n";

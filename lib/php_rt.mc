@@ -1826,9 +1826,9 @@ void php_pk_hash(uptr p) {
     i64 i = 0;
     loop { if (i >= n) break; php_arr_iset(a, i, php_zlong(ld64(d + i * 8))); i = i + 1; }
     st64(p + 24, a);
-    // the packed length is 0 from now on, so the fast paths' one bound test
-    // (php_pk_get, php_pk_set) sends every key to the hash; every other
-    // reader looks at the hash first
+    // the packed length is 0 from now on, so the store's one bound test
+    // (php_pk_set) sends every key to the hash; every reader looks at the
+    // hash first (php_pk_get_c tests it before the dense buffer)
     st64(p, 0);
 }
 
@@ -1865,13 +1865,8 @@ void php_pk_set_slow(uptr p, i64 k, i64 v) {
     php_arr_iset(ld64(p + 24), k, php_zlong(v));
 }
 
-i64 php_pk_get_slow(uptr p, i64 k);
-i64 php_pk_get(uptr p, i64 k) {
-    if ((u64) k < (u64) ld64(p)) { ph_pkabs = 0; return ld64(ld64(p + 16) + k * 8); }
-    return php_pk_get_slow(p, k);
-}
-
-// C semantics: the element, read (above, php_str_byte_c) -- while the array is
+// A packed element read (docs/semantics.md): the element and nothing else,
+// C's read (above, php_str_byte_c) -- while the array is
 // still packed. A store outside the range makes it php's hash under the same
 // handle (php_pk_set_slow: the dense buffer stays at p + 16 and is stale, the
 // hash is p + 24), and a VALID key must then be read from the hash, not from
@@ -1890,7 +1885,7 @@ i64 php_pk_get_c_slow(uptr p, i64 k) {
     ph_pkabs = 0;
     return ld64(b);
 }
-// c-debug: a hashed array's length is 0, so its read falls to the second
+// checked_reads: a hashed array's length is 0, so its read falls to the second
 // test; a key neither the buffer nor the hash has is the trap
 void php_oob_slow(i64 i, i64 n);
 i64 php_pk_get_d(uptr p, i64 k) {
@@ -1902,19 +1897,6 @@ i64 php_pk_get_d(uptr p, i64 k) {
     }
     php_oob_slow(k, ld64(p));
     return 0;
-}
-
-i64 php_pk_get_slow(uptr p, i64 k) {
-    if (!ld64(p + 24)) {
-        if (k >= 0 && k < ld64(p)) { ph_pkabs = 0; return ld64(ld64(p + 16) + k * 8); }
-        php_undef_ikey(k);
-        ph_pkabs = 1;
-        return 0;
-    }
-    uptr b = php_ht_find(ld64(p + 24), k, 0);
-    if (!b) { php_undef_ikey(k); ph_pkabs = 1; return 0; }
-    ph_pkabs = 0;
-    return ld64(b);
 }
 
 // `$x[$k] ?? d`: php's quiet read, a zval
@@ -1929,32 +1911,6 @@ uptr php_pk_getq(uptr p, i64 k) {
 i64 php_pk_count(uptr p) {
     if (ld64(p + 24)) return php_count(ld64(p + 24));
     return ld64(p);
-}
-
-// Arithmetic on a packed element is native (src/packed.mc), and php
-// promotes an int that overflows to a float, which a native int cannot hold.
-// So + - * on an element (and on what such an operation answered) are these:
-// the operation, php's overflow test, and on overflow an ArithmeticError
-// that says so -- a named refusal at run time, never a wrapped int.
-void php_pk_overflow(i64 op) {
-    php_mreset();
-    php_mc("mc-php: an int overflowed in ");
-    if (op == 0) php_mc("+");
-    if (op == 1) php_mc("-");
-    if (op == 2) php_mc("*");
-    php_mc(" on a packed array's element: php would make a float here, and this native int cannot hold one (docs/plan.md, the packed int array)");
-    php_throw_str(php_str_new("ArithmeticError", 15), php_str_new(ph_msg, ph_msgn));
-}
-i64 php_add_ck(i64 x, i64 y) { i64 r = x + y; if (((x ^ r) & (y ^ r)) < 0) php_pk_overflow(0); return r; }
-i64 php_sub_ck(i64 x, i64 y) { i64 r = x - y; if (((x ^ y) & (x ^ r)) < 0) php_pk_overflow(1); return r; }
-i64 php_mul_ck(i64 x, i64 y) {
-    i64 r = x * y;
-    // both within 32 bits cannot overflow: no division on the common path
-    if (x + 2147483648 >= 0 && x + 2147483648 < 4294967296 && y + 2147483648 >= 0 && y + 2147483648 < 4294967296) return r;
-    if (x == 0) return 0;
-    if (x == -1 && r == -9223372036854775807 - 1) { php_pk_overflow(2); return r; }
-    if (r / x != y) php_pk_overflow(2);
-    return r;
 }
 
 // an element read where null and 0 differ: the value php has
@@ -3635,11 +3591,12 @@ i64 php_str_byte(uptr s, i64 i) {
     return php_str_byte_slow(s, i);
 }
 
-// ---- C semantics (docs/semantics.md) ---------------------------------------
-// The default of a compiled program: a string offset and a packed element are
+// ---- C's reads (docs/semantics.md) -----------------------------------------
+// What a compiled program does: a string offset and a packed element are
 // READ, and nothing is checked -- an offset outside the string or below zero
-// is C's undefined behaviour, a read of whatever memory is there. The php
-// rules are the SEM_PHP road above; SEM_CDEBUG is the same read with the range
+// is C's undefined behaviour, a read of whatever memory is there. The road
+// above (php_str_off, php_str_byte) is a negative LITERAL offset's, php's
+// count from the end. `[php] checked_reads` is the same read with the range
 // checked again, and outside it a hard trap that names the statement.
 i64  php_str_byte_c(uptr s, i64 i) { return ld8(s + ZS_HDR + i); }
 uptr php_str_off_c(uptr s, i64 i)  { return php_str_ch(ld8(s + ZS_HDR + i)); }

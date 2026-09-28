@@ -418,96 +418,19 @@ void ph_scan_brf_calls(uptr src, i64 len) {
     }
 }
 
-// ---- which semantics (src/decls.mc SEM_*, docs/semantics.md) -------------------
-// A value names one of the three; anything else is a compile error at its
-// source, so a misspelt "php" cannot quietly give C's rules.
-i64 ph_sem_of(uptr v, i64 n, uptr where) {
-    if (n == 3 && mem_eq(v, "php", 3)) return SEM_PHP;
-    if (n == 1 && mem_eq(v, "c", 1)) return SEM_C;
-    if (n == 7 && mem_eq(v, "c-debug", 7)) return SEM_CDEBUG;
-    err_at2(where, 1, "mc-php: semantics must be c, c-debug or php", xstrdup(v, n));
-    return SEM_C;
-}
-
-void ph_sem_set(i64 m, i64 by) {
-    if (by < ph_sem_by) return;
-    ph_sem = m;
-    ph_sem_by = by;
-}
-
-// [php] semantics in the project file, and MCPHP_SEMANTICS in the compiler's
-// environment above it (read as MCPHP_RC=check is: a Windows-hosted mc has no
-// environment to read, src/rc.mc). A source's own comment is above both
-// (ph_sem_scan): a file that says what it needs is not overridden by the run.
-void ph_sem_config() {
-    uptr v = toml_get("php.semantics");
-    if (v) ph_sem_set(ph_sem_of(v, cstrlen(v), "mcphp.toml"), 1);
-    uptr e = host_environ();
-    if (!e) return;
-    i64 i = 0;
-    loop {
-        uptr s = ld64(e + i * 8);
-        if (!s) return;
-        if (cstrlen(s) >= 16 && mem_eq(s, "MCPHP_SEMANTICS=", 16)) {
-            ph_sem_set(ph_sem_of(s + 16, cstrlen(s + 16), "MCPHP_SEMANTICS"), 2);
-            return;
-        }
-        i = i + 1;
-    }
-}
-
-// a heredoc or nowdoc at src + i (`<<<`): past its closing label, or i when
-// it is not one. The body is text, not code, so a marker there is not one.
-i64 ph_sem_hop_doc(uptr src, i64 len, i64 i) {
-    i64 j = i + 3;
-    loop { if (j >= len) return i; i64 c = ld8(src + j); if (c != 32 && c != 9) break; j = j + 1; }
-    i64 q = ld8(src + j);
-    if (q == 39 || q == 34) j = j + 1;
-    i64 st = j;
-    loop { if (j >= len) break; if (!ph_nmb(ld8(src + j), j == st)) break; j = j + 1; }
-    i64 n = j - st;
-    if (n == 0) return i;
-    loop {
-        // the next line, its indentation, and the label with no name character after it
-        loop { if (j >= len) return len; if (ld8(src + j) == 10) break; j = j + 1; }
-        j = j + 1;
-        loop { if (j >= len) return len; i64 c = ld8(src + j); if (c != 32 && c != 9) break; j = j + 1; }
-        if (j + n <= len && mem_eq(src + j, src + st, n)
-            && (j + n == len || !ph_nmb(ld8(src + j + n), 0))) return j + n;
-    }
-    return len;
-}
-
-// `// mc-php: semantics=php` as a LINE COMMENT of a php source: php itself
-// runs the file unchanged. Strings, heredocs, `#` and `/* */` comments are
-// stepped over (ph_scan_hop, ph_sem_hop_doc), so the same bytes inside a
-// string do nothing. The value is the word after the `=`.
-void ph_sem_scan(uptr name, uptr src, i64 len) {
-    uptr k = "// mc-php: semantics=";
-    i64 kn = cstrlen(k);
-    i64 i = 0;
-    loop {
-        if (i >= len) return;
-        i64 c = ld8(src + i);
-        if (c == 60 && i + 2 < len && ld8(src + i + 1) == 60 && ld8(src + i + 2) == 60) {
-            i64 e = ph_sem_hop_doc(src, len, i);
-            if (e > i) { i = e; continue; }
-        }
-        if (c == 47 && i + kn <= len && mem_eq(src + i, k, kn)) {
-            i64 j = i + kn;
-            i64 e = j;
-            loop { if (e >= len) break; i64 d = ld8(src + e); if (d <= 32) break; e = e + 1; }
-            ph_sem_set(ph_sem_of(src + j, e - j, name), 3);
-            return;
-        }
-        i64 h = ph_scan_hop(src, len, i);
-        if (h > i) { i = h; continue; }
-        i = i + 1;
-    }
+// ---- the checked reads (src/decls.mc ph_checked_reads, docs/semantics.md) -------
+// `[php] checked_reads = true`, a TOML boolean; anything else is refused at its
+// own position in the file (toml_err_key: mc's diagnostic over a key, the one
+// name here that mc's tests/golden/surface.txt does not freeze).
+void ph_checked_config() {
+    uptr v = toml_get("php.checked_reads");
+    if (!v) return;
+    if (str_eq(v, "true")) { ph_checked_reads = 1; return; }
+    if (str_eq(v, "false")) return;
+    toml_err_key("php.checked_reads", "mc-php: expected true or false");
 }
 
 void ph_on_source(uptr name, uptr src, i64 len) {
-    if (ph_ends(name, ".php")) ph_sem_scan(name, src, len);
     ph_scan_decl(src, len);
     ph_scan_brf(src, len);
     ph_scan_refs(src, len);
@@ -598,7 +521,7 @@ void ph_push_rt_host() {
 
 void user_init() {
     ph_ext_config();
-    ph_sem_config();
+    ph_checked_config();
     ph_rc_env();
     phi_env();
     float_init();

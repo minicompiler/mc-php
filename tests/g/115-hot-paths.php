@@ -1,13 +1,11 @@
 <?php
-// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
-// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // The runtime's fast paths copied into the compiled code (src/opt.mc, phr_*):
 // a string offset read as its byte, a byte written in place, a packed
-// element read and written, an overflow-checked add, intdiv -- each with the
-// slow half it falls back to: a negative offset, a string shared by two
-// names, a key outside the array (php's warning, and the line it names --
-// the announcement moved into that slow half), an array that became a hash,
-// a division by zero. And the loops around them: a `for` whose step follows
+// element read and written, intdiv -- each with the slow half it falls back
+// to: a negative literal offset (php's count from the end), a string shared
+// by two names, a store outside the array (which makes it a hash, read as
+// one from then on), a division by zero. Every read is inside its range:
+// outside it is undefined (docs/semantics.md). And the loops around them: a `for` whose step follows
 // its body, one with a `continue` that still runs the step, an int-literal
 // ternary, strspn from an offset, str_repeat of nothing.
 function bytes(string $s): int {
@@ -31,9 +29,9 @@ function acc(int $n): int {
     for ($i = 0; $i < $n; $i++) {
         for ($j = 0; $j < $n; $j++) { $a[($i + $j) % $n] = $a[($i + $j) % $n] + $i * $j; }
     }
-    $s = $a[1] + $a[$n + 2];
-    $a[$n + 3] = 7;
-    return $s + $a[1] + $a[$n + 3] + $a[$n - 1] + $a[$n + 5];
+    $s = $a[1] + $a[$n - 2];
+    $a[$n + 3] = 7;                      // outside: the array is php's hash from here on
+    return $s + $a[1] + $a[$n + 3] + $a[$n - 1];
 }
 function carry(int $d): int { return $d >= 10 ? 1 : 0; }
 function sign(int $a, int $b): int { return $a < $b ? -1 : 1; }

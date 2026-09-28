@@ -1,6 +1,4 @@
 <?php
-// mc-php: semantics=php -- it reads outside a string or an array on purpose, which is
-// php's warning here and C's undefined behaviour by default (docs/semantics.md)
 // The runtime's byte loops, at every length that crosses a word: a copy of
 // 0..20 bytes (substr, concat), and str_replace of one byte -- found at the
 // start, the end, adjacent, never, and inside an eight-byte word -- with an
@@ -41,7 +39,7 @@ function at(string $s, int $i): string {
 foreach (["", ".", "a.", "abcdefgh.", "abcdefghijklmnopq.", "no dot here at all"] as $t) {
     echo find_dot($t), " ";
 }
-echo "\n", at("1.5", 1), at("-1.5", 2), at("x", -1), at(".", 3), at("x", PHP_INT_MAX), "\n";
+echo "\n", at("1.5", 1), at("-1.5", 2), at("x", 0), at(".", 0), at("-.", 1), "\n";
 // every position of a one-byte needle in every length from 1 to 40, which
 // crosses the byte loop, the word scan and its overlapping last word
 $sweep = "";

@@ -404,29 +404,24 @@ rm -rf "$tmp/build"
 # --- 12b. a loop whose only calls are slow halves still drains ---------------
 # src/opt.mc drops the pool drain at the top of a loop that builds nothing, and
 # a slow half that raises a diagnostic BUILDS: the "Uninitialized string
-# offset 100" and "Undefined array key 100" texts put their number in the pool
-# (php_mi -> php_itos). Treated as building nothing, 100 000 out-of-range reads
-# in one call grew php's peak by 8.4 MB each (the review of #24, reproduced
-# before the fix); with the drain kept it does not move.
-# The reads are OUTSIDE the string and the array on purpose, which is php's
-# warning only under php's rules (docs/semantics.md): C's are undefined.
-printf '<?php\n// mc-php: semantics=php\nfunction offs(string $s, int $n): int { $t = 0; for ($i = 0; $i < $n; $i++) { $t = $t + ord($s[$i + 100]); } return $t; }\nfunction keys(int $n): int { $a = array_fill(0, 4, 1); $t = 0; for ($i = 0; $i < $n; $i++) { $t = $t + $a[$i + 100]; } return $t; }\n' > "$tmp/r.php"
+# offset -100" text puts its number in the pool (php_mi -> php_itos). Treated
+# as building nothing, 100 000 such reads in one call grew php's peak by 8.4 MB
+# (the review of #24, reproduced before the fix); with the drain kept it does
+# not move. The offset is a NEGATIVE LITERAL, the one out-of-range string read
+# that keeps php's rules and its warning (docs/semantics.md): any other read
+# outside the range is undefined, and a test must not make one.
+printf '<?php\nfunction offs(string $s, int $n): int { $t = 0; for ($i = 0; $i < $n; $i++) { $t = $t + ord($s[-100]); } return $t; }\n' > "$tmp/r.php"
 rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/dg.build" 2>&1; then
-    # the 200 020 warnings are the module's own output: on stdout, dropped 4 KB
+    # the 100 010 warnings are the module's own output: on stdout, dropped 4 KB
     # at a time by the buffer's callback (a buffer that kept them would move
-    # the peak itself), and the log line on stderr. Only the numbers stay --
-    # one php for each, warmed up first: a peak is per process.
-    got=
-    for fn in offs keys; do
-        got="$got $("$PHP" -d extension="$tmp/build/r.$sx" \
-            -r '$f = $argv[1]; $a = $f === "offs" ? ["abc"] : []; ob_start(fn($b) => "", 4096); $f(...[...$a, 1000]); $p = memory_get_peak_usage(); $f(...[...$a, 100000]); $r = memory_get_peak_usage(); ob_end_clean(); echo $r - $p;' "$fn" 2>/dev/null | tr -d '\r')"
-    done
-    set -- $got
-    if [ "${1:-999999}" -lt 8192 ] && [ "${2:-999999}" -lt 8192 ]; then
-        say "slow halves: 100000 out-of-range reads of a string and of an array in one call, php's peak moved $1 and $2 bytes"
+    # the peak itself), and the log line on stderr. Only the number stays --
+    # warmed up first: a peak is per process.
+    got=$("$PHP" -d extension="$tmp/build/r.$sx"         -r 'ob_start(fn($b) => "", 4096); offs("abc", 1000); $p = memory_get_peak_usage(); offs("abc", 100000); $r = memory_get_peak_usage(); ob_end_clean(); echo $r - $p;' 2>/dev/null | tr -d '\r')
+    if [ "${got:-999999}" -lt 8192 ]; then
+        say "slow halves: 100000 reads at a negative literal offset outside the string in one call, php's peak moved $got bytes"
     else
-        bad "slow halves: want peaks that move under 8 KiB, got $got"
+        bad "slow halves: want a peak that moves under 8 KiB, got $got"
     fi
 else
     bad "slow halves: it would not build"; sed 's/^/      /' "$tmp/dg.build"

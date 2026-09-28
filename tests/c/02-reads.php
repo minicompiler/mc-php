@@ -1,5 +1,5 @@
 <?php
-// C semantics, the default: a string offset and a packed element read in
+// mc-php behaves as C does: a string offset and a packed element read in
 // range answer exactly what php answers -- only a read OUTSIDE the range
 // differs (undefined behaviour, docs/semantics.md). A negative offset the
 // source spells as a literal is php's count-from-the-end, kept.

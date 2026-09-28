@@ -67,16 +67,38 @@ case $(uname -s) in MINGW*|MSYS*|CYGWIN*) exe=$tmp.exe ;; esac
 # so a test that reads its own environment sees what php's run of it saw.
 rc_env=
 [ -n "${MCPHP__RC:-}" ] && rc_env="MCPHP_RC=$MCPHP__RC"
-if [ -n "${MCPHP_WINLINK:-}" ]; then
+# A source with a project file beside it (tests/c: NAME.toml, e.g.
+# `[php] checked_reads = true`) is built the project road, `mc-php build`:
+# the file's own tables plus a [project] this wrapper writes. The generated
+# file sits BESIDE the source and names the entry and the output by their
+# bare names, because mc resolves a relative path against the config's
+# directory and does not read a Windows drive path (D:/...) as absolute; the
+# output is moved to where the caller wants it once the build is done.
+cfg=${src%.php}.toml
+pdir=$(dirname "$src")
+pnm=.mcphp.$$.$(basename "$src" .php)
+if [ -f "$cfg" ]; then
+    kind=exe; po=$pnm; pdest=$exe
+    [ "$exe" != "$tmp" ] && po=$pnm.exe
+    [ -n "${MCPHP_WINLINK:-}" ] && { kind=obj; po=$pnm.obj; pdest=$tmp.obj; }
+    { printf '[project]\nentry = "%s"\nout = "%s"\nkind = "%s"\n\n' "$(basename "$src")" "$po" "$kind"; cat "$cfg"; } > "$pdir/$pnm.toml"
+    env $rc_env "$MCPHP" build "$pdir" --config "$pdir/$pnm.toml" > "$out" 2> "$err" &
+elif [ -n "${MCPHP_WINLINK:-}" ]; then
     env $rc_env "$MCPHP" "$src" -o "$tmp.obj" > "$out" 2> "$err" &
 else
     env $rc_env "$MCPHP" --exe "$src" -o "$exe" > "$out" 2> "$err" &
 fi
 mcpid=$!
-trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj"; exit 143' TERM
-trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj"; exit 130' INT
+trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj" "$pdir/$pnm" "$pdir/$pnm".*; exit 143' TERM
+trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj" "$pdir/$pnm" "$pdir/$pnm".*; exit 130' INT
 wait $mcpid
 rc=$?
+# the project road prints its own step line on stdout; it is the build's, not the program's
+if [ -f "$cfg" ]; then
+    rm -f "$pdir/$pnm.toml"
+    [ "$rc" = 0 ] && { : > "$out"; mv -f "$pdir/$po" "$pdest"; }
+    rm -f "$pdir/$po"
+fi
 trap - TERM INT
 if [ "$rc" != 0 ]; then
     cat "$err" >&2

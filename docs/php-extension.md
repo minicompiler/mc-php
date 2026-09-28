@@ -159,12 +159,11 @@ expectation and not against the interpreted source.
 the module loaded, once with the source `require`d -- and the two must print the same bytes on
 each stream and exit the same. These are the places where they would not:
 
-* **C's rules, by default** ([semantics.md](semantics.md)). An int that overflows in `+ - *` wraps,
+* **C's rules, always** ([semantics.md](semantics.md)). An int that overflows in `+ - *` wraps,
   and a string offset or a packed array element read outside its range is undefined behaviour,
-  not php's warning. Inside php that read is memory the process owns, so an extension that cannot
-  trust its indices is built with `[php] semantics = "php"` (php's warning and value) or
-  `"c-debug"` (a trap that names the line). A read inside the range, and everything else, is
-  php's answer in every mode.
+  not php's warning. Inside php that read is memory the process owns, so build an extension with
+  `[php] checked_reads = true` to find one (a trap that names the line). A read inside the range,
+  and everything else, is php's answer.
 
 * **Output buffering is php's.** What a module echoes goes through `php_output_write`, php's own
   output layer, exactly as an internal function's `php_printf` does -- so `ob_start()` captures it

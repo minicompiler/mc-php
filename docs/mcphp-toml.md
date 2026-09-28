@@ -163,20 +163,20 @@ debug         = false
 Nothing else about php is read. In particular **no php header file is opened**, which is the
 whole point: `php-config`, `phpize` and the development package are not on the road.
 
-### `php.semantics` -- php's rules or C's
+### `php.checked_reads` -- the reads C leaves unchecked, checked as a trap
 
 One more key sits in `[php]`, and it is about the program the compiler writes rather than the php
 it is loaded into:
 
 | key | type | default | accepted |
 |---|---|---|---|
-| `php.semantics` | string | `"c"` | `"c"`, `"c-debug"`, `"php"` |
+| `php.checked_reads` | boolean | `false` | `true`, `false` |
 
-`"c"` makes an int that overflows wrap and leaves an in-range read unchecked, as C does. An
-out-of-range read is then undefined behaviour. `"c-debug"` checks those reads again and stops the
-program at one. `"php"` keeps php's rules. [semantics.md](semantics.md) lists every difference,
-and it says how the environment and a source comment choose too. It applies to a program's
-project file as well as to an extension's.
+A compiled program behaves like C ([semantics.md](semantics.md)): a string offset or a packed
+array element read outside its range is undefined behaviour. With `checked_reads = true` those
+reads are checked again, and outside the range the program stops, naming the file and line. Any
+other value is a compile error at its position in this file. It applies to a program's project
+file as well as to an extension's.
 
 ## `[target]`
 

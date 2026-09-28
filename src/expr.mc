@@ -345,8 +345,10 @@ i64 ph_index(i64 base, i64 bt) {
         // C semantics (docs/semantics.md): the read, unchecked -- except an
         // offset the source spells as a negative literal, which is php's
         // count-from-the-end and not a read outside the string
-        if (ph_sem == SEM_C && !ph_neg_lit(i)) return ph_quiet("php_str_off_c", 2, base, i, 0, 0, ty_pstr);
-        if (ph_sem == SEM_CDEBUG && !ph_neg_lit(i)) return ph_c2("php_str_off_d", base, i, ty_pstr);
+        if (!ph_neg_lit(i)) {
+            if (ph_checked_reads) return ph_c2("php_str_off_d", base, i, ty_pstr);
+            return ph_quiet("php_str_off_c", 2, base, i, 0, 0, ty_pstr);
+        }
         return ph_c2("php_str_off", base, i, ty_pstr);
     }
     i64 kx = ph_expr(0);
@@ -357,9 +359,8 @@ i64 ph_index(i64 base, i64 bt) {
         if (kt != PT_INT) ph_pk_disagree(ph_tfile, ph_tline, "a key that is not an int");
         if (ph_at("??", 2)) return ph_c2("php_pk_getq", base, kx, ty_pzv);
         ph_ety = PT_INULL;
-        if (ph_sem == SEM_C) return ph_quiet("php_pk_get_c", 2, base, kx, 0, 0, TY_I64);
-        if (ph_sem == SEM_CDEBUG) return ph_c2("php_pk_get_d", base, kx, TY_I64);
-        return ph_c2("php_pk_get", base, kx, TY_I64);
+        if (ph_checked_reads) return ph_c2("php_pk_get_d", base, kx, TY_I64);
+        return ph_quiet("php_pk_get_c", 2, base, kx, 0, 0, TY_I64);
     }
     // an int key on an array needs no key zval: php_arr_iget(_w) is the
     // IS_LONG arm of php_arr_zget(_w), word for word
@@ -582,12 +583,11 @@ i64 ph_primary() {
         ph_inull_ok = 1;
         i64 v = ph_expr(70);
         i64 t = ph_ety;
-        // -null is int(0); -PHP_INT_MIN is php's float, so an element's
-        // negation is the checked subtraction
-        if (t == PT_INULL || (t == PT_INT && ph_is_ck(v))) {
+        // -null is int(0); an element's negation wraps as C's does, so
+        // -PHP_INT_MIN is PHP_INT_MIN (docs/semantics.md)
+        if (t == PT_INULL) {
             ph_ety = PT_INT;
-            if (ph_sem != SEM_PHP) return ph_bin(ph_tok("-", 1), ph_int(0), v, TY_I64);
-            return ph_c2("php_sub_ck", ph_int(0), v, TY_I64);
+            return ph_bin(ph_tok("-", 1), ph_int(0), v, TY_I64);
         }
         if (t == PT_FLOAT) return ph_c1("php_fneg", v, ty_f64);
         // -"1.2" is float(-1.2) and -"abc" is a TypeError: a zval keeps its
@@ -909,16 +909,12 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
     // value nor an error message can tell the two apart (src/packed.mc).
     // Beside anything else it is the zval php has.
     // `**` keeps its zval road for an element: php_pow_i has no overflow test.
-    i64 ck = ph_is_ck(lhs) || ph_is_ck(rhs);
     if (op == ph_tok("**", 2)) {
         if (lt == PT_INULL) { lhs = ph_inull_zv(lhs); lt = PT_MIXED; }
         if (rt == PT_INULL) { rhs = ph_inull_zv(rhs); rt = PT_MIXED; }
     }
-    if (lt == PT_INULL) { if (ph_numeric(rt) || rt == PT_INULL) { lt = PT_INT; ck = 1; } else { lhs = ph_inull_zv(lhs); lt = PT_MIXED; } }
-    if (rt == PT_INULL) { if (ph_numeric(lt)) { rt = PT_INT; ck = 1; } else { rhs = ph_inull_zv(rhs); rt = PT_MIXED; } }
-    // ... and so does `**` on what a checked operation answered:
-    // `($x[0] + 1) ** 2` is php's float when it overflows
-    if (ck && op == ph_tok("**", 2)) return ph_arith_zv(op, lhs, lt, rhs, rt);
+    if (lt == PT_INULL) { if (ph_numeric(rt) || rt == PT_INULL) { lt = PT_INT; } else { lhs = ph_inull_zv(lhs); lt = PT_MIXED; } }
+    if (rt == PT_INULL) { if (ph_numeric(lt)) { rt = PT_INT; } else { rhs = ph_inull_zv(rhs); rt = PT_MIXED; } }
     // anything a static type cannot answer exactly goes to the zval
     if (!ph_numeric(lt) || !ph_numeric(rt)) return ph_arith_zv(op, lhs, lt, rhs, rt);
     if (lt == PT_BOOL) { lhs = ph_to_int(lhs, lt); lt = PT_INT; }
@@ -979,24 +975,8 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         return ph_bin(op, ph_to_float(lhs, lt), ph_to_float(rhs, rt), ty_f64);
     }
     ph_ety = PT_INT;
-    // + - * on a packed element, or on what such an operation answered: php's
-    // overflow test, and a named ArithmeticError where php would make a float
-    // (php_add_ck and its two siblings, lib/php_rt.mc) -- never a wrapped int
-    // C semantics (docs/semantics.md): the same operation wraps, as C's does
-    if (ck && ph_sem != SEM_PHP) ck = 0;
-    if (ck) {
-        if (op == ph_tok("+", 1)) return ph_c2("php_add_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
-        if (op == ph_tok("-", 1)) return ph_c2("php_sub_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
-        if (op == ph_tok("*", 1)) return ph_c2("php_mul_ck", ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
-    }
+    // + - * wrap as C's do, on any int (docs/semantics.md)
     return ph_bin(op, lhs, rhs, TY_I64);
-}
-
-// a node one of the checked operations built
-i64 ph_is_ck(i64 n) {
-    if (nd_kind(n) != N_CALL) return 0;
-    uptr nm = nd_name(n);
-    return str_eq(nm, "php_add_ck") || str_eq(nm, "php_sub_ck") || str_eq(nm, "php_mul_ck");
 }
 
 i64 ph_cmp_zv(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt) {

@@ -7,17 +7,14 @@ a `zend_module_entry` and the `zend_function_entry` tables that php loads.
 
 The rule that makes it meaningful: **a `.php` source is PHP**. It runs under `php` and it compiles
 with `mc-php`, and the two must agree -- the oracle is php-src's own `.phpt` corpus, run under
-both. No dialect, and no annotations except one: the semantics selector below, a comment php
-ignores.
+both. No dialect and no annotations.
 
 **One exception, by design: a compiled program behaves the way C does where C and php part
-ways.** By default an int that overflows wraps, and a string offset or a packed array element
-read inside its range is the read and nothing else. A read OUTSIDE the range is undefined
-behaviour, not php's warning, and inside a php process it is a memory-safety risk.
-[`docs/semantics.md`](docs/semantics.md) lists every difference and how to get php's rules
-back: a `// mc-php: semantics=php` line comment in the source, `MCPHP_SEMANTICS=php`, or
-`semantics = "php"` in the project file, the first of these that says winning. `semantics = "c-debug"` checks those reads again and stops the program
-at one, naming the line. The `.phpt` grid runs with php's rules.
+ways, always.** An int that overflows wraps, and a string offset or a packed array element read
+inside its range is the read and nothing else. A read OUTSIDE the range is undefined behaviour,
+not php's warning, and inside a php process it is a memory-safety risk.
+[`docs/semantics.md`](docs/semantics.md) lists every difference. `[php] checked_reads = true`
+in the project file checks those reads again and stops the program at one, naming the line.
 
 ---
 
@@ -267,9 +264,9 @@ Seven gates, and they are what CI runs on every push:
 | `d8check` | every `.php` in the project is in a regime with an obligation (`docs/plan.md` D8) |
 | `lencheck` | every hand-counted string length in `src/` and `lib/` is right |
 | `aritycheck` | every library row's callee exists in the runtime with that many parameters |
-| fixtures | `tests/g/*.php` byte for byte what `php` prints, on **both** streams and the exit code. The six that read outside a string or an array on purpose carry the one annotation there is, `// mc-php: semantics=php`, a comment php ignores ([docs/semantics.md](docs/semantics.md)) |
+| fixtures | `tests/g/*.php` byte for byte what `php` prints, on **both** streams and the exit code |
 | refusals | `tests/r/*.php` parse under `php` and are refused **by name** by mc-php, exit 3 |
-| C semantics | `tests/c/*.php` answer their own recording (`NAME.out`, `.err`, `.code`): an int that wraps, in-range reads, and the `c-debug` trap -- [docs/semantics.md](docs/semantics.md) |
+| C behaviour | `tests/c/*.php` answer their own recording (`NAME.out`, `.err`, `.code`; a `NAME.toml` is the project file's own tables): an int that wraps, in-range reads, a packed array that became a hash, and `checked_reads` -- [docs/semantics.md](docs/semantics.md) |
 | D8 (a) | the workload's `TestCase` **run** in both worlds -- every declared `test*` executed in each, both exiting 0, and the two outputs identical |
 | D8 (b) | `tests/bench/bench10.sh`, which refuses to time `main.php` and `heavy.php` unless the two worlds agree on both streams and the exit code |
 
@@ -321,13 +318,18 @@ git clone --depth 1 --branch php-8.5.10 https://github.com/php/php-src php-src
 sh tests/grid.sh build/mc-php build/grid all
 ```
 
-The grid compiles with php's rules (`MCPHP_SEMANTICS=php`, the script's default), because it
-grades the compiler against php. With C's rules (`MCPHP_SEMANTICS=c sh tests/grid.sh ...`)
-exactly three tests of the directory grids change, green to wrong, and all three read a string
-offset outside the string on purpose (`docs/semantics.md` § 2): `Zend/tests/bug39018_2.phpt`
-(`@$foo[6]`, `$foo[100]`, `$foo[130]` on `'test'`), `Zend/tests/str_offset_001.phpt`
-(`$str[3]` on `"abc"`) and `Zend/tests/string_offset_int_min_max.phpt` (`PHP_INT_MAX` and
-`PHP_INT_MIN` on `""`).
+The grid is also a gate. What comes out green must be the recording, `tests/grid/green-*.txt`,
+minus `tests/grid/expected-differences.txt`, or the script fails naming the test:
+- a test lost fails;
+- a test gained fails, and the recording is updated in the same commit;
+- an expected difference that no longer differs fails.
+
+The expected differences are the three tests php passes that the compiled program cannot,
+because it behaves as C does. Each reads a string offset outside the string on purpose
+(`docs/semantics.md` § 2):
+- `Zend/tests/bug39018_2.phpt`: `@$foo[6]`, `$foo[100]` and `$foo[130]` on `'test'`;
+- `Zend/tests/str_offset_001.phpt`: `$str[3]` on `"abc"`;
+- `Zend/tests/string_offset_int_min_max.phpt`: `PHP_INT_MAX` and `PHP_INT_MIN` on `""`.
 
 ---
 
@@ -426,7 +428,7 @@ commit that changes what the compiler does, and the host layer is that commit, s
 | [docs/plan.md](docs/plan.md) | **read this first.** The plan, the decisions D1..D10, the test grid, and the open mc gaps |
 | [docs/php-extension.md](docs/php-extension.md) | the extension back end: what it compiles, what it refuses by name, and where a module differs from the interpreted source |
 | [docs/php-abi.md](docs/php-abi.md) | every Zend number it rests on, what it was read off, and how to re-read it |
-| [docs/semantics.md](docs/semantics.md) | **where a compiled program is C and not php**: overflow, out-of-range reads, how to choose php's rules instead |
+| [docs/semantics.md](docs/semantics.md) | **a compiled program behaves like C**: every difference from php, the memory-safety warning, `checked_reads` |
 | [docs/mcphp-toml.md](docs/mcphp-toml.md) | the `mcphp.toml` project file: the schema. `php-extension.md` § The project file is the part implemented |
 | [docs/layout.md](docs/layout.md) | what is in each directory |
 | [probes/README.md](probes/README.md) | the index of the measurements, T0..T10, each with its own `RESULTS.md` |

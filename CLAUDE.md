@@ -970,3 +970,20 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   (5) README: no annotations except the semantics selector. (6) d8check: eight regimes, and
   `extension` listed. New `tests/c/05-hashed`, `06-trap-hashed`, `07-marker-in-text`, each failing
   on the pre-fix compiler.
+- C only (2026-09-27, branch `c-only`), the owner's correction: compiled mc-php code ALWAYS behaves
+  like C. The `php` mode is gone with its only-php code paths: the element overflow test
+  (`php_add_ck`/`sub_ck`/`mul_ck`, `php_pk_overflow`, `ph_is_ck`) and php's packed read
+  (`php_pk_get`, `php_pk_get_slow`); the source comment `// mc-php: semantics=...`, its scan
+  (`ph_sem_scan`, `ph_sem_hop_doc`) and `MCPHP_SEMANTICS` are removed, and `tests/c/07-marker-in-text`
+  with them. One project key remains: `[php] checked_reads = true` (default false; not a
+  boolean is a compile error at its position, `toml_err_key` -- the one mc name used here that
+  mc's surface.txt does not freeze) turns on the trap variant. Kept, and documented as mc-php's
+  own rules rather than a mode: a negative LITERAL offset is php's count from the end (and warns
+  outside); `$a ** $b` with a non-literal exponent is php's float. Fixtures: the six `tests/g`
+  that read out of range lost those reads (105's `pk_absent` and `pk_pow(PHP_INT_MAX - 1)` went,
+  102/106/108/113/115 read in range) and stay differential; the packed-overflow block asserts the
+  wrap only; `tests/c` trap fixtures carry a `NAME.toml` that `tests/mcphp.sh` builds the project
+  road; `tests/ext.sh` step 12b reads at a negative literal offset (php's warning, still built in
+  the pool, still drained). The grid always runs compiled as C and is a GATE now: green must be
+  `tests/grid/green-*.txt` minus `tests/grid/expected-differences.txt` (exactly
+  `Zend/tests/bug39018_2`, `str_offset_001`, `string_offset_int_min_max`, each with a reason).

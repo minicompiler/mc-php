@@ -256,9 +256,9 @@ i64 ph_pk_store(uptr d, uptr fl, i64 line, i64 semi) {
     }
     ph_want("]", 1, "expected ] in a php array assignment");
     ph_want("=", 1, "expected = after a php array index");
-    // a value that can throw (a checked `+ - *` on an element) is computed
-    // and checked BEFORE the store: `try { $x[] = $x[0] * 3; }` must leave
-    // $x as it was when the product overflows. The key is taken first so php's
+    // a value that can throw is computed and checked BEFORE the store: a
+    // store the value's exception interrupts must leave $x as it was. The key
+    // is taken first so php's
     // order -- key, then value -- survives the value moving ahead of the store.
     if (k && nd_kind(k) != N_INT && nd_kind(k) != N_IDENT) k = ph_temp(k, TY_I64, "phk_");
     ph_can_throw = 0;

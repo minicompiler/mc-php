@@ -1,55 +1,50 @@
-# C semantics -- where a compiled program is not php
+# mc-php behaves like C -- every difference from php
 
-mc-php compiles php SOURCE, and by default the program it writes behaves the way C behaves
-where C and php part ways. The goal is C's cost: a read is a read, and an addition is an addition.
-Everything a program does when it stays inside its arrays and strings, and inside the range of
-an int, is php's answer. The differences are the cases below, and each one can be put back.
+mc-php compiles php SOURCE, and the program it writes behaves the way C behaves where C and php
+part ways. That is not a mode. There is no switch that gives php's rules back. The goal is C's
+cost: a read is a read, and an addition is an addition.
 
-**Warning: an out-of-range read is undefined behaviour, and a memory-safety risk.** With C's
-rules a string offset or a packed array element read outside its range reads whatever memory
-lies there, exactly as `s[i]` does in C. Inside an extension, that memory belongs to the php
-process: a wrong index can read another request's data or crash php. Build with
-`semantics = "c-debug"` to find such a read (it stops the program and names the line), and
-use `semantics = "php"` for code that must not trust its indices.
+Everything a program does while it stays inside its strings and arrays, and inside the range of
+an int, is php's answer, and the fixtures are graded against php itself (`tests/fixtures.sh`).
+This page lists every case where it is not.
 
-## Choosing the semantics
+**Warning: a read outside a string or an array is undefined behaviour, and a memory-safety
+risk.** It reads whatever memory lies there, exactly as `s[i]` does in C. Inside an extension
+that memory belongs to the php process: a wrong index can read another request's data or crash
+php. Build with `checked_reads` (below) to find such a read.
 
-| value | what it means |
-|---|---|
-| `c` | **the default.** The differences below apply. |
-| `c-debug` | C's rules, and every read they leave unchecked is checked again: outside the range the program stops with `mc-php: out-of-range read: offset N, length L (FILE:LINE)` on stderr and exit code 134. |
-| `php` | php's own rules everywhere this page names a difference. The phpt grid runs in this mode. |
+## `checked_reads`: the reads checked again, as a trap
 
-The first of these that is set decides:
+```toml
+[php]
+checked_reads = true
+```
 
-1. A line comment in a php source: `// mc-php: semantics=php`. It is a comment, so php itself
-   runs the file unchanged. Only a real line comment counts: the same bytes inside a string, a
-   heredoc, a nowdoc or a `/* */` comment are text and change nothing. A file that says what it
-   needs is not overridden by the run: `tests/g` uses the comment for the six fixtures that read
-   out of range on purpose, and they keep php's rules even under `MCPHP_SEMANTICS=c`.
-2. `MCPHP_SEMANTICS=php` (or `c`, `c-debug`) in the COMPILER's environment. mc on Windows
-   reads no environment, so on a Windows host use one of the other two.
-3. The project file, `mcphp.toml`: `[php]` `semantics = "php"` ([mcphp-toml.md](mcphp-toml.md)).
+This goes in the project file ([mcphp-toml.md](mcphp-toml.md)). Every read this page calls
+unchecked is then checked again. Outside the range the program stops, and stderr says
 
-A value other than these three is a compile error, so a misspelt `"php"` does not quietly
-give C's rules. The choice is made once for the whole compilation, not per function.
+```
+mc-php: out-of-range read: offset N, length L (FILE:LINE)
+```
+
+and the exit code is 134. The default is `false`. The value is a TOML boolean: anything else is
+a compile error at its own position in the file. It changes no answer inside the range.
+`examples/decimal` measures it at the cost of php's own checks (its README).
 
 ## The differences
 
-### 1. An int that overflows in `+`, `-` or `*`
+### 1. An int that overflows
 
 | | |
 |---|---|
 | php | the result becomes a float (`PHP_INT_MAX + 1` is `float(9.2233720368547758E+18)`) |
-| mc-php, `c` / `c-debug` | the result wraps, two's complement, as C's does: `PHP_INT_MAX + 1` is `PHP_INT_MIN`. Nothing is thrown. Unary minus wraps too: `-PHP_INT_MIN` is `PHP_INT_MIN`. |
-| mc-php, `php` | on a packed array's element (and on what such an operation answered in the same expression), php's overflow test, and where php would make a float the named `ArithmeticError`, because a native int cannot hold a float |
+| mc-php | `+`, `-`, `*`, unary `-` and `**` with a non-negative literal exponent wrap, two's complement, as C's do: `PHP_INT_MAX + 1` is `PHP_INT_MIN`, and `-PHP_INT_MIN` is `PHP_INT_MIN`. Nothing is thrown. |
 
-**Plain int arithmetic wraps in `php` mode too.** An int held in an ordinary variable has
-wrapped since before this page existed, where php makes a float. That is a known gap in `php`
-mode, recorded in [plan.md](plan.md) (§ 7, "native int arithmetic WRAPS on overflow"). It is
-not a C-mode choice.
+`$a ** $b` with an exponent that is not a literal keeps php's rule, a float when it overflows.
+The reason is that the same expression is a float whenever `$b` is negative, so it is php's
+number either way.
 
-**What still throws in every mode:** the cases where C itself traps are not made undefined.
+**What still throws, as C traps:**
 
 - A division or a modulo by zero is php's `DivisionByZeroError`: `intdiv($a, 0)`, `$a % 0`.
 - `intdiv(PHP_INT_MIN, -1)` is php's `ArithmeticError`.
@@ -61,52 +56,46 @@ not a C-mode choice.
 | | |
 |---|---|
 | php | `Warning: Uninitialized string offset N`, and the value is `""` (so `ord` is `0`) |
-| mc-php, `c` | **undefined behaviour**: the byte at that address is read, with no warning |
-| mc-php, `c-debug` | the program stops: `mc-php: out-of-range read: offset N, length L (FILE:LINE)`, exit 134 |
-| mc-php, `php` | php's warning and `""` |
+| mc-php | **undefined behaviour**: the byte at that address is read, with no warning |
+| mc-php, `checked_reads` | the program stops: `mc-php: out-of-range read: ...`, exit 134 |
 
-A **negative offset written as a literal**, `$s[-1]`, is php's count-from-the-end in every
-mode: it is not a read outside the string, and the compiler can see it. A negative offset held in
-a variable is a read outside the string under C's rules.
+A **negative offset written as a literal**, `$s[-1]`, is php's count-from-the-end: the compiler
+can see it, and it reads the last byte. Outside the string it gets php's warning. A negative
+offset held in a variable is a read outside the string.
 
-`$s[$i] ?? $d` is php's quiet read in every mode: absent, the default is taken. Use it where an
-index may be out of range.
+`$s[$i] ?? $d` is php's quiet read: absent, the default is taken. Use it where an index may be
+out of range.
 
 ### 3. A packed array element read by an int key outside the array
 
-A packed array is an int array the compiler proved is a native buffer
-([plan.md](plan.md), the packed int array). `$a[$k]` with `$k < 0` or `$k >= count($a)`:
+A packed array is an int array the compiler proved is a native buffer ([plan.md](plan.md), the
+packed int array). `$a[$k]` with `$k < 0` or `$k >= count($a)`:
 
 | | |
 |---|---|
 | php | `Warning: Undefined array key K`, and the value is `null` |
-| mc-php, `c` | **undefined behaviour**: the eight bytes at that address are read, as an int, with no warning |
-| mc-php, `c-debug` | the program stops: `mc-php: out-of-range read: offset K, length N (FILE:LINE)`, exit 134 |
-| mc-php, `php` | php's warning and `null` |
+| mc-php | **undefined behaviour**: the eight bytes at that address are read as an int, with no warning |
+| mc-php, `checked_reads` | the program stops: `mc-php: out-of-range read: ...`, exit 134 |
 
-Under C's rules an element read is never php's `null`: it is always an int.
+An element read is always an int, never php's `null`.
 
-**A store outside the range still makes the array php's hash**, as it does under php's rules.
-From then on a read is the hash's own lookup and not the unchecked one: a key the hash has
-answers its value in every mode. Under C's rules the price of this is one test per read, the
-packed-or-hashed state. A key the hash does NOT have is a read outside the array:
+**A store outside the range still makes the array php's hash**, as in php. `$a[] = v` and
+`$a[count($a)] = v` append, and any other key turns the array into a hash under the same handle.
 
-- `c` answers php's `null`, with no warning;
-- `c-debug` stops the program, naming the line;
-- `php` gives php's warning and `null`.
+- From then on a read is the hash's own lookup, and a key the hash has answers its value. The
+  price is one test per read, of whether the array is still packed.
+- A key the hash does NOT have is a read outside the array. It answers php's `null` with no
+  warning, and under `checked_reads` the program stops.
 
-These are unchanged in every mode:
-
-- A **store** outside the range is php's own: `$a[] = v` and `$a[count($a)] = v` append, and
-  any other key makes the array php's hash (above).
-- `$a[$k] ?? $d` is php's quiet read.
+`$a[$k] ?? $d` is php's quiet read.
 
 ## What is NOT different
 
-Strings are values in every mode. A string that has one owner may be written or grown in place
-(`$s .= x`, `$s[$i] = c`), but no two names ever share a buffer that one of them writes: no
-string is a mutable buffer two variables see.
+Strings are values. A string that has one owner may be written or grown in place (`$s .= x`,
+`$s[$i] = c`), but no two names ever share a buffer that one of them writes.
 
-Everything not named above is php's answer in every mode, and the fixtures are graded against
-php itself (`tests/fixtures.sh`). `tests/c/` holds the recordings of C's answers: wrapping,
-in-range reads, and the `c-debug` trap.
+The phpt grid runs php-src's own tests against the compiled program. Three of them differ from
+php only because of § 2, and `tests/grid/expected-differences.txt` names them. The grid fails
+on any other change (`tests/grid.sh`). `tests/c/` holds the recordings of what mc-php does where
+php would differ: wrapping, in-range reads, a packed array that became a hash, and
+`checked_reads`.
