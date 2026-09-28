@@ -367,12 +367,30 @@ elif command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; 
 else
     skip "the C twin of awaitable: no php-config or no $CC here"
 fi
-# Windows refuses #[Extern] by name (src/extern.mc), so its first refusal is
-# the first C declaration's
+# The build this example is working toward: awaitable.src.php through mc-php,
+# loaded, and check.php run against check.expect. How many of its lines
+# already agree -- the leading ones, up to the first that does not -- is the
+# example's PROGRESS, recorded here: fewer is a regression, more is a gain to
+# record in the same commit, and all of them means the hand-written
+# awaitable.mc can retire. Windows refuses #[Extern] by name (src/extern.mc),
+# so there the first C declaration's refusal is pinned.
+AW_PROGRESS=6
 if [ "$host" = windows ]; then
     pin "$EX" "awaitable.src.php:13: mc-php: an #[Extern] function on Windows: the link names no library for it: awaitable\\curl_easy_init"
-else
-    pin "$EX" "awaitable.src.php:26: mc-php: a class an extension would publish: awaitable\\Intent is not implemented yet (probes/t10/RESULTS.md)"
+elif ! "$PHP" -m | tr -d '\r' | grep -qix curl; then
+    skip "awaitable.src.php compiled: this php has no curl, and the module resolves libcurl from php's own process"
+elif build "$EX" "$EX/mcphp$suf.toml" "awaitable.$sx"; then
+    "$PHP" -d extension="$EX/build/awaitable.$sx" "$EX/check.php" > "$tmp/awp.out" 2>&1
+    n=$(awk 'NR == FNR { w[FNR] = $0; next } $0 != w[FNR] { exit } { k = FNR } END { print k + 0 }' \
+        "$EX/check.expect" "$tmp/awp.out")
+    total=$(wc -l < "$EX/check.expect" | tr -d ' ')
+    if [ "$n" = "$AW_PROGRESS" ]; then
+        say "awaitable.src.php compiled: check.php agrees with check.expect for $n of $total lines"
+    else
+        bad "awaitable.src.php compiled: check.php agrees for $n of $total lines, the recording says $AW_PROGRESS (record it)"
+        diff "$EX/check.expect" "$tmp/awp.out" | sed -n '1,8p' | sed 's/^/      /'
+    fi
+    rm -rf "$EX/build"
 fi
 
 [ "$fail" = 0 ] || { echo "  examples: something failed"; exit 1; }

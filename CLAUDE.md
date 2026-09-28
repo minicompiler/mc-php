@@ -1127,3 +1127,18 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   (`awaitable\Intent`), Windows's stays at 13. `tests/ext.sh` step 17 (`tests/ext/values`),
   step 14 (arrays through the function table), `tests/leaks.sh` (the values module, 300 rounds,
   nothing left).
+- awaitable, step 4 (2026-09-28, branch `awaitable-published`, stacked on the step-3 PR):
+  **published classes**. A class an extension publishes (name without `_`) is registered with the
+  engine at MINIT as an internal class (`phx_cls_begin`/`phx_meth`/`phx_marg`/`phx_cls_end`):
+  its declared properties with defaults and visibility (`zend_declare_property`), its methods
+  as internal methods whose handler (`phx_mh`) makes `$this` a proxy and runs the compiled
+  body, `final`/`abstract`. The runtime class stays and carries CE_ENG (CE_SIZE 104 -> 112) and
+  flag 64; `new` of it in the module is the engine's object (`php_new_ce` -> `phx_pnew`),
+  `php_ctor` on a proxy is the engine's `__construct`, and a proxy read/write inside a method
+  uses the class as the engine scope (`phx_escope`), so private is the method's. Refused by
+  name: an interface/trait/enum, `extends`/`implements`, static members, abstract methods, a
+  non-scalar property default, a class inside a function. `awaitable.src.php`'s `await` got its
+  body (`new Intent`, `$fn(...$args)`, the Throwable kept); the build succeeds, so the example's
+  pin became a PROGRESS count on non-Windows hosts: check.php through the compiled module agrees
+  with check.expect for 6 of 37 lines (`AW_PROGRESS` in `tests/examples.sh`; it stops at a
+  callable string). `tests/ext.sh` step 18 (`tests/ext/classes`), four refusals, `tests/leaks.sh`.

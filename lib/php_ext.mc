@@ -12,12 +12,12 @@
 // headers are the ORACLE; the compiler never opens one. docs/php-abi.md is
 // the record, with the php the numbers were read off.
 //
-// What it does NOT do, and why it is not an omission: it registers no class,
-// no constant and no INI entry, and it declares no module globals. The scope
-// of this back end is plain functions -- any signature but a reference, with
-// php's arrays and objects crossing (§ engine values, at the end) -- and
-// everything else is a NAMED refusal in src/ext.mc and src/class.mc rather
-// than a silent wrong answer.
+// What it does NOT do, and why it is not an omission: it registers no
+// constant and no INI entry, and it declares no module globals. The scope of
+// this back end is plain functions -- any signature but a reference, with
+// php's arrays and objects crossing (§ engine values) -- and plain classes
+// (§ published classes, at the end); everything else is a NAMED refusal in
+// src/ext.mc and src/class.mc rather than a silent wrong answer.
 
 // ---- zend_module_entry: Zend/zend_modules.h --------------------------------
 #define MEX_SIZE            168
@@ -1194,7 +1194,7 @@ extern i64  instanceof_function_slow(uptr a, uptr b);
 
 uptr phx_eg;                        // &executor_globals, found at get_module
 uptr phx_pce;                       // the proxies' class, made before MINIT ends
-u64  phx_engt[5];                   // lib/php_rt.mc's ph_eng
+u64  phx_engt[6];                   // lib/php_rt.mc's ph_eng
 
 i64 phx_zexc() { return ld64(phx_eg + EGX_EXCEPTION) != 0; }
 
@@ -1285,8 +1285,8 @@ uptr phx_e2r_arr(uptr ht) {
 // cannot cross, and is the runtime's Error with null in its place.
 uptr phx_r2e_arr(uptr a);
 void phx_r2e(uptr z, uptr ez) {
-    i64 t = 0;
-    if (z) t = php_zv_type(z);
+    if (!z) { st64(ez, 0); st32(ez + ZVX_TYPE_INFO, IZ_NULL); return; }
+    i64 t = php_zv_type(z);
     if (t == IZ_UNDEF) t = IZ_NULL;
     st64(ez, ld64(z));
     st32(ez + ZVX_TYPE_INFO, t);
@@ -1298,6 +1298,15 @@ void phx_r2e(uptr z, uptr ez) {
     if (t == IZ_ARRAY) { st64(ez, phx_r2e_arr(ld64(z))); st32(ez + ZVX_TYPE_INFO, IZ_ARRAY_EX); }
     if (t == IZ_OBJECT) {
         uptr o = ld64(z);
+        // the runtime object that stands for an engine exception the module
+        // caught (phx_zcatch): the engine's own object goes back
+        if (phx_zmirror && o == phx_zmirror && phx_type(phx_zexcz) == IZ_OBJECT) {
+            uptr ze = ld64(phx_zexcz);
+            st32(ze, ld32(ze) + 1);
+            st64(ez, ze);
+            st32(ez + ZVX_TYPE_INFO, IZ_OBJECT_EX);
+            return;
+        }
         if (!php_is_proxy(o)) {
             st64(ez, 0);
             st32(ez + ZVX_TYPE_INFO, IZ_NULL);
@@ -1342,14 +1351,19 @@ uptr phx_pcname(uptr o) {
     return php_str_new(n + ZSX_VAL, ld64(n + ZSX_LEN));
 }
 
-// The scope is the module's code, which is no class of the engine's: public
-// members only, as for any caller outside the class.
+// The scope is the runtime's: a class the module publishes is the engine's
+// class there (a method reads its own private properties), any other scope
+// is no class of the engine's -- public members only.
+uptr phx_escope(uptr scope) {
+    if (scope && (ld64(scope + 64) & 64)) return ld64(scope + CE_ENG);
+    return 0;
+}
 uptr phx_pget(uptr o, uptr name, uptr scope, i64 quiet) {
     if (ph_outn) php_flush();
     uptr zo = ld64(o + PHX_POBJ);
     u8 rv[16];
     st32(rv + ZVX_TYPE_INFO, IZ_UNDEF);
-    uptr z = zend_read_property(0, zo, name + ZSX_VAL, ld64(name + ZSX_LEN), quiet, rv);
+    uptr z = zend_read_property(phx_escope(scope), zo, name + ZSX_VAL, ld64(name + ZSX_LEN), quiet, rv);
     uptr r = phx_e2r(z);
     if (z == rv) zval_ptr_dtor(rv);
     phx_zafter();
@@ -1360,7 +1374,7 @@ void phx_pset(uptr o, uptr name, uptr v, uptr scope) {
     if (ph_outn) php_flush();
     u8 ez[16];
     phx_r2e(v, ez);
-    zend_update_property(0, ld64(o + PHX_POBJ), name + ZSX_VAL, ld64(name + ZSX_LEN), ez);
+    zend_update_property(phx_escope(scope), ld64(o + PHX_POBJ), name + ZSX_VAL, ld64(name + ZSX_LEN), ez);
     zval_ptr_dtor(ez);
     phx_zafter();
 }
@@ -1384,6 +1398,8 @@ uptr phx_pcall(uptr o, uptr name, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, upt
     i64 k = 0;
     loop { if (k >= n) break; zval_ptr_dtor(av + k * 16); k = k + 1; }
     if (phx_zexc()) { phx_zcatch(); return php_znull(); }
+    // a class with no constructor: `new` calls nothing, as php's own
+    if (!ok && php_str_eq(php_case(name, 0), php_str_new("__construct", 11))) return php_znull();
     if (!ok) {
         uptr m = php_str_concat(php_str_new("Call to undefined method ", 25), phx_pcname(o));
         m = php_str_concat(m, php_str_new("::", 2));
@@ -1416,6 +1432,7 @@ void phx_eng_init() {
     st64(phx_engt + 16, &phx_pset);
     st64(phx_engt + 24, &phx_pcall);
     st64(phx_engt + 32, &phx_pis);
+    st64(phx_engt + 40, &phx_pnew);
     ph_eng = phx_engt;
 }
 
@@ -1599,4 +1616,147 @@ void phx_ret2(i64 dpt, i64 bk, uptr bname, i64 nul) {
         if (nul) m = m | MAYBE_NULL;
     }
     st32(a + AIX_TYPE_MASK, m);
+}
+
+// ---- published classes ---------------------------------------------------------
+// A class the module publishes is the ENGINE's: registered at MINIT as an
+// internal class of that name -- its declared properties with their defaults
+// and visibility, its methods as internal methods whose handlers run the
+// compiled bodies -- and every object of it, made by php or by the module, is
+// a zend_object the module holds as a proxy (§ engine values). The runtime's
+// own class stays: it carries the methods the handlers call and the defaults
+// the declaration reads, and its CE_ENG is the engine's (flag 64).
+#define CEX_SIZE            520
+#define CEX_FLAGS           28      // u32 ce_flags
+#define CEX_HANDLERS        360     // default_object_handlers
+#define CEX_FUNCS           504     // info.internal.builtin_functions
+#define EXX_THIS            32      // execute_data->This: the object
+#define ACC_FINAL           32
+#define ACC_EXPLICIT_ABSTRACT 64
+
+extern uptr zend_register_internal_class_ex(uptr ce, uptr parent);
+extern void zend_declare_property(uptr ce, uptr name, i64 len, uptr zv, i64 flags);
+extern void object_init_ex(uptr zv, uptr ce);
+
+// One zend_function_entry table per class, laid one after the other in one
+// buffer, each ending in its zero row: phx_cls_begin opens one, phx_meth adds a
+// row (its argument records in phx_ai, as a function's), phx_cls_end closes it
+// and registers the class.
+#define PHX_MAXCM 512
+u8  phx_cfe[24624];                 // (PHX_MAXCM + 1) * FEX_SIZE
+i64 phx_ncm;
+i64 phx_cfirst;
+
+void phx_cls_begin() { phx_cfirst = phx_ncm; }
+
+void phx_meth(uptr name, uptr handler, i64 nreq, i64 vis) {
+    if (phx_ncm >= PHX_MAXCM) php_die("mc-php: too many published methods\n", 35);
+    if (phx_nai >= PHX_MAXAI) php_die("mc-php: too many argument records\n", 34);
+    uptr e = phx_cfe + phx_ncm * FEX_SIZE;
+    uptr a = phx_ai + phx_nai * AIX_SIZE;
+    st64(e + FEX_FNAME, name);
+    st64(e + FEX_HANDLER, handler);
+    st64(e + FEX_ARG_INFO, a);
+    st32(e + FEX_NUM_ARGS, 0);
+    i64 fl = 1;                     // ZEND_ACC_PUBLIC
+    if (vis == 1) fl = 2;           // protected
+    if (vis == 2) fl = 4;           // private
+    st32(e + FEX_FLAGS, fl);
+    st64(a + AIX_NAME, nreq);
+    st64(a + AIX_TYPE_PTR, 0);
+    st32(a + AIX_TYPE_MASK, 0);
+    st64(a + AIX_DEFAULT_VALUE, 0);
+    phx_nai = phx_nai + 1;
+    phx_ncm = phx_ncm + 1;
+}
+
+// a method's parameter, untyped: the compiled body checks what it declared
+void phx_marg(uptr name) {
+    uptr e = phx_cfe + (phx_ncm - 1) * FEX_SIZE;
+    uptr a = phx_ai + phx_nai * AIX_SIZE;
+    st32(e + FEX_NUM_ARGS, ld32(e + FEX_NUM_ARGS) + 1);
+    st64(a + AIX_NAME, name);
+    st64(a + AIX_TYPE_PTR, 0);
+    st32(a + AIX_TYPE_MASK, 0);
+    st64(a + AIX_DEFAULT_VALUE, 0);
+    phx_nai = phx_nai + 1;
+}
+
+// The class, registered: `flags` is the runtime's (1 abstract, 2 final).
+void phx_cls_end(uptr rce, uptr name, i64 flags) {
+    // the table's zero row
+    uptr z = phx_cfe + phx_ncm * FEX_SIZE;
+    i64 k = 0;
+    loop { if (k >= FEX_SIZE) break; st64(z + k, 0); k = k + 8; }
+    uptr tbl = phx_cfe + phx_cfirst * FEX_SIZE;
+    if (phx_ncm == phx_cfirst) tbl = 0;
+    phx_ncm = phx_ncm + 1;
+    uptr t = php_alloc(CEX_SIZE);
+    k = 0;
+    loop { if (k >= CEX_SIZE) break; st64(t + k, 0); k = k + 8; }
+    // the name interned the engine's way (zend_string_init_interned is a
+    // POINTER the engine sets), the standard handlers, the method table
+    uptr sip = php_dlsym("zend_string_init_interned");
+    st64(t + ZCX_NAME, callp(ld64(sip), name, php_cstrlen(name), 1));
+    st64(t + CEX_HANDLERS, php_dlsym("std_object_handlers"));
+    st64(t + CEX_FUNCS, tbl);
+    uptr ece = zend_register_internal_class_ex(t, 0);
+    if (flags & 2) st32(ece + CEX_FLAGS, ld32(ece + CEX_FLAGS) | ACC_FINAL);
+    if (flags & 1) st32(ece + CEX_FLAGS, ld32(ece + CEX_FLAGS) | ACC_EXPLICIT_ABSTRACT);
+    // the declared properties, in declaration order, with their visibility
+    uptr p = ld64(rce + 40);
+    i64 used = php_ht_used(p);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(p, i);
+        i = i + 1;
+        if (php_zv_type(b) == IZ_UNDEF) continue;
+        uptr pn = ld64(b + 24);
+        u8 ez[16];
+        i64 t2 = php_zv_type(b);
+        if (t2 == IZ_ARRAY || t2 == IZ_OBJECT)
+            php_die("mc-php: a published class's array or object default is not implemented yet\n", 75);
+        phx_r2e(b, ez);
+        i64 vis = 0;
+        uptr vb = php_ht_find(ld64(rce + 72), php_str_hash(pn), pn);
+        if (vb) vis = ld64(vb) / 8;
+        i64 fl = 1;
+        if (vis == 1) fl = 2;
+        if (vis == 2) fl = 4;
+        zend_declare_property(ece, pn + ZSX_VAL, ld64(pn + ZSX_LEN), ez, fl);
+    }
+    st64(rce + CE_ENG, ece);
+    php_ce_flag(rce, 64);
+}
+
+// `new C` of a published class, in the module: the engine's object, with
+// the defaults its class declares; the constructor is php_ctor's call
+uptr phx_pnew(uptr rce) {
+    u8 z[16];
+    object_init_ex(z, ld64(rce + CE_ENG));
+    uptr o = phx_proxy(ld64(z));
+    zval_ptr_dtor(z);
+    phx_zafter();
+    return o;
+}
+
+// A published method's handler: $this the engine's object as a proxy, the
+// arguments as runtime zvals (0 for one not passed: the body raises php's
+// own error or takes the default), the compiled body, the answer back.
+void phx_mh(uptr ex, uptr rv, uptr fn, uptr mname) {
+    phx_enter();
+    i64 n = phx_nargs(ex);
+    if (n > 6) {
+        phx_arity2(ex, 0, 6, mname);
+        phx_leave();
+        return;
+    }
+    u8 a[48];
+    i64 k = 0;
+    loop { if (k >= 6) break; st64(a + k * 8, 0); if (k < n) st64(a + k * 8, phx_e2r(phx_argz(ex, k))); k = k + 1; }
+    uptr o = phx_proxy(ld64(ex + EXX_THIS));
+    uptr r = callp(fn, o, ld64(a), ld64(a + 8), ld64(a + 16), ld64(a + 24), ld64(a + 32), ld64(a + 40));
+    if (!ph_exc && r) phx_r2e(r, rv);
+    phx_leave();
 }

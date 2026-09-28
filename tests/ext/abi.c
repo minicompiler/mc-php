@@ -131,5 +131,15 @@ int main(void) {
     P("MAYBE_ANY",           MAY_BE_ANY);
     P("ZTX_VARIADIC",        _ZEND_IS_VARIADIC_BIT);
     P("ZTX_LITERAL_NAME",    _ZEND_TYPE_LITERAL_NAME_BIT);
+
+    /* a class the module publishes (lib/php_ext.mc § published classes): the
+       template INIT_CLASS_ENTRY fills, the flags, and $this in a method */
+    P("CEX_SIZE",            sizeof(zend_class_entry));
+    P("CEX_FLAGS",           offsetof(zend_class_entry, ce_flags));
+    P("CEX_HANDLERS",        offsetof(zend_class_entry, default_object_handlers));
+    P("CEX_FUNCS",           offsetof(zend_class_entry, info.internal.builtin_functions));
+    P("EXX_THIS",            offsetof(zend_execute_data, This));
+    P("ACC_FINAL",           ZEND_ACC_FINAL);
+    P("ACC_EXPLICIT_ABSTRACT", ZEND_ACC_EXPLICIT_ABSTRACT_CLASS);
     return 0;
 }

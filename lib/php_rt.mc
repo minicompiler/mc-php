@@ -3534,7 +3534,7 @@ uptr php_obj_props(uptr o) { return ld64(o + 24); }
 // read them ask lib/php_ext.mc through ph_eng -- a table of five functions,
 // 0 on the program road, where no proxy is ever made:
 //   0 class name   1 property read   2 property write   3 method call
-//   4 instanceof
+//   4 instanceof   5 `new` of a class the module publishes
 uptr ph_eng;
 i64 php_is_proxy(uptr o) {
     if (!ph_eng) return 0;
@@ -5301,7 +5301,10 @@ uptr php_f_strrev_z(uptr z) { return php_strrev(php_zv_str(z)); }
 //   88 cases    HashTable  an enum's cases, name -> the case object
 //   96 ro       HashTable  a readonly property's name -> its DECLARING ce
 // ============================================================================
-#define CE_SIZE 104
+//  104 eng      the engine's zend_class_entry, for a class the module
+//               PUBLISHES (flag 64; lib/php_ext.mc § published classes)
+#define CE_SIZE 112
+#define CE_ENG  104
 
 uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6);
 uptr php_obj_get(uptr o, uptr name, uptr scope);
@@ -5356,6 +5359,7 @@ uptr php_ce_alloc(uptr name) {
     st64(ce + 80, php_arr_new(8));
     st64(ce + 88, php_arr_new(8));
     st64(ce + 96, php_arr_new(8));
+    st64(ce + CE_ENG, 0);
     return ce;
 }
 
@@ -5508,6 +5512,8 @@ void php_obj_defaults(uptr o, uptr ce) {
 }
 
 uptr php_new_ce(uptr ce) {
+    // a published class's object is the ENGINE's (flag 64)
+    if (ph_eng && (ld64(ce + 64) & 64) && !(ld64(ce + 64) & 1)) return callp(ld64(ph_eng + 40), ce);
     if (ld64(ce + 64) & 1) {
         uptr m = php_str_concat(php_str_new("Cannot instantiate abstract class ", 34), ld64(ce));
         php_throw_str(php_str_new("Error", 5), m);
@@ -6398,6 +6404,7 @@ uptr php_ce_name(uptr ce) { return ld64(ce); }
 // constructor takes it back off the list -- measured, five Zend/tests said so
 // (Zend/tests/try/catch_002 expects `Caught` and nothing else).
 uptr php_ctor(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    if (php_is_proxy(o)) return php_mcall(o, name, scope, n, a1, a2, a3, a4, a5, a6);
     uptr ce = php_obj_ce(o);
     if (!php_ce_lookup(ce, 24, php_str_new("__construct", 11))) { php_dt_arm(o); return php_znull(); }
     uptr r = php_mcall(o, name, scope, n, a1, a2, a3, a4, a5, a6);
@@ -6406,6 +6413,7 @@ uptr php_ctor(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, u
 }
 
 uptr php_ctor0(uptr o) {
+    if (php_is_proxy(o)) return php_mcall(o, php_str_new("__construct", 11), 0, 0, 0, 0, 0, 0, 0, 0);
     uptr ce = php_obj_ce(o);
     if (!php_ce_lookup(ce, 24, php_str_new("__construct", 11))) { php_dt_arm(o); return php_znull(); }
     uptr r = php_mcall(o, php_str_new("__construct", 11), 0, 0, 0, 0, 0, 0, 0, 0);

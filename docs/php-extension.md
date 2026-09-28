@@ -56,12 +56,27 @@ back out. Every array or object the module holds is a reference it took, given b
 call's memory goes (or at RSHUTDOWN for a call that pinned); `tests/leaks.sh` runs the same module
 300 times under a debug php and nothing is left. The same crossing serves a call through php's
 function table (§ A call to a function the source does not declare): an array or an object is an
-argument and an answer there too. What does not cross: a php resource, and an object of a class
-the module declares, since the back end publishes no class yet -- a class that WOULD be published
-(its name does not begin with `_`) is refused while compiling:
+argument and an answer there too. What does not cross: a php resource, and an object of a class the module
+keeps private (`_Name`).
+
+**Classes are published** as functions are: every class whose name does not begin with `_` is
+registered with the engine at MINIT as an internal class of that name (`lib/php_ext.mc`
+§ published classes) -- its declared properties with their defaults and visibility, its
+methods as internal methods whose handlers run the compiled bodies, `final` and `abstract` as
+declared. Every object of it, made by php (`new Box(3)`) or by the module (`new Box` inside a
+function), is the engine's, and the module holds it as a proxy: `$this->n` in a method is the
+engine's property read with the class as the scope, so a private property is the method's and
+nobody else's -- `$b->secret` from php is php's own `Cannot access private property`. What is
+published is a plain class at a file's top level; the rest is refused by name: an interface, a
+trait, an enum, `extends`/`implements`, a static method or property, an abstract method, and a
+property whose default is not a scalar (an internal class's default is the engine's to keep for
+the process). A method's arguments are checked by its compiled body, which is a userland
+method's check (`Too few arguments to function Box::add()`), and a published method takes at
+most six. `tests/ext.sh` step 18 runs a module that publishes a class, loaded and interpreted,
+byte for byte.
 
 ```
-hello.php:3: mc-php: a class an extension would publish: Box is not implemented yet
+hello.php:3: mc-php: an interface an extension would publish: I is not implemented yet
 hello.php:7: mc-php: a by-reference parameter in an exported function: f is not implemented yet
 hello.php:7: mc-php: a by-reference return in an exported function: f is not implemented yet
 ```

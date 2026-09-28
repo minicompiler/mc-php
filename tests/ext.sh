@@ -182,7 +182,7 @@ nref=0
 # the last line names the reason, and it carries the classification. This
 # repository distinguishes two (docs/plan.md): `is refused by design` with
 # exit 3 is a DESIGN answer, and `is not implemented yet` with exit 1 is a
-# construct that has not been built. These three are the second kind -- the
+# construct that has not been built. These seven are the second kind -- the
 # schema promises them -- so that is what is required, and a message alone is
 # not enough (found by the reviewer of #15: a compile error that happened to
 # contain the phrase passed).
@@ -208,6 +208,12 @@ refuse() {
 # step 17's signatures; what is left is a REFERENCE across the boundary)
 refuse 'function f(&$x): int { return 1; }'          'a by-reference parameter in an exported function'
 refuse 'function &f(int $x): int { return $x; }'     'a by-reference return in an exported function'
+# a class the module publishes is a plain one at the top level (§ published
+# classes): the rest of what php may declare there is refused by name
+refuse 'interface I {}'                              'an interface an extension would publish'
+refuse 'class A extends \Exception {}'               'a published class that extends or implements another'
+refuse 'class A { public static function f() {} }'  'a static method of a published class'
+refuse 'class A { public $a = [1]; }'                'a published class'"'"'s property whose default is not a scalar'
 # php HOISTS a global function, so this is ordinary php -- and D4 builds the
 # call against a zval signature and widens the declaration to match, which the
 # back end cannot export. The refusal has to say THAT and not "not a declared
@@ -652,6 +658,24 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/v.build" 2>&1; then
     fi
 else
     bad "values: it would not build"; sed 's/^/      /' "$tmp/v.build"
+fi
+rm -rf "$tmp/build"
+
+# --- 18. a module that publishes classes, as interpreted ---------------------
+cp tests/ext/classes/classes.php "$tmp/r.php"
+sed "s#__DIR__ . '/classes.php'#__DIR__ . '/r.php'#" tests/ext/classes/check.php > "$tmp/cc.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/c.build" 2>&1; then
+    "$PHP" -d extension="$tmp/build/r.$sx" "$tmp/cc.php" > "$tmp/c.m" 2>&1; cm=$?
+    "$PHP" "$tmp/cc.php" > "$tmp/c.i" 2>&1; ci=$?
+    if [ "$cm" = "$ci" ] && cmp -s "$tmp/c.m" "$tmp/c.i"; then
+        say "classes: $(wc -l < "$tmp/c.m" | tr -d ' ') lines of a published class, byte for byte the interpreted source's"
+    else
+        bad "classes: the module (exit $cm) and the interpreted source (exit $ci) differ"
+        diff "$tmp/c.i" "$tmp/c.m" | sed -n '1,12p' | sed 's/^/      /'
+    fi
+else
+    bad "classes: it would not build"; sed 's/^/      /' "$tmp/c.build"
 fi
 rm -rf "$tmp/build"
 
