@@ -38,11 +38,14 @@ off as the compiler learns it:
 | 36 | `function await(callable $fn, mixed ...$args): Intent` | DONE (the awaitable-classes branch): a signature beyond the scalars -- `callable`, `mixed ...$args`, a class, `array` -- checked as php's own parameter parsing checks it, and php's arrays and objects inside the module (`lib/php_ext.mc` § engine values, `tests/ext.sh` step 17) |
 | 65 | `function parallel(callable $fn, mixed ...$args): array` | DONE with it |
 | 26 | `final class Intent` and the three sync classes | DONE (the awaitable-published branch): published, the engine's own classes (`lib/php_ext.mc` § published classes, `tests/ext.sh` step 18) |
-| 36 | `await`'s body | DONE (the awaitable-call branch): `$fn(...$args)` calls any php callable -- a name (`'strtoupper'`), an array, a closure, an `__invoke` object -- through php's own `_call_user_function_impl`, and what it throws is kept in the Intent as the engine's object (`lib/php_ext.mc`'s `phx_vcall` and `phx_exc_obj`, `tests/ext.sh` step 19). `check.php` now stops at line 10: `\awaitable\reset()` is not declared |
+| 36 | `await`'s body | DONE (the awaitable-call branch): `$fn(...$args)` calls any php callable -- a name (`'strtoupper'`), an array, a closure, an `__invoke` object -- through php's own `_call_user_function_impl`, and what it throws is kept in the Intent as the engine's object (`lib/php_ext.mc`'s `phx_vcall` and `phx_exc_obj`, `tests/ext.sh` step 19). `check.php` then stopped at line 10: `\awaitable\reset()` |
+| 65 | `parallel`'s body, `reset`/`peak`/`completed`/`errors` | DONE (the awaitable-parallel branch): one `fork()` per argument through `#[Extern('c')]`, the child calls `$fn` through php, `serialize()`s the answer down a `pipe()` and `_exit`s; the parent reads each pipe in order, `waitpid()`s and `unserialize()`s, and a child that threw is its message and one more `errors()`. A buffer C writes into -- `pipe()`'s two descriptors, `read()`'s bytes, `waitpid()`'s status -- is a php string of that length, read back with `unpack()`. The counters are module globals. `check.php` now stops at line 32: `http_get_many`, the threads |
 
-Behind the classes the BODIES need what the source does not say yet: the counters
-(`reset`, `peak`, `completed`, `errors`, `wait_all`), `fork`, `pipe` and pthreads -- the C library itself is `#[Extern]`'s,
-with `variadic:` placing curl's variadic argument.
+What is left -- `http_get`, `http_get_many`, `wait_all` and the three sync classes' bodies -- needs
+what the source cannot say yet: code that runs on another OS thread (pthread_create's worker,
+curl's write callback) and native memory for a mutex, a condition variable and a body buffer.
+That is the owner's decision still open (a `#[Native]` function); the C library itself is
+`#[Extern]`'s, with `variadic:` placing curl's variadic argument.
 
 ## How it is checked -- `tests/examples.sh`
 

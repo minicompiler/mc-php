@@ -1186,3 +1186,16 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   Written down, not fixed: such a destructor runs at the call's end rather than at php's moment,
   and a published method called from a loop inside the module keeps ~500 bytes a call until the
   call returns (a million calls exhaust 128 MB).
+- awaitable, step 6 (2026-09-28, branch `awaitable-parallel`, stacked on the step-5 PR):
+  **`parallel` and the counters, in the source**. No compiler change: `awaitable.src.php` declares
+  `fork`, `pipe`, `waitpid`, `_exit` and `read`/`write`/`close` (as `c_read`/`c_write`/`c_close`,
+  `name:`) with `#[Extern('c')]` and writes the C twin's algorithm in php -- one child per
+  argument, the child calls `$fn` through php, `serialize()`s the answer (or the message of what
+  it threw) down a pipe and `_exit`s; the parent reads each pipe in order, `waitpid()`s and
+  `unserialize()`s, counting a thrown child in `errors()`. A buffer C writes into is a php string
+  the module made of that length (`str_repeat("\0", 8)`), read back with `unpack()` -- written
+  down in `docs/php-extension.md` as the rule until native memory has a surface. `reset`, `peak`,
+  `completed` and `errors` are module globals. `AW_PROGRESS` 9 -> 31 on macOS and Linux; it stops
+  at `http_get_many` (threads: the owner's decision on a `#[Native]` function is pending).
+  Measured, `parallel('heavy', ...6 args)` at 2 000 000 iterations each, best of 5 on 10 cores:
+  17.0 ms against 46.0 ms sequential in php (2.71x), and the C twin 17.1 ms.
