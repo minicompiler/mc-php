@@ -40,7 +40,6 @@ hello.php:7: mc-php: an exported parameter whose type is not a declared scalar: 
 hello.php:7: mc-php: a variadic parameter in an exported function: f
 hello.php:7: mc-php: a by-reference return in an exported function: f
 hello.php:7: mc-php: an exported function whose return type is not a declared scalar: f
-hello.php:3: mc-php: a namespace in an extension source
 ```
 
 A parameter with a **default** and an **untyped** parameter are both `mixed` by
@@ -55,10 +54,19 @@ php HOISTS a global function, so calling one declared further down the file is l
 builds that call against a zval signature and then widens the declaration to match it, and a
 widened signature is not exportable. **Declare before the first call**, which is the fix the
 message names. Closing it properly means teaching the byte pre-scan the declared TYPES, which
-would move every forward call's lowering on the program road too; that is a step of its own. A `namespace` is refused rather than
-flattened: flattening costs a program nothing (T9) but would make the module publish `f` where
-the source says `aw\f`, and `docs/mcphp-toml.md` promises the module obeys the source's own
-namespace.
+would move every forward call's lowering on the program road too; that is a step of its own.
+
+**Namespaces** are php's, on both roads (`src/ns.mc`): a declaration in `namespace aw\util;` is
+`aw\util\name`, published under that name; `use` imports a class, a namespace, a function or a
+constant, alone, aliased or grouped; a class name has no fallback, and an unqualified function or
+constant falls back to the global one -- the source's own `aw\util\f` when it declares one, else
+php's `f`, and on the extension road a name neither the source nor the library has is looked up
+in php's function table as `aw\util\f` and then `f`, as php does. `__NAMESPACE__`, `X::class`
+and `get_class()` answer the qualified names, and both forms are read, `namespace X;` and the
+braced `namespace X { ... }` / `namespace { ... }`, at a file's top level only, as php reads
+them: in a function body or a block, and a namespace inside a braced one, they are refused while
+compiling. A leading underscore
+makes a function module-private under its namespace too (`aw\util\_h`).
 
 The body is the whole language. Classes, closures, `match`, exceptions, the 272-row library --
 everything the program road compiles compiles here; it is the SIGNATURE that is narrow, because

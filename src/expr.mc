@@ -703,9 +703,8 @@ i64 ph_primary() {
             return ph_tref(atmp);
         }
         if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php class name was expected after new", ph_tname);
-        cn = ph_tname;
+        cn = ph_ns_class(ph_tname);
         ph_next();
-        loop { if (!ph_accept("\\", 1)) break; cn = ph_tname; ph_next(); }
         // `new static()` / `new self()` / `new parent()`: the class ENTRY
         if (str_eq(cn, "static") || str_eq(cn, "self") || str_eq(cn, "parent")) {
             i64 ceo = ph_ce_of(cn, fl, line);
@@ -1133,8 +1132,7 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
         if (ph_is("instanceof")) {
             if (minp > 65) break;
             ph_next();
-            ph_accept("\\", 1);
-            uptr cn = ph_tname;
+            uptr cn = ph_ns_class(ph_tname);
             if (ph_at("$", 1)) ph_refuse(ph_tfile, ph_tline, "instanceof with a class name from a variable", "D6");
             ph_next();
             lhs = ph_cast(TY_U8, ph_c2("php_instanceof", ph_recv(lhs, lt), ph_strlit(cn, cstrlen(cn)), TY_I64));

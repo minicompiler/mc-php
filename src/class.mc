@@ -221,7 +221,7 @@ void ph_skip_type() {
         // a php type word may be one of mc's OWN keywords -- `void` is, and
         // `: void` on a method was 37 of the 734 that did not compile. The
         // test is what the token LOOKS like, not which id the core gave it.
-        if (!ph_wordish() && ph_tid != T_STR) break;
+        if (!ph_wordish() && ph_tid != T_STR && !(ph_tid == T_IDENT && ld8(ph_tname) == 92)) break;
         if (ph_at("$", 1)) break;
         ph_next();
         if (ph_accept("|", 1)) { ph_accept("?", 1); continue; }
@@ -233,6 +233,7 @@ void ph_skip_type() {
 
 i64 ph_is_typeword() {
     if (ph_at("?", 1)) return 1;
+    if (ph_tid == T_IDENT && ld8(ph_tname) == 92) return 1;       // \Fully\Qualified
     if (!ph_wordish()) return 0;
     if (ph_at("$", 1)) return 0;
     return 1;
@@ -269,13 +270,13 @@ void ph_class(uptr fl, i64 line, i64 flags) {
     }
     if (!cname) {
         if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php class needs a name", ph_tname);
-        cname = ph_tname;
+        cname = ph_ns_decl(ph_tname);               // `ns\Name` inside a namespace
         ph_next();
     }
     if (kind == 3) { if (ph_accept(":", 1)) ph_skip_type(); }
 
     ph_nonce = ph_nonce + 1;
-    uptr ceg = p_cat("ce_", cname, 0, cstrlen(cname));
+    uptr ceg = ph_mangle(cname, "ce_");
     ceg = p_cat(ceg, php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
     i64 g = node_new(N_GLOBAL, line, fl);
     set_nd_name(g, ceg);
@@ -294,9 +295,8 @@ void ph_class(uptr fl, i64 line, i64 flags) {
         loop {
             ph_accept("\\", 1);
             if (ph_tid != T_IDENT) err_at(fl, line, "mc-php: a php class name was expected after extends");
-            uptr pn = ph_tname;
+            uptr pn = ph_ns_class(ph_tname);
             ph_next();
-            loop { if (!ph_accept("\\", 1)) break; pn = ph_tname; ph_next(); }
             // an interface `extends` several: they are all interfaces here
             if (kind == 1) ph_cfill(ph_stmt_of(ph_c2("php_ce_iface", ph_ceref(ceg), ph_strlit(pn, cstrlen(pn)), TY_VOID)));
             if (kind != 1) ph_cfill(ph_stmt_of(ph_c2("php_ce_extend", ph_ceref(ceg), ph_strlit(pn, cstrlen(pn)), TY_VOID)));
@@ -308,9 +308,8 @@ void ph_class(uptr fl, i64 line, i64 flags) {
         loop {
             ph_accept("\\", 1);
             if (ph_tid != T_IDENT) err_at(fl, line, "mc-php: a php interface name was expected");
-            uptr inm = ph_tname;
+            uptr inm = ph_ns_class(ph_tname);
             ph_next();
-            loop { if (!ph_accept("\\", 1)) break; inm = ph_tname; ph_next(); }
             ph_cfill(ph_stmt_of(ph_c2("php_ce_iface", ph_ceref(ceg), ph_strlit(inm, cstrlen(inm)), TY_VOID)));
             if (!ph_accept(",", 1)) break;
         }
@@ -336,8 +335,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
         if (ph_is("use")) {
             ph_next();
             loop {
-                ph_accept("\\", 1);
-                uptr tn = ph_tname;
+                uptr tn = ph_ns_class(ph_tname);
                 ph_next();
                 ph_cfill(ph_stmt_of(ph_c2("php_ce_use", ph_ceref(ceg), ph_strlit(tn, cstrlen(tn)), TY_VOID)));
                 if (!ph_accept(",", 1)) break;
@@ -425,7 +423,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             if (ph_tid != T_IDENT) err_at2(mfl, mline, "mc-php: a php method needs a name", ph_tname);
             uptr mname = ph_tname;
             ph_next();
-            uptr mcname = p_cat("m_", cname, 0, cstrlen(cname));
+            uptr mcname = ph_mangle(cname, "m_");      // `\` is `$`, as for the class global
             mcname = p_cat(mcname, "_", 0, 1);
             mcname = p_cat(mcname, mname, 0, cstrlen(mname));
             mcname = p_cat(mcname, php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));

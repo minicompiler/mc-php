@@ -1052,3 +1052,30 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   gate in `tests/examples.sh` (both load orders, B alone, the twins, the bench row). The leftover
   `tests/g/104-callable-value.php` and `tests/r/d6-callable-string.php` (callable values, $f()
   of a string) are untracked and not part of this.
+- awaitable, step 1 (2026-09-28, branch `awaitable` from main 3f62f05): **namespaces**, php's
+  rules, on both roads (`src/ns.mc`). The lexer hands a qualified name (`\A`, `A\B`,
+  `namespace\B`) over as ONE identifier (`src/lex.mc` `ph_next`, `ph_qpend`); declarations are
+  `ns\name` (functions, classes, `const`, and the forward-declaration scan in
+  `src/program.mc`); a use site resolves per file with its `use` imports (class, namespace,
+  function, constant; aliased and grouped) -- a class name has no fallback, a function or a
+  constant falls back to the global one, and on the extension road an undeclared name goes to
+  php's function table as `ns\f` then `f` (bit 48 of the call site's packed word).
+  `__NAMESPACE__`, `X::class` and `get_class()` answer qualified names; an mc name carries `$`
+  for the backslash (`ph_mangle`); the runtime keys a class by its qualified name
+  (`php_clskey`). Both forms, `namespace X;` and braced. `tests/g/120-namespaces.php`,
+  `121-namespace-blocks.php`, `tests/ext.sh` step 15. `examples/awaitable` gained its C twin
+  (`c/awaitable.c`, graded against `check.expect`), and its pinned refusal moved to line 13
+  (`#[Extern]`). The grid against a snapshot of main: `tests/lang` 104 = 104, `Zend/tests`
+  766 -> **828** (+62: `namespaces/*`, `use_function/*`, `use_const/*`, `group_use/*`,
+  `class_alias/*` and the rest a qualified name was blocking), `ext/standard/tests/strings`
+  273 = 273, no loss.
+  Review of #32, six findings, all fixed: a method's mc name maps the backslash too
+  (`ph_mangle(cname, "m_")`); `namespace` and `use` are read by `src/program.mc`'s top-level
+  loop only and refused in a function body or a block (`src/lvalue.mc`), a namespace inside a
+  braced one of the SAME file is refused before the namespace changes (the open blocks are a stack of the
+  files that opened them, so a file required inside a braced block declares its own namespace --
+  `tests/g/inc-ns.inc`, and `use_const/shadow_global`, `use_function/shadow_global` stay green); the forward-declaration scan resets to
+  the global namespace on `namespace {` (a function called before its declaration in the
+  global block, `tests/g/121`); the C twin frees a sync object's handle with the object
+  (`free_obj`, no clone) and its arg info says `parallel` needs 2 and `http_get_many` 1.
+  `tests/fixtures.sh` asserts the four scope refusals.

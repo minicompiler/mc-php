@@ -332,7 +332,8 @@ uptr ph_mangle(uptr d, uptr pfx) {
     i64 i = 0;
     loop { i64 c = ld8(pfx + i); if (!c) break; st8(o + i, c); i = i + 1; }
     i64 j = skip;
-    loop { if (j >= n) break; st8(o + i, ld8(d + j)); i = i + 1; j = j + 1; }
+    // a namespaced name's backslash is `$` in an mc name (src/ns.mc)
+    loop { if (j >= n) break; i64 c = ld8(d + j); if (c == 92) c = 36; st8(o + i, c); i = i + 1; j = j + 1; }
     st8(o + i, 0);
     return o;
 }

@@ -461,7 +461,7 @@ i64 ph_fn_exists(uptr n) {
 // bool as themselves, anything else through a runtime zval. The callee is not
 // visible here, so the answer is a zval and the context types it with php's
 // rules (a declared `: int` return checks it).
-i64 ph_ftable_call(uptr name, uptr av, i64 na, uptr fl, i64 line) {
+i64 ph_ftable_call(uptr name, uptr av, i64 na, uptr fl, i64 line, i64 fb) {
     if (ph_had_spread) ph_todo2(fl, line, "argument unpacking into a function php's function table answers", name);
     // ponytail: four, the (value, what) pairs of one mc call; a staging
     // buffer if a real source needs more
@@ -496,6 +496,9 @@ i64 ph_ftable_call(uptr name, uptr av, i64 na, uptr fl, i64 line) {
     // nothing but the arguments.
     uptr fn = ph_cur_fn;
     if (!fn) fn = "";
+    // an unqualified name inside a namespace: php tries `ns\name` first and
+    // then the global one (bit 48 of the packed word, lib/php_ext.mc)
+    if (fb) { name = ph_ns_join(ph_ns_cur(), name); nt = nt | (1 << 48); }
     i64 i0 = ph_int(0);
     i64 i1 = ph_int(0);
     i64 sn = ph_raw(name, cstrlen(name));
@@ -511,6 +514,14 @@ i64 ph_ftable_call(uptr name, uptr av, i64 na, uptr fl, i64 line) {
 }
 
 i64 ph_builtin(uptr name, i64 line, uptr fl) {
+    // the name as written, resolved (src/ns.mc): as a function here, as a
+    // constant where one is looked up, as a class before `::`. Outside a
+    // namespace and unqualified, all three are the name itself.
+    uptr raw = name;
+    u8 fbb[8];
+    name = ph_ns_fc(raw, 0, fbb);
+    u8 cfb[8];
+    uptr cnm = ph_ns_fc(raw, 1, cfb);
     // D1 and D6: the named refusals, before anything else
     if (str_eq(name, "eval")) ph_refuse(fl, line, "eval", "D1");
     if (str_eq(name, "create_function")) ph_refuse(fl, line, "create_function", "D1");
@@ -575,6 +586,12 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     }
     if (str_eq(name, "NAN")) { ph_next(); ph_ety = PT_FLOAT; return ph_c1("php_nan", ph_int(0), ty_f64); }
     if (str_eq(name, "INF")) { ph_next(); ph_ety = PT_FLOAT; return ph_c1("php_inf", ph_int(0), ty_f64); }
+    if (str_eq(name, "__NAMESPACE__")) {
+        uptr nsn = ph_ns_cur();
+        ph_next();
+        ph_ety = PT_STRING;
+        return ph_strlit(nsn, cstrlen(nsn));
+    }
     if (str_eq(name, "__CLASS__")) {
         ph_next();
         ph_ety = PT_STRING;
@@ -582,11 +599,11 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_strlit(ph_cur_cls, cstrlen(ph_cur_cls));
     }
     // a constant this program declared with `const` or define()
-    i64 ci = ph_const_find(name);
+    i64 ci = ph_const_find(cnm);
     if (ci >= 0) {
         ph_next();
         i64 ct = ld64(ph_cty + ci * 8);
-        if (ct < 0) { ph_ety = PT_MIXED; return ph_c1("php_const_get", ph_strlit(name, cstrlen(name)), ty_pzv); }
+        if (ct < 0) { ph_ety = PT_MIXED; return ph_c1("php_const_get", ph_strlit(cnm, cstrlen(cnm)), ty_pzv); }
         ph_ety = ct;
         if (ct == PT_STRING) return ph_strlit(ld64(ph_cstr + ci * 8), ld64(ph_cval + ci * 8));
         if (ct == PT_BOOL)   return ph_bool(ld64(ph_cval + ci * 8));
@@ -678,6 +695,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     ph_next();
     if (ph_at("::", 2)) {
         ph_next();
+        name = ph_ns_class(raw);
         i64 ce = ph_ce_of(name, fl, line);
         if (ph_is("class")) {
             ph_next();
@@ -1375,7 +1393,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         // An EXTENSION is loaded into a php that has a function table, and
         // php looks a call up there when it runs: another module may define
         // the name. A PROGRAM has no other module, so there it stays refused.
-        if (ph_ext) return ph_ftable_call(name, av, na, fl, line);
+        if (ph_ext) return ph_ftable_call(name, av, na, fl, line, ld64(fbb));
         ph_todo2(fl, line, "a php function mc-php does not have", name);
     }
     i64 np = ld64(ph_fnp + fi * 8);

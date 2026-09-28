@@ -1396,23 +1396,15 @@ i64 ph_stmt_1() {
         ph_accept(";", 1);
         return ph_empty();
     }
-    if (ph_is("namespace") || ph_is("use")) {
-        // A namespace is FLATTENED on the program road (T9), which costs a
-        // program nothing but would make an EXTENSION publish `f` where the
-        // source says `aw\f` -- and docs/mcphp-toml.md promises the module
-        // obeys the source's own namespace. Refused by name until it does.
-        if (ph_ext && ph_is("namespace"))
-            ph_todo(fl, line, "a namespace in an extension source");
-        ph_next();
-        loop { if (ph_at(";", 1)) break; if (ph_at("{", 1)) break; if (ph_tid == T_EOF) break; ph_next(); }
-        ph_accept(";", 1);
-        return ph_empty();
-    }
+    // namespaces and imports are declarations of a file's top level, read by
+    // src/program.mc's loop; here they sit inside a block or a function body
+    if (ph_is("namespace") || ph_is("use"))
+        err_at2(fl, line, "mc-php: a declaration of a file's top level, not a statement", ph_tname);
     if (ph_is("const")) {
         ph_next();
         loop {
             if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php constant needs a name", ph_tname);
-            uptr cn = ph_tname;
+            uptr cn = ph_ns_decl(ph_tname);            // `ns\NAME` inside a namespace
             ph_next();
             ph_want("=", 1, "expected = in a php const");
             i64 v = ph_expr(0);
@@ -1693,9 +1685,8 @@ i64 ph_stmt_1() {
             loop {
                 ph_accept("\\", 1);
                 if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php class name was expected in catch", ph_tname);
-                uptr cn = ph_tname;
+                uptr cn = ph_ns_class(ph_tname);
                 ph_next();
-                loop { if (!ph_accept("\\", 1)) break; cn = ph_tname; ph_next(); }
                 i64 one = ph_cast(TY_U8, ph_c1("php_catches", ph_strlit(cn, cstrlen(cn)), TY_I64));
                 if (!cond) cond = one;
                 if (cond != one) cond = ph_bin(ph_tok("||", 2), cond, one, TY_U8);

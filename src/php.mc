@@ -28,6 +28,7 @@
 #include "vars.mc"
 #include "consts.mc"
 #include "tables.mc"
+#include "ns.mc"
 #include "types.mc"
 #include "packed.mc"
 #include "rc.mc"

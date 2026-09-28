@@ -5277,17 +5277,13 @@ uptr php_ce_reg() {
 // and `TestCase` are the same class here, and two classes with the same
 // base name in different namespaces would collide -- which is the cost,
 // written down rather than hidden.
+// A class's key: its FULLY QUALIFIED name, lowercase -- the compiler resolves
+// every name the source writes to that (src/ns.mc) -- with the one leading
+// backslash a string may carry (`class_exists('\\A\\B')`) dropped.
 uptr php_clskey(uptr name) {
     i64 n = php_strlen(name);
-    i64 cut = 0;
-    i64 i = 0;
-    loop {
-        if (i >= n) break;
-        if (ld8(name + ZS_HDR + i) == 92) cut = i + 1;
-        i = i + 1;
-    }
-    if (!cut) return php_case(name, 0);
-    return php_case(php_str_new(name + ZS_HDR + cut, n - cut), 0);
+    if (n && ld8(name + ZS_HDR) == 92) return php_case(php_str_new(name + ZS_HDR + 1, n - 1), 0);
+    return php_case(name, 0);
 }
 
 uptr php_ce_new(uptr name) {

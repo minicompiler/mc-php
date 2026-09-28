@@ -182,7 +182,7 @@ nref=0
 # the last line names the reason, and it carries the classification. This
 # repository distinguishes two (docs/plan.md): `is refused by design` with
 # exit 3 is a DESIGN answer, and `is not implemented yet` with exit 1 is a
-# construct that has not been built. These eight are the second kind -- the
+# construct that has not been built. These seven are the second kind -- the
 # schema promises them -- so that is what is required, and a message alone is
 # not enough (found by the reviewer of #15: a compile error that happened to
 # contain the phrase passed).
@@ -210,7 +210,6 @@ refuse 'function f(int $x = 1): int { return $x; }'  'parameter whose type is no
 refuse 'function f(int ...$x): int { return 1; }'    'a variadic parameter in an exported function'
 refuse 'function f(int $x): array { return []; }'    'return type is not a declared scalar'
 refuse 'function &f(int $x): int { return $x; }'     'a by-reference return in an exported function'
-refuse 'namespace aw; function f(): int { return 1; }' 'a namespace in an extension source'
 # php HOISTS a global function, so this is ordinary php -- and D4 builds the
 # call against a zval signature and widens the declaration to match, which the
 # back end cannot export. The refusal has to say THAT and not "not a declared
@@ -541,6 +540,47 @@ case "$rc:$got" in
     *"an array or object argument to a function php's function table answers"*) say "function table: an array argument refused while compiling" ;;
     *) bad "function table: an array argument: got $got" ;;
 esac
+rm -rf "$tmp/build"
+
+# --- 15. a namespaced module, in the module as interpreted -------------------
+# A function declared in `namespace aw\util` is published as `aw\util\tri`,
+# a module-private `_h` stays private under its namespace, a constant and
+# __NAMESPACE__/__FUNCTION__ are the namespace's, an unqualified php function
+# is php's global one, and an unqualified name the source does not declare is
+# looked up as `aw\util\helper` and then `helper`, as php does (src/ns.mc).
+cat > "$tmp/r.php" <<'EOF2'
+<?php
+namespace aw\util;
+const K = 3;
+function _h(int $n): int { return $n * K; }
+function tri(int $n): int { return _h($n) + strlen("ab"); }
+function name(): string { return __FUNCTION__ . " in " . __NAMESPACE__; }
+function via(int $n): int { return helper($n); }
+EOF2
+cat > "$tmp/ns.php" <<'EOF2'
+<?php
+if (!function_exists('aw\util\tri')) { require __DIR__ . '/r.php'; }
+function helper($n) { return $n + 1000; }
+echo aw\util\tri(4), " ", \aw\util\name(), " ", aw\util\via(1), " ",
+     var_export(function_exists('aw\util\_h'), true), "\n";
+EOF2
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/ns.build" 2>&1; then
+    nn=$("$PHP" -d extension="$tmp/build/r.$sx" "$tmp/ns.php" 2>&1 | tr -d '\r')
+    ni=$("$PHP" "$tmp/ns.php" 2>&1 | tr -d '\r')
+    # interpreted, the private helper IS a function php knows: that one
+    # answer differs by design (docs/php-extension.md § What is published)
+    ni=$(printf '%s' "$ni" | sed 's/ true$/ false/')
+    if [ "$nn" = "$ni" ]; then
+        say "namespaces: published as aw\\util\\*, the fallback to a global function, as interpreted"
+    else
+        bad "namespaces: module and interpreted differ"; printf '      module:      %s\n      interpreted: %s\n' "$nn" "$ni"
+    fi
+    pub=$("$PHP" -d extension="$tmp/build/r.$sx" -r '$f = get_extension_funcs("hello"); sort($f); echo implode(" ", $f);' 2>&1 | tr -d '\r')
+    [ "$pub" = 'aw\util\name aw\util\tri aw\util\via' ] || bad "namespaces: published $pub"
+else
+    bad "namespaces: it would not build"; sed 's/^/      /' "$tmp/ns.build"
+fi
 rm -rf "$tmp/build"
 
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }

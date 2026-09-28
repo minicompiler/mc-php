@@ -985,6 +985,12 @@ uptr phx_flook(uptr c, i64 lazy) {
     i64 len = php_cstrlen(name);
     uptr l = php_case(php_str_new(name, len), 0);
     uptr f = zend_fetch_function_str(l + ZSX_VAL, len);
+    // an unqualified name inside a namespace: `ns\name`, then the global one
+    if (!f && (ld64(c + PHF_NT) >> 48) & 1) {
+        i64 k = len;
+        loop { if (k == 0) break; if (ld8(name + k - 1) == 92) break; k = k - 1; }
+        f = zend_fetch_function_str(l + ZSX_VAL + k, len - k);
+    }
     if (!f) { phx_undefined(name); return 0; }
     st64(c + PHF_FN, f);
     st64(c + PHF_GEN, phx_gen);

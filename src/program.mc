@@ -20,6 +20,11 @@ void ph_program() {
     if (!ph_at("<?=", 3)) ph_next();              // <?php
     loop {
         if (ph_tid == T_EOF) break;
+        if (ph_ns_close()) continue;
+        // namespaces and imports, php's rules (src/ns.mc): here and nowhere
+        // else, since php only allows them at a file's top level
+        if (ph_is("namespace")) { ph_ns_stmt(ph_tfile, ph_tline); continue; }
+        if (ph_is("use")) { ph_ns_use_stmt(ph_tfile, ph_tline); continue; }
         if (ph_is("function")) {
             i64 fn = ph_function();
             top_add(fn);
@@ -316,10 +321,28 @@ void ph_scan_brf(uptr src, i64 len) {
 // looked at for a `&$`: one pass, no second notion of where a header is.
 void ph_scan_decl(uptr src, i64 len) {
     i64 i = 0;
+    // the namespace a header is in: its declaration is `ns\name` (src/ns.mc)
+    uptr sns = "";
     loop {
         if (i + 8 >= len) break;
         i64 hop = ph_scan_hop(src, len, i);
         if (hop != i) { i = hop; continue; }
+        if (i + 10 < len && ld8(src + i) == 110 && (i == 0 || !ph_nmb(ld8(src + i - 1), 0))
+            && str_eq(xstrdup(src + i, 9), "namespace") && (ph_space(ld8(src + i + 9)) || ld8(src + i + 9) == 123)) {
+            i64 a = i + 9;
+            loop { if (a >= len) break; if (!ph_space(ld8(src + a))) break; a = a + 1; }
+            i64 b = a;
+            loop { if (b >= len) break; i64 cb = ld8(src + b); if (!ph_nmb(cb, 0) && cb != 92) break; b = b + 1; }
+            // `namespace X;`, `namespace X {`, and `namespace {`: the global one
+            i64 cb2 = 0;
+            if (b < len) cb2 = ld8(src + b);
+            if (cb2 == 59 || cb2 == 123 || ph_space(cb2)) {
+                if (b > a) sns = xstrdup(src + a, b - a);
+                else if (cb2 == 123) sns = "";
+            }
+            i = b;
+            continue;
+        }
         if (ld8(src + i) == 102 && ld8(src + i + 1) == 117 && ld8(src + i + 2) == 110
             && ld8(src + i + 3) == 99 && ld8(src + i + 4) == 116 && ld8(src + i + 5) == 105
             && ld8(src + i + 6) == 111 && ld8(src + i + 7) == 110
@@ -333,7 +356,7 @@ void ph_scan_decl(uptr src, i64 len) {
             i64 ns = j;
             loop { if (j >= len) break; if (!ph_nmb(ld8(src + j), j == ns)) break; j = j + 1; }
             if (j == ns) { i = j + 1; continue; }             // `function (` -- a closure
-            uptr nm = xstrdup(src + ns, j - ns);
+            uptr nm = ph_ns_join(sns, xstrdup(src + ns, j - ns));
             loop { if (j >= len) break; if (!ph_space(ld8(src + j))) break; j = j + 1; }
             if (j >= len || ld8(src + j) != 40) { i = j; continue; }
             // walk the parameter list: one parameter per top-level comma plus
