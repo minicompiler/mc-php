@@ -344,7 +344,30 @@ if hand_ok "awaitable.mc"; then
         fi
     fi
 fi
-pin "$EX" "awaitable.src.php:7: mc-php: a namespace in an extension source is not implemented yet (probes/t10/RESULTS.md)"
+# the C twin (c/awaitable.c): the same extension written the ordinary way,
+# the specification the compiled module is measured against, graded by the
+# same check.php against the same check.expect
+CC=${CC:-cc}
+if [ "$host" = windows ]; then
+    skip "the C twin of awaitable on Windows: fork, pipe and pthreads are POSIX (README.md)"
+elif command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; then
+    inc=$(php-config --includes)
+    if "$CC" -O2 -bundle -undefined dynamic_lookup -o "$tmp/c-awaitable.so" "$EX/c/awaitable.c" $inc -lcurl 2>"$tmp/c.err" ||
+       "$CC" -O2 -shared -fPIC -o "$tmp/c-awaitable.so" "$EX/c/awaitable.c" $inc -lcurl -lpthread 2>>"$tmp/c.err"; then
+        "$PHP" -d extension="$tmp/c-awaitable.so" "$EX/check.php" > "$tmp/awc.out" 2>&1; awcrc=$?
+        if [ "$awcrc" = 0 ] && cmp -s "$tmp/awc.out" "$EX/check.expect"; then
+            say "check.php (the C twin): $(wc -l < "$tmp/awc.out" | tr -d ' ') lines, every one check.expect's"
+        else
+            bad "check.php (the C twin) exited $awcrc, or differs from $EX/check.expect:"
+            diff -u "$EX/check.expect" "$tmp/awc.out" | sed -n '3,24p' | sed 's/^/      /'
+        fi
+    else
+        bad "the C twin of awaitable would not build:"; sed 's/^/      /' "$tmp/c.err"
+    fi
+else
+    skip "the C twin of awaitable: no php-config or no $CC here"
+fi
+pin "$EX" "awaitable.src.php:13: mc-php: an exported function whose return type is not a declared scalar: awaitable\\curl_easy_init is not implemented yet (probes/t10/RESULTS.md)"
 
 [ "$fail" = 0 ] || { echo "  examples: something failed"; exit 1; }
 echo "  examples: green"

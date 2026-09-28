@@ -34,7 +34,10 @@ echo "a callable that throws: failed=", var_export($w->failed, true), " ",
 try {
     \awaitable\await('no_such_function');
 } catch (TypeError $e) {
-    echo "TypeError: ", $e->getMessage(), "\n";
+    // the clause before the comma: php's own parameter parsing (the C twin)
+    // goes on with the reason, `function "no_such_function" not found or
+    // invalid function name`, which the hand-written module does not say
+    echo "TypeError: ", explode(', ', $e->getMessage())[0], "\n";
 }
 
 // --- parallel: any php callable, one forked child per argument ---------------

@@ -26,13 +26,14 @@ reentrant, and a child process is a full copy of it. The value comes home throug
 
 ## What stands between `awaitable.src.php` and the compiler
 
-Each refusal found by removing the one before it and building again, 2026-09-23:
+Each refusal found by removing the one before it and building again, 2026-09-23, and struck
+off as the compiler learns it:
 
 | line | what | mc-php says |
 |---|---|---|
-| 7 | `namespace awaitable;` | `a namespace in an extension source is not implemented yet` -- **pinned by the gate** |
-| 30 | `public ?\Throwable $exception` | `a php class member: \ is not implemented yet` (a fully-qualified type in a property) |
-| 13-24 | `#[Extern('curl')] function curl_easy_init(): Ptr {}` and seven more | `an exported function whose return type is not a declared scalar: curl_easy_init` -- the attribute means nothing to mc-php yet, so the declaration is read as a function to export |
+| 7 | `namespace awaitable;` | DONE (the awaitable branch, 2026-09-28): namespaces and `use` imports with php's rules, declarations published as `awaitable\...` (`src/ns.mc`, `tests/g/120-namespaces.php`) |
+| 30 | `public ?\Throwable $exception` | DONE with it: a fully-qualified name is one token |
+| 13-24 | `#[Extern('curl')] function curl_easy_init(): Ptr {}` and seven more | `an exported function whose return type is not a declared scalar: awaitable\curl_easy_init` -- the attribute means nothing to mc-php yet, so the declaration is read as a function to export -- **pinned by the gate** |
 | 37 | `function await(callable $fn, mixed ...$args): Intent` | `a variadic parameter in an exported function: await` -- and behind it a `callable` parameter and a class return, both outside the scalar signatures |
 | 66 | `function parallel(callable $fn, mixed ...$args): array` | the same, and an `array` return |
 
@@ -49,7 +50,8 @@ need what no PHP source can say today: a C library called with a C variadic (`#[
 |---|---|---|
 | `awaitable.mc` compiled by plain mc and linked; `check.php` against `check.expect`, byte for byte: 37 lines -- await, a throwing callable, a bad callback, parallel with six children (distinct pids, none of them php's own, the same sums as sequential), closures, methods and internal functions, a throwing child, `await(parallel)`, six `file://` fetches on threads under `Semaphore(2)` (bodies as written, peak concurrency within 2), the sync primitives, and that the native handle is private | yes | SKIPPED, the reason printed: pthreads, `fork`, `pipe` and `dlsym` are POSIX |
 | `demo.php` (the owner's `reference/aw6.php`, translated) run, and its `same results: true` line required; its times are printed, not gated | yes | SKIPPED |
-| the build this example waits for, `mcphp.toml` over `awaitable.src.php`, refused with the first message above | yes | yes |
+| the C twin, `c/awaitable.c` -- the same extension written as an ordinary C extension, awaitable.mc's algorithm function by function, and the specification the compiled module is measured against -- built with `php-config`, `cc` and libcurl where the host has them, and graded by the same `check.php` against the same `check.expect` | yes, where `php-config` is | SKIPPED: fork, pipe and pthreads |
+| the build this example waits for, `mcphp.toml` over `awaitable.src.php`, refused with the first message above that is not DONE | yes | yes |
 
 Nothing touches the network: the threads fetch files the script writes. The module resolves
 libcurl from php's own process, so a php without the curl extension skips it by name.
@@ -73,6 +75,7 @@ missing URL`.
 |---|---|
 | `awaitable.mc` | the extension, hand-written, from `reference/aw6.mc` |
 | `awaitable.src.php` | the PHP source it stands for, from `reference/awaitable.src.php` |
+| `c/awaitable.c` | the C twin |
 | `mcphp.toml` | the build over `awaitable.src.php` that the gate pins |
 | `check.php`, `check.expect` | the gate |
 | `demo.php` | the timed demonstration |

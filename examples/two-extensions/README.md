@@ -84,6 +84,12 @@ interpreted 1.19 (1.01-1.24). There a call from one extension into another throu
 pay it: the row straight into A, which has no such call, is faster compiled on both Linux legs
 (1.484 against 2.273 ms, 1.576 against 1.894 ms).
 
+**Kept as it is, by the owner's decision (2026-09-28).** The C twin makes the same call, through
+`zend_call_known_function`, and on that image both are slower than the interpreter: that is
+php's own cost for calling from one extension into another, not the module's, so the module does
+what the twin does and does not go round it (by calling an internal callee's handler directly,
+say).
+
 This is not an arithmetic benchmark. Almost all of a call's time is php's -- the VM's call of an
 internal function and `zend_call_function`, the same in all three columns -- so the interpreted
 column is only ~1.2x the twins', and "faster than interpreted" left the module ~20% of room.
