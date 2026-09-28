@@ -303,22 +303,15 @@ uptr php_str_val(uptr s) { return s + ZS_HDR; }
 // halves of four, or single bytes. A decimal's strings are ten to twenty
 // bytes long, and the byte loop for the tail was most of what a copy cost.
 void php_memcpy(uptr d, uptr s, i64 n) {
-    if (n >= 8) {
-        u64 t = ld64(s + n - 8);
-        i64 i = 0;
-        loop { if (i + 8 > n) break; st64(d + i, ld64(s + i)); i = i + 8; }
-        st64(d + n - 8, t);
-        return;
-    }
-    if (n >= 4) {
-        i64 a = ld32(s);
-        i64 b = ld32(s + n - 4);
-        st32(d, a);
-        st32(d + n - 4, b);
-        return;
-    }
-    i64 j = 0;
-    loop { if (j >= n) break; st8(d + j, ld8(s + j)); j = j + 1; }
+    // eight bytes a step, then the tail as 4, 2 and 1 byte pieces: no store
+    // overlaps another, so a load of the bytes just written is forwarded
+    // from one store (two overlapping stores under one load are not), and a
+    // string of a few bytes is copied with no loop at all
+    i64 i = 0;
+    loop { if (i + 8 > n) break; st64(d + i, ld64(s + i)); i = i + 8; }
+    if (n & 4) { st32(d + i, ld32(s + i)); i = i + 4; }
+    if (n & 2) { st16(d + i, ld16(s + i)); i = i + 2; }
+    if (n & 1) st8(d + i, ld8(s + i));
 }
 
 // the first byte c in p[0..n), or -1: eight bytes a step, the has-a-zero-byte
@@ -442,6 +435,22 @@ uptr php_str_rope(uptr r, i64 n) {
         }
         i = i + 1;
     }
+    return o;
+}
+
+// `a . str_repeat(c, n)` (src/opt.mc): one string of the final length. A
+// count str_repeat refuses, or a pattern of more than one byte, is the
+// two calls it stands for, so what they raise is raised the same way.
+uptr php_str_repeat(uptr s, i64 times);
+uptr php_str_catrep(uptr a, uptr c, i64 n) {
+    if (n < 0 || ld64(c + 16) != 1) return php_str_concat(a, php_str_repeat(c, n));
+    if (!n) return a;
+    i64 la = ld64(a + 16);
+    uptr o = php_str_alloc(la + n);
+    php_memcpy(o + ZS_HDR, a + ZS_HDR, la);
+    i64 b = ld8(c + ZS_HDR);
+    i64 i = 0;
+    loop { if (i >= n) break; st8(o + ZS_HDR + la + i, b); i = i + 1; }
     return o;
 }
 
