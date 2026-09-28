@@ -430,10 +430,18 @@ for c in 'function f() { namespace inner; }|namespace' 'function f() { use Foo\B
 done
 [ "$nsr" = 0 ] && echo "  namespace scope: namespace and use in a function or a block, and a namespace inside a braced one, refused while compiling"
 # #[Extern] (src/extern.mc) refuses what it cannot read as a C declaration,
-# while compiling: on something that is not a function, a library the program
-# road does not link, and a body that is not empty
+# while compiling: on something that is not a function (a class member, a
+# statement in a body, a namespace, a use, a closure -- refused at the
+# attribute, so it never reaches a later declaration), a runtime function's
+# name, a library the program road does not link, and a body that is not empty
 xr=0
 for c in 'class A { #[Extern("c")] function f(): int {} }|on something that is not a function' \
+         'function f() { #[Extern("c")] echo 1; } function g(): int { return 2; }|on something that is not a function' \
+         '#[Extern("c")] namespace A; function g(): int { return 2; }|on something that is not a function' \
+         '#[Extern("c")] use A\B; function g(): int { return 2; }|on something that is not a function' \
+         '$f = #[Extern("c")] function () {};|on something that is not a function' \
+         '#[Extern("c")] function php_alloc(Ptr $n): Ptr {}|one of the runtime'"'"'s own functions' \
+         '#[Extern("c", name: "1atoi")] function f(string $s): int {}|is not a C identifier: 1atoi' \
          '#[Extern("curl")] function curl_easy_init(): Ptr {}|library the program road does not link' \
          '#[Extern("c")] function abs(int $a): int { return 1; }|body is the library'"'"'s: leave it empty'; do
     src=${c%|*}; want=${c##*|}
@@ -444,5 +452,10 @@ for c in 'class A { #[Extern("c")] function f(): int {} }|on something that is n
         echo "  FAIL  #[Extern]: [$src] said [$(head -1 "$tmp/xr.err")]"; xr=1; fail=1
     fi
 done
-[ "$xr" = 0 ] && echo "  #[Extern]: on a class member, an unlinked library and a body, refused while compiling"
+[ "$xr" = 0 ] && echo "  #[Extern]: on what is not a function, a runtime name, a bad name:, an unlinked library and a body, refused while compiling"
+# two aliases of one C symbol (c/08's dec and hex, both `name: 'strtol'`) are
+# ONE C declaration
+nx=$("$MCPHP_BIN" --dump-ast $P/c/08-extern.php 2>/dev/null | grep -c '^EXTERN.* name=strtol$')
+if [ "$nx" = 1 ]; then echo "  #[Extern]: two aliases of strtol, one C declaration"
+elif [ "$host_os" != windows ]; then echo "  FAIL  #[Extern]: two aliases of strtol made $nx C declarations"; fail=1; fi
 exit $fail

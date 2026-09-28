@@ -72,6 +72,7 @@ makes a function module-private under its namespace too (`aw\util\_h`).
 (`src/extern.mc`, both roads), and called like any function the source declares:
 
 ```php
+#[Extern('c', name: 'atoi')] function c_atoi(string $s): int {}
 #[Extern('curl')] function curl_easy_init(): Ptr {}
 #[Extern('curl', variadic: 1)] function curl_easy_setopt(Ptr $h, int $opt, mixed $v): int {}
 #[Extern('c')] function strerror(int $e): string {}
@@ -86,7 +87,14 @@ string's bytes, a bool, null as 0, anything else php's `TypeError` with no C cal
 nothing. `variadic: N` marks the last N parameters as the C variadic ones: Apple's arm64 passes
 those on the stack after the eight argument registers, so there the fixed arguments are padded to
 eight; elsewhere a variadic int travels as a fixed one. The C symbol is the function's name
-without its namespace, and the declaration is never published. On the extension road the symbol
+without its namespace, or `name:` when the php name is another one (`name:` is validated as a C
+identifier); declarations that share a symbol share its one C declaration, the first fixing how
+many argument words it takes (a later one with more is refused: declare the widest first). The
+body is `{}`, which keeps the file php, or `;`. The declaration is never published. The attribute is the item of its
+list whose NAME is `Extern` (or `\Extern`) -- `#[Doc("Extern")]` is not -- and it annotates the
+function right after it: before anything else (a statement, a class member, a `namespace`, a
+`use`, a closure) it is refused at the attribute's own line, so it can never reach a later
+declaration. A name that is one of the runtime's own functions is refused too. On the extension road the symbol
 comes from php's own process, as every Zend name does; on the program road from the C library, so
 the library named is `c` or `pthread`. **Windows refuses it by name**
 (`an #[Extern] function on Windows: the link names no library for it`): its link names each

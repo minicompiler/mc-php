@@ -367,7 +367,13 @@ elif command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; 
 else
     skip "the C twin of awaitable: no php-config or no $CC here"
 fi
-pin "$EX" "awaitable.src.php:36: mc-php: a variadic parameter in an exported function: awaitable\\await is not implemented yet (probes/t10/RESULTS.md)"
+# Windows refuses #[Extern] by name (src/extern.mc), so its first refusal is
+# the first C declaration's
+if [ "$host" = windows ]; then
+    pin "$EX" "awaitable.src.php:13: mc-php: an #[Extern] function on Windows: the link names no library for it: awaitable\\curl_easy_init"
+else
+    pin "$EX" "awaitable.src.php:36: mc-php: a variadic parameter in an exported function: awaitable\\await is not implemented yet (probes/t10/RESULTS.md)"
+fi
 
 [ "$fail" = 0 ] || { echo "  examples: something failed"; exit 1; }
 echo "  examples: green"

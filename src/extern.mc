@@ -31,11 +31,34 @@
 // library named there is `c` or `pthread`. Windows has neither road for a
 // library the link does not name, and is refused by name.
 //
+// `name: 'sym'` names the C symbol when the php name is another one
+// (`#[Extern('c', name: 'atoi')] function c_atoi(string $s): int {}`); two
+// declarations of one symbol share its one C declaration, the first fixing
+// how many argument words it takes. The body is `{}`, which keeps the file
+// php, or `;`.
+//
 // A php function stands for it: `f_NAME` with the declared php signature, whose
 // body converts the arguments and calls the C symbol -- so a call to it is an
 // ordinary call to a declared function, with php's argument checks.
 
 i64  ph_fext[PH_MAXFN];         // 1: the row is a C function, never published
+
+// the C declarations this file has emitted, by symbol
+#define PH_MAXXSYM 256
+uptr ph_xsn[PH_MAXXSYM];
+i64  ph_xsd[PH_MAXXSYM];
+i64  ph_nxsym;
+i64 ph_xsym_find(uptr s) {
+    i64 i = 0;
+    loop { if (i >= ph_nxsym) break; if (str_eq(ld64(ph_xsn + i * 8), s)) return ld64(ph_xsd + i * 8); i = i + 1; }
+    return -1;
+}
+void ph_xsym_add(uptr s, i64 d) {
+    if (ph_nxsym >= PH_MAXXSYM) err_at("mc-php", 1, "mc-php: too many #[Extern] C symbols");
+    st64(ph_xsn + ph_nxsym * 8, s);
+    st64(ph_xsd + ph_nxsym * 8, d);
+    ph_nxsym = ph_nxsym + 1;
+}
 
 // ---- the attribute --------------------------------------------------------
 uptr ph_xa_lib;
@@ -46,35 +69,74 @@ uptr ph_xa_skip(uptr q) {
     return q;
 }
 
-void ph_xa_parse(uptr fl, i64 line) {
+// a quoted string at q: its bytes, and q moved past it
+uptr ph_xa_str(uptr pq) {
+    uptr q = ld64(pq);
+    i64 c = ld8(q);
+    uptr b = q + 1;
+    uptr e = b;
+    loop { if (e >= ph_ext_ae || ld8(e) == c) break; e = e + 1; }
+    st64(pq, e + 1);
+    return xstrdup(b, e - b);
+}
+
+// is s a C identifier?
+i64 ph_c_ident(uptr s) {
+    if (!ld8(s)) return 0;
+    i64 i = 0;
+    loop {
+        i64 c = ld8(s + i);
+        if (!c) break;
+        i64 ok = c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (i && c >= 48 && c <= 57);
+        if (!ok) return 0;
+        i = i + 1;
+    }
+    return 1;
+}
+
+// the attribute's arguments: the library first, then `variadic: N` and
+// `name: 'sym'` in any order; an error is the attribute's own line
+uptr ph_xa_name;
+void ph_xa_parse() {
+    uptr fl = ph_ext_file;
+    i64 line = ph_ext_line;
     ph_xa_lib = 0;
     ph_xa_var = 0;
+    ph_xa_name = 0;
     uptr q = ph_ext_ab;
     // past `Extern` (or `\Extern`) to its `(`
     loop { if (q >= ph_ext_ae) break; if (ld8(q) == 40) break; q = q + 1; }
     if (q >= ph_ext_ae) err_at(fl, line, "mc-php: #[Extern] needs the library: #[Extern('c')]");
     q = q + 1;
+    u8 pq[8];
     loop {
         q = ph_xa_skip(q);
         if (q >= ph_ext_ae || ld8(q) == 41) break;
         i64 c = ld8(q);
         if (c == 39 || c == 34) {
-            uptr b = q + 1;
-            uptr e = b;
-            loop { if (e >= ph_ext_ae || ld8(e) == c) break; e = e + 1; }
-            ph_xa_lib = xstrdup(b, e - b);
-            q = e + 1;
+            st64(pq, q);
+            ph_xa_lib = ph_xa_str(pq);
+            q = ld64(pq);
         } else {
             uptr b = q;
             loop { if (q >= ph_ext_ae || !ph_name_byte(ld8(q), 0)) break; q = q + 1; }
             uptr key = xstrdup(b, q - b);
             q = ph_xa_skip(q);
             if (q < ph_ext_ae && ld8(q) == 58) q = ph_xa_skip(q + 1);
-            if (!str_eq(key, "variadic"))
-                err_at2(fl, line, "mc-php: an #[Extern] argument mc-php does not read", key);
-            i64 v = 0;
-            loop { if (q >= ph_ext_ae) break; i64 d = ld8(q); if (d < 48 || d > 57) break; v = v * 10 + d - 48; q = q + 1; }
-            ph_xa_var = v;
+            if (str_eq(key, "variadic")) {
+                i64 v = 0;
+                loop { if (q >= ph_ext_ae) break; i64 d = ld8(q); if (d < 48 || d > 57) break; v = v * 10 + d - 48; q = q + 1; }
+                ph_xa_var = v;
+            } else if (str_eq(key, "name")) {
+                i64 d = 0;
+                if (q < ph_ext_ae) d = ld8(q);
+                if (d != 39 && d != 34) err_at(fl, line, "mc-php: #[Extern] name: is the C symbol, a quoted string");
+                st64(pq, q);
+                ph_xa_name = ph_xa_str(pq);
+                q = ld64(pq);
+                if (!ph_c_ident(ph_xa_name))
+                    err_at2(fl, line, "mc-php: #[Extern] name: is not a C identifier", ph_xa_name);
+            } else err_at2(fl, line, "mc-php: an #[Extern] argument mc-php does not read", key);
         }
         q = ph_xa_skip(q);
         if (q < ph_ext_ae && ld8(q) == 44) q = q + 1;
@@ -126,12 +188,13 @@ i64 ph_xid(uptr name, i64 ty) {
 // ---- the declaration ------------------------------------------------------
 // Called by ph_function after the name, for row fi, with the attribute read.
 i64 ph_extern_fn(uptr name, i64 fi, i64 fwd, uptr fl, i64 line) {
-    ph_xa_parse(fl, line);
+    ph_xa_parse();
     ph_ext_ab = 0;
     if (fwd) err_at2(fl, line, "mc-php: an #[Extern] function called before it is declared (move it above its first call)", name);
     uptr os = host_os();
     st64(ph_fext + fi * 8, 1);
     uptr sym = ph_ns_last(name);
+    if (ph_xa_name) sym = ph_xa_name;
     ph_want("(", 1, "expected ( in a php function");
     u8 xt[96];                          // each parameter's XT_*
     u8 pn[96];                          // and its php name, `$x`
@@ -153,9 +216,21 @@ i64 ph_extern_fn(uptr name, i64 fi, i64 fwd, uptr fl, i64 line) {
     if (!ph_at(":", 1)) err_at2(fl, line, "mc-php: an #[Extern] function needs its return type", name);
     ph_next();
     i64 rt = ph_xt(1, fl, line);
-    ph_want("{", 1, "expected { in a php function");
-    if (!ph_at("}", 1)) err_at2(fl, line, "mc-php: an #[Extern] function's body is the library's: leave it empty", name);
-    ph_next();
+    // the body: `{}`, which keeps the file php, or `;`
+    if (!ph_accept(";", 1)) {
+        ph_want("{", 1, "expected { in a php function");
+        if (!ph_at("}", 1)) err_at2(fl, line, "mc-php: an #[Extern] function's body is the library's: leave it empty", name);
+        ph_next();
+    }
+    // The C declaration: one per symbol. An earlier #[Extern] of the same
+    // symbol (an alias, `name:`) made it, and so may the runtime, whose
+    // `extern`s are C's too; a name the runtime DEFINES is its own function.
+    i64 di = ph_xsym_find(sym);
+    if (di < 0) {
+        di = decl_find(sym);
+        if (di >= 0 && nd_kind(di) != N_EXTERN)
+            err_at2(fl, line, "mc-php: an #[Extern] name that is one of the runtime's own functions", sym);
+    }
     if (!ph_ext && !str_eq(ph_xa_lib, "c") && !str_eq(ph_xa_lib, "pthread"))
         err_at2(fl, line, "mc-php: an #[Extern] library the program road does not link (only c and pthread; an extension resolves any from php's process)", ph_xa_lib);
     if (str_eq(os, "windows"))
@@ -168,6 +243,17 @@ i64 ph_extern_fn(uptr name, i64 fi, i64 fwd, uptr fl, i64 line) {
         if (pad < 0) pad = 0;
     }
     if (np + pad > 12) err_at2(fl, line, "mc-php: an #[Extern] call that needs more than 12 argument words", name);
+    // a declaration already made fixes the count of argument words: fewer are
+    // padded with zeros, which every C ABI here lets a callee ignore
+    i64 words = np + pad;
+    if (di >= 0) {
+        i64 dw = 0;
+        i64 pp = nd_a(di);
+        loop { if (!pp) break; dw = dw + 1; pp = nd_next(pp); }
+        if (words > dw)
+            err_at2(fl, line, "mc-php: an #[Extern] of a C symbol declared before with fewer arguments (declare the widest first)", sym);
+        words = dw;
+    }
 
     // the php row: the declared php signature
     st64(ph_fname + fi * 8, name);
@@ -183,12 +269,12 @@ i64 ph_extern_fn(uptr name, i64 fi, i64 fwd, uptr fl, i64 line) {
     i64 xty = TY_I64;
     if (rt == XT_VOID) xty = TY_VOID;
     if (rt == XT_PTR || rt == XT_STR) xty = TY_UPTR;
-    if (decl_find(sym) < 0) {
+    if (di < 0) {
         i64 xh = 0;
         i64 xtl = 0;
         i64 k = 0;
         loop {
-            if (k >= np + pad) break;
+            if (k >= words) break;
             i64 xp = param_new(TY_I64, p_cat("a", php_dec(k), 0, cstrlen(php_dec(k))));
             if (xtl) set_nd_next(xtl, xp);
             if (!xtl) xh = xp;
@@ -200,6 +286,7 @@ i64 ph_extern_fn(uptr name, i64 fi, i64 fwd, uptr fl, i64 line) {
         set_nd_type(x, xty);
         set_nd_a(x, xh);
         top_add(x);
+        ph_xsym_add(sym, x);
     }
 
     // the php function: its parameters, the arguments converted, the call
@@ -211,8 +298,9 @@ i64 ph_extern_fn(uptr name, i64 fi, i64 fwd, uptr fl, i64 line) {
     i64 at = 0;
     i64 i = 0;
     loop {
-        if (i >= np + pad) break;
+        if (i >= words) break;
         i64 a = 0;
+        if (i >= np + pad) { a = ph_int(0); if (at) set_nd_next(at, a); if (!at) ah = a; at = a; i = i + 1; continue; }
         if (i < np - ph_xa_var || i >= np - ph_xa_var + pad) {
             i64 j = i;
             if (i >= np - ph_xa_var + pad) j = i - pad;

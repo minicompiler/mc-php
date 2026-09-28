@@ -1096,3 +1096,12 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   two `#[Extern(host: true, kind: 'data')]` lines (the engine's globals are the crossing's, not
   the source's), and its pinned refusal moved to line 36 (`await`'s variadic). The two callable
   drafts are committed on the pushed branch `awaitable-callables`.
+  Review of #33: the attribute is the list item whose NAME is `Extern` (`ph_attr_item`; strings
+  and parentheses skipped, so `#[Doc("Extern")]` is inert -- `tests/g/122-attribute-names.php`);
+  it must be followed by `function`, else it is refused at its own line in the lexer (a body
+  statement, a namespace, a use, a closure, a class member) and can never reach a later
+  declaration; a C name the runtime DEFINES is refused (only an `extern` is reused). Windows's
+  pin is its own refusal, line 13. The owner's addition: `name: 'sym'` names the C symbol (a C
+  identifier, checked at the attribute), aliases of one symbol share ONE C declaration (a
+  table of the ones emitted, `ph_xsym_*`, then the runtime's `extern`s), fewer argument words
+  than the declaration padded with zeros, more refused; `;` as a body is read too.
