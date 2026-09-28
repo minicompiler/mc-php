@@ -7180,6 +7180,30 @@ i64 php_spn_o(uptr s, uptr bm, i64 o) {
     return i - o;
 }
 
+// strspn($s, 'lit', $o) where the set is one run of bytes lo..lo+w
+// ('0123456789', '0'): a subtraction and one unsigned compare a byte, where
+// the byte map is a load, a shift and a mask
+i64 php_spn_r_slow(uptr s, i64 lo, i64 w, i64 o) {
+    u8 bm[32];
+    i64 k = 0;
+    loop { if (k >= 32) break; st8(bm + k, 0); k = k + 1; }
+    k = lo;
+    loop { if (k > lo + w) break; st8(bm + (k >> 3), ld8(bm + (k >> 3)) | (1 << (k & 7))); k = k + 1; }
+    return php_spn(s, bm, o, 0, 0, 1);
+}
+i64 php_spn_r(uptr s, i64 lo, i64 w, i64 o) {
+    i64 n = ld64(s + 16);
+    if ((u64) o > (u64) n) return php_spn_r_slow(s, lo, w, o);
+    uptr p = s + ZS_HDR;
+    i64 i = o;
+    loop {
+        if (i >= n) break;
+        if ((u64) (ld8(p + i) - lo) > (u64) w) break;
+        i = i + 1;
+    }
+    return i - o;
+}
+
 i64 php_spn_s(uptr s, uptr set, i64 o, i64 l, i64 hasl, i64 want) {
     u8 bm[32];
     php_bmap(set, bm);
