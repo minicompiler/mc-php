@@ -10,6 +10,8 @@
 // exactly what php_call_zv calls through. D6 refuses a callable spelled as a
 // STRING; this is the value form, and it is kept.
 i64 ph_closure(uptr fl, i64 line, i64 arrow) {
+    // #[Extern] on a closure: there is no name to call it by
+    if (ph_ext_ab) { ph_ext_ab = 0; err_at(ph_ext_file, ph_ext_line, "mc-php: #[Extern] on something that is not a function"); }
     ph_nonce = ph_nonce + 1;
     uptr cn = p_cat("cl_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
 

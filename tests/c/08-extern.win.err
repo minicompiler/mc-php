@@ -1,0 +1,1 @@
+tests/c/08-extern.php:6: mc-php: an #[Extern] function on Windows: the link names no library for it: atoi

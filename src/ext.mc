@@ -115,6 +115,7 @@ void ph_ext_config() {
 // may take and return anything the language does.
 void ph_ext_export(i64 fi, uptr fl, i64 line) {
     if (!ph_ext) return;
+    if (ld64(ph_fext + fi * 8)) return;                             // a C function
     if (ld8(ph_ns_last(ld64(ph_fname + fi * 8))) == 95) return;    // `ns\_name` too
     if (ph_nexp >= PH_MAXEXP) err_at("mcphp.toml", 1, "mc-php: too many exported functions");
     st64(ph_expi + ph_nexp * 8, fi);

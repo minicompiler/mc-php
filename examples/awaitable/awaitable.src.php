@@ -17,11 +17,10 @@ namespace awaitable;
 #[Extern('pthread')] function pthread_create(Ptr $tid, Ptr $attr, Ptr $fn, Ptr $arg): int {}
 #[Extern('pthread')] function pthread_join(Ptr $tid, Ptr $ret): int {}
 
-// A symbol the host binary exports, not a library: dlsym on POSIX and
-// GetProcAddress on Windows. Address taken once at MINIT, dereferenced late --
-// and twice when the symbol is itself a pointer.
-#[Extern(host: true, kind: 'data')] function executor_globals(): Ptr {}
-#[Extern(host: true, kind: 'data')] function zend_ce_exception(): Ptr {}
+// The engine's own state -- executor_globals, zend_ce_exception, which
+// awaitable.mc reads through dlsym -- is not declared here: calling a php
+// callable, catching what it throws and handing back an object are the
+// compiler's own crossing, so the source never touches the engine's globals.
 
 // --- what the extension publishes ----------------------------------------
 final class Intent {

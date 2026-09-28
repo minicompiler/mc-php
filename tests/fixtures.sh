@@ -143,25 +143,30 @@ echo "  refusals: $nrok / $nr parse under php and are named by mc-php, exit 3"
 # tables (`[php] checked_reads = true`), and tests/mcphp.sh builds it the
 # project road.
 nc=0; ncok=0
+host_os=$("$MCPHP_BIN" --host | sed -n 's/^os //p' | tr -d '\r')
 for f in $P/c/*.php; do
     nc=$((nc + 1))
     b=${f%.php}
     lim $P/mcphp.sh "$f" > "$tmp/c.out" 2> "$tmp/c.err"; ce=$?
     rm -f "$MCPHP_OUT" "$MCPHP_OUT.exe" "$MCPHP_OUT.out" "$MCPHP_OUT.err"
     tr -d '\r' < "$tmp/c.out" > "$tmp/c.o"
-    tr -d '\r' < "$tmp/c.err" | sed 's#(.*tests[/\\]c[/\\]#(tests/c/#' > "$tmp/c.e"
-    want=0; [ -f "$b.code" ] && want=$(cat "$b.code")
-    [ -f "$b.err" ] && cp "$b.err" "$tmp/c.we" || : > "$tmp/c.we"
-    if [ "$timedout" != yes ] && [ "$ce" = "$want" ] && cmp -s "$b.out" "$tmp/c.o" && cmp -s "$tmp/c.we" "$tmp/c.e"; then
+    tr -d '\r' < "$tmp/c.err" | sed -e 's#(.*tests[/\\]c[/\\]#(tests/c/#' -e 's#^[^ (]*tests[/\\]c[/\\]#tests/c/#' > "$tmp/c.e"
+    # NAME.win.{out,err,code}: what the file answers on Windows instead
+    wb=$b
+    [ "$host_os" = windows ] && [ -f "$b.win.code" ] && wb=$b.win
+    want=0; [ -f "$wb.code" ] && want=$(cat "$wb.code")
+    [ -f "$wb.err" ] && cp "$wb.err" "$tmp/c.we" || : > "$tmp/c.we"
+    [ -f "$wb.out" ] && cp "$wb.out" "$tmp/c.wo" || : > "$tmp/c.wo"
+    if [ "$timedout" != yes ] && [ "$ce" = "$want" ] && cmp -s "$tmp/c.wo" "$tmp/c.o" && cmp -s "$tmp/c.we" "$tmp/c.e"; then
         ncok=$((ncok + 1))
     else
         printf '  FAIL  c/%s (exit %s, want %s)\n' "$(basename "$f")" "$ce" "$want"
-        diff "$b.out" "$tmp/c.o" | sed -n '1,6p' | sed 's/^/      /'
+        diff "$tmp/c.wo" "$tmp/c.o" | sed -n '1,6p' | sed 's/^/      /'
         diff "$tmp/c.we" "$tmp/c.e" | sed -n '1,6p' | sed 's/^/      /'
         fail=1
     fi
 done
-echo "  C behaviour: $ncok / $nc answer their recording (wrap, in-range reads, a hash, checked_reads)"
+echo "  C behaviour: $ncok / $nc answer their recording (wrap, in-range reads, a hash, checked_reads, #[Extern])"
 # The packed int array (src/packed.mc) is a LOWERING, and a differential only
 # says the answers are php's -- a proof that silently never fires would pass
 # it too. So the lowering is read back: every pk_* function of g/105 must
@@ -424,4 +429,33 @@ for c in 'function f() { namespace inner; }|namespace' 'function f() { use Foo\B
     fi
 done
 [ "$nsr" = 0 ] && echo "  namespace scope: namespace and use in a function or a block, and a namespace inside a braced one, refused while compiling"
+# #[Extern] (src/extern.mc) refuses what it cannot read as a C declaration,
+# while compiling: on something that is not a function (a class member, a
+# statement in a body, a namespace, a use, a closure -- refused at the
+# attribute, so it never reaches a later declaration), a runtime function's
+# name, a library the program road does not link, and a body that is not empty
+xr=0
+for c in 'class A { #[Extern("c")] function f(): int {} }|on something that is not a function' \
+         'function f() { #[Extern("c")] echo 1; } function g(): int { return 2; }|on something that is not a function' \
+         '#[Extern("c")] namespace A; function g(): int { return 2; }|on something that is not a function' \
+         '#[Extern("c")] use A\B; function g(): int { return 2; }|on something that is not a function' \
+         '$f = #[Extern("c")] function () {};|on something that is not a function' \
+         '#[Extern("c")] function php_alloc(Ptr $n): Ptr {}|one of the runtime'"'"'s own functions' \
+         '#[Extern("c", name: "1atoi")] function f(string $s): int {}|is not a C identifier: 1atoi' \
+         '#[Extern("curl")] function curl_easy_init(): Ptr {}|library the program road does not link' \
+         '#[Extern("c")] function abs(int $a): int { return 1; }|body is the library'"'"'s: leave it empty'; do
+    src=${c%|*}; want=${c##*|}
+    printf '<?php\n%s\necho 1;\n' "$src" > "$tmp/xr.php"
+    if env -u MCPHP_RC "$MCPHP_BIN" --backend=macho "$tmp/xr.php" -o "$tmp/xr.o" > "$tmp/xr.err" 2>&1; then
+        echo "  FAIL  #[Extern]: [$src] compiled"; xr=1; fail=1
+    elif ! grep -q "$want" "$tmp/xr.err"; then
+        echo "  FAIL  #[Extern]: [$src] said [$(head -1 "$tmp/xr.err")]"; xr=1; fail=1
+    fi
+done
+[ "$xr" = 0 ] && echo "  #[Extern]: on what is not a function, a runtime name, a bad name:, an unlinked library and a body, refused while compiling"
+# two aliases of one C symbol (c/08's dec and hex, both `name: 'strtol'`) are
+# ONE C declaration
+nx=$("$MCPHP_BIN" --dump-ast $P/c/08-extern.php 2>/dev/null | grep -c '^EXTERN.* name=strtol$')
+if [ "$nx" = 1 ]; then echo "  #[Extern]: two aliases of strtol, one C declaration"
+elif [ "$host_os" != windows ]; then echo "  FAIL  #[Extern]: two aliases of strtol made $nx C declarations"; fail=1; fi
 exit $fail

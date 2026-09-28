@@ -3,7 +3,7 @@
 #     mc-php build examples/awaitable --config examples/awaitable/mcphp.toml
 #
 # This is the build the example is WAITING for, and today it is refused by
-# name at its first line of code (a `namespace` in an extension source).
+# name at the first declaration mc-php does not take yet.
 # README.md lists every refusal behind that one, found by removing each in
 # turn; tests/examples.sh runs this build on every host and requires the
 # first -- the day it moves, the gate says so. Until then the example is the

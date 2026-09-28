@@ -354,6 +354,7 @@ uptr php_str_new(uptr b, i64 n) {
 
 u64 php_str_hash(uptr s);
 
+
 uptr php_str_mod(uptr b, i64 n) {
     uptr za = ph_zalloc;
     ph_zalloc = 0;
@@ -1471,6 +1472,27 @@ i64 php_pow_i(i64 a, i64 e);
 #define IS_ARRAY   7
 #define IS_OBJECT  8
 #define IS_RESOURCE 9
+
+// #[Extern] (src/extern.mc): a returned C string, copied; "" for null
+uptr php_str_c(uptr p) {
+    if (!p) return php_str_new("", 0);
+    return php_str_new(p, php_cstrlen(p));
+}
+
+// #[Extern]'s `mixed` parameter: the one C word a php value stands for -- an
+// int as itself, a string as its NUL-terminated bytes, a bool as 0 or 1, null
+// as 0. Anything else is php's TypeError, and the caller does not call C.
+i64 php_zv_cword(uptr z) {
+    i64 t = 0;
+    if (z) t = ld8(z + 8);
+    if (t == IS_UNDEF || t == IS_NULL || t == IS_FALSE) return 0;
+    if (t == IS_TRUE) return 1;
+    if (t == IS_LONG) return ld64(z);
+    if (t == IS_STRING) return ld64(z) + ZS_HDR;
+    php_throw_cls(php_str_new("TypeError", 9),
+                  php_str_new("mc-php: a C function takes an int, a string, a bool or null, not this value", 75));
+    return 0;
+}
 
 uptr php_zv_str(uptr z);
 i64  php_zv_bool(uptr z);

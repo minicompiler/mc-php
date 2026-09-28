@@ -70,6 +70,47 @@ i64  ph_nopeek;           // set right after a p_push_source: cur is in the old 
 
 // `#[\Override]` just went past: the next class member is the one php checks
 i64  ph_saw_override;
+// #[Extern(...)] just went past: its bytes, for src/extern.mc, and where it is
+uptr ph_ext_ab;
+uptr ph_ext_ae;
+i64  ph_ext_line;
+uptr ph_ext_file;
+
+// The attribute list [b, e): the item whose NAME is `w` (lowercase, a class
+// name's case not mattering), unqualified or with the one leading backslash
+// of the global namespace -- its first byte, or 0. Items are split at the
+// commas outside parentheses and strings, so `#[Doc("Extern")]` names Doc.
+uptr ph_attr_item(uptr b, uptr e, uptr w) {
+    uptr q = b;
+    i64 n = cstrlen(w);
+    loop {
+        loop { if (q >= e) break; if (!ph_space(ld8(q))) break; q = q + 1; }
+        uptr it = q;
+        if (q < e && ld8(q) == 92) q = q + 1;
+        uptr nb = q;
+        loop { if (q >= e) break; if (!ph_name_byte(ld8(q), q == nb)) break; q = q + 1; }
+        if (q - nb == n) {
+            i64 k = 0;
+            loop { if (k >= n) break; i64 c = ld8(nb + k); if (c >= 65 && c <= 90) c = c + 32; if (c != ld8(w + k)) break; k = k + 1; }
+            if (k == n && (q >= e || ld8(q) != 92)) return it;
+        }
+        // to the next comma outside parentheses and strings
+        i64 d = 0;
+        loop {
+            if (q >= e) return 0;
+            i64 c = ld8(q);
+            if (c == 39 || c == 34) {
+                q = q + 1;
+                loop { if (q >= e) return 0; if (ld8(q) == 92) { q = q + 2; continue; } if (ld8(q) == c) break; q = q + 1; }
+            }
+            if (c == 40 || c == 91) d = d + 1;
+            if (c == 41 || c == 93) d = d - 1;
+            if (c == 44 && d == 0) { q = q + 1; break; }
+            q = q + 1;
+        }
+    }
+    return 0;
+}
 
 // is the very next thing in the source `::`? The module has no token
 // lookahead, so this reads the cursor, which sits just past the current
@@ -481,6 +522,7 @@ void ph_next() {
     uptr e = p_src_end();
     uptr q0 = q;
     i64 quote = 0;
+    i64 xat = 0;
     loop {
         if (q >= e) break;
         i64 c = ld8(q);
@@ -506,17 +548,36 @@ void ph_next() {
                 // -- except `#[\Override]`, which is not reflection: php
                 // CHECKS it while compiling the class, so the name is read
                 // here and the member that follows is marked.
+                uptr astart = q;
                 q = q + 2;
                 i64 depth = 1;
                 uptr abeg = q;
                 loop {
                     if (q >= e) break;
                     i64 d2 = ld8(q);
+                    // a quoted string's brackets are not the attribute's
+                    if (d2 == 39 || d2 == 34) {
+                        q = q + 1;
+                        loop { if (q >= e) break; if (ld8(q) == 92) { q = q + 2; continue; } if (ld8(q) == d2) break; q = q + 1; }
+                    }
                     if (d2 == 91) depth = depth + 1;
                     if (d2 == 93) { depth = depth - 1; if (depth == 0) { q = q + 1; break; } }
                     q = q + 1;
                 }
                 if (ph_has_word(abeg, q, "Override", 8)) ph_saw_override = 1;
+                // #[Extern(...)]: the declaration that follows is a C function
+                // (src/extern.mc reads the bytes of that one attribute)
+                uptr xi = ph_attr_item(abeg, q - 1, "extern");
+                if (xi) {
+                    ph_ext_ab = xi;
+                    ph_ext_ae = q - 1;
+                    i64 nl = 0;
+                    uptr z = q0;
+                    loop { if (z >= astart) break; if (ld8(z) == 10) nl = nl + 1; z = z + 1; }
+                    ph_ext_line = p_line() + nl;
+                    ph_ext_file = p_file();
+                    xat = 1;
+                }
                 continue;
             }
             loop {
@@ -531,6 +592,14 @@ void ph_next() {
         if (c == 34) { quote = 2; break; }              // "
         if (c == 60 && q + 2 < e && ld8(q + 1) == 60 && ld8(q + 2) == 60) { quote = 3; break; }
         break;
+    }
+    // #[Extern] annotates the declaration right after it: anything else there
+    // -- a statement, a class member, a namespace, another attribute's target
+    // -- is refused at the attribute itself, so it can never reach a later one
+    if (xat) {
+        i64 fnx = 0;
+        if (q + 8 <= e && str_eq(xstrdup(q, 8), "function") && (q + 8 == e || !ph_name_byte(ld8(q + 8), 0))) fnx = 1;
+        if (!fnx) { ph_ext_ab = 0; err_at(ph_ext_file, ph_ext_line, "mc-php: #[Extern] on something that is not a function"); }
     }
     if (quote == 1) {
         u8 eb[8];

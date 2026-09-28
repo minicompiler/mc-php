@@ -1079,3 +1079,29 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   global block, `tests/g/121`); the C twin frees a sync object's handle with the object
   (`free_obj`, no clone) and its arg info says `parallel` needs 2 and `http_get_many` 1.
   `tests/fixtures.sh` asserts the four scope refusals.
+- awaitable, step 2 (2026-09-28, branch `awaitable-extern` from main d5ea921): **`#[Extern]`, a
+  C function declared in php** (`src/extern.mc`), on both roads. `#[Extern('lib', variadic: N)]
+  function f(int $a, Ptr $p, string $s, mixed $v): int {}` -- the declaration is the ABI: `int`
+  is C's int (a returned one sign-extended from bit 31), `Ptr` a pointer-sized integer, a `string`
+  parameter the string's NUL-terminated bytes and a `string` return a C string copied, a `bool`
+  parameter 0/1, a `mixed` parameter decided per call by the value (`php_zv_cword`; anything but
+  int/string/bool/null is php's TypeError and C is not called), `void`. `variadic: N` pads the
+  fixed arguments to eight on Apple arm64 only, where C variadics travel on the stack. The php
+  function `f_NAME` stands for it (its body converts and calls the C symbol, the name without
+  its namespace; declared `extern` unless the runtime already declares it), and it is never
+  published (`ph_fext`). Extension road: the symbol comes from php's process; program road: the
+  C library, so `c` or `pthread`; Windows refused by name (the link names no library for it) --
+  `tests/c/08-extern.php` (its Windows answer in `08-extern.win.*`, a new rule of the `c/` loop),
+  `tests/ext.sh` step 16, and the refusals in `tests/fixtures.sh`. `awaitable.src.php` lost its
+  two `#[Extern(host: true, kind: 'data')]` lines (the engine's globals are the crossing's, not
+  the source's), and its pinned refusal moved to line 36 (`await`'s variadic). The two callable
+  drafts are committed on the pushed branch `awaitable-callables`.
+  Review of #33: the attribute is the list item whose NAME is `Extern` (`ph_attr_item`; strings
+  and parentheses skipped, so `#[Doc("Extern")]` is inert -- `tests/g/122-attribute-names.php`);
+  it must be followed by `function`, else it is refused at its own line in the lexer (a body
+  statement, a namespace, a use, a closure, a class member) and can never reach a later
+  declaration; a C name the runtime DEFINES is refused (only an `extern` is reused). Windows's
+  pin is its own refusal, line 13. The owner's addition: `name: 'sym'` names the C symbol (a C
+  identifier, checked at the attribute), aliases of one symbol share ONE C declaration (a
+  table of the ones emitted, `ph_xsym_*`, then the runtime's `extern`s), fewer argument words
+  than the declaration padded with zeros, more refused; `;` as a body is read too.
