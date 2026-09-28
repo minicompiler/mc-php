@@ -48,6 +48,19 @@
 //       registers nobody saves: a parameter's own argument register or a free
 //       one of x1..x7 and x10..x15, and the saves and restores of the callee-
 //       saved ones it no longer uses go (arm64; MCPHP_LEAF=0 turns it off alone).
+//   P12 a signed division or remainder by a constant 2..65535 a lone movz
+//       made is a multiply-high by the magic number (Hacker's Delight 10-1):
+//       smulh, an arithmetic shift, the sign added back, and an msub for the
+//       remainder -- what clang writes for `t / 10` (arm64; MCPHP_DIVK=0).
+//   P13 a shift by a constant is the immediate form (lsl, asr, lsr), and
+//       `x + (y << k)` just after it is one add with a shifted operand
+//       (arm64; MCPHP_SHIFT=0).
+//   P12 and P13 ARE new forms, smulh, the three immediate shifts and the
+//   shifted add, in this machine's band (502..506) with their encoder, size and
+//   dump; every one is re-assembled byte for byte by llvm-mc in the sweep.
+//   ph_addm64(p, v), the intrinsic src/lvalue.mc writes for a FIXED array's
+//   `$x[K] = $x[K] + E`, is `*p = *p + v` on both machines in forms they
+//   already have (MCPHP_ADDM=0 stops src/lvalue.mc writing it).
 //
 // The x86-64 half (both ABIs, over <float>'s) is the same idea in that
 // machine's forms: `lea rd, [rl + k]` is the add or sub of a constant, and a

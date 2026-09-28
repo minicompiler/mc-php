@@ -360,7 +360,7 @@ by byte into one `str_repeat` of its final length (2 888 strings fewer a `work()
 against 0.358-0.360 ms.
 
 **Toward 2x: decimal-2x** (2026-09-27, macos/arm64, php 8.5.10, one host, one sitting, fifteen
-rounds interleaved, best of nine each; `decimal.php` and `bench.php` unchanged). Each change was
+rounds interleaved, best of nine each; `decimal.php` and `bench.php` unchanged in this round). Each change was
 built alone and measured against the build before it -- time with `bench.php`, and instructions
 and cycles per call with `/usr/bin/time -l` over a million calls of each function -- and one
 that did not gain was reverted.
@@ -404,18 +404,37 @@ loop's own cost taken out):
 | `dec_cmp` | 2390 / 302 | 1712 / 206 | 830 / 121 | 1.70 |
 | `dec_div` | 65885 / 8216 | 56004 / 7221 | 6191 / 1220 | 5.92 |
 
-**The floor, per cause.** `bench.php` is 0.267 ms against the twin's 0.125 (2.14x). Addition,
-subtraction and comparison are at 2.04x, 2.00x and 1.70x; what keeps the workload above 2x is
-multiplication (2.51x, 360 of its ~1800 calls):
+**The three causes, attacked** (2026-09-28, the same host and method; the owner's rule that mc
+already lets a module teach whatever instruction it needs). Each was bounded before it was built:
 
-* the twin's `umul` inner loop `acc[i + j] += x * digit` is vectorised by clang (NEON, several
-  lanes an iteration). mc has no SIMD, so this loop is scalar, and making it 30% shorter moved
-  no cycle (the table above);
-* the carry loop divides by 10 twice an element (`$t % 10`, `intdiv($t, 10)`), and each is an
-  `sdiv` on the carried path; the twin's unsigned division by a constant is a multiply-high. mc
-  has no multiply-high form;
-* `dec_div` builds a remainder string per step of its long division (a PHP string is a value,
-  and the twin subtracts in its one buffer), but the bench makes three of those calls in all.
+| cause | bound (measured first) | built | measured |
+|---|---|---|---|
+| `dec_div` builds a remainder string per step of its long division | representation, not a floor: the twin keeps one buffer | `_dec_udivmod` keeps the twin's one remainder buffer of nb + 2 digits, compared and subtracted where it lies (`decimal.php`; the answers are the same, 20000 random divisions byte for byte) | `dec_div` 7217 -> 3130 cycles a call, 10300 -> 1300 strings for 100 calls; bench 0.266 -> 0.259 ms |
+| the carry loop's two `sdiv` against the twin's multiply-high | division made free (a shift in its place, wrong answers, timing only): -75 cycles a `dec_mul` | P12 (`src/mach.mc`): a signed `/` or `%` by a constant is `smulh` by the magic number, an immediate shift, the sign added back (Hacker's Delight 10-1, what clang writes); `intdiv()` by a positive literal is mc's own `/`. `smulh` and the immediate shifts are new forms in the machine's band | `dec_mul` -13 to -33 cycles; the bench within its noise. The loop is bound by its spills and the chain through the carry, not by the division any more |
+| the twin's inner loop is NEON | clang vectorises only the digit loads (`rev64`): a 64-bit multiply has no NEON form, so the multiplies stay scalar. Removing the loop costs the twin 195 cycles a `dec_mul`; our loop, hand-written into the `.so` as 8 scalar instructions, costs less than that. So no SIMD: the bound is a short scalar loop | the element address once (`ph_addm64`, `src/lvalue.mc`), an address's constants summed into the load's offset (`src/opt.mc`), and `x + (y << 3)` as one add (P13): the loop from 26 instructions to 15. Measured with the loop patched by hand first: 16 and 17 instructions gained nothing, 15 did, and each of the three changes alone gains nothing | `dec_mul` 1055 -> 946 cycles; bench 0.259 -> 0.250 ms |
+
+Measured and not built: a leaf's frame dropped when nothing uses it (no gain); `48 + x` with the
+constant on the left as an immediate (slower); `php_spn_r` copied with its loop into its callers
+(+75 cycles a `dec_add`: the callers spill); `php_memcpy` inline in the rope (-7 cycles, noise);
+the fresh buffer's bound test removed in the digit loops (-1%, a range proof not worth its code).
+
+| | this branch before | now | the C twin | cycles, now / C |
+|---|---|---|---|---|
+| `dec_add` | 3937 / 493 | 3936 / 487 | 1658 / 241 | 2.02 |
+| `dec_sub` | 4161 / 512 | 4153 / 510 | 1662 / 244 | 2.09 |
+| `dec_mul` | 8470 / 1079 | 7700 / 945 | 2737 / 427 | 2.21 |
+| `dec_cmp` | 1712 / 206 | 1692 / 200 | 829 / 116 | 1.72 |
+| `dec_div` | 56004 / 7221 | 24077 / 3153 | 6191 / 1190 | 2.65 |
+
+**The floor, now.** `bench.php` is 0.250 ms against the twin's 0.125 (2.00x; 1.97x to 2.02x over
+the runs of this sitting). None of the three named causes is the floor any more: what is left is
+spread thin. The largest single items of a run are `_dec_umul` (10%), `php_memcpy` and
+`php_spn_r` (8% each), `_dec_addsub`, the rope, the allocator and `_dec_fmt` (5-8% each), and
+their cost is per call and per spill rather than per loop: `_dec_addsub`, with the helpers it
+copies in, is 10722 instructions long with an 832-byte frame; the carry loop keeps `$t` and the
+carry in the frame because ten callee-saved registers go to the inner loop's variables (mc's
+allocator gives a local one register for the whole function), and making the carried values
+registers by hand (`$t` in `$j`, the carry in `$x`) moved 9 cycles.
 
 ## What it cannot do yet
 

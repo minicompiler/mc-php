@@ -1006,3 +1006,16 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   `_dec_umul` (NEON in the twin, and two `sdiv` per carry step where the twin multiplies high).
   `tests/g/116-lowered-forms.php` + its read-back in `tests/fixtures.sh`; the strings gate in
   `tests/examples.sh` re-recorded 500 500 600 200 10300.
+  Second round (2026-09-28, the three causes, each bounded first): `_dec_udivmod` keeps the
+  twin's one remainder buffer (`decimal.php`; dec_div 7217 -> 3130 cycles, strings gate 10300 ->
+  1300); P12 in `src/mach.mc` (a signed `/`/`%` by a constant 2..65535 is `smulh` by the magic
+  number, Hacker's Delight 10-1; `intdiv()` by a positive literal is mc's `/`; `MCPHP_DIVK=0`);
+  P13 (a constant shift is the immediate form, `x + (y << k)` one shifted add;
+  `MCPHP_SHIFT=0`); `ph_addm64` (`src/lvalue.mc`: a FIXED `$a[K] = $a[K] + E` computes the
+  element address once; `MCPHP_ADDM=0`) and `ph_ac_walk` (`src/opt.mc`: an address's integer
+  terms summed into the load offset; `MCPHP_AC=0`). New forms in the band 502..506 (`smulh`,
+  `lsl`/`asr`/`lsr` immediate, shifted `add`), swept by llvm-mc. No NEON: clang vectorises only
+  the digit loads, and a 15-instruction scalar loop beats the twin's. Bench 0.267 -> 0.250 ms
+  against 0.125 (2.00x, 1.97-2.02 over the sitting): under 2x is not reached; the floor is
+  diffuse (calls, spills in the big inlined functions, allocation). `tests/g/117`, `118` + the
+  "second round" read-back in `tests/fixtures.sh`.

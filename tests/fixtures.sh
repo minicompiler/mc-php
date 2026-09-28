@@ -268,6 +268,25 @@ else
     echo "  FAIL  peephole: g/114's dump reads $* (want 1 1 1 1 1 1 1: arm64 add #4095, movz #4096, b.ge, @PAGEOFF]; x86-64 lea +4095, lea -4096, jge)"
     fail=1
 fi
+# decimal-2x's second round, read back on arm64 whatever the host: in g/118
+# a division by a constant is a multiply-high and no sdiv (P12) whose shift is
+# the immediate form (P13), the FIXED array's `$a[K] = $a[K] + E` is
+# ph_addm64 (src/lvalue.mc), its element address one add with a shifted
+# operand (P13) and its byte read's constants the load's own offset
+# (src/opt.mc's ph_ac_walk). The differential passes without any of it.
+set -- $("$MCPHP_BIN" --machine=arm64 --dump-asm $P/g/118-divk-shift-rmw.php 2>&1 | awk '
+    /^_/ { u = $0 }
+    u == "_f_divs:" && /smulh/ { a++ } u == "_f_divs:" && /sdiv/ { b++ }
+    u == "_f_divs:" && /asr x[0-9]+, x[0-9]+, #2$/ { c++ }
+    u == "_f_rmw:" && /, lsl #3$/ { d++ } u == "_f_rmw:" && /ldrb w[0-9]+, \[x[0-9]+, #23\]$/ { e++ }
+    END { print (a > 0), b + 0, (c > 0), (d > 0), (e > 0) }')
+set -- "$@" $("$MCPHP_BIN" --dump-ast $P/g/118-divk-shift-rmw.php 2>&1 | grep -c 'name=ph_addm64')
+if [ "$*" = "1 0 1 1 1 2" ]; then
+    echo "  second round: g/118's multiply-high, immediate shifts, shifted add, load offset and ph_addm64"
+else
+    echo "  FAIL  second round: g/118 reads $* (want 1 0 1 1 1 2: smulh and no sdiv, asr #2, an add lsl #3, ldrb [x, #23], two ph_addm64)"
+    fail=1
+fi
 # src/mach.mc's P10, read back on the three machines: every slow half in g/115's
 # acc() -- the element read of a hash, the store outside the array -- is
 # laid out after the function's ret, and the fast path falls through its
