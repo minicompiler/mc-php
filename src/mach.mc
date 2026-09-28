@@ -44,6 +44,10 @@
 //       moved past the epilogue once the function is finished, so the fast
 //       path falls through its guards (see the section below; both machines,
 //       MCPHP_LAYOUT=0 turns it off alone).
+//   P11 a LEAF (no call but a tail call, no raw word) keeps its locals in
+//       registers nobody saves: a parameter's own argument register or a free
+//       one of x1..x7 and x10..x15, and the saves and restores of the callee-
+//       saved ones it no longer uses go (arm64; MCPHP_LEAF=0 turns it off alone).
 //
 // The x86-64 half (both ABIs, over <float>'s) is the same idea in that
 // machine's forms: `lea rd, [rl + k]` is the add or sub of a constant, and a
