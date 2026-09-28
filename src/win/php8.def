@@ -12,13 +12,24 @@
 ; Measured: without it php refused the module with "The specified procedure
 ; could not be found". zend_fetch_function_str (a pointer and a size_t) is the
 ; same convention again: a call through php's function table finds its
-; function with it (lib/php_ext.mc's phx_flook).
+; function with it (lib/php_ext.mc's phx_flook). The hash functions and
+; instanceof_function_slow that php's arrays and objects crossing into the
+; module use (lib/php_ext.mc § engine values) are ZEND_FASTCALL too, each
+; aliased by its own byte count, eight per argument.
 LIBRARY php8.dll
 EXPORTS
 _emalloc == _emalloc@@8
 _erealloc == _erealloc@@16
 _efree == _efree@@8
 zend_fetch_function_str == zend_fetch_function_str@@16
+_zend_new_array == _zend_new_array@@8
+zend_hash_update == zend_hash_update@@24
+zend_hash_index_update == zend_hash_index_update@@24
+zend_hash_internal_pointer_reset_ex == zend_hash_internal_pointer_reset_ex@@16
+zend_hash_get_current_key_ex == zend_hash_get_current_key_ex@@32
+zend_hash_get_current_data_ex == zend_hash_get_current_data_ex@@16
+zend_hash_move_forward_ex == zend_hash_move_forward_ex@@16
+instanceof_function_slow == instanceof_function_slow@@16
 php_output_discard
 php_output_end
 php_output_flush
@@ -29,11 +40,15 @@ php_output_start_default
 php_output_write
 zend_argument_count_error
 zend_call_known_function
+zend_call_method_if_exists
 zend_clear_exception
 zend_get_exception_base
+zend_is_callable_ex
 zend_lookup_class
+zend_lookup_class_ex
 zend_read_property
 zend_throw_exception
 zend_throw_exception_internal
 zend_type_error
+zend_update_property
 zval_ptr_dtor

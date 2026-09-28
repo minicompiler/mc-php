@@ -9,6 +9,19 @@
 i64 ph_main_head;
 i64 ph_main_tail;
 
+// the boundary's record of what slot k of row fi declared (tables.mc)
+void ph_bnd_set(i64 fi, i64 k, i64 pt) {
+    i64 i = fi * (PH_MAXP + 1) + k;
+    i64 bk = ph_lt_k;
+    i64 nul = ph_lt_null;
+    if (pt < 0) nul = 1;                                  // untyped: anything
+    if (pt == PT_MIXED && bk >= 10) { pt = bk - 10; bk = BK_ANY; }   // ?int, ?array
+    st64(ph_fdpt + i * 8, pt);
+    st64(ph_fbk + i * 8, bk);
+    st64(ph_fbn + i * 8, ph_lt_n);
+    st64(ph_fbnul + i * 8, nul);
+}
+
 i64 ph_function() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
@@ -69,7 +82,11 @@ i64 ph_function() {
         i64 byref = 0;
         if (ph_at("&", 1)) { ph_next(); byref = 1; }
         i64 pt = -1;
+        ph_lt_k = BK_ANY;
+        ph_lt_n = 0;
+        ph_lt_null = 0;
         if (!ph_at("$", 1) && !ph_at("...", 3)) pt = ph_type_word(0);
+        ph_bnd_set(fi, np, pt);
         // The DECLARED primitive, kept for the coercion below: a parameter
         // with a default -- or one a forward call already fixed -- is forced
         // to PT_MIXED so that "not passed" is expressible, and with it went
@@ -181,7 +198,12 @@ i64 ph_function() {
     if (np > PH_MAXCP) ph_ncp = PH_MAXCP;
     st64(ph_fnp + fi * 8, np);
     i64 rt = PT_MIXED;
-    if (ph_at(":", 1)) { ph_next(); rt = ph_type_word(1); }
+    ph_lt_k = BK_ANY;
+    ph_lt_n = 0;
+    ph_lt_null = 0;
+    i64 drt = -1;
+    if (ph_at(":", 1)) { ph_next(); rt = ph_type_word(1); drt = rt; }
+    ph_bnd_set(fi, PH_MAXP, drt);
     if (fwd && rt != PT_VOID && rt != PT_MIXED) st64(ph_fwid + fi * 8, 1);
     if (fwd && rt != PT_VOID) rt = PT_MIXED;
     st64(ph_fret + fi * 8, rt);

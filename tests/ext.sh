@@ -182,7 +182,7 @@ nref=0
 # the last line names the reason, and it carries the classification. This
 # repository distinguishes two (docs/plan.md): `is refused by design` with
 # exit 3 is a DESIGN answer, and `is not implemented yet` with exit 1 is a
-# construct that has not been built. These seven are the second kind -- the
+# construct that has not been built. These three are the second kind -- the
 # schema promises them -- so that is what is required, and a message alone is
 # not enough (found by the reviewer of #15: a compile error that happened to
 # contain the phrase passed).
@@ -204,11 +204,9 @@ refuse() {
         *) bad "refusal: $1"; printf '      unclassified: %s\n' "$got" ;;
     esac
 }
-refuse 'function f(mixed $x): int { return 1; }'     'parameter whose type is not a declared scalar'
-refuse 'function f($x): int { return 1; }'           'parameter whose type is not a declared scalar'
-refuse 'function f(int $x = 1): int { return $x; }'  'parameter whose type is not a declared scalar'
-refuse 'function f(int ...$x): int { return 1; }'    'a variadic parameter in an exported function'
-refuse 'function f(int $x): array { return []; }'    'return type is not a declared scalar'
+# (mixed, untyped, a default, a variadic and an array return are taken since
+# step 17's signatures; what is left is a REFERENCE across the boundary)
+refuse 'function f(&$x): int { return 1; }'          'a by-reference parameter in an exported function'
 refuse 'function &f(int $x): int { return $x; }'     'a by-reference return in an exported function'
 # php HOISTS a global function, so this is ordinary php -- and D4 builds the
 # call against a zval signature and widens the declaration to match, which the
@@ -470,9 +468,10 @@ rm -rf "$tmp/build"
 # (a numeric string coerced, a word refused); an exception the callee throws,
 # caught by the module's own catch (class, message, code) and uncaught across
 # it (the engine's own object); an undefined function; output ordered around
-# the call; and the module RE-ENTERED through the callee. Then what cannot
-# cross: an array argument is refused while compiling, an array answer when
-# it arrives. examples/two-extensions is the same road between two modules.
+# the call; and the module RE-ENTERED through the callee. Then arrays, which
+# cross as the engine's own both ways (§ engine values), and an array answer
+# to `: int`, php's own TypeError. examples/two-extensions is the same road
+# between two modules.
 cat > "$tmp/r.php" <<'EOF2'
 <?php
 function ft_one(int $a): int { return cb_add($a, 1); }
@@ -522,24 +521,28 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/ft.build" 2>&1; then
         bad "function table: the module (exit $fnrc) and the interpreted source (exit $firc) differ"
         diff "$tmp/ft.i" "$tmp/ft.n" | head -12 | sed 's/^/      /'
     fi
-    # an array answer is refused where it arrives, by name
+    # an array answer crosses now (§ engine values), so `: int` refuses it
+    # with php's own return-value rule
     got=$("$PHP" -d extension="$tmp/build/r.$sx" -r 'function cb_add($a, $b) { return [$a]; }
         try { ft_two(1, 2); } catch (Error $e) { echo $e->getMessage(); }' 2>&1 | tr -d '\r')
-    want="mc-php: a php array, object or resource returned by cb_add(): only null, bool, int, float and string cross php's function table"
-    [ "$got" = "$want" ] && say "function table: an array answer refused by name" \
+    want="ft_two(): Return value must be of type int, array returned"
+    [ "$got" = "$want" ] && say "function table: an array answer to \`: int\` is php's own TypeError" \
         || { bad "function table: an array answer"; printf '      want %s\n      got  %s\n' "$want" "$got"; }
 else
     bad "function table: it would not build"; sed 's/^/      /' "$tmp/ft.build"
 fi
-printf '<?php\nfunction ft_arr(int $n): int { $a = [$n]; return cb_count($a); }\n' > "$tmp/r.php"
+# an array goes in and comes back: the engine's own array both ways
+printf '<?php\nfunction ft_arr(int $n): int { $a = [$n, $n + 1]; return cb_count($a); }\nfunction ft_back(int $n): array { return cb_twice([$n, "k" => [$n]]); }\n' > "$tmp/r.php"
 rm -f "$tmp/build/r.$sx"
-"$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/fa.out" 2>&1; rc=$?
-got=$(grep -o "mc-php: .*" "$tmp/fa.out" | head -1)
-case "$rc:$got" in
-    0:*) bad "function table: an array argument built anyway" ;;
-    *"an array or object argument to a function php's function table answers"*) say "function table: an array argument refused while compiling" ;;
-    *) bad "function table: an array argument: got $got" ;;
-esac
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/fa.out" 2>&1; then
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" -r 'function cb_count($a) { return count($a); } function cb_twice($a) { return [$a, $a]; }
+        echo ft_arr(5), " ", json_encode(ft_back(7));' 2>&1 | tr -d '\r')
+    want='2 [{"0":7,"k":[7]},{"0":7,"k":[7]}]'
+    [ "$got" = "$want" ] && say "function table: an array argument and an array answer, both the engine's own" \
+        || { bad "function table: arrays"; printf '      want %s\n      got  %s\n' "$want" "$got"; }
+else
+    bad "function table: arrays would not build"; sed 's/^/      /' "$tmp/fa.out"
+fi
 rm -rf "$tmp/build"
 
 # --- 15. a namespaced module, in the module as interpreted -------------------
@@ -622,6 +625,33 @@ elif [ "$rc" = 0 ]; then
     fi
 else
     bad "#[Extern]: it would not build"; sed 's/^/      /' "$tmp/xc.build"
+fi
+rm -rf "$tmp/build"
+
+# --- 17. signatures beyond the scalars, php's arrays and objects inside -----
+# tests/ext/values: every answer the interpreted source's, the errors an
+# internal function's (php's own parameter parsing, as a C extension's), and
+# the engine object a proxy stands for is the same object going back out.
+cp tests/ext/values/values.php "$tmp/r.php"
+cp tests/ext/values/check.php "$tmp/vc.php"
+sed -i.bak "s#__DIR__ . '/values.php'#__DIR__ . '/r.php'#" "$tmp/vc.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/v.build" 2>&1; then
+    "$PHP" -d extension="$tmp/build/r.$sx" "$tmp/vc.php" 2>&1 | tr -d '\r' > "$tmp/v.m"
+    "$PHP" "$tmp/vc.php" 2>&1 | tr -d '\r' > "$tmp/v.i"
+    ne=$(wc -l < tests/ext/values/errors.expect | tr -d ' ')
+    nm=$(wc -l < "$tmp/v.m" | tr -d ' ')
+    head -n $((nm - ne)) "$tmp/v.m" > "$tmp/v.mh"
+    head -n $((nm - ne)) "$tmp/v.i" > "$tmp/v.ih"
+    tail -n "$ne" "$tmp/v.m" > "$tmp/v.mt"
+    if cmp -s "$tmp/v.mh" "$tmp/v.ih" && cmp -s "$tmp/v.mt" tests/ext/values/errors.expect; then
+        say "values: arrays, objects, a class, a callable, ?array, a default and variadics, as interpreted; $ne errors in php's own words"
+    else
+        bad "values: module and interpreted differ"; diff "$tmp/v.ih" "$tmp/v.mh" | sed -n '1,12p' | sed 's/^/      /'
+        diff tests/ext/values/errors.expect "$tmp/v.mt" | sed -n '1,12p' | sed 's/^/      /'
+    fi
+else
+    bad "values: it would not build"; sed 's/^/      /' "$tmp/v.build"
 fi
 rm -rf "$tmp/build"
 

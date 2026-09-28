@@ -147,25 +147,37 @@ void ph_ext_check(i64 fi, uptr fl, i64 line) {
     // one comes first and says what to do.
     if (ld64(ph_fwid + fi * 8))
         ph_todo2(fl, line, "an exported function called before it is declared (move it above its first call)", name);
-    if (ld64(ph_fvar + fi * 8))
-        ph_todo2(fl, line, "a variadic parameter in an exported function", name);
     if (ld64(ph_fpr + fi * 8))
         ph_todo2(fl, line, "a by-reference parameter in an exported function", name);
     if (ld64(ph_frr + fi * 8))
         ph_todo2(fl, line, "a by-reference return in an exported function", name);
-    i64 rt = ld64(ph_fret + fi * 8);
-    if (rt != PT_VOID && !ph_ext_scalar(rt))
-        ph_todo2(fl, line, "an exported function whose return type is not a declared scalar", name);
+}
+
+// the declaration of slot k of row fi (tables.mc; PH_MAXP is the return)
+i64  ph_bd_pt(i64 fi, i64 k)  { return ld64(ph_fdpt + (fi * (PH_MAXP + 1) + k) * 8); }
+i64  ph_bd_k(i64 fi, i64 k)   { return ld64(ph_fbk + (fi * (PH_MAXP + 1) + k) * 8); }
+uptr ph_bd_n(i64 fi, i64 k)   { uptr n = ld64(ph_fbn + (fi * (PH_MAXP + 1) + k) * 8); if (!n) n = ""; return n; }
+i64  ph_bd_nul(i64 fi, i64 k) { return ld64(ph_fbnul + (fi * (PH_MAXP + 1) + k) * 8); }
+
+// is parameter k checked and read the scalar way (phx_chk, one tag)?
+i64 ph_ext_plain(i64 fi, i64 k) {
     i64 np = ld64(ph_fnp + fi * 8);
+    if (ld64(ph_fvar + fi * 8) && k == np - 1) return 0;
+    return ph_ext_scalar(ld64(ph_fpt + (fi * PH_MAXP + k) * 8));
+}
+
+// the count of arguments a call must pass: every parameter before the first
+// with a default, the variadic one not counted
+i64 ph_ext_nreq(i64 fi) {
+    i64 np = ld64(ph_fnp + fi * 8);
+    if (ld64(ph_fvar + fi * 8)) np = np - 1;
     i64 k = 0;
     loop {
         if (k >= np) break;
-        if (!ph_ext_scalar(ld64(ph_fpt + (fi * PH_MAXP + k) * 8)))
-            ph_todo2(fl, line, "an exported parameter whose type is not a declared scalar", name);
-        if (ld64(ph_fpd + (fi * PH_MAXP + k) * 8))
-            ph_todo2(fl, line, "a default value in an exported function", name);
+        if (ld64(ph_fpd + (fi * PH_MAXP + k) * 8)) break;
         k = k + 1;
     }
+    return k;
 }
 
 // ---- the handler -----------------------------------------------------------
@@ -216,8 +228,13 @@ i64 ph_ext_or(i64 fast, i64 slow) {
 }
 
 // the reader that turns argument k into the mc value the php function takes
-i64 ph_ext_read(i64 pt, i64 k) {
+i64 ph_ext_read(i64 fi, i64 k) {
+    i64 pt = ld64(ph_fpt + (fi * PH_MAXP + k) * 8);
     i64 ex = ph_ext_ident("ex", TY_UPTR);
+    if (ld64(ph_fvar + fi * 8) && k == ld64(ph_fnp + fi * 8) - 1)
+        return ph_c2("phx_rest", ex, ph_int(k), ty_parr);
+    if (pt == PT_ARR)    return ph_c2("phx_aarg", ex, ph_int(k), ty_parr);
+    if (pt == PT_MIXED)  return ph_c2("phx_zarg", ex, ph_int(k), ty_pzv);
     if (pt == PT_INT)    return ph_quiet("ld64", 1, ph_ext_argz(k, 0), 0, 0, 0, TY_I64);
     if (pt == PT_STRING) return ph_quiet("ld64", 1, ph_ext_argz(k, 0), 0, 0, 0, ty_pstr);
     if (pt == PT_FLOAT)  return ph_c2("phx_f", ex, ph_int(k), ty_f64);
@@ -237,6 +254,8 @@ i64 ph_ext_write(i64 rt, i64 call) {
     }
     if (rt == PT_FLOAT)  return ph_stmt_of(ph_c2("phx_ret_float", rv, call, TY_VOID));
     if (rt == PT_STRING) return ph_stmt_of(ph_c2("phx_ret_str", rv, call, TY_VOID));
+    if (rt == PT_ARR)    return ph_stmt_of(ph_c2("phx_ret_arr", rv, call, TY_VOID));
+    if (rt == PT_MIXED)  return ph_stmt_of(ph_c2("phx_ret_zv", rv, call, TY_VOID));
     return ph_stmt_of(ph_c2("phx_ret_bool", rv, call, TY_VOID));
 }
 
@@ -299,7 +318,7 @@ i64 ph_ext_body(i64 fi, uptr name, i64 np, i64 rt) {
     i64 k = 0;
     loop {
         if (k >= np) break;
-        st64(av + k * 8, ph_ext_read(ld64(ph_fpt + (fi * PH_MAXP + k) * 8), k));
+        st64(av + k * 8, ph_ext_read(fi, k));
         k = k + 1;
     }
     return ph_ext_write(rt, ph_calln(ph_mangle(name, "f_"), av, np, ph_mcty(rt)));
@@ -321,6 +340,22 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
         k = k - 1;
         uptr pn = ld64(ph_fpn + (fi * PH_MAXP + k) * 8);
         if (!pn) pn = "";                      // ph_fpn already holds the bare name
+        if (!ph_ext_plain(fi, k)) {
+            // declared beyond a scalar, or with a default, or variadic
+            u8 dv[64];
+            st64(dv, ph_ext_ident("ex", TY_UPTR));
+            st64(dv + 8, ph_int(k));
+            st64(dv + 16, ph_int(ph_bd_pt(fi, k)));
+            st64(dv + 24, ph_int(ph_bd_k(fi, k)));
+            st64(dv + 32, ph_raw(ph_bd_n(fi, k), cstrlen(ph_bd_n(fi, k))));
+            st64(dv + 40, ph_int(ph_bd_nul(fi, k)));
+            st64(dv + 48, ph_raw(name, cstrlen(name)));
+            st64(dv + 56, ph_raw(pn, cstrlen(pn)));
+            uptr cf = "phx_chk2";
+            if (ld64(ph_fvar + fi * 8) && k == np - 1) cf = "phx_chk_rest";
+            body = ph_ext_if(ph_calln(cf, dv, 8, TY_I64), body);
+            continue;
+        }
         u8 cv[48];
         st64(cv, ph_ext_ident("ex", TY_UPTR));
         st64(cv + 8, ph_int(k));
@@ -338,11 +373,19 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
         }
         body = ph_ext_if(chk, body);
     }
-    i64 nar = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR),
-                       0, 0, 0, TY_I64);
-    body = ph_ext_if(ph_ext_or(ph_bin(ph_tok("==", 2), nar, ph_int(np), TY_U8),
-                               ph_c3("phx_arity", ph_ext_ident("ex", TY_UPTR), ph_int(np),
-                                     ph_raw(name, cstrlen(name)), TY_I64)), body);
+    i64 nreq = ph_ext_nreq(fi);
+    i64 nmax = np;
+    if (ld64(ph_fvar + fi * 8)) nmax = 0 - 1;
+    if (nreq == nmax) {
+        i64 nar = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR),
+                           0, 0, 0, TY_I64);
+        body = ph_ext_if(ph_ext_or(ph_bin(ph_tok("==", 2), nar, ph_int(np), TY_U8),
+                                   ph_c3("phx_arity", ph_ext_ident("ex", TY_UPTR), ph_int(np),
+                                         ph_raw(name, cstrlen(name)), TY_I64)), body);
+    } else {
+        body = ph_ext_if(ph_c4("phx_arity2", ph_ext_ident("ex", TY_UPTR), ph_int(nreq), ph_int(nmax),
+                               ph_raw(name, cstrlen(name)), TY_I64), body);
+    }
 
     i64 pre = ph_stmt_of(ph_call("phx_enter", 0, 0, 0, 0, 0, TY_VOID));
     set_nd_next(pre, body);
@@ -364,6 +407,7 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
             i64 tag = 0;
             if (pk == PT_INT) tag = 4;                    // IS_LONG
             if (pk == PT_STRING) tag = 6;                 // IS_STRING
+            if (!ph_ext_plain(fi, k)) tag = 0;
             if (!tag) { cond = 0; break; }
             i64 ty = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
             cond = ph_bin(ph_tok("&&", 2), cond, ph_bin(ph_tok("==", 2), ty, ph_int(tag), TY_U8), TY_U8);
@@ -479,19 +523,42 @@ void ph_ext_get_module(uptr fl, i64 line) {
         u8 fv[32];
         st64(fv, ph_raw(name, cstrlen(name)));
         st64(fv + 8, ph_ext_addr(ph_ext_hname(name)));
-        st64(fv + 16, ph_int(np));
+        st64(fv + 16, ph_int(ph_ext_nreq(fi)));
         st64(fv + 24, ph_int(ld64(ph_fret + fi * 8)));
         i64 s = ph_stmt_of(ph_calln("phx_fn", fv, 4, TY_VOID));
         if (tail) set_nd_next(tail, s);
         if (!tail) head = s;
         tail = s;
+        i64 rtk = ld64(ph_fret + fi * 8);
+        if (rtk == PT_MIXED || rtk == PT_ARR) {
+            u8 rv4[32];
+            st64(rv4, ph_int(ph_bd_pt(fi, PH_MAXP)));
+            st64(rv4 + 8, ph_int(ph_bd_k(fi, PH_MAXP)));
+            st64(rv4 + 16, ph_raw(ph_bd_n(fi, PH_MAXP), cstrlen(ph_bd_n(fi, PH_MAXP))));
+            st64(rv4 + 24, ph_int(ph_bd_nul(fi, PH_MAXP)));
+            i64 r2 = ph_stmt_of(ph_calln("phx_ret2", rv4, 4, TY_VOID));
+            set_nd_next(tail, r2);
+            tail = r2;
+        }
         i64 k = 0;
         loop {
             if (k >= np) break;
             uptr pn = ld64(ph_fpn + (fi * PH_MAXP + k) * 8);
             if (!pn) pn = "";
-            i64 a = ph_stmt_of(ph_c2("phx_arg", ph_raw(pn, cstrlen(pn)),
+            i64 a = 0;
+            if (ph_ext_plain(fi, k)) {
+                a = ph_stmt_of(ph_c2("phx_arg", ph_raw(pn, cstrlen(pn)),
                                      ph_int(ld64(ph_fpt + (fi * PH_MAXP + k) * 8)), TY_VOID));
+            } else {
+                u8 av6[48];
+                st64(av6, ph_raw(pn, cstrlen(pn)));
+                st64(av6 + 8, ph_int(ph_bd_pt(fi, k)));
+                st64(av6 + 16, ph_int(ph_bd_k(fi, k)));
+                st64(av6 + 24, ph_raw(ph_bd_n(fi, k), cstrlen(ph_bd_n(fi, k))));
+                st64(av6 + 32, ph_int(ph_bd_nul(fi, k)));
+                st64(av6 + 40, ph_int(ld64(ph_fvar + fi * 8) && k == np - 1));
+                a = ph_stmt_of(ph_calln("phx_arg2", av6, 6, TY_VOID));
+            }
             set_nd_next(tail, a);
             tail = a;
             k = k + 1;

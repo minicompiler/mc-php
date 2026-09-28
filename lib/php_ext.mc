@@ -14,9 +14,10 @@
 //
 // What it does NOT do, and why it is not an omission: it registers no class,
 // no constant and no INI entry, and it declares no module globals. The scope
-// of this back end is plain functions with declared scalar parameters and a
-// declared scalar return (docs/plan.md D11); everything else is a NAMED
-// refusal in src/ext.mc rather than a silent wrong answer.
+// of this back end is plain functions -- any signature but a reference, with
+// php's arrays and objects crossing (§ engine values, at the end) -- and
+// everything else is a NAMED refusal in src/ext.mc and src/class.mc rather
+// than a silent wrong answer.
 
 // ---- zend_module_entry: Zend/zend_modules.h --------------------------------
 #define MEX_SIZE            168
@@ -295,6 +296,7 @@ uptr phx_module(uptr name, uptr version, i64 api, uptr build_id,
     // the address of an extern with adrp/add, which Apple's ld refuses for a
     // symbol the bundle resolves at load time (docs/plan.md § 5).
     ph_osink = &phx_owrite;
+    phx_eng_init();
     ph_obx = &phx_ob;
     st16(phx_me + MEX_SIZE_FIELD, MEX_SIZE);
     st32(phx_me + MEX_ZEND_API, api);
@@ -363,9 +365,14 @@ void phx_bad_type(uptr fname, i64 k, uptr pname, uptr want, uptr z) {
     uptr s = php_str_new(fname, php_cstrlen(fname));
     s = php_str_concat(s, php_str_new("(): Argument #", 14));
     s = php_str_concat(s, php_itos(k + 1));
-    s = php_str_concat(s, php_str_new(" ($", 3));
-    s = php_str_concat(s, php_str_new(pname, php_cstrlen(pname)));
-    s = php_str_concat(s, php_str_new(") must be of type ", 18));
+    // a variadic parameter's arguments are named by number alone, as php's
+    // own parameter parsing names them
+    if (ld8(pname)) {
+        s = php_str_concat(s, php_str_new(" ($", 3));
+        s = php_str_concat(s, php_str_new(pname, php_cstrlen(pname)));
+        s = php_str_concat(s, php_str_new(")", 1));
+    }
+    s = php_str_concat(s, php_str_new(" must be of type ", 17));
     s = php_str_concat(s, php_str_new(want, php_cstrlen(want)));
     s = php_str_concat(s, php_str_new(", ", 2));
     s = php_str_concat(s, phx_tname(z));
@@ -571,7 +578,10 @@ void phx_esc_from(i64 from) {
     loop {
         if (i <= from) break;
         i = i - 1;
-        php_str_release(ld64(ph_esc + i * 8));
+        uptr e = ld64(ph_esc + i * 8);
+        // bit 0: an engine array or object (§ engine values), not a string
+        if (e & 1) phx_unhold(e - 1);
+        else php_str_release(e);
     }
     if (ph_en > from) ph_en = from;
 }
@@ -585,6 +595,9 @@ void phx_copy(uptr d, uptr s, i64 n) {
 // MINIT ends here: what it built is module state, and a copy of it is what
 // every request that changed it is put back to
 void phx_snapshot() {
+    // the one class every proxy has, module memory like the rest of MINIT's
+    phx_pce = php_ce_alloc(php_str_new("mc-php engine object", 20));
+    php_ce_flag(phx_pce, 32);
     phx_mark = ph_top;
     phx_snap = php_alloc(phx_mark + 8);
     phx_copy(phx_snap, ph_heap, phx_mark);
@@ -928,7 +941,7 @@ uptr phx_nocross(uptr what, uptr name) {
     uptr m = php_str_new("mc-php: a php ", 14);
     m = php_str_concat(m, php_str_new(what, php_cstrlen(what)));
     m = php_str_concat(m, php_str_new(name, php_cstrlen(name)));
-    m = php_str_concat(m, php_str_new("(): only null, bool, int, float and string cross php's function table", 69));
+    m = php_str_concat(m, php_str_new("(): a resource does not cross php's function table", 50));
     php_throw_cls(php_str_new("Error", 5), m);
     return php_znull();
 }
@@ -940,11 +953,15 @@ uptr phx_nocross(uptr what, uptr name) {
 // A string -- the runtime's IS a zend_string -- is passed as it stands: the
 // engine copies the zval into the callee's frame and takes its own reference
 // there, so the callee may keep it. 0 is "cannot cross".
+// An array or an object crosses as the engine's own (§ engine values): the
+// answer is then 2, a zval the call owns and releases after.
+void phx_r2e(uptr z, uptr ez);
 i64 phx_zin(uptr d, i64 v, i64 t) {
     if (t == IZ_LONG) { st64(d, v); st32(d + ZVX_TYPE_INFO, t); return 1; }
     if (!t) {
         t = ld8(v + 8);
         if (t == IZ_UNDEF) t = IZ_NULL;
+        if (t == IZ_ARRAY || t == IZ_OBJECT) { phx_r2e(v, d); return 2; }
         if (t > IZ_STRING) return 0;
         v = ld64(v);
     }
@@ -1006,13 +1023,17 @@ i64 phx_fcall_do(uptr f, uptr c, i64 v1, i64 v2, i64 v3, i64 v4, uptr r, i64 laz
     i64 nt = ld64(c + PHF_NT);
     i64 n = nt & 255;
     i64 ok = 1;
-    if (n > 0) ok = phx_zin(pz, v1, (nt >> 8) & 255);
-    if (n > 1 && ok) ok = phx_zin(pz + 16, v2, (nt >> 16) & 255);
-    if (n > 2 && ok) ok = phx_zin(pz + 32, v3, (nt >> 24) & 255);
-    if (n > 3 && ok) ok = phx_zin(pz + 48, v4, (nt >> 32) & 255);
+    u8 own[4];
+    st32(own, 0);
+    if (n > 0) { ok = phx_zin(pz, v1, (nt >> 8) & 255); st8(own, ok == 2); }
+    if (n > 1 && ok) { ok = phx_zin(pz + 16, v2, (nt >> 16) & 255); st8(own + 1, ok == 2); }
+    if (n > 2 && ok) { ok = phx_zin(pz + 32, v3, (nt >> 24) & 255); st8(own + 2, ok == 2); }
+    if (n > 3 && ok) { ok = phx_zin(pz + 48, v4, (nt >> 32) & 255); st8(own + 3, ok == 2); }
     if (!ok) {
+        i64 j = 0;
+        loop { if (j >= 4) break; if (ld8(own + j)) zval_ptr_dtor(pz + j * 16); j = j + 1; }
         if (lazy) phx_enter_lz();
-        phx_nocross("array, object or resource passed to ", ld64(c + PHF_NAME));
+        phx_nocross("resource passed to ", ld64(c + PHF_NAME));
         return 0;
     }
     st32(r + ZVX_TYPE_INFO, IZ_UNDEF);
@@ -1022,6 +1043,8 @@ i64 phx_fcall_do(uptr f, uptr c, i64 v1, i64 v2, i64 v3, i64 v4, uptr r, i64 laz
     phx_lz = 0;
     zend_call_known_function(f, 0, 0, r, n, pz, 0);
     phx_lz = lz;
+    i64 j = 0;
+    loop { if (j >= 4) break; if (ld8(own + j)) zval_ptr_dtor(pz + j * 16); j = j + 1; }
     return 1;
 }
 
@@ -1044,9 +1067,14 @@ uptr phx_fres(uptr r, uptr z, uptr name) {
         st64(rz + 8, ld64(r + 8));
         uptr in = ld64(rz) + ZRX_VAL;
         t = ld8(in + ZVX_TYPE_INFO);
+        if (t == IZ_ARRAY || t == IZ_OBJECT) {
+            phx_e2r_into(in, z);
+            zval_ptr_dtor(rz);
+            return z;
+        }
         if (t > IZ_STRING) {
             zval_ptr_dtor(rz);
-            return phx_nocross("array, object or resource returned by ", name);
+            return phx_nocross("resource returned by ", name);
         }
         st64(z, ld64(in));
         st64(z + ZVX_TYPE_INFO, t);
@@ -1054,9 +1082,19 @@ uptr phx_fres(uptr r, uptr z, uptr name) {
         zval_ptr_dtor(rz);
         if (t != IZ_STRING) return z;
     }
+    if (t == IZ_ARRAY || t == IZ_OBJECT) {
+        // the engine's answer, copied or proxied, then its reference given
+        // back (from a copy of the zval: r may be z itself)
+        u8 rc[16];
+        st64(rc, ld64(r));
+        st64(rc + 8, ld64(r + 8));
+        phx_e2r_into(rc, z);
+        zval_ptr_dtor(rc);
+        return z;
+    }
     if (t != IZ_STRING) {
         zval_ptr_dtor(r);
-        return phx_nocross("array, object or resource returned by ", name);
+        return phx_nocross("resource returned by ", name);
     }
     // the engine's reference becomes the call's: kept until the call's
     // memory goes, as every string a runtime zval holds (php_str_esc)
@@ -1120,4 +1158,445 @@ i64 phx_fcall_l2(uptr c, i64 v1, i64 v2, i64 lazy) {
     if (lz) phx_lz = lz;
     if (ld8(pz + 32 + ZVX_TYPE_INFO) == IZ_LONG) return ld64(pz + 32);
     return phx_fl_slow(pz + 32, c, lazy);
+}
+
+// ---- engine values: php's arrays and objects inside the module ---------------
+// A php ARRAY crosses as a copy -- it is a value in php, so a copy is what the
+// callee would have had anyway -- and a php OBJECT as a PROXY: a runtime object
+// of the one class phx_pce, flag 32, with the zend_object after its header
+// (lib/php_rt.mc § an ENGINE object inside the runtime). What the module does
+// to a proxy -- read or write a property, call a method, ask its class or
+// instanceof -- is done to the engine's object, with the engine's rules and
+// the engine's errors. A string is the engine's zend_string either way.
+//
+// Each engine object or array the module holds is a REFERENCE it took, kept
+// on the same list as the strings a call escapes (ph_esc), tagged by bit 0,
+// and given back where those are: when the call's memory goes, or at
+// RSHUTDOWN for a call that pinned (phx_esc_from).
+#define EGX_EXCEPTION       960     // zend_executor_globals.exception
+#define IZ_ARRAY_EX         775     // IS_ARRAY | (REFCOUNTED | COLLECTABLE) << 8
+#define GCX_IMMUTABLE       64      // GC_IMMUTABLE: never counted
+#define HASH_KEY_IS_STRING  1
+#define PHX_POBJ            40      // where a proxy keeps its zend_object
+#define FETCH_NO_AUTOLOAD   128     // ZEND_FETCH_CLASS_NO_AUTOLOAD: instanceof loads nothing
+
+extern uptr _zend_new_array(i64 size);
+extern uptr zend_hash_update(uptr ht, uptr key, uptr zv);
+extern uptr zend_hash_index_update(uptr ht, i64 h, uptr zv);
+extern void zend_hash_internal_pointer_reset_ex(uptr ht, uptr pos);
+extern i32  zend_hash_get_current_key_ex(uptr ht, uptr sk, uptr nk, uptr pos);
+extern uptr zend_hash_get_current_data_ex(uptr ht, uptr pos);
+extern i32  zend_hash_move_forward_ex(uptr ht, uptr pos);
+extern void zend_update_property(uptr scope, uptr obj, uptr name, i64 len, uptr zv);
+extern i32  zend_call_method_if_exists(uptr obj, uptr name, uptr rv, i64 n, uptr params);
+extern uptr zend_lookup_class_ex(uptr name, uptr key, i64 flags);
+extern i64  instanceof_function_slow(uptr a, uptr b);
+
+uptr phx_eg;                        // &executor_globals, found at get_module
+uptr phx_pce;                       // the proxies' class, made before MINIT ends
+u64  phx_engt[5];                   // lib/php_rt.mc's ph_eng
+
+i64 phx_zexc() { return ld64(phx_eg + EGX_EXCEPTION) != 0; }
+
+// a reference the module takes on an engine array or object
+void phx_hold(uptr p) {
+    if (ld32(p + 4) & GCX_IMMUTABLE) return;
+    st32(p, ld32(p) + 1);
+    if (ph_en == ph_ecap) { ph_ecap = ph_ecap * 2 + 256; ph_esc = php_rc_grow(ph_esc, ph_en, ph_ecap); }
+    st64(ph_esc + ph_en * 8, p + 1);
+    ph_en = ph_en + 1;
+}
+
+// and its release: the zval shape zval_ptr_dtor reads, typed by the block's own
+// GC type -- the last reference frees it the engine's way
+void phx_unhold(uptr p) {
+    u8 z[16];
+    st64(z, p);
+    st32(z + ZVX_TYPE_INFO, (ld32(p + 4) & 15) | 256);
+    zval_ptr_dtor(z);
+}
+
+uptr phx_proxy(uptr zo) {
+    phx_hold(zo);
+    uptr o = php_alloc(PHX_POBJ + 8);
+    st32(o, 1);
+    st32(o + 4, IS_OBJECT);
+    st32(o + 8, 0);
+    st64(o + 16, phx_pce);
+    st64(o + 24, php_arr_new(1));
+    st64(o + 32, 0);
+    st64(o + PHX_POBJ, zo);
+    return o;
+}
+
+// An engine zval, into the runtime zval z. A reference is followed; a
+// resource cannot cross and is the runtime's Error.
+uptr phx_e2r_arr(uptr ht);
+void phx_e2r_into(uptr ez, uptr z) {
+    i64 t = phx_type(ez);
+    if (t == IZ_REFERENCE) { ez = ld64(ez) + ZRX_VAL; t = phx_type(ez); }
+    if (t == IZ_UNDEF) t = IZ_NULL;
+    // the type word only: an array bucket's collision link is the u32 above
+    // it, and a whole-word store there cut a chain into a loop
+    st64(z, ld64(ez));
+    st32(z + 8, t);
+    if (t == IZ_STRING) php_str_esc(ld64(ez));
+    if (t == IZ_ARRAY) st64(z, phx_e2r_arr(ld64(ez)));
+    if (t == IZ_OBJECT) st64(z, phx_proxy(ld64(ez)));
+    if (t > IZ_REFERENCE || t == IZ_RESOURCE) {
+        st64(z, 0);
+        st32(z + 8, IZ_NULL);
+        php_throw_cls(php_str_new("Error", 5), php_str_new("mc-php: a php resource cannot cross into the module", 51));
+    }
+}
+
+uptr phx_e2r(uptr ez) {
+    uptr z = php_alloc(ZV_SIZE);
+    st64(z + 8, 0);
+    phx_e2r_into(ez, z);
+    return z;
+}
+
+uptr phx_e2r_arr(uptr ht) {
+    uptr a = php_arr_new(8);
+    u8 pos[8];
+    st64(pos, 0);
+    zend_hash_internal_pointer_reset_ex(ht, pos);
+    loop {
+        uptr v = zend_hash_get_current_data_ex(ht, pos);
+        if (!v) break;
+        u8 sk[8];
+        u8 nk[8];
+        st64(sk, 0);
+        st64(nk, 0);
+        uptr slot = 0;
+        if (zend_hash_get_current_key_ex(ht, sk, nk, pos) == HASH_KEY_IS_STRING)
+            slot = php_arr_sslot(a, ld64(sk));
+        else slot = php_arr_islot(a, ld64(nk));
+        phx_e2r_into(v, slot);
+        zend_hash_move_forward_ex(ht, pos);
+    }
+    return a;
+}
+
+// A runtime value, into the engine zval ez with the references it needs: the
+// caller owns them, as return_value and an argument array do. A runtime
+// object that is not a proxy -- one of a class the module does not publish --
+// cannot cross, and is the runtime's Error with null in its place.
+uptr phx_r2e_arr(uptr a);
+void phx_r2e(uptr z, uptr ez) {
+    i64 t = 0;
+    if (z) t = php_zv_type(z);
+    if (t == IZ_UNDEF) t = IZ_NULL;
+    st64(ez, ld64(z));
+    st32(ez + ZVX_TYPE_INFO, t);
+    if (t == IZ_NULL) st64(ez, 0);
+    if (t == IZ_STRING) {
+        uptr s = ld64(z);
+        if (!(ld32(s + 4) & ZSX_INTERNED)) { st32(s, ld32(s) + 1); st32(ez + ZVX_TYPE_INFO, IZ_STRING_EX); }
+    }
+    if (t == IZ_ARRAY) { st64(ez, phx_r2e_arr(ld64(z))); st32(ez + ZVX_TYPE_INFO, IZ_ARRAY_EX); }
+    if (t == IZ_OBJECT) {
+        uptr o = ld64(z);
+        if (!php_is_proxy(o)) {
+            st64(ez, 0);
+            st32(ez + ZVX_TYPE_INFO, IZ_NULL);
+            php_throw_cls(php_str_new("Error", 5),
+                          php_str_concat(php_str_new("mc-php: an object of a class this module does not publish cannot cross into php: ", 81),
+                                         php_obj_cname(o)));
+            return;
+        }
+        uptr zo = ld64(o + PHX_POBJ);
+        st32(zo, ld32(zo) + 1);
+        st64(ez, zo);
+        st32(ez + ZVX_TYPE_INFO, IZ_OBJECT_EX);
+    }
+    if (t > IZ_OBJECT) { st64(ez, 0); st32(ez + ZVX_TYPE_INFO, IZ_NULL); }
+}
+
+uptr phx_r2e_arr(uptr a) {
+    i64 used = php_ht_used(a);
+    uptr ht = _zend_new_array(php_count(a));
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(a, i);
+        i = i + 1;
+        if (php_zv_type(b) == IZ_UNDEF) continue;
+        u8 ez[16];
+        phx_r2e(b, ez);
+        uptr k = ld64(b + 24);
+        if (k) zend_hash_update(ht, k, ez);
+        else zend_hash_index_update(ht, ld64(b + 16), ez);
+    }
+    return ht;
+}
+
+// what an engine call left: an exception the engine now holds becomes the
+// runtime's (phx_zcatch), so the module's own catch sees it
+void phx_zafter() { if (phx_zexc()) phx_zcatch(); }
+
+// ---- the five operations on a proxy (lib/php_rt.mc's ph_eng) ---------------
+uptr phx_pcname(uptr o) {
+    uptr n = ld64(ld64(ld64(o + PHX_POBJ) + ZOX_CE) + ZCX_NAME);
+    return php_str_new(n + ZSX_VAL, ld64(n + ZSX_LEN));
+}
+
+// The scope is the module's code, which is no class of the engine's: public
+// members only, as for any caller outside the class.
+uptr phx_pget(uptr o, uptr name, uptr scope, i64 quiet) {
+    if (ph_outn) php_flush();
+    uptr zo = ld64(o + PHX_POBJ);
+    u8 rv[16];
+    st32(rv + ZVX_TYPE_INFO, IZ_UNDEF);
+    uptr z = zend_read_property(0, zo, name + ZSX_VAL, ld64(name + ZSX_LEN), quiet, rv);
+    uptr r = phx_e2r(z);
+    if (z == rv) zval_ptr_dtor(rv);
+    phx_zafter();
+    return r;
+}
+
+void phx_pset(uptr o, uptr name, uptr v, uptr scope) {
+    if (ph_outn) php_flush();
+    u8 ez[16];
+    phx_r2e(v, ez);
+    zend_update_property(0, ld64(o + PHX_POBJ), name + ZSX_VAL, ld64(name + ZSX_LEN), ez);
+    zval_ptr_dtor(ez);
+    phx_zafter();
+}
+
+uptr phx_pcall(uptr o, uptr name, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    if (ph_outn) php_flush();
+    u8 av[96];
+    if (n > 0) phx_r2e(a1, av);
+    if (n > 1) phx_r2e(a2, av + 16);
+    if (n > 2) phx_r2e(a3, av + 32);
+    if (n > 3) phx_r2e(a4, av + 48);
+    if (n > 4) phx_r2e(a5, av + 64);
+    if (n > 5) phx_r2e(a6, av + 80);
+    u8 rv[16];
+    st32(rv + ZVX_TYPE_INFO, IZ_UNDEF);
+    uptr zo = ld64(o + PHX_POBJ);
+    i64 lz = phx_lz;
+    phx_lz = 0;
+    i64 ok = zend_call_method_if_exists(zo, name, rv, n, av) == 0;
+    phx_lz = lz;
+    i64 k = 0;
+    loop { if (k >= n) break; zval_ptr_dtor(av + k * 16); k = k + 1; }
+    if (phx_zexc()) { phx_zcatch(); return php_znull(); }
+    if (!ok) {
+        uptr m = php_str_concat(php_str_new("Call to undefined method ", 25), phx_pcname(o));
+        m = php_str_concat(m, php_str_new("::", 2));
+        m = php_str_concat(m, name);
+        m = php_str_concat(m, php_str_new("()", 2));
+        php_throw_cls(php_str_new("Error", 5), m);
+        return php_znull();
+    }
+    uptr r = phx_e2r(rv);
+    zval_ptr_dtor(rv);
+    return r;
+}
+
+i64 phx_pis(uptr o, uptr name) {
+    uptr ce = ld64(ld64(o + PHX_POBJ) + ZOX_CE);
+    uptr cz = phx_zstr(php_clskey(name));
+    uptr want = zend_lookup_class_ex(cz, 0, FETCH_NO_AUTOLOAD);
+    st32(cz, ld32(cz) - 1);
+    if (!ld32(cz)) phx_ef(cz);
+    if (!want) return 0;
+    if (want == ce) return 1;
+    return instanceof_function_slow(ce, want) & 255;
+}
+
+// get_module: the table, and the engine's globals
+void phx_eng_init() {
+    phx_eg = php_dlsym("executor_globals");
+    st64(phx_engt, &phx_pcname);
+    st64(phx_engt + 8, &phx_pget);
+    st64(phx_engt + 16, &phx_pset);
+    st64(phx_engt + 24, &phx_pcall);
+    st64(phx_engt + 32, &phx_pis);
+    ph_eng = phx_engt;
+}
+
+// ---- a signature beyond the scalars ------------------------------------------
+// What src/ext.mc emits for a parameter or a return that is not a declared
+// int, float, string or bool: the argument checked against what was DECLARED
+// (types.mc's BK_* kind, the class name, null allowed), then converted
+// (§ engine values), with php's own messages.
+#define MAYBE_ARRAY         128
+#define MAYBE_OBJECT        256
+#define MAYBE_CALLABLE      4096
+#define MAYBE_ANY           1022
+#define ZTX_VARIADIC        134217728   // _ZEND_IS_VARIADIC_BIT
+#define ZTX_LITERAL_NAME    8388608     // _ZEND_TYPE_LITERAL_NAME_BIT: ptr is a C string
+
+extern i64 zend_is_callable_ex(uptr callable, uptr obj, i64 flags, uptr name, uptr fcc, uptr err);
+
+// "f() expects exactly/at least/at most N argument(s), M given"
+i64 phx_arity2(uptr ex, i64 mn, i64 mx, uptr fname) {
+    i64 got = phx_nargs(ex);
+    if (got >= mn && (mx < 0 || got <= mx)) return 1;
+    uptr w = "exactly ";
+    i64 want = mn;
+    if (mx < 0 || mn != mx) {
+        if (got < mn) w = "at least ";
+        if (got >= mn) { w = "at most "; want = mx; }
+    }
+    uptr s = php_str_new(fname, php_cstrlen(fname));
+    s = php_str_concat(s, php_str_new("() expects ", 11));
+    s = php_str_concat(s, php_str_new(w, php_cstrlen(w)));
+    s = php_str_concat(s, php_itos(want));
+    if (want == 1) s = php_str_concat(s, php_str_new(" argument, ", 11));
+    if (want != 1) s = php_str_concat(s, php_str_new(" arguments, ", 12));
+    s = php_str_concat(s, php_itos(got));
+    s = php_str_concat(s, php_str_new(" given", 6));
+    zend_argument_count_error(s + ZSX_VAL);
+    return 0;
+}
+
+// the declared type's name in a TypeError, `?` in front when null is allowed
+uptr phx_bname(i64 dpt, i64 bk, uptr bname, i64 nul) {
+    uptr n = "mixed";
+    if (dpt == 0) n = "int";
+    if (dpt == 1) n = "float";
+    if (dpt == 2) n = "string";
+    if (dpt == 3) n = "bool";
+    if (dpt == 8) n = "array";
+    if (bk == 1) n = "callable";
+    if (bk == 2) n = "object";
+    if (bk == 3) n = bname;
+    if (!nul) return n;
+    uptr s = php_str_concat(php_str_new("?", 1), php_str_new(n, php_cstrlen(n)));
+    return s + ZSX_VAL;
+}
+
+// Argument k against its declaration; 0 after php's TypeError. Not passed is
+// fine: the arity was checked and a default fills it.
+i64 phx_chk2(uptr ex, i64 k, i64 dpt, i64 bk, uptr bname, i64 nul, uptr fname, uptr pname) {
+    if (k >= phx_nargs(ex)) return 1;
+    uptr z = phx_argz(ex, k);
+    i64 t = phx_type(z);
+    if (t == IZ_REFERENCE) { z = ld64(z) + ZRX_VAL; t = phx_type(z); }
+    if (t == IZ_NULL && nul) return 1;
+    i64 ok = 1;
+    if (dpt >= 0 && dpt <= 3) {
+        ok = 0;
+        if (dpt == 0 && t == IZ_LONG) ok = 1;
+        if (dpt == 1 && (t == IZ_DOUBLE || t == IZ_LONG)) ok = 1;
+        if (dpt == 2 && t == IZ_STRING) ok = 1;
+        if (dpt == 3 && (t == IZ_TRUE || t == IZ_FALSE)) ok = 1;
+    }
+    if (dpt == 8 && t != IZ_ARRAY) ok = 0;
+    if (bk == 2 && t != IZ_OBJECT) ok = 0;
+    if (bk == 3) {
+        ok = 0;
+        if (t == IZ_OBJECT) {
+            uptr ce = ld64(ld64(z) + ZOX_CE);
+            uptr cz = phx_zstr(php_str_new(bname, php_cstrlen(bname)));
+            uptr want = zend_lookup_class_ex(cz, 0, FETCH_NO_AUTOLOAD);
+            st32(cz, ld32(cz) - 1);
+            if (!ld32(cz)) phx_ef(cz);
+            if (want && (want == ce || (instanceof_function_slow(ce, want) & 255))) ok = 1;
+        }
+    }
+    if (bk == 1) {
+        u8 err[8];
+        st64(err, 0);
+        if (zend_is_callable_ex(z, 0, 0, 0, 0, err) & 255) return 1;
+        uptr s = php_str_new(fname, php_cstrlen(fname));
+        s = php_str_concat(s, php_str_new("(): Argument #", 14));
+        s = php_str_concat(s, php_itos(k + 1));
+        s = php_str_concat(s, php_str_new(" ($", 3));
+        s = php_str_concat(s, php_str_new(pname, php_cstrlen(pname)));
+        s = php_str_concat(s, php_str_new(") must be a valid callback", 26));
+        if (ld64(err)) {
+            s = php_str_concat(s, php_str_new(", ", 2));
+            s = php_str_concat(s, php_str_new(ld64(err), php_cstrlen(ld64(err))));
+            phx_ef(ld64(err));
+        }
+        zend_type_error(s + ZSX_VAL);
+        return 0;
+    }
+    if (ok) return 1;
+    phx_bad_type(fname, k, pname, phx_bname(dpt, bk, bname, nul), z);
+    return 0;
+}
+
+// every argument from k on, against the variadic parameter's declaration
+i64 phx_chk_rest(uptr ex, i64 k, i64 dpt, i64 bk, uptr bname, i64 nul, uptr fname, uptr pname) {
+    i64 n = phx_nargs(ex);
+    loop {
+        if (k >= n) break;
+        if (!phx_chk2(ex, k, dpt, bk, bname, nul, fname, "")) return 0;
+        k = k + 1;
+    }
+    return 1;
+}
+
+// argument k as a runtime zval, 0 when it was not passed
+uptr phx_zarg(uptr ex, i64 k) {
+    if (k >= phx_nargs(ex)) return 0;
+    return phx_e2r(phx_argz(ex, k));
+}
+
+uptr phx_aarg(uptr ex, i64 k) { return ld64(phx_zarg(ex, k)); }
+
+// the arguments from k on, a runtime array: a variadic parameter
+uptr phx_rest(uptr ex, i64 k) {
+    uptr a = php_arr_new(8);
+    i64 n = phx_nargs(ex);
+    loop {
+        if (k >= n) break;
+        phx_e2r_into(phx_argz(ex, k), php_arr_nextslot(a));
+        k = k + 1;
+    }
+    return a;
+}
+
+// the answer: return_value takes the references it needs
+void phx_ret_zv(uptr rv, uptr z) { if (z) phx_r2e(z, rv); }
+void phx_ret_arr(uptr rv, uptr a) {
+    st64(rv, phx_r2e_arr(a));
+    st32(rv + ZVX_TYPE_INFO, IZ_ARRAY_EX);
+}
+
+// A parameter's argument record for the declared type: a scalar's mask, an
+// array's, a callable's, an object's, a class by name, null allowed; the
+// variadic bit on the last. `nreq` in the function's entry is the count
+// without a default.
+i64 phx_mask2(i64 dpt, i64 bk, i64 nul) {
+    i64 m = phx_mask(dpt);
+    if (dpt == 8) m = MAYBE_ARRAY;
+    if (bk == 1) m = MAYBE_CALLABLE;
+    if (bk == 2) m = MAYBE_OBJECT;
+    if (dpt < 0 || (dpt == 7 && bk == 0)) m = MAYBE_ANY;
+    if (nul && m != MAYBE_ANY) m = m | MAYBE_NULL;
+    return m;
+}
+
+void phx_arg2(uptr name, i64 dpt, i64 bk, uptr bname, i64 nul, i64 variadic) {
+    phx_arg(name, 0);
+    uptr a = phx_ai + (phx_nai - 1) * AIX_SIZE;
+    i64 m = phx_mask2(dpt, bk, nul);
+    if (bk == 3) {
+        st64(a + AIX_TYPE_PTR, bname);
+        m = ZTX_LITERAL_NAME;
+        if (nul) m = m | MAYBE_NULL;
+    }
+    if (variadic) m = m | ZTX_VARIADIC;
+    st32(a + AIX_TYPE_MASK, m);
+}
+
+// and the return's, written over what phx_fn put there
+void phx_ret2(i64 dpt, i64 bk, uptr bname, i64 nul) {
+    uptr e = phx_fe + (phx_nfn - 1) * FEX_SIZE;
+    uptr a = ld64(e + FEX_ARG_INFO);
+    i64 m = phx_mask2(dpt, bk, nul);
+    if (bk == 3) {
+        st64(a + AIX_TYPE_PTR, bname);
+        m = ZTX_LITERAL_NAME;
+        if (nul) m = m | MAYBE_NULL;
+    }
+    st32(a + AIX_TYPE_MASK, m);
 }

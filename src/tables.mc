@@ -58,6 +58,14 @@ i64  ph_frr[PH_MAXFN];                  // 1 when declared `function &f()`
 // extension back end reads it: the refusal it would otherwise print names the
 // declared type, which is not what is wrong.
 i64  ph_fwid[PH_MAXFN];
+// What each parameter and the return DECLARED, for the extension boundary
+// (src/ext.mc checks an argument against it): the declared primitive (-1 for
+// none), types.mc's BK_* kind, the class name for BK_CLASS, and 1 when null
+// is allowed. Slot PH_MAXP of a row is the return.
+i64  ph_fdpt[PH_MAXFN * (PH_MAXP + 1)];
+i64  ph_fbk[PH_MAXFN * (PH_MAXP + 1)];
+uptr ph_fbn[PH_MAXFN * (PH_MAXP + 1)];
+i64  ph_fbnul[PH_MAXFN * (PH_MAXP + 1)];
 i64  ph_nfn;
 // the row ph_function() last defined, so ph_program can hand a TOP-LEVEL
 // declaration to the extension back end (a `function` nested in another one

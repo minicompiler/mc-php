@@ -113,5 +113,23 @@ int main(void) {
     P("ZRX_VAL",             offsetof(zend_reference, val));
     P("ZCX_PARENT",          offsetof(zend_class_entry, parent));
     P("IZ_OBJECT_EX",        IS_OBJECT_EX);
+
+    /* engine values inside the module (lib/php_ext.mc § engine values): the
+       pending exception, an array's type_info, the never-counted flag, the
+       key kind a hash iterator answers, instanceof's no-autoload lookup */
+    P("EGX_EXCEPTION",       offsetof(zend_executor_globals, exception));
+    P("IZ_ARRAY_EX",         IS_ARRAY_EX);
+    P("GCX_IMMUTABLE",       GC_IMMUTABLE);
+    P("HASH_KEY_IS_STRING",  HASH_KEY_IS_STRING);
+    P("FETCH_NO_AUTOLOAD",   ZEND_FETCH_CLASS_NO_AUTOLOAD);
+
+    /* a signature beyond the scalars: the masks, and the two bits of a
+       zend_type an argument record may carry */
+    P("MAYBE_ARRAY",         MAY_BE_ARRAY);
+    P("MAYBE_OBJECT",        MAY_BE_OBJECT);
+    P("MAYBE_CALLABLE",      MAY_BE_CALLABLE);
+    P("MAYBE_ANY",           MAY_BE_ANY);
+    P("ZTX_VARIADIC",        _ZEND_IS_VARIADIC_BIT);
+    P("ZTX_LITERAL_NAME",    _ZEND_TYPE_LITERAL_NAME_BIT);
     return 0;
 }

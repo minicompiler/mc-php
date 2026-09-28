@@ -1162,6 +1162,19 @@ i64 ph_stmt_1() {
                     if (rw == 4) e = ph_to_bool(e, PT_MIXED);
                 }
             }
+            // `: array` returning a zval (a call's answer): php's rule too,
+            // then the array out of it -- it was stored as it was, a zval
+            // where an array pointer belongs
+            if (ph_fn_ret == PT_ARR && ph_ety != PT_ARR && ph_ety != PT_PK) {
+                u8 rcb[48];
+                st64(rcb, ph_to_mixed(e, ph_ety));
+                st64(rcb + 8, ph_int(5));
+                st64(rcb + 16, ph_strlit("", 0));
+                st64(rcb + 24, ph_strlit(ph_cur_fn, cstrlen(ph_cur_fn)));
+                st64(rcb + 32, ph_int(0));
+                st64(rcb + 40, ph_strlit("", 0));
+                e = ph_c1("php_zv_arr_r", ph_calln("php_param_coerce", rcb, 6, ty_pzv), ty_parr);
+            }
             rthrow = ph_can_throw;
             ph_can_throw = ph_can_throw | sctr;
         }

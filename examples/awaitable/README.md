@@ -35,15 +35,13 @@ off as the compiler learns it:
 | 30 | `public ?\Throwable $exception` | DONE with it: a fully-qualified name is one token |
 | 13-18 | `#[Extern('curl')] function curl_easy_init(): Ptr {}` and five more | DONE (the awaitable-extern branch): a C function declared in php, `#[Extern('lib', variadic: N)]` (`src/extern.mc`, `tests/c/08-extern.php`, `tests/ext.sh` step 16) |
 | 23-24 (was) | `#[Extern(host: true, kind: 'data')] function executor_globals(): Ptr {}` and `zend_ce_exception` | REMOVED from the source: calling a php callable, catching what it throws and handing back an object are the compiler's own crossing, so the source never reads the engine's globals |
-| 36 | `function await(callable $fn, mixed ...$args): Intent` | `a variadic parameter in an exported function: awaitable\await` -- and behind it a `callable` parameter and a class return, both outside the scalar signatures -- **pinned by the gate** |
-| 65 | `function parallel(callable $fn, mixed ...$args): array` | the same, and an `array` return |
+| 36 | `function await(callable $fn, mixed ...$args): Intent` | DONE (the awaitable-classes branch): a signature beyond the scalars -- `callable`, `mixed ...$args`, a class, `array` -- checked as php's own parameter parsing checks it, and php's arrays and objects inside the module (`lib/php_ext.mc` § engine values, `tests/ext.sh` step 17) |
+| 65 | `function parallel(callable $fn, mixed ...$args): array` | DONE with it |
+| 26 | `final class Intent` and the three sync classes | `a class an extension would publish: awaitable\Intent` -- the back end registers no class yet, and a class that would be published is refused rather than compiled into a module php cannot see it in -- **pinned by the gate** (Windows: line 13's own refusal) |
 
-With those five stubbed out it builds -- and the four classes are compiled and NOT published:
-`class_exists('awaitable\Semaphore')` is false in a php that loaded it, with no refusal, because
-the back end registers no class yet (`docs/php-extension.md`). Behind the signatures the BODIES
-need what no PHP source can say today: a C library called with a C variadic (`#[Extern]`, whose
-`variadic:` field is exactly the placement below), a php callable called back from native code,
-`fork`, `pipe` and pthreads.
+Behind the classes the BODIES need what the source does not say yet: a php callable called from
+the module (`$fn(...$args)`), `fork`, `pipe` and pthreads -- the C library itself is `#[Extern]`'s,
+with `variadic:` placing curl's variadic argument.
 
 ## How it is checked -- `tests/examples.sh`
 

@@ -477,8 +477,6 @@ i64 ph_ftable_call(uptr name, uptr av, i64 na, uptr fl, i64 line, i64 fb) {
         if (i < na) {
             i64 t = ph_aty(av, i);
             v = ph_a(av, i);
-            if (ph_is_arr(t) || t == PT_OBJ)
-                ph_todo2(fl, line, "an array or object argument to a function php's function table answers", name);
             i64 w = 0;
             if (t == PT_INT) w = 4;                         // IS_LONG
             if (t == PT_STRING) w = 6;                      // IS_STRING

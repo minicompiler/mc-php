@@ -372,7 +372,7 @@ fi
 if [ "$host" = windows ]; then
     pin "$EX" "awaitable.src.php:13: mc-php: an #[Extern] function on Windows: the link names no library for it: awaitable\\curl_easy_init"
 else
-    pin "$EX" "awaitable.src.php:36: mc-php: a variadic parameter in an exported function: awaitable\\await is not implemented yet (probes/t10/RESULTS.md)"
+    pin "$EX" "awaitable.src.php:26: mc-php: a class an extension would publish: awaitable\\Intent is not implemented yet (probes/t10/RESULTS.md)"
 fi
 
 [ "$fail" = 0 ] || { echo "  examples: something failed"; exit 1; }

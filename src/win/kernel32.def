@@ -16,6 +16,8 @@ GetFileAttributesExA
 GetFullPathNameA
 GetLastError
 GetModuleFileNameA
+GetModuleHandleA
+GetProcAddress
 GetStdHandle
 MoveFileExA
 ReadFile
