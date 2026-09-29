@@ -159,7 +159,10 @@ uptr php_str_alloc(i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 }
 
 // php's pefree for a string whose count reached zero
-void php_str_free(uptr s) {
+void php_str_free(uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    // shared mode (docs/threads.md § Step 3): once a thread has started,
+    // counts may have raced, so a string is not freed now but at RSHUTDOWN
+    if (ld64(phT + PHT_ph_shared)) { php_str_defer(phT, s); return; }
     if (ld32(s + 4) & ZSX_PERSIST) { free(s); return; }
     _efree(s, "mc-php", 0, 0, 0);
 }
@@ -176,12 +179,105 @@ void php_rc_drain(i64 m) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
         uptr s = ld64(p + (i << 3));
         i64 rc = ld32(s);
         if (rc > 1) { st32(s, rc - 1); continue; }
+        if (ld64(phT + PHT_ph_shared)) { php_str_defer(phT, s); continue; }
         if (ld32(s + 4) & ZSX_PERSIST) { free(s); continue; }
         _efree(s, "mc-php", 0, 0, 0);
     }
     if (ld64(phT + PHT_ph_pn) > m) st64(phT + PHT_ph_pn, m);
 }
 void phx_ef(uptr p) { _efree(p, "mc-php", 0, 0, 0); }
+
+// Shared mode's deferred frees: a string whose count reached zero while
+// counts could race waits here, tagged with its request, and is freed once
+// by that request's own thread at RSHUTDOWN, after every thread of it has
+// ended (php_str_undefer). A race may have counted it to zero twice, so the
+// list may hold it twice; the free takes each once. Process memory, under
+// the runtime's lock: any thread of the request may add to it.
+uptr ph_dfr;                        // (root, string) pairs
+i64  ph_dfrn;
+i64  ph_dfrc;
+void php_str_defer(uptr phT, uptr s) {
+    uptr root = ld64(phT + PHT_ph_troot);
+    if (!root) root = phT;
+    ph_lock();
+    if (ph_dfrn == ph_dfrc) {
+        i64 c = ph_dfrc * 2 + 1024;
+        uptr t = ph_os_map(c * 16);
+        if (!t) { ph_unlock(); php_die("mc-php: cannot map the deferred frees\n", 38); }
+        i64 i = 0;
+        loop { if (i >= ph_dfrn * 2) break; st64(t + i * 8, ld64(ph_dfr + i * 8)); i = i + 1; }
+        if (ph_dfr) ph_os_unmap(ph_dfr, ph_dfrc * 16);
+        ph_dfr = t;
+        ph_dfrc = c;
+    }
+    st64(ph_dfr + ph_dfrn * 16, root);
+    st64(ph_dfr + ph_dfrn * 16 + 8, s);
+    ph_dfrn = ph_dfrn + 1;
+    ph_unlock();
+}
+void php_str_undefer(uptr root) {
+    ph_lock();
+    // this request's entries to the front, the others after them
+    i64 m = 0;
+    i64 i = 0;
+    loop {
+        if (i >= ph_dfrn) break;
+        if (ld64(ph_dfr + i * 16) == root) {
+            uptr r = ld64(ph_dfr + m * 16);
+            uptr v = ld64(ph_dfr + m * 16 + 8);
+            st64(ph_dfr + m * 16, ld64(ph_dfr + i * 16));
+            st64(ph_dfr + m * 16 + 8, ld64(ph_dfr + i * 16 + 8));
+            st64(ph_dfr + i * 16, r);
+            st64(ph_dfr + i * 16 + 8, v);
+            m = m + 1;
+        }
+        i = i + 1;
+    }
+    // sorted by address (shell sort, in place: no allocation here), so a
+    // string listed twice is freed once
+    i64 gap = m / 2;
+    loop {
+        if (gap < 1) break;
+        i = gap;
+        loop {
+            if (i >= m) break;
+            uptr v = ld64(ph_dfr + i * 16 + 8);
+            i64 j = i;
+            loop {
+                if (j < gap) break;
+                uptr w = ld64(ph_dfr + (j - gap) * 16 + 8);
+                if (w <= v) break;
+                st64(ph_dfr + j * 16 + 8, w);
+                j = j - gap;
+            }
+            st64(ph_dfr + j * 16 + 8, v);
+            i = i + 1;
+        }
+        gap = gap / 2;
+    }
+    uptr last = 0;
+    i = 0;
+    loop {
+        if (i >= m) break;
+        uptr s = ld64(ph_dfr + i * 16 + 8);
+        if (s != last) {
+            if (ld32(s + 4) & ZSX_PERSIST) free(s);
+            if (!(ld32(s + 4) & ZSX_PERSIST)) _efree(s, "mc-php", 0, 0, 0);
+            last = s;
+        }
+        i = i + 1;
+    }
+    // the other requests' entries move down
+    i = m;
+    loop {
+        if (i >= ph_dfrn) break;
+        st64(ph_dfr + (i - m) * 16, ld64(ph_dfr + i * 16));
+        st64(ph_dfr + (i - m) * 16 + 8, ld64(ph_dfr + i * 16 + 8));
+        i = i + 1;
+    }
+    ph_dfrn = ph_dfrn - m;
+    ph_unlock();
+}
 uptr phx_er(uptr p, i64 n) { return _erealloc(p, n, "mc-php", 0, 0, 0); }
 void phx_pf(uptr p) { free(p); }
 
@@ -671,6 +767,12 @@ void phx_stat_line() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 void phx_zexc_drop();
 
 i64 phx_rshutdown(i64 mtype, i64 mnum) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    // every thread this request started ends with it (docs/threads.md §
+    // Step 3): waited for, joined or detached; one neither joined nor
+    // detached that ended on a throwable is reported, as a warning -- the
+    // request is over, there is nothing left to catch it
+    uptr te = php_thr_endall(phT, 0, 0);
+    if (te) php_thr_report(te);
     php_flush();
     php_request_reset();
     // a userland function a call site cached is gone with the request
@@ -703,6 +805,10 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) { uptr phT = ph_tcur; if (!phT) phT = ph_
     st64(phT + PHT_phx_cl, 0);
     st64(phT + PHT_phx_cc, 0);
     st64(phT + PHT_phx_keep, 0);
+    // last: the strings shared mode kept, the memory the request's threads
+    // kept, and shared mode off
+    if (ld64(phT + PHT_ph_shared)) php_str_undefer(phT);
+    php_thr_endall(phT, 1, 0);
     return 0;
 }
 

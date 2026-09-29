@@ -326,6 +326,46 @@ if build examples/hello "examples/hello/mcphp$suf.toml" "hello.$sx" && [ -f "$ds
     done
 fi
 
+# --- threads: the thread API on the program road --------------------------------
+# examples/threads/primes.php counts the primes below 2 000 000 in slices, one
+# thread each (docs/threads.md § Step 3), on 1 thread and on 4; the answer is
+# checked against the one recorded here and against its C twin (pthreads or
+# Win32 threads, c/primes.c), and the bench row -- mc-php's and the twin's
+# wall clock on 1 and 4 threads, the best of three -- is printed, not gated.
+echo "  -- threads"
+EX=examples/threads
+tw="primes below 2000000: 148933"
+tb=$tmp/primes
+t1=$(PRIMES_THREADS=1 MCPHP_BIN=$BIN MCPHP_OUT=$tb sh "$here/mcphp.sh" "$EX/primes.php" 2>&1 | tr -d '\r')
+t4=$(PRIMES_THREADS=4 MCPHP_BIN=$BIN MCPHP_OUT=$tb sh "$here/mcphp.sh" "$EX/primes.php" 2>&1 | tr -d '\r')
+if [ "$t1" = "$tw" ] && [ "$t4" = "$tw" ]; then
+    say "primes.php: $tw, on 1 thread and on 4"
+else
+    bad "primes.php: want '$tw', got '$t1' on 1 thread and '$t4' on 4"
+fi
+tx=$tb; [ -f "$tb.exe" ] && tx=$tb.exe
+CC=${CC:-cc}
+if command -v "$CC" >/dev/null 2>&1 && "$CC" -O2 -o "$tmp/primes-c" "$EX/c/primes.c" -lpthread 2>"$tmp/c.err"; then
+    tc=$tmp/primes-c; [ -f "$tc.exe" ] && tc=$tc.exe
+    ct=$(PRIMES_THREADS=4 "$tc" | tr -d '\r')
+    [ "$ct" = "$tw" ] && say "the C twin: $ct" || bad "the C twin: want '$tw', got '$ct'"
+    # wall clock, best of three, measured by php itself
+    row=$("$PHP" -r '
+        $b = [];
+        foreach ([[$argv[1], 1], [$argv[1], 4], [$argv[2], 1], [$argv[2], 4]] as $k => [$x, $n]) {
+            $b[$k] = INF;
+            for ($r = 0; $r < 3; $r++) {
+                putenv("PRIMES_THREADS=$n");
+                $t = hrtime(true); exec(escapeshellarg($x)); $d = (hrtime(true) - $t) / 1e6;
+                if ($d < $b[$k]) $b[$k] = $d;
+            }
+        }
+        printf("mc-php %.0f ms on 1 thread, %.0f ms on 4; C %.0f ms and %.0f ms", $b[0], $b[1], $b[2], $b[3]);' "$tx" "$tc")
+    say "bench: $row -- best of three; not gated"
+else
+    skip "the C twin: no $CC here, or it would not build -- no C column"
+fi
+
 # --- awaitable -----------------------------------------------------------------
 echo "  -- awaitable"
 EX=examples/awaitable

@@ -39,3 +39,78 @@ function probe(int $x, int $id): int {
     catch (\Error $e) { return str_contains($e->getMessage(), 'another thread') ? 1 : 100; }
 }
 function guard(int $n): int { return mcphp_threads('th\probe', $n, 0); }
+
+// The thread API (docs/threads.md § Step 3) on this road: compiled
+// callables on native threads, their values kept after the join, a
+// throwable rethrown at the join, and a php callable refused. api.php runs
+// these, graded by tests/ext.sh step 20b against its recording.
+function api(int $n, int $iters): int {
+    $hs = [];
+    for ($i = 0; $i < $n; $i++) $hs[] = mcphp_thread_start(fn(int $k, int $id): int => work($k, $id), $iters, $i);
+    $sum = 0;
+    foreach ($hs as $h) $sum += (int) mcphp_thread_join($h);
+    return $sum;
+}
+$kept_s = "";
+$kept_a = [];
+$kept_o = new _Acc();
+function keep_one(int $k): int {
+    global $kept_s, $kept_a, $kept_o;
+    $kept_s = str_repeat("k", $k);
+    $kept_a = range(1, $k);
+    $kept_o = new _Acc();
+    $kept_o->add($kept_s);
+    return 1;
+}
+function kept(): string { global $kept_s, $kept_a, $kept_o; return $kept_s . " " . count($kept_a) . " " . $kept_o->n; }
+function keep(int $k): string {
+    mcphp_thread_join(mcphp_thread_start(fn(int $x): int => keep_one($x), $k));
+    return kept();
+}
+function keep_detached(int $k): string {
+    mcphp_thread_detach(mcphp_thread_start(fn(int $x): int => keep_one($x), $k));
+    while (mcphp_thread_running() > 0) usleep(1000);
+    return kept();
+}
+function thrower(string $m): int { throw new \LogicException($m); }
+function rethrow(): string {
+    $h = mcphp_thread_start(fn(string $m): int => thrower($m), "from a thread");
+    try {
+        mcphp_thread_join($h);
+        return "none";
+    } catch (\LogicException $e) {
+        return "caught " . $e->getMessage();
+    }
+}
+function refuse(callable $f): string {
+    try { mcphp_thread_start($f); return "started"; }
+    catch (\Error $e) { return $e->getMessage(); }
+}
+// shared mode: the flag, and whether a fresh string would be written in place
+function mode(): string { $s = str_repeat("m", 3); return mcphp_shared_mode() . " " . mcphp_str_mine($s); }
+// a copy made for another thread is a distinct object, destructed once by
+// the thread that owns it: the worker destructs its copy of the argument and
+// what it made when it ends; the request's copies of the results are the
+// request's (and a module's request end runs no destructor,
+// docs/php-extension.md)
+final class _D {
+    public function __construct(public int $n) {}
+    public function __destruct() { echo "dtor ", $this->n, "\n"; }
+}
+function d_peek(_D $d): int { return $d->n; }
+function d_make(int $n): _D { return new _D($n); }
+function d_pass(_D $d): _D { return $d; }
+function dtors(): string {
+    $a = new _D(1);
+    $r1 = mcphp_thread_join(mcphp_thread_start(fn(_D $x): int => d_peek($x), $a));
+    $r2 = mcphp_thread_join(mcphp_thread_start(fn(int $n): _D => d_make($n), 2));
+    $r3 = mcphp_thread_join(mcphp_thread_start(fn(_D $x): _D => d_pass($x), $a));
+    return $r1 . " " . $r2->n . " " . $r3->n . " " . (($r3 === $a) ? "same" : "distinct");
+}
+// a detached thread the request does not wait for itself: RSHUTDOWN does,
+// so its line comes out before php ends
+function late(int $ms): int { usleep($ms * 1000); echo "the detached thread finished inside the request\n"; return 1; }
+function detach_late(int $ms): string {
+    mcphp_thread_detach(mcphp_thread_start(fn(int $m): int => late($m), $ms));
+    return "detached, running " . mcphp_thread_running();
+}

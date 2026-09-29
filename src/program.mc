@@ -626,9 +626,13 @@ void user_init() {
         uptr r = ph_swap(ph_rt, ph_rt_size, "i64 outer = !ld64(phT + PHT_ph_tidx);", "i64 outer = 0;");
         r = ph_swap(r, cstrlen(r), "uptr php_thr_block(uptr from, i64 idx) {", "uptr php_thr_block_nts(uptr from, i64 idx) {");
         r = ph_swap(r, cstrlen(r), "uptr php_ce_sslot_s(uptr ce, uptr name, uptr scope) {", "uptr php_ce_sslot_s_nts(uptr ce, uptr name, uptr scope) {");
+        // a php callable on a thread: a ZTS php can give it a context of its
+        // own, which is threads step 3b and not built yet
+        r = ph_swap(r, cstrlen(r), "a php callable cannot run on another thread in a php without thread safety; build the module with thread_safety = \\\"zts\\\", or pass a compiled function",
+                    "a php callable cannot run on another thread yet: its own php context on the worker is threads step 3b; pass a compiled function");
         p_push_source("php runtime", r, cstrlen(r));
         ph_push_rt_host();
-        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12320\n", "#define PHT_SIZE 12440\n");
+        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12344\n", "#define PHT_SIZE 12464\n");
         p_push_source("php thread block", t, cstrlen(t));
         pass(&ph_tls_pass);
         return;

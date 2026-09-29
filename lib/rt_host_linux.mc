@@ -95,6 +95,15 @@ extern i64 pthread_create(uptr tid, uptr attr, uptr fn, uptr arg);
 extern i64 pthread_join(uptr tid, uptr ret);
 extern uptr mmap(uptr addr, i64 n, i64 prot, i64 flags, i64 fd, i64 off);
 extern i64 munmap(uptr addr, i64 n);
+// The runtime's own lock (the thread API's table and lists, lib/php_rt.mc §
+// the thread API): one mutex, made with the thread key. Not the user's lock:
+// those are step 4.
+extern i64 pthread_mutex_init(uptr m, uptr attr);
+extern i64 pthread_mutex_lock(uptr m);
+extern i64 pthread_mutex_unlock(uptr m);
+u8 ph_lk[64];
+void ph_lock() { pthread_mutex_lock(ph_lk); }
+void ph_unlock() { pthread_mutex_unlock(ph_lk); }
 i64 ph_tkey;
 uptr ph_tget() { return pthread_getspecific(ph_tkey); }
 void ph_tset(uptr b) { pthread_setspecific(ph_tkey, b); }
@@ -103,7 +112,10 @@ void ph_tinit() {
     st64(k, 0);
     pthread_key_create(k, 0);
     ph_tkey = ld64(k);
+    pthread_mutex_init(ph_lk, 0);
 }
+// the logical CPUs online (mcphp_hardware_concurrency): sysconf(_SC_NPROCESSORS_ONLN)
+i64 ph_os_ncpu() { i64 n = sysconf(84) & 0xffffffff; if (n < 1) return 1; return n; }
 // fresh zeroed pages (MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE: a thread's
 // arena is reserved, not committed), 0 when the kernel says no
 uptr ph_os_map(i64 n) {

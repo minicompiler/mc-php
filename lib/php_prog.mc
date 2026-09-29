@@ -21,7 +21,10 @@ uptr php_str_alloc(i64 n) { return php_str_mk(n, 1); }
 // POISONED -- a length no string has -- and a string that is already dead
 // dies loudly here, which is where a second release or a release of a stale
 // pointer ends up.
-void php_str_free(uptr s) {
+void php_str_free(uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    // shared mode (docs/threads.md § Step 3): a count that may have raced
+    // poisons nothing
+    if (ld64(phT + PHT_ph_shared)) return;
     if (ld32(s + 4) == ZS_DEAD) php_rc_dead(s);
     st32(s, 0);
     st32(s + 4, ZS_DEAD);

@@ -47,9 +47,11 @@
 // (ph_tslow -> ph_tget: pthread_getspecific, TlsGetValue).
 // What stays a global is written before any second thread can exist (the
 // class table, the literals, the extension's tables), is a process-wide
-// setting read once (MCPHP_RC=check, MCPHP_STATS), or is module state another
-// thread is refused (the global table, a `static`, define(), class_alias():
-// ph_shared_off): module memory, shared as a C extension's is.
+// setting read once (MCPHP_RC=check, MCPHP_STATS), or is module state every
+// thread shares (the global table, a `static`, define(): threads step 3, the
+// races are the developer's) -- module memory, shared as a C extension's is.
+// class_alias() and register_shutdown_function() still refuse another thread
+// (ph_shared_off).
 // docs/threads.md is the inventory.
 u8   ph_tmain[PHT_SIZE];            // the block of the thread that booted
 uptr ph_tcur;                       // ph_tmain while no other thread runs, then 0
@@ -93,9 +95,9 @@ void php_die(uptr msg, i64 n) { php_flush(); write(2, msg, n); exit(255); }
 // an _emalloc block is whatever the allocator had. Every allocation site
 // writes what it reads (the audit is docs/php-extension.md § The memory).
 #define PH_ZBIG 4096                // a block bigger than this is never bumped: it gets its own
-// Another thread (§ other threads) has no Zend chunk, so it never pins: the
-// module state that would outlive it refuses it (ph_shared_off), and its
-// block and arena are unmapped when it is joined.
+// Another thread (§ other threads) has no Zend chunk, so it never pins: its
+// arena is its own, kept after its join until the program or the request
+// ends (§ the thread API), so module state may point into it.
 void php_pin() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); if (((uptr) ld64(phT + PHT_ph_zalloc))) st64(phT + PHT_ph_pin, 1); }
 
 uptr php_alloc(i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
@@ -112,9 +114,38 @@ uptr php_alloc(i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (!hb) { hb = ph_heap; st64(phT + PHT_ph_hbase, hb); st64(phT + PHT_ph_hlim, PH_ARENA); }
     i64 a = (ld64(phT + PHT_ph_top) + 7) / 8 * 8;
     // n against what is left, never `a + n`: a size near PHP_INT_MAX would wrap it
-    if (n < 0 || n > ld64(phT + PHT_ph_hlim) - a) php_die("mc-php: arena exhausted\n", 24);
+    if (n < 0 || n > ld64(phT + PHT_ph_hlim) - a) return php_arena_grow(phT, n);
     st64(phT + PHT_ph_top, a + n);
     return hb + a;
+}
+
+// A thread other than the booting one grows its arena by chunks, each twice
+// the last (up to 64 MiB, or the request if larger); a chunk starts with the
+// previous chunk's base and size, so the whole chain can be released at once
+// (php_arena_free). The booting thread's arena is ph_heap, and ends there.
+uptr php_arena_grow(uptr phT, i64 n) {
+    if (n < 0 || !ld64(phT + PHT_ph_tidx)) php_die("mc-php: arena exhausted\n", 24);
+    i64 sz = ld64(phT + PHT_ph_hlim) * 2;
+    if (sz > 67108864) sz = 67108864;
+    if (sz < n + 16) sz = (n + 16 + 65535) / 65536 * 65536;
+    uptr c = ph_os_map(sz);
+    if (!c) php_die("mc-php: arena exhausted\n", 24);
+    st64(c, ld64(phT + PHT_ph_hbase));
+    st64(c + 8, ld64(phT + PHT_ph_hlim));
+    st64(phT + PHT_ph_hbase, c);
+    st64(phT + PHT_ph_hlim, sz);
+    st64(phT + PHT_ph_top, 16 + n);
+    return c + 16;
+}
+void php_arena_free(uptr b, i64 n) {
+    loop {
+        if (!b) break;
+        uptr pb = ld64(b);
+        i64 pn = ld64(b + 8);
+        ph_os_unmap(b, n);
+        b = pb;
+        n = pn;
+    }
 }
 
 // ---- string: the zend_string shape (T3's probes/t3/zend.mc, verbatim) ------
@@ -297,7 +328,10 @@ void php_rc_ret_slow(i64 m, uptr v) {
 // and nobody else's: php's own test before zend_string_extend reallocates.
 i64 php_str_mine(uptr s) {
     if (ld32(s) != 1) return 0;
-    return (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) == 0;
+    if (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) return 0;
+    // shared mode: a count of 1 may be a lost increment, so never in place
+    uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    return !ld64(phT + PHT_ph_shared);
 }
 
 // n bytes of room for a string we own, which may MOVE: _erealloc, php's
@@ -662,7 +696,8 @@ uptr php_str_setoff_own(uptr s, i64 i, uptr cz) { uptr phT = ph_tcur; if (!phT) 
 uptr php_zstr(uptr s);
 uptr php_chr(i64 c);
 uptr php_str_sets_own(uptr s, i64 i, uptr c) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
-    if ((u64) i < (u64) ld64(s + 16) && ld64(c + 16) && ld32(s) == 1 && (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) == 0) {
+    if ((u64) i < (u64) ld64(s + 16) && ld64(c + 16) && ld32(s) == 1 && (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) == 0
+        && !ld64(phT + PHT_ph_shared)) {
         st64(phT + PHT_ph_rc_inplace, ld64(phT + PHT_ph_rc_inplace) + 1);
         st8(s + ZS_HDR + i, ld8(c + ZS_HDR));
         st64(s + 8, 0);
@@ -674,7 +709,8 @@ uptr php_str_sets(uptr s, i64 i, uptr c) { return php_str_setoff(s, i, php_zstr(
 
 // `$s[$i] = chr(c)`: the byte itself, with no one-byte string between
 uptr php_str_setb_own(uptr s, i64 i, i64 c) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
-    if ((u64) i < (u64) ld64(s + 16) && ld32(s) == 1 && (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) == 0) {
+    if ((u64) i < (u64) ld64(s + 16) && ld32(s) == 1 && (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) == 0
+        && !ld64(phT + PHT_ph_shared)) {
         st64(phT + PHT_ph_rc_inplace, ld64(phT + PHT_ph_rc_inplace) + 1);
         st8(s + ZS_HDR + i, c & 255);
         st64(s + 8, 0);
@@ -3259,9 +3295,15 @@ uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3,
 
 uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5);
 
+void php_dt_run(uptr phT);
 void php_shutdown() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (ld64(phT + PHT_ph_dt_ran)) return;
     st64(phT + PHT_ph_dt_ran, 1);
+    // every thread the API started is waited for but a detached one, which
+    // the process's exit ends, as in C; one neither joined nor detached that
+    // ended on a throwable ends the program as an uncaught one
+    uptr te = php_thr_endall(phT, 0, 1);
+    if (te) { st64(phT + PHT_ph_exc, te); php_uncaught(); }
     // php runs register_shutdown_function() callbacks first, then destructors
     if (((uptr) ld64(phT + PHT_ph_sdfn))) {
         i64 used = php_ht_used(((uptr) ld64(phT + PHT_ph_sdfn)));
@@ -3279,7 +3321,14 @@ void php_shutdown() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
             i = i + 1;
         }
     }
+    php_dt_run(phT);
+}
+
+// the destructors of the objects this thread created, newest first: the
+// program's end (php_shutdown) and a thread of the API's end
+void php_dt_run(uptr phT) {
     uptr n = ((uptr) ld64(phT + PHT_ph_dt_head));
+    st64(phT + PHT_ph_dt_head, 0);
     loop {
         if (!n) break;
         uptr o = ld64(n);
@@ -6688,7 +6737,8 @@ f64 php_inf(i64 ignored) { return ph_unbits(0x7ff0000000000000); }
 i64 ph_shared_off(uptr phT, uptr what, i64 n) {
     if (!ld64(phT + PHT_ph_tidx)) return 0;
     uptr m = php_str_concat(php_str_new("mc-php: ", 8), php_str_new(what, n));
-    m = php_str_concat(m, php_str_new(" is shared by every thread: another thread may not reach it", 59));
+    uptr t = " runs only on the thread that started the program or the request";
+    m = php_str_concat(m, php_str_new(t, php_cstrlen(t)));
     php_throw_cls(php_str_new("Error", 5), m);
     return 1;
 }
@@ -6700,7 +6750,6 @@ i64 ph_shared_off(uptr phT, uptr what, i64 n) {
 uptr ph_globals;
 
 uptr php_gvar(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
-    if (ph_shared_off(phT, "a global variable", 17)) return php_znull();
     php_pin();                                // the global table
     if (!ph_globals) ph_globals = php_arr_new(16);
     uptr b = php_ht_find(ph_globals, php_str_hash(name), name);
@@ -6715,7 +6764,6 @@ uptr php_gvar(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 // php does: its slot joins ph_rsl, which php_request_reset clears.
 uptr ph_rsl;
 uptr php_static(uptr slot, uptr init) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
-    if (ph_shared_off(phT, "a static variable", 17)) return php_znull();
     php_pin();
     uptr z = ld64(slot);
     if (z) return z;
@@ -6734,7 +6782,6 @@ uptr php_static(uptr slot, uptr init) { uptr phT = ph_tcur; if (!phT) phT = ph_t
 uptr ph_consts;
 
 void php_const_set(uptr name, uptr v) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
-    if (ph_shared_off(phT, "define()", 8)) return;
     php_pin();
     if (!ph_consts) ph_consts = php_arr_new(16);
     php_zv_cpv(php_arr_sslot(ph_consts, name), v);
@@ -10870,18 +10917,20 @@ void php_request_reset() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 // the booting thread bumps ph_heap -- so a thread never touches another's
 // temporaries, and never calls Zend (a php without ZTS has one allocator and
 // one executor for the whole process). A string a thread builds is its own
-// arena's and immutable, as every string is on the program road. Module
-// state -- a global, a static, a constant -- refuses it for now
-// (ph_shared_off, interim until the thread API makes it shared), so nothing
-// outside the thread points into its arena: the arena and the block go with
-// the thread, always (tests/c/10-threads-vm measures it).
+// arena's and immutable, as every string is on the program road. A thread
+// php_thr_run starts shares module state too; its arena goes with it at the
+// join (tests/c/10-threads-vm measures it), so a value it stores into module
+// state is the gate's own business. The public API keeps a thread's arena
+// until the program or request ends instead (§ the thread API).
 //
 // php_thr_run is the internal start the runtime's own gates use
 // (`mcphp_threads('f', $n, $arg)`, src/builtin.mc): n threads, thread i
 // calling the compiled f(arg, i); it answers the sum of what they returned,
 // or -1 for a thread whose f ended on an uncaught throwable. The public API
-// is a later step (docs/threads.md).
+// is § the thread API below (docs/threads.md § Step 3).
 #define PH_TMAX    64
+#define PH_CHUNK0  65536            // a thread's first arena chunk: 64 KiB, then doubling
+i64 ph_tapi;                        // 1 once mcphp_thread_start ran: the fast path stays off
 #define PHR_FN     0                // a thread's record, in the booting thread's arena
 #define PHR_ARG    8
 #define PHR_IDX    16
@@ -10914,11 +10963,20 @@ uptr php_thr_body(uptr rec) {
 // open files -- the three std streams)
 uptr php_thr_block(uptr from, i64 idx) {
     uptr b = ph_os_map(PHT_SIZE);
-    uptr a = ph_os_map(ph_os_arena());
+    uptr a = ph_os_map(PH_CHUNK0);
     if (!b || !a) php_die("mc-php: cannot map a thread's memory\n", 37);
+    // the first chunk of the thread's arena, which grows by chunks
+    // (php_arena_grow): its header says there is no chunk before it
     st64(b + PHT_ph_hbase, a);
-    st64(b + PHT_ph_hlim, ph_os_arena());
+    st64(b + PHT_ph_hlim, PH_CHUNK0);
+    st64(b + PHT_ph_top, 16);
     st64(b + PHT_ph_tidx, idx);
+    // a thread of the API shares the mode and the root of the thread that
+    // started it (docs/threads.md § Step 3)
+    st64(b + PHT_ph_shared, ld64(from + PHT_ph_shared));
+    uptr root = ld64(from + PHT_ph_troot);
+    if (!root) root = from;
+    st64(b + PHT_ph_troot, root);
     st64(b + PHT_ph_erep, ld64(from + PHT_ph_erep));
     st64(b + PHT_ph_disp, ld64(from + PHT_ph_disp));
     st64(b + PHT_ph_log, ld64(from + PHT_ph_log));
@@ -10983,14 +11041,336 @@ i64 php_thr_run(uptr fn, i64 n, i64 arg) { uptr phT = ph_tcur; if (!phT) phT = p
         if (v < 0 || sum < 0) sum = 0 - 1;
         if (sum >= 0) sum = sum + v;
         uptr b = ld64(r + PHR_BLOCK);
-        ph_os_unmap(ld64(b + PHT_ph_hbase), ld64(b + PHT_ph_hlim));
+        php_arena_free(ld64(b + PHT_ph_hbase), ld64(b + PHT_ph_hlim));
         ph_os_unmap(b, PHT_SIZE);
         i = i + 1;
     }
-    // no other thread runs: the booting thread's fast path again
-    if (outer) {
+    // no other thread runs: the booting thread's fast path again -- unless
+    // the thread API was used, whose threads may still run (detached)
+    if (outer && !ph_tapi) {
         ph_mt = 0;
         ph_tcur = ph_tmain;
     }
     return sum;
+}
+
+// ---- the thread API (docs/threads.md § Step 3) -----------------------------
+// mcphp_thread_start / _join / _detach / _running and
+// mcphp_hardware_concurrency (src/builtin.mc). A thread runs a compiled
+// callable with its arguments, all of them deep-copied into the thread's own
+// arena before start returns; join copies the result (or the exception) back
+// into the joiner's. Module state -- globals, statics, constants -- is ONE
+// copy every thread reads and writes, as in C: the races are the
+// developer's, and the locks are step 4.
+//
+// What keeps that memory-safe, without a copy on every store:
+//   * a thread's arena is never released at its join: the chunks are kept
+//     until the program ends (exe) or the request does (extension, after
+//     every thread of it was waited for), so a value a thread stored into a
+//     global never dangles;
+//   * shared mode (PHT_ph_shared, set by the first start and copied into
+//     every thread's block): counts are not atomic and may race, so from
+//     then on no string is freed and none is written in place until the
+//     request ends. Objects are never counted (D7) and arrays are copied by
+//     value, so a string's count is the only one that can race.
+// ponytail: the kept memory is everything a program's threads ever
+// allocated, bounded by use (64 KiB chunks, doubling), not by thread count:
+// 10^4 short threads kept 180 MB of RSS, 18 KB each (docs/threads.md).
+// The upgrade: release a joined thread's chunks when shared mode saw no
+// store from it, or per-thread free lists.
+#define PHA_H      0                // a thread's record: the host's handle
+#define PHA_BLOCK  8                // its block
+#define PHA_FN     16               // the callable, the thread's copy
+#define PHA_N      24               // the argument count
+#define PHA_ARG    32               // five arguments, the thread's copies
+#define PHA_RES    72               // what it returned, in its arena
+#define PHA_EXC    80               // or the throwable it did not catch
+#define PHA_STATE  88               // 0 running, 1 finished
+#define PHA_DET    96               // detached
+#define PHA_ROOT   104              // the program's or request's block
+#define PHA_ID     112
+#define PHA_NEXT   120              // the root's list of kept records
+#define PHA_HB     128              // the arena chain kept at the join
+#define PHA_HL     136
+#define PHA_SIZE   144
+// the refusal a php callable gets (src/program.mc swaps its text in a ZTS
+// build, where the reason is that 3b is not built yet)
+uptr ph_tnophp() { return "mc-php: a php callable cannot run on another thread in a php without thread safety; build the module with thread_safety = \"zts\", or pass a compiled function"; }
+uptr ph_ttab;                       // handle -> record; 0 once joined
+i64  ph_tcap;
+i64  ph_tnext;
+
+// the handle's record, or 0 (under the lock)
+uptr ph_trec(i64 id) {
+    if (id < 1 || id > ph_tnext || id >= ph_tcap) return 0;
+    return ld64(ph_ttab + id * 8);
+}
+void ph_tnotjoinable(i64 id) {
+    uptr m = php_str_concat(php_str_new("mc-php: thread ", 15), php_itos(id));
+    php_throw_str(php_str_new("Error", 5), php_str_concat(m, php_str_new(" is not joinable", 16)));
+}
+
+// A deep copy into the current thread's arena: arrays and compiled objects
+// are copied, one identity map per copy (a value two slots share stays one,
+// a cycle ends), and each copied object joins the copying thread's
+// destructor list, as ext/parallel's copies do; a string is shared -- the arena that holds it is kept, and
+// shared mode stops it being freed or written in place; an engine object
+// stays the engine's (a thread that uses it gets the engine guard's Error).
+uptr php_tc_arr(uptr src, uptr m);
+uptr php_tc_obj(uptr o, uptr m) {
+    if (php_is_proxy(o)) return o;
+    uptr seen = php_ht_find(m, o, 0);
+    if (seen) return ld64(seen);
+    uptr c = php_alloc(OBJ_HDR);
+    i64 i = 0;
+    loop { if (i >= OBJ_HDR) break; st64(c + i, ld64(o + i)); i = i + 8; }
+    php_zv_cp(php_arr_islot(m, o), php_zlong(c));
+    // a distinct object, destructed once by the thread that copied it
+    php_dt_arm(c);
+    st64(c + 24, php_tc_arr(ld64(o + 24), m));
+    if (ld64(o + 32)) st64(c + 32, php_arr_copy(ld64(o + 32)));
+    // a closure's bound $this is a pointer in its props: the object too
+    if (ph_ce_closure && php_obj_ce(o) == ph_ce_closure) {
+        uptr t = php_ht_find(ld64(c + 24), php_str_hash(php_str_new("this", 4)), php_str_new("this", 4));
+        if (t && ld64(t)) st64(t, php_tc_obj(ld64(t), m));
+    }
+    return c;
+}
+void php_tc_z(uptr d, uptr s, uptr m) {
+    php_zv_cp(d, s);
+    i64 t = php_zv_type(s);
+    if (t == IS_ARRAY) st64(d, php_tc_arr(ld64(s), m));
+    if (t == IS_OBJECT) st64(d, php_tc_obj(ld64(s), m));
+}
+uptr php_tc_arr(uptr src, uptr m) {
+    uptr a = php_arr_new(ld32(src + 32));
+    i64 used = php_ht_used(src);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(src, i);
+        if (ld8(b + 8) != IS_UNDEF) {
+            uptr k = ld64(b + 24);
+            uptr t = 0;
+            // a counted key is copied: the other thread's count is not ours
+            if (k && !(ld32(k + 4) & ZS_INTERNED)) k = php_str_new(k + ZS_HDR, ld64(k + 16));
+            if (k) t = php_ht_slotfor(a, php_str_hash(k), k);
+            if (!k) t = php_arr_islot(a, ld64(b + 16));
+            php_tc_z(t, b, m);
+        }
+        i = i + 1;
+    }
+    st64(a + 40, ld64(src + 40));
+    return a;
+}
+uptr php_tc_val(uptr s) {
+    if (!s) return 0;
+    uptr z = php_zv_alloc();
+    php_tc_z(z, s, php_arr_new(8));
+    return z;
+}
+
+// the callable a thread may run: a compiled closure or invokable object; a
+// php callable (a name, an array, an engine object) cannot run on another
+// thread of a php without thread safety
+i64 php_thr_callable(uptr fn) {
+    if (ph_eng && (php_zv_type(fn) != IS_OBJECT || php_is_proxy(ld64(fn)))) {
+        php_throw_str(php_str_new("Error", 5), php_str_new(ph_tnophp(), php_cstrlen(ph_tnophp())));
+        return 0;
+    }
+    if (php_zv_type(fn) != IS_OBJECT) {
+        uptr m = "mc-php: mcphp_thread_start() runs a closure or an invokable object";
+        php_throw_str(php_str_new("Error", 5), php_str_new(m, php_cstrlen(m)));
+        return 0;
+    }
+    return 1;
+}
+
+uptr php_thr_api_body(uptr rec) {
+    uptr phT = ld64(rec + PHA_BLOCK);
+    ph_tset(phT);
+    uptr r = php_call_zv(ld64(rec + PHA_FN), ld64(rec + PHA_N), ld64(rec + PHA_ARG), ld64(rec + PHA_ARG + 8),
+                         ld64(rec + PHA_ARG + 16), ld64(rec + PHA_ARG + 24), ld64(rec + PHA_ARG + 32));
+    if (ld64(phT + PHT_ph_exc)) { st64(rec + PHA_EXC, ld64(phT + PHT_ph_exc)); st64(phT + PHT_ph_exc, 0); r = 0; }
+    st64(rec + PHA_RES, r);
+    // the objects this thread created, its copies of the arguments included,
+    // are destructed at its end; the joiner gets copies of its own
+    php_dt_run(phT);
+    php_flush();
+    ph_lock();
+    st64(rec + PHA_STATE, 1);
+    ph_unlock();
+    return 0;
+}
+
+i64 php_thr_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (!php_thr_callable(fn)) return 0;
+    // the first thread: the host's slot, and the fast path off for good
+    if (!ph_tkeyed) { ph_tinit(); ph_tkeyed = 1; }
+    if (!ph_mt) {
+        ph_tset(ph_tmain);
+        ph_mt = 1;
+        ph_tcur = 0;
+    }
+    ph_tapi = 1;
+    // what every thread shares is made here, not by whichever thread
+    // reaches it first
+    php_pin();
+    if (!ph_ce_closure) ph_ce_closure = php_ce_new(php_str_new("Closure", 7));
+    if (!ph_globals) ph_globals = php_arr_new(16);
+    if (!ph_consts) ph_consts = php_arr_new(16);
+    st64(phT + PHT_ph_shared, 1);
+    uptr rec = php_alloc(PHA_SIZE);
+    i64 i = 0;
+    loop { if (i >= PHA_SIZE) break; st64(rec + i, 0); i = i + 8; }
+    ph_lock();
+    ph_tnext = ph_tnext + 1;
+    i64 id = ph_tnext;
+    if (id >= ph_tcap) {
+        i64 c = ph_tcap * 2 + 64;
+        uptr t = ph_os_map(c * 8);
+        if (!t) { ph_unlock(); php_die("mc-php: cannot map the thread table\n", 36); }
+        i = 0;
+        loop { if (i >= ph_tcap) break; st64(t + i * 8, ld64(ph_ttab + i * 8)); i = i + 1; }
+        if (ph_ttab) ph_os_unmap(ph_ttab, ph_tcap * 8);
+        ph_ttab = t;
+        ph_tcap = c;
+    }
+    // the handle is reserved here and the record published below, once every
+    // field a scan reads is written and the host's handle exists:
+    // php_thr_running and php_thr_endall never see half a record
+    ph_unlock();
+    uptr b = php_thr_block(phT, id);
+    uptr root = ld64(phT + PHT_ph_troot);
+    if (!root) root = phT;
+    st64(rec + PHA_ID, id);
+    st64(rec + PHA_BLOCK, b);
+    st64(rec + PHA_ROOT, root);
+    st64(rec + PHA_N, n);
+    // the copies, made in the new thread's arena: allocation follows the
+    // host's slot while the fast path is off
+    ph_tset(b);
+    st64(rec + PHA_FN, php_tc_val(fn));
+    if (n > 0) st64(rec + PHA_ARG, php_tc_val(a1));
+    if (n > 1) st64(rec + PHA_ARG + 8, php_tc_val(a2));
+    if (n > 2) st64(rec + PHA_ARG + 16, php_tc_val(a3));
+    if (n > 3) st64(rec + PHA_ARG + 24, php_tc_val(a4));
+    if (n > 4) st64(rec + PHA_ARG + 32, php_tc_val(a5));
+    ph_tset(phT);
+    if (ph_thr_create(&php_thr_api_body, rec, rec + PHA_H) != 0) php_die("mc-php: cannot start a thread\n", 30);
+    ph_lock();
+    st64(ph_ttab + id * 8, rec);
+    ph_unlock();
+    return id;
+}
+
+// the record leaves the table: its thread is waited for, its block goes,
+// and its arena is kept on the root's list until the root ends
+void php_thr_reap(uptr rec) {
+    ph_thr_join(rec + PHA_H);
+    uptr b = ld64(rec + PHA_BLOCK);
+    st64(rec + PHA_HB, ld64(b + PHT_ph_hbase));
+    st64(rec + PHA_HL, ld64(b + PHT_ph_hlim));
+    ph_os_unmap(b, PHT_SIZE);
+    uptr root = ld64(rec + PHA_ROOT);
+    ph_lock();
+    st64(rec + PHA_NEXT, ld64(root + PHT_ph_tret));
+    st64(root + PHT_ph_tret, rec);
+    ph_unlock();
+}
+
+uptr php_thr_join(i64 id) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    ph_lock();
+    uptr rec = ph_trec(id);
+    if (rec && ld64(rec + PHA_DET)) rec = 0;
+    if (rec) st64(ph_ttab + id * 8, 0);
+    ph_unlock();
+    if (!rec) { ph_tnotjoinable(id); return php_znull(); }
+    php_thr_reap(rec);
+    if (ld64(rec + PHA_EXC)) { php_throw(php_tc_val(ld64(rec + PHA_EXC))); return php_znull(); }
+    uptr r = php_tc_val(ld64(rec + PHA_RES));
+    if (!r) return php_znull();
+    return r;
+}
+
+uptr php_thr_detach(i64 id) {
+    ph_lock();
+    uptr rec = ph_trec(id);
+    if (rec && ld64(rec + PHA_DET)) rec = 0;
+    if (rec) st64(rec + PHA_DET, 1);
+    ph_unlock();
+    if (!rec) ph_tnotjoinable(id);
+    return php_znull();
+}
+
+// the threads of this program or request that have not finished
+i64 php_thr_running() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr root = ld64(phT + PHT_ph_troot);
+    if (!root) root = phT;
+    i64 c = 0;
+    if (!ph_tapi) return 0;
+    ph_lock();
+    i64 id = 1;
+    loop {
+        if (id > ph_tnext) break;
+        uptr rec = ld64(ph_ttab + id * 8);
+        if (rec && ld64(rec + PHA_ROOT) == root && !ld64(rec + PHA_STATE)) c = c + 1;
+        id = id + 1;
+    }
+    ph_unlock();
+    return c;
+}
+
+// the test gates of shared mode (src/builtin.mc): the flag, and what
+// php_str_mine answers for a string
+i64 php_thr_shared() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); return ld64(phT + PHT_ph_shared); }
+i64 php_thr_mine(uptr s) { return php_str_mine(s); }
+
+// a throwable a thread neither joined nor detached ended on, as a warning
+void php_thr_report(uptr ez) {
+    uptr o = ld64(ez);
+    uptr s = php_str_concat(php_str_new("mc-php: a thread neither joined nor detached ended on an uncaught ", 66), php_obj_cname(o));
+    uptr m = php_zv_str(php_exm_message(o));
+    if (php_strlen(m)) s = php_str_concat(php_str_concat(s, php_str_new(": ", 2)), m);
+    php_mreset();
+    php_ms(s);
+    php_raise_m(PHE_WARNING);
+}
+
+// The end of the program (exe) or of the request (extension): every thread
+// of it is waited for, joined or detached; the first one neither joined nor
+// detached that ended on a throwable is answered (0 when none). free: release
+// the kept arenas too (the request's end; a program's end leaves them to exit).
+// skipdet: a detached thread is neither waited for nor touched -- the
+// program's end, where the process's exit ends it, as in C.
+uptr php_thr_endall(uptr root, i64 free, i64 skipdet) {
+    if (!ph_tapi) return 0;
+    uptr exc = 0;
+    loop {
+        ph_lock();
+        uptr rec = 0;
+        i64 id = 1;
+        loop {
+            if (id > ph_tnext) break;
+            uptr r = ld64(ph_ttab + id * 8);
+            if (r && ld64(r + PHA_ROOT) == root && !(skipdet && ld64(r + PHA_DET))) { rec = r; st64(ph_ttab + id * 8, 0); break; }
+            id = id + 1;
+        }
+        ph_unlock();
+        if (!rec) break;
+        php_thr_reap(rec);
+        if (!exc && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC)) exc = php_tc_val(ld64(rec + PHA_EXC));
+    }
+    if (free) {
+        uptr k = ld64(root + PHT_ph_tret);
+        loop {
+            if (!k) break;
+            uptr nx = ld64(k + PHA_NEXT);
+            php_arena_free(ld64(k + PHA_HB), ld64(k + PHA_HL));
+            k = nx;
+        }
+        st64(root + PHT_ph_tret, 0);
+        st64(root + PHT_ph_shared, 0);
+    }
+    return exc;
 }

@@ -1,0 +1,3 @@
+the slow thread finished
+the program's last line
+uncaught from a thread: LogicException lost 3

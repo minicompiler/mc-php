@@ -1341,3 +1341,66 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     (stack trace, exit 255), checked in the use loop itself; main accepted it and printed 1,
     and past `ph_nvar + 16` repeats died with the wrong reason. Fixture
     `tests/g/126-closure-use-twice.php`; ext.sh asserts both Fatal errors on stdout AND stderr.
+- threads, step 3a (2026-09-29, branch `threads-api`, from main 4fd70b6): **the thread API**
+  (`docs/threads.md` § Step 3). Five builtins on both roads -- `mcphp_thread_start(callable,
+  ...args)` (at most 5 arguments), `mcphp_thread_join`, `mcphp_thread_detach`,
+  `mcphp_thread_running`, `mcphp_hardware_concurrency` -- the primitive layer an object `Thread`
+  can sit on later. Test hooks `mcphp_shared_mode()`, `mcphp_str_mine($s)`.
+  - Frozen publication (the approved design) was WITHDRAWN: a store into module state is not one
+    place, and copy-on-write of a shared array is O(n) per write. The replacement, approved: a
+    worker's arena is KEPT after its join (on the root's `ph_tret` list; freed at the request's
+    end on the extension road, never on the program road); shared mode (`ph_shared`, set by the
+    first start, copied into every worker, sticky until the request ends) stops strings being
+    freed or written in place, and on the extension road defers a counted Zend string's free to
+    RSHUTDOWN (`php_str_defer`/`php_str_undefer`, deduplicated); globals, statics and `define()`
+    are written in place and shared, as in C; arguments, results and exceptions are deep-copied
+    (`php_tc_*`, one identity map per copy, counted keys copied, strings shared). A runtime lock
+    (pthread mutex / `SRWLOCK`) guards the handle table, the deferred list and the kept list.
+    `class_alias()` and `register_shutdown_function()` still refuse another thread. A php
+    callable is refused: NTS with an Error naming `thread_safety = "zts"`, ZTS naming step 3b.
+  - A thread's arena grows by chunks (64 KiB, doubling to 64 MiB), replacing step 1's single
+    256 MiB map. Retention measured (macOS, N short threads each building 1 KB): 100 / 1000 /
+    10000 threads keep 3.6 / 19.6 / 180 MB resident and reserve 6 / 62 / 625 MiB -- ~18 KB and
+    64 KiB per thread, bounded by use; a `ponytail:` note names the upgrade.
+  - Unjoined threads are waited for at the program's or request's end; the first one's
+    exception is the program's uncaught one (exe) or a warning (extension). A detached thread is
+    `std::thread::detach`'s on the program road: not waited for, not unmapped, ended by the
+    process's exit (touching state during the final destructors is UB, documented); the
+    extension road's RSHUTDOWN waits for it, so one that never ends blocks RSHUTDOWN.
+  - Tests: `tests/c/11-thread-api` (a joined and a detached thread's stored string/array/object
+    read after them, shared mode sticky after the last join, nested threads, rethrow),
+    `tests/c/12-thread-unjoined`, `tests/ext/threads/api.php` (ext.sh § 20b), leaks.sh's API
+    block, FrankenPHP's request starting an API thread, `examples/threads` (primes) with a C
+    twin. Teeth: releasing a joined thread's arena at the join (result copied first) SIGSEGVs
+    both `11-thread-api` and `api.php`.
+  - Gates: run.sh green (fixtures 126/126 plain and check, C behaviour 12/12, ext, examples);
+    grid plain and check = recording minus the 3 expected differences; leaks 0 on aarch64;
+    linux.sh aarch64 green, ZTS=1 green, x86_64 all but the known `requests` failure under
+    emulation; both.sh; FrankenPHP aarch64 and x86_64; mcnames 217 against mc 1.1.0 and 1.3.0
+    (strict); llvm-mc sweep 2614 arm64 / 2361 x86-64 distinct instructions (only the two known
+    `setp`/`setnp` REX-prefix differences), branches 0 bad, mnemonic sets identical to main's.
+    CI found one defect the local gates could not: the three new kernel32 externs sat below
+    `rt_host_windows.mc`'s `#dylib "ucrtbase.dll"`, so windows/x86_64 (mc's direct PE) imported
+    them from ucrtbase.dll and the loader refused every program (exit 127); aarch64 links through
+    kernel32.lib and passed. Moved to the top block; all 8 CI legs green.
+  - NTS bytes: every module changes (the runtime carries the API; mc links no dead code):
+    `__text` +7428 bytes in `callables.so`; files hello 364856 -> 366504, decimal 418968 ->
+    420616, extA/extB +1648, awaitable +1680, values +1680, callables +18176, classes +18192
+    (a page boundary), threads +1328.
+  - Cost, best of 21 processes interleaved (each the bench's best of 9): decimal module 0.428 ->
+    0.434 ms (+1.4%), two-extensions b_use 3.752 -> 3.784 (+0.9%), a_add 1.493 -> 1.500
+    (+0.5%); program road (`benchprog.php`, best of 25) 56.38 -> 56.17..56.48 ms, noise.
+  - Found, pre-existing, not fixed: a closure whose body throws inside a `try` fails to compile
+    with `break out of range`; a top-level variable created only by `global` in a function is
+    undefined at top level.
+  - Review of #42 (three findings, fixed in the PR): (1) `php_thr_start` published the record in
+    `ph_ttab` before `PHA_ROOT`/`PHA_ID` were written, so a concurrent `mcphp_thread_running()` or
+    `php_thr_endall` scan could skip it -- now the handle is reserved under the lock and the
+    record published under it after the thread exists, every field a scan reads already written;
+    (2) copies are armed for `__destruct` (`php_dt_arm` in `php_tc_obj`; a worker runs its list at
+    its end, `php_dt_run`): each copy distinct, destructed once by its owner -- fixture
+    `tests/c/13-thread-destruct` (6 lines; the PR's first head printed 0) and 3 lines in
+    `api.php`; (3) the program's end skips detached records (`php_thr_endall(root, free,
+    skipdet)`) -- fixture `tests/c/14-thread-detach-exit`, a detached thread that never returns:
+    exits in 4 ms, and the first head was still running after 5 s; `api.php` ends with a detached
+    thread's line that RSHUTDOWN waited for.

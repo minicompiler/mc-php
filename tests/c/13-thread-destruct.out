@@ -1,0 +1,9 @@
+dtor 1
+dtor 2
+dtor 1
+results: 1 2 1
+the copies are distinct: yes
+end of main
+dtor 1
+dtor 2
+dtor 1

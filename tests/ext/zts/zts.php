@@ -22,7 +22,11 @@ function zts_say(int $n): void {
     echo "|", 3 * $n;
 }
 
-// n|calls|a|list|count|items|K|s|f|R|helper|boom:rev|thread
+// a thread of the API (docs/threads.md § Step 3) started by a request shares
+// THAT request's module state: it reads the global this request just wrote
+function zts_shared(int $x): int { global $zts_g; return $x * 3 + (int) $zts_g['a']; }
+
+// n|calls|a|list|count|items|K|s|f|R|helper|boom:rev|api|thread
 function work(int $n, callable $boom): string {
     global $zts_g, $zts_box;
     static $calls = 0;
@@ -49,6 +53,7 @@ function work(int $n, callable $boom): string {
     $rev = 'strrev';
     try { $boom($n); $b = "none"; } catch (LogicException $x) { $b = (string) $x->getMessage(); }
     $b = $b . ":" . (string) $rev("z$n");
+    $tv = (int) mcphp_thread_join(mcphp_thread_start(fn(int $x): int => zts_shared($x), $n));
     return $n . "|" . $calls . "|" . $zts_g['a'] . "|" . count($zts_g['list']) . "|" . _Box::$count
-        . "|" . $k . "|" . ZTS_K . "|" . $s . "|" . $f($n) . "|" . ZTS_R . "|" . $h . "|" . $b . "|" . mcphp_thread();
+        . "|" . $k . "|" . ZTS_K . "|" . $s . "|" . $f($n) . "|" . ZTS_R . "|" . $h . "|" . $b . "|" . $tv . "|" . mcphp_thread();
 }
