@@ -57,6 +57,10 @@ echo "parallel: ", count($par), " results, the same sums as sequential: ",
      ", distinct pids: ", count($pids), ", none of them this process: ",
      var_export(!in_array(getmypid(), $pids, true), true), "\n";
 echo "sums: ", implode(',', array_column($par, 'sum')), "\n";
+// the counters count the THREADS (http_get_many below): a forked child is
+// neither completed() nor part of peak(), and one that returned is no error
+echo "after parallel: completed() = ", \awaitable\completed(), ", peak() = ", \awaitable\peak(),
+     ", errors() = ", \awaitable\errors(), "\n";
 
 class Service { public function shout(string $x): string { return strtoupper($x) . "!"; } }
 var_dump(\awaitable\parallel(fn(string $s) => "[$s]", 'a', 'b'));

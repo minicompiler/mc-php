@@ -73,5 +73,109 @@ final class Mutex { public function lock(): void {} public function unlock(): vo
 // and that is also the bound: only what serialize accepts crosses back, and
 // nothing the child mutates is shared. On Windows there is no fork, so that
 // door becomes CreateProcess + re-exec, or a second interpreter under ZTS.
-function parallel(callable $fn, mixed ...$args): array {}
-function errors(): int {}
+//
+// The C library's side of it is declared like curl's. A buffer C writes into
+// -- pipe()'s two descriptors, waitpid()'s status, read()'s bytes -- is a php
+// string of that length: C sees its bytes, and unpack() reads them back.
+#[Extern('c')] function fork(): int {}
+#[Extern('c')] function pipe(string $fds): int {}
+#[Extern('c')] function waitpid(int $pid, string $status, int $options): int {}
+#[Extern('c')] function _exit(int $code): void {}
+#[Extern('c', name: 'read')] function c_read(int $fd, string $buf, int $n): int {}
+#[Extern('c', name: 'write')] function c_write(int $fd, string $buf, int $n): int {}
+#[Extern('c', name: 'close')] function c_close(int $fd): int {}
+// errno is a macro in C: the thread's error number, read right after a call
+// that failed (src/extern.mc). EINTR is 4 on every host this runs on.
+#[Extern('c')] function errno(): int {}
+const EINTR = 4;
+
+// since the last reset(): peak and completed count the THREADS (http_get and
+// http_get_many, as the C twin does), errors the parallel children that threw
+$peak = 0;
+$completed = 0;
+$errors = 0;
+
+function parallel(callable $fn, mixed ...$args): array {
+    global $errors;
+    $n = count($args);
+    if ($n === 0) throw new \ArgumentCountError('awaitable\parallel() expects at least 2 arguments, 1 given');
+    if ($n > 64) throw new \TypeError('awaitable\parallel(): at most 64 jobs');
+    $pids = [];
+    $fds = [];
+    foreach ($args as $i => $arg) {
+        // a job that cannot start is -1 in ITS slot, answered as failed
+        $pids[$i] = -1;
+        $p = str_repeat("\0", 8);
+        if (pipe($p) !== 0) continue;
+        [$r, $w] = array_values(unpack('l2', $p));
+        $k = fork();
+        if ($k === 0) {
+            c_close($r);
+            _child($w, $fn, $arg);
+        }
+        c_close($w);
+        if ($k < 0) { c_close($r); continue; }
+        $pids[$i] = $k;
+        $fds[$i] = $r;
+    }
+    $out = [];
+    foreach ($args as $i => $arg) {
+        $tag = '1';
+        $body = '';
+        if ($pids[$i] !== -1) {
+            $all = _read_all($fds[$i]);
+            c_close($fds[$i]);
+            // a signal handler installed without SA_RESTART makes a blocked
+            // waitpid() return -1 with EINTR: asked again, as the C twin does,
+            // and on no other error (ECHILD: someone else reaped the child)
+            $st = str_repeat("\0", 8);
+            while (waitpid($pids[$i], $st, 0) < 0 && errno() === EINTR) {}
+            if ($all !== '') { $tag = substr($all, 0, 1); $body = substr($all, 1); }
+        }
+        if ($tag === '0') {
+            $v = $body === '' ? false : @unserialize($body);
+            $out[] = $v === false && $body !== 'b:0;' ? null : $v;
+        } else {
+            $errors++;
+            $out[] = $body === '' ? null : $body;
+        }
+    }
+    return $out;
+}
+
+// the child: call, serialize, write '0' and the bytes -- or '1' and the message
+// of what it threw -- and leave without running php's shutdown
+function _child(int $w, callable $fn, mixed $arg): void {
+    try {
+        $s = '0' . serialize($fn($arg));
+    } catch (\Throwable $e) {
+        $s = '1' . $e->getMessage();
+    }
+    _write_all($w, $s);
+    _exit(0);
+}
+
+function _write_all(int $fd, string $s): void {
+    while ($s !== '') {
+        $k = c_write($fd, $s, strlen($s));
+        if ($k <= 0) return;
+        $s = substr($s, $k);
+    }
+}
+
+// to the end of the pipe, asking again on EINTR (as above)
+function _read_all(int $fd): string {
+    $all = '';
+    while (true) {
+        $buf = str_repeat("\0", 65536);
+        $k = c_read($fd, $buf, 65536);
+        if ($k < 0 && errno() === EINTR) continue;
+        if ($k <= 0) return $all;
+        $all .= substr($buf, 0, $k);
+    }
+}
+
+function peak(): int { global $peak; return $peak; }
+function completed(): int { global $completed; return $completed; }
+function errors(): int { global $errors; return $errors; }
+function reset(): void { global $peak, $completed, $errors; $peak = 0; $completed = 0; $errors = 0; }

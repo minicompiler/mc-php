@@ -17,6 +17,10 @@
 #[Extern('c', name: 'atoi')] function c_atoi(string $s): int;   // `;` for a body is not php, `{}` is
 #[Extern('c', name: 'strtol')] function dec(string $s, Ptr $end, int $base): Ptr {}
 #[Extern('c', name: 'strtol')] function hex(string $s, Ptr $end, int $base): Ptr {}
+// errno is a macro in C: the thread's error number, read right after the call
+// that set it (close(-1) is EBADF, 9, on every host this road runs on)
+#[Extern('c')] function errno(): int {}
+#[Extern('c', name: 'close')] function c_close(int $fd): int {}
 #[Extern('c', variadic: 2)] function snprintf(Ptr $b, Ptr $n, string $f, mixed $a, mixed $c): int {}
 echo atoi("-42"), " ", abs(-7), " ", strlen("hello"), " ", strerror(2), "\n";
 // a C int is sign-extended from bit 31, whatever the callee left above it
@@ -27,3 +31,5 @@ $n = snprintf($b, 64, "%d-%s", 42, "x");
 echo $n, " ", strcat($b, ""), "\n";
 free($b);
 try { snprintf(0, 0, "%d", [1], 0); } catch (TypeError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+$r = c_close(-1);
+echo $r, " ", errno(), "\n";

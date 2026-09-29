@@ -222,11 +222,20 @@ i64 ph_extern_fn(uptr name, i64 fi, i64 fwd, uptr fl, i64 line) {
         if (!ph_at("}", 1)) err_at2(fl, line, "mc-php: an #[Extern] function's body is the library's: leave it empty", name);
         ph_next();
     }
+    // `errno` is a macro in C, not a symbol: the calling thread's error
+    // number, which the runtime's host layer reads where that host keeps it
+    // (php_c_errno: __error() on macOS, __errno_location() on Linux). Read
+    // right after the call that failed, it is C's own answer.
+    i64 xerr = str_eq(sym, "errno");
+    if (xerr && (np != 0 || rt != XT_INT || !str_eq(ph_xa_lib, "c")))
+        err_at2(fl, line, "mc-php: #[Extern('c')] errno takes no parameter and returns int", name);
+    if (xerr) sym = "php_c_errno";
     // The C declaration: one per symbol. An earlier #[Extern] of the same
     // symbol (an alias, `name:`) made it, and so may the runtime, whose
     // `extern`s are C's too; a name the runtime DEFINES is its own function.
     i64 di = ph_xsym_find(sym);
-    if (di < 0) {
+    if (xerr) di = decl_find(sym);
+    if (di < 0 && !xerr) {
         di = decl_find(sym);
         if (di >= 0 && nd_kind(di) != N_EXTERN)
             err_at2(fl, line, "mc-php: an #[Extern] name that is one of the runtime's own functions", sym);
@@ -246,7 +255,7 @@ i64 ph_extern_fn(uptr name, i64 fi, i64 fwd, uptr fl, i64 line) {
     // a declaration already made fixes the count of argument words: fewer are
     // padded with zeros, which every C ABI here lets a callee ignore
     i64 words = np + pad;
-    if (di >= 0) {
+    if (di >= 0 && !xerr) {
         i64 dw = 0;
         i64 pp = nd_a(di);
         loop { if (!pp) break; dw = dw + 1; pp = nd_next(pp); }
@@ -269,7 +278,7 @@ i64 ph_extern_fn(uptr name, i64 fi, i64 fwd, uptr fl, i64 line) {
     i64 xty = TY_I64;
     if (rt == XT_VOID) xty = TY_VOID;
     if (rt == XT_PTR || rt == XT_STR) xty = TY_UPTR;
-    if (di < 0) {
+    if (di < 0 && !xerr) {
         i64 xh = 0;
         i64 xtl = 0;
         i64 k = 0;

@@ -34,6 +34,7 @@
 #include "zend_interfaces.h"
 #include <pthread.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sys/wait.h>
 #include <curl/curl.h>
 
@@ -162,13 +163,25 @@ PHP_FUNCTION(http_get_many) {
 }
 
 /* --- any php callable, one forked child per argument ---------------------- */
+/* a signal handler installed without SA_RESTART makes a blocked read, write
+   or waitpid return -1 with EINTR: asked again, every one (signals.php) */
 static void write_all(int fd, const char *p, size_t n) {
     size_t off = 0;
-    while (off < n) { ssize_t k = write(fd, p + off, n - off); if (k <= 0) return; off += k; }
+    while (off < n) {
+        ssize_t k = write(fd, p + off, n - off);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return;
+        off += k;
+    }
 }
 static size_t read_all(int fd, char *p, size_t n) {
     size_t off = 0;
-    while (off < n) { ssize_t k = read(fd, p + off, n - off); if (k <= 0) return off; off += k; }
+    while (off < n) {
+        ssize_t k = read(fd, p + off, n - off);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return off;
+        off += k;
+    }
     return off;
 }
 
@@ -228,7 +241,7 @@ PHP_FUNCTION(parallel) {
             if (read_all(fd[i], &tag, 1) == 1 && read_all(fd[i], (char *)&len, 8) != 8) len = 0;
             if (len) { buf = malloc(len + 1); if (read_all(fd[i], buf, len) != len) len = 0; }
             close(fd[i]);
-            int st; waitpid(pid[i], &st, 0);
+            int st; while (waitpid(pid[i], &st, 0) < 0 && errno == EINTR) {}
         }
         zval z;
         ZVAL_NULL(&z);

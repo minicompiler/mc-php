@@ -1186,3 +1186,33 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   Written down, not fixed: such a destructor runs at the call's end rather than at php's moment,
   and a published method called from a loop inside the module keeps ~500 bytes a call until the
   call returns (a million calls exhaust 128 MB).
+- awaitable, step 6 (2026-09-28, branch `awaitable-parallel`, stacked on the step-5 PR):
+  **`parallel` and the counters, in the source**. No compiler change: `awaitable.src.php` declares
+  `fork`, `pipe`, `waitpid`, `_exit` and `read`/`write`/`close` (as `c_read`/`c_write`/`c_close`,
+  `name:`) with `#[Extern('c')]` and writes the C twin's algorithm in php -- one child per
+  argument, the child calls `$fn` through php, `serialize()`s the answer (or the message of what
+  it threw) down a pipe and `_exit`s; the parent reads each pipe in order, `waitpid()`s and
+  `unserialize()`s, counting a thrown child in `errors()`. A buffer C writes into is a php string
+  the module made of that length (`str_repeat("\0", 8)`), read back with `unpack()` -- written
+  down in `docs/php-extension.md` as the rule until native memory has a surface. `reset`, `peak`,
+  `completed` and `errors` are module globals. `AW_PROGRESS` 9 -> 31 on macOS and Linux; it stops
+  at `http_get_many` (threads: the owner's decision on a `#[Native]` function is pending).
+  Measured, `parallel('heavy', ...6 args)` at 2 000 000 iterations each, best of 5 on 10 cores:
+  17.0 ms against 46.0 ms sequential in php (2.71x), and the C twin 17.1 ms.
+  Review (reviewer agent): a read or `waitpid` interrupted by a signal (EINTR, a handler with no
+  `SA_RESTART`) lost the child's answer and left it a zombie -- in the C twin too. Reproduced with
+  `examples/awaitable/signals.php` (a SIGCHLD handler through `pcntl_signal(..., false)`, a slow
+  first child): both printed an empty first answer and `a child left unreaped: true`. Fixed in
+  both the same way: retried on `errno == EINTR` and on nothing else. The source reads errno
+  through `#[Extern('c')] function errno(): int {}` -- a macro in C, so `src/extern.mc` maps it to
+  the host layer's `php_c_errno` (`__error()` on macOS, `__errno_location()` on Linux; a
+  misdeclared one is refused, `tests/c/08-extern` prints `close(-1)`'s 9). A first version asked
+  `kill(pid, 0)` instead; the second review pass showed a child reaped by someone else (a SIGCHLD
+  handler calling `pcntl_waitpid(-1, ..., WNOHANG)`, php's manual's idiom) makes waitpid answer
+  ECHILD for ever, and kill succeeds again once the pid is reused -- a spin. `signals.php` gained
+  that handler and `SIG_IGN`; both versions pass them here (the handler cannot run inside the
+  module's call, and pid reuse cannot be forced), so the gate for the change is errno's fixture
+  and the EINTR case. `tests/examples.sh` runs `signals.php`, bounded by `tests/lim.sh`, against
+  the twin and the compiled module when php has pcntl. The counters were checked against
+  the twin and `awaitable.mc`: they count threads, so `parallel` leaves `completed()`/`peak()` at
+  0 -- now a `check.php` line (38 lines; `AW_PROGRESS` 32).

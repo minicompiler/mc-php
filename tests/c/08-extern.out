@@ -3,3 +3,4 @@
 -9 42 255
 4 42-x
 TypeError: mc-php: a C function takes an int, a string, a bool or null, not this value
+-1 9

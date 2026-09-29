@@ -50,6 +50,7 @@ rootn=$(cygpath -m "$root" 2>/dev/null || echo "$root")
 . "$here/tmp.sh"
 mcphp_tmp_init mcphp-examples
 tmp=$MCPHP_TMP
+. "$here/lim.sh"
 trap 'rm -rf "$tmp"' EXIT
 trap 'exit 130' INT
 
@@ -325,6 +326,26 @@ fi
 # --- awaitable -----------------------------------------------------------------
 echo "  -- awaitable"
 EX=examples/awaitable
+# signals.php: parallel() while SIGCHLD arrives with no SA_RESTART, so the
+# parent's blocked read() and waitpid() return EINTR -- every answer home and
+# no child left unreaped -- and under a handler that reaps any child and under
+# SIG_IGN, where parallel()'s own waitpid() answers ECHILD and must stop
+# (pcntl is what installs such handlers)
+aw_signals() {
+    if ! "$PHP" -m | tr -d '\r' | grep -qix pcntl; then
+        skip "signals.php ($2): this php has no pcntl"; return
+    fi
+    # bounded: a retry loop that does not stop is a hang, not an answer
+    lim "$PHP" -d extension="$1" "$EX/signals.php" > "$tmp/sig.out" 2>&1
+    [ "$timedout" = yes ] && echo "(timed out after ${LIM_SECS:-30} s)" >> "$tmp/sig.out"
+    if printf '%s\n' "slept 400, slept 10, slept 20, slept 30, slept 40, slept 50" \
+        "SIGCHLD seen: true" "a child left unreaped: false" \
+        "slept 300, slept 10, slept 20" "slept 200, slept 10" "done" | cmp -s - "$tmp/sig.out"; then
+        say "signals.php ($2): EINTR asked again, ECHILD not; every answer home, no child left unreaped"
+    else
+        bad "signals.php ($2):"; sed -n '1,6p' "$tmp/sig.out" | sed 's/^/      /'
+    fi
+}
 if hand_ok "awaitable.mc"; then
     if ! "$PHP" -m | tr -d '\r' | grep -qix curl; then
         skip "awaitable.mc: this php has no curl, and the module resolves libcurl from php's own process"
@@ -361,6 +382,7 @@ elif command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; 
             bad "check.php (the C twin) exited $awcrc, or differs from $EX/check.expect:"
             diff -u "$EX/check.expect" "$tmp/awc.out" | sed -n '3,24p' | sed 's/^/      /'
         fi
+        aw_signals "$tmp/c-awaitable.so" "the C twin"
     else
         bad "the C twin of awaitable would not build:"; sed 's/^/      /' "$tmp/c.err"
     fi
@@ -374,7 +396,7 @@ fi
 # record in the same commit, and all of them means the hand-written
 # awaitable.mc can retire. Windows refuses #[Extern] by name (src/extern.mc),
 # so there the first C declaration's refusal is pinned.
-AW_PROGRESS=9
+AW_PROGRESS=32
 if [ "$host" = windows ]; then
     pin "$EX" "awaitable.src.php:14: mc-php: an #[Extern] function on Windows: the link names no library for it: awaitable\\curl_easy_init"
 elif ! "$PHP" -m | tr -d '\r' | grep -qix curl; then
@@ -390,6 +412,7 @@ elif build "$EX" "$EX/mcphp$suf.toml" "awaitable.$sx"; then
         bad "awaitable.src.php compiled: check.php agrees for $n of $total lines, the recording says $AW_PROGRESS (record it)"
         diff "$EX/check.expect" "$tmp/awp.out" | sed -n '1,8p' | sed 's/^/      /'
     fi
+    aw_signals "$EX/build/awaitable.$sx" "the compiled module"
     rm -rf "$EX/build"
 fi
 
