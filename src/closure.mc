@@ -45,6 +45,14 @@ i64 ph_cap_site(uptr an, uptr unames, uptr urefs, i64 nu, uptr used, i64 line, u
     return mk;
 }
 
+// is `name` one of the n names at `names` (the closure's parameters, or the
+// use list so far)
+i64 ph_is_param(uptr name, uptr pnames, i64 np) {
+    i64 i = 0;
+    loop { if (i >= np) break; if (str_eq(ld64(pnames + i * 8), name)) return 1; i = i + 1; }
+    return 0;
+}
+
 // does anything in the tree under n (its siblings too) name `mn`
 i64 ph_names(i64 n, uptr mn) {
     loop {
@@ -93,26 +101,29 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     }
     ph_want(")", 1, "expected ) in a php closure");
 
-    // what it captures, and from which enclosing variable
-    u8 unames[128];
+    // what it captures, and from which enclosing variable: as many as the
+    // enclosing scope has (an arrow function may name any of them; a fixed
+    // sixteen once dropped the seventeenth, which then read as undefined)
+    i64 ucap = ph_nvar + 16;
+    uptr unames = xalloc(ucap * 8);
     // `use (&$x)`: the capture is the enclosing variable's OWN zval, carried
     // through the use array as its address (php_zlong / php_zv_long) rather
     // than as a copy -- the array slot php_arr_set writes is a different cell
     // and could not alias. The enclosing $x is already a zval: the source
     // scan's `&$` rule put it in the ref set.
-    u8 urefs[128];
+    uptr urefs = xalloc(ucap * 8);
     i64 ur0 = 0;
-    loop { if (ur0 >= 16) break; st64(urefs + ur0 * 8, 0); ur0 = ur0 + 1; }
+    loop { if (ur0 >= ucap) break; st64(urefs + ur0 * 8, 0); ur0 = ur0 + 1; }
     i64 nu = 0;
     if (arrow) {
-        // fn() captures every enclosing variable by value
+        // fn() captures enclosing variables by value (the body decides which,
+        // below) -- never one its own parameter names: inside the arrow
+        // function that name is the parameter
         i64 i = 0;
         loop {
             if (i >= ph_nvar) break;
-            if (nu < 16) {
-                uptr vn = ld64(ph_vname + i * 8);
-                if (!str_eq(vn, "$this")) { st64(unames + nu * 8, vn); nu = nu + 1; }
-            }
+            uptr vn = ld64(ph_vname + i * 8);
+            if (!str_eq(vn, "$this") && !ph_is_param(vn, pnames, np)) { st64(unames + nu * 8, vn); nu = nu + 1; }
             i = i + 1;
         }
     }
@@ -128,8 +139,14 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
                 ph_next();
                 uptr un = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
                 ph_next();
+                // php's own compile-time error, with its stack trace
+                if (ph_is_param(un, pnames, np))
+                    ph_phpfatal_x(fl, line, p_cat(p_cat("Cannot use lexical variable ", un, 0, cstrlen(un)), " as a parameter name", 0, 20), 1);
+                // php refuses a name the use list already has, however many
+                if (ph_is_param(un, unames, nu))
+                    ph_phpfatal_x(fl, line, p_cat(p_cat("Cannot use variable ", un, 0, cstrlen(un)), " twice", 0, 6), 1);
                 if (ph_var_find(un) < 0) ph_refuse2(fl, line, "an undefined php variable in use", un, "D4");
-                if (nu >= 16) ph_todo(fl, line, "more than sixteen captured variables");
+                if (nu >= ucap) ph_todo(fl, line, "a use list longer than the variables in scope");
                 st64(unames + nu * 8, un);
                 st64(urefs + nu * 8, uref);
                 nu = nu + 1;
@@ -236,10 +253,10 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     // php's rule for fn(): capture, by value at creation, the variables the
     // body names and no other -- one it does not name is never read, and may
     // be a slot nothing assigned on this path (a catch's $e)
-    u8 used[16];
+    uptr used = xalloc(ucap);
     i64 uu = 0;
     loop {
-        if (uu >= 16) break;
+        if (uu >= ucap) break;
         st8(used + uu, !arrow || (uu < nu && ph_names(nd_a(body), ph_mangle(ld64(unames + uu * 8), "v_"))));
         uu = uu + 1;
     }

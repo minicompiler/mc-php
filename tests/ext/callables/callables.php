@@ -50,3 +50,16 @@ function arrow_nested(): int {
     $f = fn(int $x): int => (fn(int $y): int => $y + $k)($x) * 2;
     return $f(4);
 }
+// A closure's parameter is its own variable (tests/g/124-closure-shadow.php
+// is the program road's copy): not captured over, and what a nested arrow
+// function captures is its outer arrow function's parameter.
+function shadow_a(): int { $x = 100; $f = fn($x) => fn() => $x * 2; return $f(5)(); }
+function shadow_b(): int { $x = 999; $g = fn() => fn($x) => $x + 1; return $g()(1); }
+function shadow_c(): int { $x = 1; $f = fn($x) => fn($y) => $x + $y; return $f(10)(5); }
+function shadow_d(): int { $x = 5; $y = 1; $f = function ($x) use ($y) { return $x + $y; }; return $f(10) + $x; }
+function shadow_wide(): int {
+    $v1 = 1; $v2 = 2; $v3 = 3; $v4 = 4; $v5 = 5; $v6 = 6; $v7 = 7; $v8 = 8; $v9 = 9;
+    $v10 = 10; $v11 = 11; $v12 = 12; $v13 = 13; $v14 = 14; $v15 = 15; $v16 = 16; $v17 = 17;
+    $g = fn() => $v17 + $v1;
+    return $g();
+}

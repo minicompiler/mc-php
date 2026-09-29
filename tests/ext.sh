@@ -781,6 +781,26 @@ else
 fi
 rm -rf "$tmp/build"
 
+# php's compile-time Fatal errors about a closure's captures are the same on
+# this road: a parameter named like a use-list variable, and a use list that
+# names one variable twice. Both forms, php's words, exit 255, no module.
+for lx in 125-closure-lexical-param:"Cannot use lexical variable \$x as a parameter name":6 \
+          126-closure-use-twice:"Cannot use variable \$a twice":5; do
+    lf=${lx%%:*}; lr=${lx#*:}; lm=${lr%:*}; ll=${lr##*:}
+    cp "tests/g/$lf.php" "$tmp/r.php"
+    rm -f "$tmp/build/r.$sx"
+    "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/lx.out" 2> "$tmp/lx.err"; lc=$?
+    if [ "$lc" = 255 ] && grep -q "^Fatal error: $lm in .*r.php on line $ll\$" "$tmp/lx.out" \
+       && grep -q "^PHP Fatal error:  $lm in .*r.php on line $ll\$" "$tmp/lx.err" \
+       && [ "$(grep -c '^#0 {main}$' "$tmp/lx.out")" = 1 ] && [ "$(grep -c '^#0 {main}$' "$tmp/lx.err")" = 1 ] \
+       && [ ! -f "$tmp/build/r.$sx" ]; then
+        say "closures: $lm -- php's compile-time Fatal error on stdout and stderr, exit 255, no module"
+    else
+        bad "closures: $lm (exit $lc)"; sed 's/^/      /' "$tmp/lx.out" "$tmp/lx.err" | head -8
+    fi
+    rm -rf "$tmp/build"
+done
+
 # --- 20. compiled functions on several OS threads at once --------------------
 # tests/ext/threads: the module's threads against php calling the same
 # function one thread at a time (a recording: php has no mcphp_threads)
