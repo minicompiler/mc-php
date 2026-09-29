@@ -1148,3 +1148,41 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   every host -- #34's windows/x86_64 failure (two kernel32 names below the runtime's
   `#dylib "ucrtbase.dll"`, exit 127 before `main`) was the same class of miss, found only on a
   Windows runner.
+- awaitable, step 5 (2026-09-28, branch `awaitable-call`, stacked on the step-4 PR): **php's
+  callables called, throwables both ways**. On the extension road `$fn(...)` on a value that is
+  not the runtime's own closure -- a name, `"C::m"`, an array callable, an engine `Closure`, an
+  `__invoke` object -- goes to php (`ph_eng` slot 6, `phx_vcall` over `_call_user_function_impl`),
+  a spread's trailing "not passed" slots dropped so php counts the real arguments; what it throws
+  is the module's to catch (`phx_zcatch`), and a non-callable is php's own `Error` wording for a
+  name, an object and a scalar. A runtime throwable crossing into php -- stored, returned, or
+  thrown out of a handler -- is the engine's object of its class with message and code
+  (`phx_exc_obj`, which `phx_throw` now uses too). Found on the way and fixed: `phx_zmirror`
+  outlived the call whose memory held it, so a later call's runtime exception at the same
+  address was taken for the mirror and php got the OLD engine exception rethrown; the mirror
+  is now dropped at the end of the outermost call. On the program road an object is called
+  through `__invoke` (`$g("x")` on a `new Greeter`), and a callable STRING is refused by design
+  (D6, `tests/r/d6-callable-string.php`) where an extension calls it through php;
+  `tests/g/104-callable-value.php` is green, and the grid gains three `__invoke` tests
+  (`bug70179`, `dereference_004`, `bug46409`).
+  `AW_PROGRESS` 6 -> 9 (`reset()` is next: the bodies). `tests/ext.sh` step 19
+  (`tests/ext/callables`), `tests/leaks.sh` (the callables module, 300 rounds). windows/x86_64
+  CI then found `EG(exception)` at the wrong place: `executor_globals` carries an
+  `OSVERSIONINFOEX` before it on Windows, so the headers' 960 is not Windows's offset. It is now
+  MEASURED in a request's first call (`phx_egx_find`: an exception thrown with nothing pending,
+  found among the globals, cleared), with 960 as the fallback -- a fallback of 8 still passed
+  step 19 on macOS, so the probe is what answers.
+  Review (reviewer agent, Copilot out of quota): `phx_exc_obj`'s fallback lookup of `Exception`
+  leaked its temporary `zend_string` on every throwable of a class the engine does not know.
+  Reproduced first -- `tests/leaks.sh` now throws a module-private `_Oops` 300 times: 600 blocks
+  left under a debug php -- and fixed with one lookup helper both lookups use (`phx_lookup`).
+  Same review: `phx_mh`'s `$this` proxy was suspected of delaying `__destruct`.
+  Measured: an object php holds is destroyed where php destroys it (a loop of method calls, then
+  `unset`, prints in php's order). What the review led to is a CRASH: an object the module makes
+  and drops is released at the module call's end, and its `__destruct` -- a module method -- ran
+  as a call nested in `phx_leave_slow` after the call's allocator was torn down; a destructor
+  that allocated left the next call with `zend_mm_heap corrupted` (exit 134). The holds are now
+  released with the call still open (`phx_esc_open`: at depth 1, round by round, keeping what a
+  pinning destructor holds). `tests/ext/classes` gained that shape (it aborts without the fix).
+  Written down, not fixed: such a destructor runs at the call's end rather than at php's moment,
+  and a published method called from a loop inside the module keeps ~500 bytes a call until the
+  call returns (a million calls exhaust 128 MB).

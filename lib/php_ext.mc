@@ -586,6 +586,35 @@ void phx_esc_from(i64 from) {
     if (ph_en > from) ph_en = from;
 }
 
+// What a call held, released with the call still OPEN (phx_leave_slow): the
+// last reference to an engine object runs its __destruct, and when that is a
+// method of this module it is a call nested in this release -- on this
+// call's allocator, which must not be torn down yet (it was, and a destructor
+// that allocated corrupted php's heap). What those destructors hold in turn
+// lands above the list's top: it is released next round, unless one of them
+// pinned the call (a global it wrote), and then it is kept with the call.
+void phx_esc_open() {
+    phx_depth = 1;
+    loop {
+        i64 top = ph_en;
+        if (top <= phx_efloor) break;
+        i64 i = top;
+        loop {
+            if (i <= phx_efloor) break;
+            i = i - 1;
+            uptr e = ld64(ph_esc + i * 8);
+            st64(ph_esc + i * 8, 0);
+            if (e & 1) phx_unhold(e - 1);
+            else if (e) php_str_release(e);
+        }
+        i64 k = 0;
+        loop { if (top + k >= ph_en) break; st64(ph_esc + (phx_efloor + k) * 8, ld64(ph_esc + (top + k) * 8)); k = k + 1; }
+        ph_en = phx_efloor + k;
+        if (ph_pin || ph_nob) break;
+    }
+    phx_depth = 0;
+}
+
 // the arena and its copy are 8-aligned, and the copy has 8 bytes to spare
 void phx_copy(uptr d, uptr s, i64 n) {
     i64 i = 0;
@@ -707,6 +736,8 @@ void phx_enter() {
 }
 void phx_enter_slow() {
     php_bootstrap();
+    // a request's first call (MINIT has ended): nothing is pending
+    if (!phx_egx_done && phx_mark && phx_eg) phx_egx_find();
     phx_zalloc_fn = &phx_zalloc;
     if (!phx_depth) {
         ph_pin = 0;
@@ -742,30 +773,60 @@ void phx_throw() {
         zend_throw_exception_internal(e);
         return;
     }
-    uptr cn = php_obj_cname(o);
-    uptr m = php_zv_str(php_exm_message(o));
     ph_exc = 0;
-    // The CLASS, when the engine has one of that name -- every php built-in
-    // does, so `throw new InvalidArgumentException(...)` crosses the boundary
-    // as itself. A class this program DECLARED is the engine's only if the
-    // program also registered it, which this back end does not do yet: the
-    // fallback is a plain Exception whose message names the class, and it is
-    // written down rather than silent (docs/php-extension.md § What differs).
-    // the name is ours only for the lookup: released the way the engine
-    // releases a string, in case an autoloader kept a reference
-    uptr cz = phx_zstr(cn);
+    zend_throw_exception_internal(phx_exc_obj(o));
+}
+
+// A runtime throwable as the engine's object, with one reference for the
+// caller: thrown out of a handler (phx_throw) or stored where php reads it
+// (phx_r2e). The CLASS, when the engine has one of that name -- every php
+// built-in does, so `throw new InvalidArgumentException(...)` crosses the
+// boundary as itself, with its message and code. A class this program
+// DECLARED is the engine's only if the module publishes it, and a throwable
+// class is not published yet: the fallback is a plain Exception whose message
+// names the class, and it is written down rather than silent
+// (docs/php-extension.md § What differs). object_init_ex runs the class's
+// create handler, which is what gives it php's file and line -- the
+// statement that is executing, as zend_throw_exception would.
+// A class of the engine's by name. The name is ours only for the lookup:
+// released the way the engine releases a string, in case an autoloader kept
+// a reference.
+uptr phx_lookup(uptr name) {
+    uptr cz = phx_zstr(name);
     uptr ce = zend_lookup_class(cz);
     st32(cz, ld32(cz) - 1);
     if (!ld32(cz)) phx_ef(cz);
+    return ce;
+}
+
+uptr phx_exc_obj(uptr o) {
+    uptr cn = php_obj_cname(o);
+    uptr m = php_zv_str(php_exm_message(o));
+    uptr ce = phx_lookup(cn);
     uptr s = m;
+    i64 code = 0;
+    if (ce) code = php_zv_long(php_exm_code(o));
     if (!ce) {
+        ce = phx_lookup(php_str_new("Exception", 9));
         s = cn;
         if (php_strlen(m)) {
             s = php_str_concat(s, php_str_new(": ", 2));
             s = php_str_concat(s, m);
         }
     }
-    zend_throw_exception(ce, s + ZSX_VAL, 0);
+    u8 z[16];
+    object_init_ex(z, ce);
+    uptr e = ld64(z);
+    u8 v[16];
+    phx_r2e(php_zstr(s), v);
+    zend_update_property(zend_get_exception_base(e), e, "message", 7, v);
+    zval_ptr_dtor(v);
+    if (code) {
+        st64(v, code);
+        st32(v + ZVX_TYPE_INFO, IZ_LONG);
+        zend_update_property(zend_get_exception_base(e), e, "code", 4, v);
+    }
+    return e;
 }
 
 // The common return: nothing echoed, nothing thrown, the outermost call, nothing
@@ -774,7 +835,7 @@ void phx_throw() {
 // phx_leave_slow, which is the whole story.
 void phx_leave_slow();
 void phx_leave() {
-    if (!ph_outn && !ph_exc && phx_depth == 1 && !ph_nob && !ph_pin && ph_en == phx_efloor && phx_cn == phx_keep) {
+    if (!ph_outn && !ph_exc && phx_depth == 1 && !ph_nob && !ph_pin && ph_en == phx_efloor && phx_cn == phx_keep && !phx_zmirror) {
         phx_depth = 0;
         php_rc_drain(0);
         ph_zalloc = 0;
@@ -789,6 +850,16 @@ void phx_leave_slow() {
     if (!phx_depth) { if (!phx_mark) phx_snapshot(); return; }
     phx_depth = phx_depth - 1;
     if (phx_depth) return;
+    // what the call held goes while the call is still open (phx_esc_open)
+    if (!ph_pin && !ph_nob && ph_en > phx_efloor) {
+        phx_esc_open();
+        php_flush();
+        phx_throw();
+    }
+    // the runtime object that stood for a caught engine exception is made of
+    // the call's memory: kept past it, a later call's object at the same
+    // address would be taken for it (phx_throw, phx_r2e)
+    phx_zexc_drop();
     // the call's temporaries die: whatever it answered, return_value has its
     // own reference by now (phx_ret_str)
     php_rc_drain(0);
@@ -856,12 +927,11 @@ extern void zend_throw_exception_internal(uptr obj);
 // Uncaught, or rethrown as it is, the ENGINE's object goes back with its own
 // class and trace (phx_throw).
 //
-// ponytail: one slot, released by the next one or at RSHUTDOWN -- not when
-// the module's catch is done with it, which would put a test on every
-// handler's return. A second one taken while an outer mirror is still
-// pending crosses as the runtime exception it was converted to (its class
-// and message, not its trace), and an exception class with a destructor
-// sees it run late.
+// ponytail: one slot, released by the next one or at the end of the
+// outermost call -- not when the module's catch is done with it. A second
+// one taken while an outer mirror is still pending crosses as the runtime
+// exception it was converted to (its class and message, not its trace), and
+// an exception class with a destructor sees it run late.
 
 void phx_zexc_drop() {
     if (phx_type(phx_zexcz) == IZ_OBJECT) zval_ptr_dtor(phx_zexcz);
@@ -1194,9 +1264,28 @@ extern i64  instanceof_function_slow(uptr a, uptr b);
 
 uptr phx_eg;                        // &executor_globals, found at get_module
 uptr phx_pce;                       // the proxies' class, made before MINIT ends
-u64  phx_engt[6];                   // lib/php_rt.mc's ph_eng
+u64  phx_engt[7];                   // lib/php_rt.mc's ph_eng
 
-i64 phx_zexc() { return ld64(phx_eg + EGX_EXCEPTION) != 0; }
+// EG(exception)'s offset, MEASURED once in the first call rather than taken
+// from the headers alone: executor_globals is laid out differently on Windows
+// (an OSVERSIONINFOEX member sits before it). The first handler runs with
+// nothing pending, so an exception thrown there is found among the globals
+// and cleared; EGX_EXCEPTION (tests/ext/abi.c) is what it finds elsewhere,
+// and the fallback.
+i64 phx_egx = EGX_EXCEPTION;
+i64 phx_egx_done;
+void phx_egx_find() {
+    phx_egx_done = 1;
+    uptr x = zend_throw_exception(0, "", 0);
+    i64 off = 0;
+    loop {
+        if (off >= 8192) break;
+        if (ld64(phx_eg + off) == x) { phx_egx = off; break; }
+        off = off + 8;
+    }
+    zend_clear_exception();
+}
+i64 phx_zexc() { return ld64(phx_eg + phx_egx) != 0; }
 
 // a reference the module takes on an engine array or object
 void phx_hold(uptr p) {
@@ -1307,6 +1396,13 @@ void phx_r2e(uptr z, uptr ez) {
             st32(ez + ZVX_TYPE_INFO, IZ_OBJECT_EX);
             return;
         }
+        // a throwable the module made -- caught, kept, stored in an object php
+        // reads -- goes as the engine's object of that class (phx_exc_obj)
+        if (!php_is_proxy(o) && php_instanceof(z, php_str_new("Throwable", 9))) {
+            st64(ez, phx_exc_obj(o));
+            st32(ez + ZVX_TYPE_INFO, IZ_OBJECT_EX);
+            return;
+        }
         if (!php_is_proxy(o)) {
             st64(ez, 0);
             st32(ez + ZVX_TYPE_INFO, IZ_NULL);
@@ -1345,7 +1441,7 @@ uptr phx_r2e_arr(uptr a) {
 // runtime's (phx_zcatch), so the module's own catch sees it
 void phx_zafter() { if (phx_zexc()) phx_zcatch(); }
 
-// ---- the five operations on a proxy (lib/php_rt.mc's ph_eng) ---------------
+// ---- the operations on a proxy (lib/php_rt.mc's ph_eng) --------------------
 uptr phx_pcname(uptr o) {
     uptr n = ld64(ld64(ld64(o + PHX_POBJ) + ZOX_CE) + ZCX_NAME);
     return php_str_new(n + ZSX_VAL, ld64(n + ZSX_LEN));
@@ -1413,6 +1509,62 @@ uptr phx_pcall(uptr o, uptr name, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, upt
     return r;
 }
 
+// A php callable the module calls that is not the runtime's own closure: a
+// function's name, an array callable, an engine object (a Closure, an
+// __invoke) -- php resolves and calls it, as the C twin's
+// zend_call_function does. What it throws is the module's to catch
+// (phx_zcatch); what is not callable is php's own Error.
+extern i32 _call_user_function_impl(uptr obj, uptr fn, uptr rv, i64 n, uptr params, uptr named);
+uptr phx_vcall(uptr f, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
+    if (ph_outn) php_flush();
+    // a spread's slots past the end of its array are 0, "not passed"
+    // (php_unpack_at): php counts only the arguments there are
+    if (n > 0 && !a1) n = 0;
+    if (n > 1 && !a2) n = 1;
+    if (n > 2 && !a3) n = 2;
+    if (n > 3 && !a4) n = 3;
+    if (n > 4 && !a5) n = 4;
+    u8 fz[16];
+    phx_r2e(f, fz);
+    // not callable: php's own Error, in the words `$f()` says for a name, an
+    // object and a scalar (an array's and a "C::m" string's are php's
+    // "Invalid callback ..." of zend_call_function below)
+    if (!(zend_is_callable_ex(fz, 0, 0, 0, 0, 0) & 255)) {
+        i64 t = php_zv_type(f);
+        uptr m = 0;
+        if (t == IS_STRING && php_strpos(ld64(f), php_str_new("::", 2), 0) < 0)
+            m = php_str_concat(php_str_concat(php_str_new("Call to undefined function ", 27), ld64(f)), php_str_new("()", 2));
+        if (t == IS_OBJECT)
+            m = php_str_concat(php_str_concat(php_str_new("Object of type ", 15), php_obj_cname(ld64(f))), php_str_new(" is not callable", 16));
+        if (t != IS_STRING && t != IS_ARRAY && t != IS_OBJECT)
+            m = php_str_concat(php_str_concat(php_str_new("Value of type ", 14), php_f_get_debug_type(f)), php_str_new(" is not callable", 16));
+        if (m) {
+            zval_ptr_dtor(fz);
+            php_throw_cls(php_str_new("Error", 5), m);
+            return php_znull();
+        }
+    }
+    u8 av[80];
+    if (n > 0) phx_r2e(a1, av);
+    if (n > 1) phx_r2e(a2, av + 16);
+    if (n > 2) phx_r2e(a3, av + 32);
+    if (n > 3) phx_r2e(a4, av + 48);
+    if (n > 4) phx_r2e(a5, av + 64);
+    u8 rv[16];
+    st32(rv + ZVX_TYPE_INFO, IZ_UNDEF);
+    i64 lz = phx_lz;
+    phx_lz = 0;
+    _call_user_function_impl(0, fz, rv, n, av, 0);
+    phx_lz = lz;
+    i64 k = 0;
+    loop { if (k >= n) break; zval_ptr_dtor(av + k * 16); k = k + 1; }
+    zval_ptr_dtor(fz);
+    if (phx_zexc()) { zval_ptr_dtor(rv); phx_zcatch(); return php_znull(); }
+    uptr r = phx_e2r(rv);
+    zval_ptr_dtor(rv);
+    return r;
+}
+
 i64 phx_pis(uptr o, uptr name) {
     uptr ce = ld64(ld64(o + PHX_POBJ) + ZOX_CE);
     uptr cz = phx_zstr(php_clskey(name));
@@ -1433,6 +1585,7 @@ void phx_eng_init() {
     st64(phx_engt + 24, &phx_pcall);
     st64(phx_engt + 32, &phx_pis);
     st64(phx_engt + 40, &phx_pnew);
+    st64(phx_engt + 48, &phx_vcall);
     ph_eng = phx_engt;
 }
 

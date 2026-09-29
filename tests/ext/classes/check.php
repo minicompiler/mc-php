@@ -14,3 +14,5 @@ try { echo $b->secret; } catch (Error $e) { echo get_class($e), ": ", $e->getMes
 try { $b->secret = 1; } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
 try { $b->hidden(); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
 $r = new ReflectionClass('pc\Box'); echo var_export($r->isFinal(), true), "\n";
+echo pc\plain(), "\n";
+echo pc\churn(), "\n";
