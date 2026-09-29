@@ -1199,3 +1199,12 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   at `http_get_many` (threads: the owner's decision on a `#[Native]` function is pending).
   Measured, `parallel('heavy', ...6 args)` at 2 000 000 iterations each, best of 5 on 10 cores:
   17.0 ms against 46.0 ms sequential in php (2.71x), and the C twin 17.1 ms.
+  Review (reviewer agent): a read or `waitpid` interrupted by a signal (EINTR, a handler with no
+  `SA_RESTART`) lost the child's answer and left it a zombie -- in the C twin too. Reproduced with
+  `examples/awaitable/signals.php` (a SIGCHLD handler through `pcntl_signal(..., false)`, a slow
+  first child): both printed an empty first answer and `a child left unreaped: true`. Fixed in
+  both: the twin retries on `errno == EINTR`; the source, which has no errno to read, asks again
+  while `kill(pid, 0)` says the child is still there. `tests/examples.sh` runs `signals.php`
+  against the twin and the compiled module when php has pcntl. The counters were checked against
+  the twin and `awaitable.mc`: they count threads, so `parallel` leaves `completed()`/`peak()` at
+  0 -- now a `check.php` line (38 lines; `AW_PROGRESS` 32).
