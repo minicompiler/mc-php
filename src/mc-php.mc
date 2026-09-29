@@ -17,8 +17,9 @@
 //     mc build src --config src/mc-php.linux-aarch64.toml
 //     mc build src --config src/mc-php.linux-x86_64.toml
 //
-// Those two include src/host_extra_linux.mc, which is the one declaration mc's
-// Linux host layer does not carry. Windows has an entry per architecture too
+// Those two include src/host_extra_linux.mc, which is what mc's Linux host
+// layer does not carry; this entry includes src/host_extra_macos.mc, the same
+// for macOS. Windows has an entry per architecture too
 // (src/mc-php-windows-*.mc), built on Windows only.
 #include <mc/host>
 // <mc/core> is these seven parts and mc's main; mc-php's main is
@@ -33,4 +34,5 @@
 #include <float>
 #include <machine_arm64_float>
 #include <machine_x86_64_float>
+#include "host_extra_macos.mc"
 #include "php.mc"

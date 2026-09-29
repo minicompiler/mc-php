@@ -788,6 +788,18 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         ph_ety = PT_MIXED;
         return ph_c2("php_f_pack", ph_to_mixed(ph_a(avp, 0), ph_aty(avp, 0)), ph_c1("php_zarr", ar2, ty_pzv), ty_pzv);
     }
+    // mcphp_thread(): which php thread runs this call, as a number -- the
+    // thread's runtime block (lib/php_zts.mc's phz_tid). A ZTS module's test
+    // gate (tests/frankenphp.sh counts the threads a load landed on); it
+    // exists in a ZTS output only, and anything else refuses it by name.
+    if (str_eq(name, "mcphp_thread")) {
+        u8 tnp1[8];
+        ph_read_args(1, fl, line, tnp1);
+        if (ld64(tnp1) != 0) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        if (!ph_ext || !ph_ext_zts) err_at2(fl, line, "mc-php: mcphp_thread() is a ZTS extension's test gate", name);
+        ph_ety = PT_INT;
+        return ph_call("phz_tid", 0, 0, 0, 0, 0, TY_I64);
+    }
     // mcphp_threads('f', $n, $arg): the runtime's own gate of its threads
     // (lib/php_rt.mc § other threads) -- n OS threads, thread i running the
     // compiled f(arg, i), the sum of what they returned. Internal: the public

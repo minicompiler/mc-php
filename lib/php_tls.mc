@@ -98,3 +98,22 @@
 #define PHT_ph_rdbuf            8208   // u8[], 4096 bytes
 #define PHT_phx_zexcz          12304   // u8[], 16 bytes  the engine exception a call took off it
 #define PHT_SIZE 12320
+
+// A ZTS module's words (lib/php_zts.mc, docs/threads.md § ZTS), after the NTS
+// block. src/program.mc makes PHT_SIZE cover them for a ZTS output only, so
+// an NTS module's block and every byte of it are what they were; a #define
+// emits nothing.
+#define PHT_phx_eg             12320   // uptr  this php thread's executor globals
+#define PHT_ph_globals         12328   // uptr  the global variable table, this request's
+#define PHT_ph_consts          12336   // uptr  the constants, this request's
+#define PHT_ph_classes         12344   // uptr  the class registry, this request's
+#define PHT_ph_ce_closure      12352   // uptr
+#define PHT_ph_rsl             12360   // uptr  the statics to reset at the end of the request
+#define PHT_phz_init           12368   // i64   1 once a php thread's block is set up
+#define PHT_phz_mod            12376   // uptr  this thread's copy of the module's own words (statics, call caches)
+#define PHT_phz_sp             12384   // uptr  this request's static-property tables: (class entry, table) pairs
+#define PHT_phz_spn            12392   // i64
+#define PHT_phz_idm            12400   // uptr  the identity map of a copy: (from, to) pairs
+#define PHT_phz_idn            12408   // i64
+#define PHT_phz_idc            12416   // i64   its capacity
+#define PHT_SIZE_ZTS           12424

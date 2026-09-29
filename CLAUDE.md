@@ -1257,7 +1257,8 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     - `EG` is read as `tsrm_get_ls_cache() + executor_globals_offset`, both found by dlsym.
       `EG(exception)` is 960 on both builds, and the layout gate is 85/85 against the ZTS
       headers.
-    - An RINIT/RSHUTDOWN pair refuses a request on any php thread other than the loading one.
+    - (superseded by the review round below) An RINIT/RSHUTDOWN pair refused a request on any
+      php thread other than the loading one.
     - On Windows, `php_dlsym` asks `php8ts.dll`. The host source is swapped only for ZTS.
   - `"both"`: mc-php's entries now include mc's seven parts plus `src/build.mc`'s own main,
     which re-registers `build`. It builds the NTS output in process, then the ZTS output in a
@@ -1273,3 +1274,27 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     - `ext.sh` 2b (three refusals) and 2c ("both" on every leg).
   - CI adds a macOS ZTS job (setup-php `phpts: ts`), ZTS Windows legs (x86_64 and aarch64), and
     the ZTS and both steps on the Linux legs.
+  - Review round (PR #39), six findings:
+    1. Real multi-thread ZTS (`docs/threads.md` § ZTS). TSRM module globals: php gives every
+       php thread a runtime block (`globals_size/id_ptr/ctor/dtor`), set up at the thread's
+       first request, released by `globals_dtor`. EG is read per thread. Per php thread, and
+       copied from MINIT's at each request (`phz_privatize`): globals, constants, the class
+       registry, statics, static properties, the call-site caches (`phst_`/`phf_` moved into a
+       per-thread area by `src/tls.mc`). MINIT's memory is read-only under
+       `MCPHP_ZTS_READONLY=1`. Gate `tests/frankenphp.sh` (FrankenPHP 8.5.11 ZTS, 8 php
+       threads, 400 warm-up + 4000 requests 32 at a time): every answer right, 5 threads,
+       RSS +2..3 MiB, on aarch64 (3 runs) and x86_64 under emulation (2000/16); CI on both
+       Linux legs. Cost on decimal's bench: 0.228 ms NTS vs 0.269 ms ZTS (+18%); interpreted
+       php itself +5%. Found on the way, NOT a ZTS defect and not fixed here: an arrow function
+       captures every enclosing variable, so a `$e` a catch never assigned is an unset slot --
+       SIGSEGV exit 139 on main's own compiler, program road, NTS.
+    2. A php without `tsrm_get_ls_cache`/`executor_globals_offset` gets an `E_CORE_ERROR` from
+       `get_module` naming the symbol; `ext.sh` 2c and `both.sh` check it (NTS php loading the
+       ZTS output).
+    3. The unfrozen mc names: `tests/mcnames.mc` (217: 64 functions, 5 globals, 145 defines, 3
+       C functions) and `docs/mc-internals.md`, pinned to mc 1.3.0; `tests/mcnames.sh --strict`
+       in CI names a missing name or a changed arity and the mc version.
+    4. The ZTS copy is `.mcphp-zts-<pid>-<file>`, removed on every path; `.gitignore` has
+       `.mcphp-zts-*` and `.mcphp-test-*`; a SIGKILL leaving it is documented.
+    5. `php8.lib` -> `php8ts.lib` only for a Windows target and only as a whole word.
+    6. `ph_swap` refuses a text that occurs twice or never.

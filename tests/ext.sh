@@ -147,9 +147,9 @@ say "thread_safety: $tsn of 3 wrong files refused at the key's own line and colu
 # NTS php and build/hello-zts.$sx for a ZTS one. The php under test loads the
 # one for its kind and refuses the other by name. Every leg grades the half its
 # php can; tests/both.sh loads each half in its own php on Linux.
-sed 's/^thread_safety = .*/thread_safety = "both"/' "$cfg0" > "$EX/.both-test.toml"
+sed 's/^thread_safety = .*/thread_safety = "both"/' "$cfg0" > "$EX/.mcphp-test-both.toml"
 rm -f "$EX/build/hello.$sx" "$EX/build/hello-zts.$sx"
-if "$BIN" build "$EX" --config "$EX/.both-test.toml" > "$tmp/both.out" 2>&1 \
+if "$BIN" build "$EX" --config "$EX/.mcphp-test-both.toml" > "$tmp/both.out" 2>&1 \
    && [ -f "$EX/build/hello.$sx" ] && [ -f "$EX/build/hello-zts.$sx" ]; then
     mine=hello.$sx; other=hello-zts.$sx
     [ "$TSV" = zts ] && { mine=hello-zts.$sx; other=hello.$sx; }
@@ -158,18 +158,27 @@ if "$BIN" build "$EX" --config "$EX/.both-test.toml" > "$tmp/both.out" 2>&1 \
     bo=$(cygpath -m "$tmp/b-other.$sx" 2>/dev/null || echo "$tmp/b-other.$sx")
     ml=$("$PHP" -d extension="$bm" -r 'echo extension_loaded("hello") ? "yes" : "no";' 2>&1 | tr -d '\r')
     ol=$("$PHP" -d extension="$bo" -r 'echo extension_loaded("hello") ? "yes" : "no";' 2>&1 | tr -d '\r')
-    # refused: by its header where the file loads, and on Windows by the
-    # loader, before any header is read -- a ZTS module imports php8ts.dll
-    # and an NTS php does not have it (and the other way round)
+    # refused: an NTS module by a ZTS php's header check; a ZTS module in an
+    # NTS php by the module itself, from get_module, naming the TSRM symbol
+    # this php does not export (lib/php_zts.mc phx_ts_module, an E_CORE_ERROR,
+    # which php answers by exiting); and on Windows by the loader, before any
+    # of that -- a ZTS module imports php8ts.dll and an NTS php does not have
+    # it (and the other way round)
     case "$ml|$ol" in
         yes\|*"Unable to initialize module"*no|yes\|*"Unable to load dynamic library"*no)
             say "both: two outputs; this $TSV php loads $mine and refuses $other" ;;
+        "yes|"*"mc-php: this ZTS extension needs php's tsrm_get_ls_cache, which this php does not export"*)
+            say "both: two outputs; this $TSV php loads $mine, and $other refuses this php by name: tsrm_get_ls_cache is missing" ;;
         *) bad "both: $mine says \"$ml\", $other says \"$ol\"" ;;
     esac
 else
     bad "both: the build:"; sed 's/^/      /' "$tmp/both.out"
 fi
-rm -f "$EX/.both-test.toml" "$EX/build/hello.$sx" "$EX/build/hello-zts.$sx"
+# the ZTS copy of the project file (.mcphp-zts-<pid>-<file>) is gone
+left=$(ls -a "$EX" | grep '^\.mcphp-zts-' | tr '\n' ' ')
+if [ -n "$left" ]; then bad "both: left behind: $left"; rm -f "$EX"/.mcphp-zts-*
+else say "both: no .mcphp-zts- copy left beside the project file"; fi
+rm -f "$EX/.mcphp-test-both.toml" "$EX/build/hello.$sx" "$EX/build/hello-zts.$sx"
 
 # --- 3. the build ----------------------------------------------------------
 out=$tmp/hello.$sx

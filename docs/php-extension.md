@@ -307,18 +307,22 @@ for one of each from the same project ([mcphp-toml.md](mcphp-toml.md) § `php.th
 loader compares the header's `zts` and build id, so a php refuses a module built for the other
 kind, by name.
 
-A ZTS module differs from an NTS one in three places, all in `lib/php_zts.mc` and pushed only for
-a ZTS output:
+A ZTS module differs from an NTS one in four places, all in `lib/php_zts.mc`, the ZTS-only swaps
+`src/program.mc` lists and `src/tls.mc`'s lowering, and pushed only for a ZTS output
+([threads.md](threads.md) § ZTS has the whole model and its measurements):
 
 - **the engine's globals.** A ZTS php has no `executor_globals` symbol. Its executor globals are
   the calling thread's TSRM block plus `executor_globals_offset`, and php exports
-  `tsrm_get_ls_cache` and that offset. `EG(exception)` is at the same offset on both builds:
-  `tests/ext/abi.c` prints 960 against the NTS and the ZTS headers alike, and the runtime still
-  measures it at the first call.
-- **one php thread.** The module serves the php thread that loaded it. That covers every request
-  of the CLI and of a single-threaded SAPI. A request that a threaded SAPI starts on another
-  thread is refused at its start, by name (an `E_CORE_ERROR` from the module's RINIT), because the
-  runtime's state belongs to the loading thread. Lifting that is threads step 3.
+  `tsrm_get_ls_cache` and that offset; the module reads them on each php thread, never once for
+  all. `EG(exception)` is at the same offset on both builds: `tests/ext/abi.c` prints 960 against
+  the NTS and the ZTS headers alike, and the runtime still measures it at the first call. A php
+  that exports neither name is refused from `get_module` by name, as an `E_CORE_ERROR`.
+- **every php thread.** The module declares TSRM module globals, so php gives each of its threads
+  a runtime block; a threaded SAPI (FrankenPHP) runs requests on several of them at once.
+- **the module state.** The global variables, the constants, the class registry, the functions'
+  statics, the classes' static properties and the call sites' caches are per php thread, and each
+  request starts from a copy of what MINIT left. MINIT's own memory is read by every thread and
+  written by none; `tests/frankenphp.sh` makes it read-only while it runs to prove it.
 - **Windows.** The ZTS php is `php8ts.dll`. The module is linked against `php8ts.lib`, and the
   runtime's `php_dlsym` asks `php8ts.dll` for the names it looks up at load.
 

@@ -12,13 +12,22 @@
 //   [project] out = the NTS output's name with "-zts" before its extension
 //             (build/hello.so -> build/hello-zts.so, build/hello.dll ->
 //             build/hello-zts.dll)
-//   [linker]  every "php8.lib" -> "php8ts.lib" (Windows: a ZTS php is
-//             php8ts.dll, and the import library names it)
+//   [linker]  "php8.lib" -> "php8ts.lib" where it is a whole word, and only
+//             for a Windows target (a ZTS php is php8ts.dll, and the import
+//             library names it); nothing else in the file is touched
 //
 // The copy sits beside the file it copies, so every relative path in it means
-// what it meant there, and it is removed when the second build ends. A second
-// process because mc's tables are built once per process: two compilations do
-// not fit in one (mc's own `[compiler]` road spawns for the same reason).
+// what it meant there, under a name of this process's own --
+// `.mcphp-zts-<pid>-<file>`, so two builds of one project at once never share
+// one -- and it is removed when the second build ends, however it ends. What
+// no code here can clean is a process killed from outside (SIGKILL) while the
+// copy exists: the name's `.mcphp-zts-` prefix is how to find it, and
+// .gitignore keeps it out of a commit (docs/mcphp-toml.md § php.thread_safety).
+// A second process because mc's tables are built once per process: two
+// compilations do not fit in one (mc's own `[compiler]` road spawns for the
+// same reason). mc freezes none of drv_build, drv_spawn or mc_main: they are
+// in tests/mcnames.mc, which CI compiles against the pinned mc
+// (docs/mc-internals.md).
 //
 // `<mc/core>` is mc's parts plus a main; mc-php's entries include the parts
 // and this file is the main, the same main with ph_build_init() before the
@@ -64,9 +73,17 @@ i64 ph_tb_key(uptr s, i64 n, uptr key) {
     return i < n && ld8(s + i) == 61;                                 // =
 }
 
+// a byte that can be part of a file name's word: php8.lib is swapped only
+// where it is a whole word -- a path component, a quoted argument -- and
+// never inside a longer name (myphp8.lib, php8.lib.bak)
+i64 ph_ts_namech(i64 c) {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+        || c == 95 || c == 46 || c == 45;
+}
+
 // the project file with the three lines of the ZTS build (the header says
-// which), line by line
-uptr ph_ts_config_text(uptr src, i64 n, uptr out) {
+// which), line by line; the [linker] swap only for a Windows target (win)
+uptr ph_ts_config_text(uptr src, i64 n, uptr out, i64 win) {
     uptr b = xalloc(BUF_SIZE);
     buf_init(b);
     uptr tb = "";
@@ -85,11 +102,15 @@ uptr ph_ts_config_text(uptr src, i64 n, uptr out) {
             buf_put(b, "out = \"", 7);
             buf_put(b, out, cstrlen(out));
             buf_put(b, "\"", 1);
-        } else if (str_eq(tb, "linker")) {
+        } else if (win && str_eq(tb, "linker")) {
             i64 k = 0;
             loop {
                 if (k >= ln) break;
-                if (k + 8 <= ln && mem_eq(line + k, "php8.lib", 8)) { buf_put(b, "php8ts.lib", 10); k = k + 8; continue; }
+                if (k + 8 <= ln && mem_eq(line + k, "php8.lib", 8)
+                    && (k == 0 || !ph_ts_namech(ld8(line + k - 1)))
+                    && (k + 8 == ln || !ph_ts_namech(ld8(line + k + 8)))) {
+                    buf_put(b, "php8ts.lib", 10); k = k + 8; continue;
+                }
                 buf_put(b, line + k, 1);
                 k = k + 1;
             }
@@ -126,12 +147,18 @@ i64 ph_build(i64 argc, uptr argv) {
     i64 n = 0;
     uptr src = read_file(cfg, &n);
     uptr zout = ph_ts_out(out);
-    uptr zb = ph_ts_config_text(src, n, zout);
-    // beside the original: the same directory, so the same relative paths
+    uptr os = toml_get("target.os");
+    if (!os) os = host_os();                                   // mc's rule: no [target] is the host
+    uptr zb = ph_ts_config_text(src, n, zout, str_eq(os, "windows"));
+    // beside the original: the same directory, so the same relative paths,
+    // and a name of this process's own, so two builds of one project at once
+    // do not share it: .mcphp-zts-<pid>-<the file's name>
     i64 cn = cstrlen(cfg);
     i64 bs = cn;
     loop { if (bs == 0) break; if (ld8(cfg + bs - 1) == 47 || ld8(cfg + bs - 1) == 92) break; bs = bs - 1; }
-    uptr zcfg = path_join(cfg, p_cat(p_cat(".", cfg + bs, 0, cn - bs), ".zts", 0, 4));
+    uptr pid = php_dec(ph_pid());
+    uptr zn = p_cat(p_cat(".mcphp-zts-", pid, 0, cstrlen(pid)), "-", 0, 1);
+    uptr zcfg = path_join(cfg, p_cat(zn, cfg + bs, 0, cn - bs));
     // the NTS output, here
     i64 rc = callp(ph_mc_build, argc, argv);
     if (rc) return rc;

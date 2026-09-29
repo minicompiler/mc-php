@@ -37,7 +37,9 @@ env:
   # repository is a CONSUMER of mc's 1.0 frozen surface and it should break the
   # way a consumer breaks. mc.toml's [package].mc says 1.1.0 is the floor;
   # this is what is actually installed, and the Windows legs were measured on
-  # it (docs/plan.md § 5).
+  # it (docs/plan.md § 5). It is also the exact mc mc-php is verified
+  # against: tests/mcnames.mc pins the same value, and `tests/mcnames.sh
+  # --strict` fails when the two differ (docs/mc-internals.md).
   MC_VERSION: "1.3.0"
   # 8.5 because the oracle is php-src at tag php-8.5.10 and every fixture is
   # BYTE FOR BYTE what php prints. The minor is pinned; the patch is not, so a
@@ -121,6 +123,12 @@ jobs:
           mkdir -p "$HOME/.mc/libs"
           cp -R "$RUNNER_TEMP/mc/lib/mc" "$HOME/.mc/libs/mc"
           ls -d "$HOME/.mc/libs/mc/"*
+
+      # Every name mc-php uses from mc that mc does not freeze, against the
+      # installed mc, which must be the one tests/mcnames.mc pins
+      # (docs/mc-internals.md).
+      - name: The unfrozen mc names, against mc ${{ env.MC_VERSION }}
+        run: sh tests/mcnames.sh --strict
 
       - name: The fast gates
         run: sh tests/run.sh
@@ -265,6 +273,13 @@ jobs:
       # own php and refused by the other (tests/both.sh).
       - name: thread_safety = "both", each output in its php
         run: sh tests/both.sh ${{ matrix.arch }}
+
+      # A ZTS module under a REAL threaded SAPI: FrankenPHP with 8 php threads,
+      # concurrent requests, every answer checked, at least two php threads,
+      # a memory bound, MINIT's memory read-only (tests/frankenphp.sh,
+      # docs/threads.md § ZTS).
+      - name: A ZTS module under FrankenPHP, concurrent requests
+        run: sh tests/frankenphp.sh ${{ matrix.arch }}
 
   # Built ON Windows and graded there. The compiler is mc-php's own source,
   # compiled by the runner's mc.exe and linked by lld-link next to the three

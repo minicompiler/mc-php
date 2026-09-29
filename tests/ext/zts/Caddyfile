@@ -1,0 +1,13 @@
+# tests/frankenphp.sh: FrankenPHP with a pool of php threads, the module
+# loaded through PHP_INI_SCAN_DIR, plain HTTP on one port.
+{
+	auto_https off
+	admin off
+	frankenphp {
+		num_threads {$MCPHP_FP_THREADS}
+	}
+}
+:8080 {
+	root * {$MCPHP_FP_ROOT}
+	php_server
+}

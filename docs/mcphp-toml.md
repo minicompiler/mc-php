@@ -181,9 +181,17 @@ took before are refused with the word that replaces them (`false` is `"nts"`, `t
 
 What `"both"` does: `mc-php build` builds the NTS module, then builds the ZTS one in a second
 process from a copy of this file beside it, with three lines changed -- `thread_safety = "zts"`,
-the `-zts` output name, and every `php8.lib` in `[linker]` replaced by `php8ts.lib` (a thread-safe
-php on Windows is `php8ts.dll`, and the import library names it). The copy is removed when the
-build ends. With `"zts"` alone, the `[linker]` line is yours to write, so write `php8ts.lib`.
+the `-zts` output name, and, for a Windows target only, `php8.lib` in `[linker]` replaced by
+`php8ts.lib` wherever it is a whole word (a thread-safe php on Windows is `php8ts.dll`, and the
+import library names it; a `myphp8.lib` is left alone). With `"zts"` alone, the `[linker]` line
+is yours to write, so write `php8ts.lib`.
+
+The copy is named `.mcphp-zts-<pid>-<file>` -- the id of the `mc-php build` process, so two builds
+of one project at once never share it -- and it is removed when the build ends, whether the second
+build succeeded, failed or crashed. The one case no code can clean is a build killed from outside
+(`kill -9`) while the copy exists: it stays beside your project file. The `.mcphp-zts-` prefix is
+how to find it, it is safe to delete, and this repository's `.gitignore` carries the prefix; add it
+to yours.
 
 The PROGRAM road has no module header, so it ignores this key. A value the key cannot mean is
 refused there too. In particular **no php header file is opened**, which is the

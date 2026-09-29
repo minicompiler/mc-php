@@ -510,26 +510,30 @@ i64 ph_dollar_expr() {
 // calls is_dir, is_file and filesize, all three of which reach php_stat_mode
 // and php_stat_size and therefore stat(), and it is green on both
 // architectures.
-// src with its one occurrence of `from` replaced by `to`, as a new
-// NUL-terminated buffer; a source that lacks it is this compiler's own bug
+// src with `from` replaced by `to`, as a new NUL-terminated buffer. `from`
+// must occur EXACTLY once: a runtime source that lacks it, or has it twice,
+// is this compiler's own bug and stops the build by name, never a silent
+// half-swap (a ZTS output is its NTS source with these swaps and nothing else).
 uptr ph_swap(uptr src, i64 n, uptr from, uptr to) {
     i64 fl = cstrlen(from);
     i64 tl = cstrlen(to);
+    i64 at = 0 - 1;
     i64 i = 0;
     loop {
         if (i + fl > n) break;
         if (mem_eq(src + i, from, fl)) {
-            uptr r = xalloc(n - fl + tl + 1);
-            mem_copy(r, src, i);
-            mem_copy(r + i, to, tl);
-            mem_copy(r + i + tl, src + i + fl, n - i - fl);
-            st8(r + n - fl + tl, 0);
-            return r;
+            if (at >= 0) err_at2("mc-php", 1, "mc-php: a ZTS swap's text occurs twice in the runtime source", from);
+            at = i;
         }
         i = i + 1;
     }
-    err_at2("mc-php", 1, "mc-php: the runtime source lacks what a ZTS build swaps", from);
-    return src;
+    if (at < 0) err_at2("mc-php", 1, "mc-php: the runtime source lacks what a ZTS build swaps", from);
+    uptr r = xalloc(n - fl + tl + 1);
+    mem_copy(r, src, at);
+    mem_copy(r + at, to, tl);
+    mem_copy(r + at + tl, src + at + fl, n - at - fl);
+    st8(r + n - fl + tl, 0);
+    return r;
 }
 
 void ph_push_rt_host() {
@@ -549,7 +553,7 @@ void ph_push_rt_host() {
         // a ZTS php is php8ts.dll: the one name the host layer's php_dlsym
         // asks for is swapped in the SOURCE, so the NTS output is untouched
         if (ph_ext_zts) {
-            uptr w = ph_swap(ph_rt_win, ph_rt_win_size, "GetModuleHandleA(\"php8.dll\")", "GetModuleHandleA(\"php8ts.dll\")");
+            uptr w = ph_swap(ph_rt_win, ph_rt_win_size, "GetModuleHandleA(\"php8.dll\"), name)", "GetModuleHandleA(\"php8ts.dll\"), name)");
             p_push_source("php runtime host", w, cstrlen(w));
             return;
         }
@@ -598,9 +602,30 @@ void user_init() {
     // three: a push is a stack, and php_ext.mc reads the runtime's own
     // globals (ph_exc) -- a call binds after the whole unit is parsed, a
     // GLOBAL has to be declared before the line that names it.
-    // a ZTS output's additions (lib/php_zts.mc), parsed after php_ext.mc
-    // whose globals and #defines they name
-    if (ph_ext && ph_ext_zts) p_push_source("php extension zts", ph_zts_rt, ph_zts_rt_size);
+    // A ZTS output (lib/php_zts.mc, docs/threads.md § ZTS) is the NTS runtime
+    // with the swaps below and nothing else, plus php_zts.mc, parsed after
+    // php_ext.mc whose globals and #defines it names. Each swap's text must
+    // occur exactly once (ph_swap).
+    if (ph_ext && ph_ext_zts) {
+        p_push_source("php extension zts", ph_zts_rt, ph_zts_rt_size);
+        // RSHUTDOWN copies MINIT's arena back over what a request changed; in
+        // a ZTS module nothing a request does writes that arena, and other
+        // threads are reading it
+        uptr e = ph_swap(ph_ext_rt, ph_ext_rt_size, "if (ld64(phT + PHT_phx_dirty)) {", "if (ld64(phT + PHT_phx_dirty) && 0) {");
+        p_push_source("php extension runtime", e, cstrlen(e));
+        // the booting thread's fast path never comes back (several php threads
+        // run the module at once), a thread's block carries the ZTS words, and
+        // a static property is this request's
+        uptr r = ph_swap(ph_rt, ph_rt_size, "i64 outer = !ld64(phT + PHT_ph_tidx);", "i64 outer = 0;");
+        r = ph_swap(r, cstrlen(r), "uptr php_thr_block(uptr from, i64 idx) {", "uptr php_thr_block_nts(uptr from, i64 idx) {");
+        r = ph_swap(r, cstrlen(r), "uptr php_ce_sslot_s(uptr ce, uptr name, uptr scope) {", "uptr php_ce_sslot_s_nts(uptr ce, uptr name, uptr scope) {");
+        p_push_source("php runtime", r, cstrlen(r));
+        ph_push_rt_host();
+        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12320\n", "#define PHT_SIZE 12424\n");
+        p_push_source("php thread block", t, cstrlen(t));
+        pass(&ph_tls_pass);
+        return;
+    }
     if (ph_ext) p_push_source("php extension runtime", ph_ext_rt, ph_ext_rt_size);
     if (!ph_ext) p_push_source("php program allocator", ph_prog_rt, ph_prog_rt_size);
     p_push_source("php runtime", ph_rt, ph_rt_size);

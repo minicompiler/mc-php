@@ -237,20 +237,89 @@ This is a test hook, not an API. These tests use it:
 
 `[php].thread_safety = "zts"`, or the ZTS half of `"both"`
 ([mcphp-toml.md](mcphp-toml.md) § `php.thread_safety`), builds a module that a thread-safe php
-loads. The only runtime difference is `lib/php_zts.mc`, which is pushed for that output alone. It
-adds two globals to the inventory:
+loads, and that php may run requests on several of its threads at once -- FrankenPHP does, with a
+pool of php threads. The runtime is the NTS one with the text swaps `src/program.mc` lists, plus
+`lib/php_zts.mc`, which is pushed for that output alone. The NTS output does not change by one
+byte (measured with `cmp`, [php-extension.md](php-extension.md) § Thread safety).
 
-| names | why it is safe |
+### One block per php thread
+
+The module declares TSRM module globals: `zend_module_entry`'s `globals_size` is the thread
+block's size, `globals_id_ptr` the module's resource id, and `globals_ctor`/`globals_dtor` the
+module's. php allocates a block for every thread it runs (`ts_allocate_id`), and the module finds
+it as `TSRMG_BULK(id)` of the calling thread's `tsrm_get_ls_cache()`. At a thread's first request
+the block gets its own arena, its own copy of the module's per-thread words and the file table's
+standard streams; when php ends the thread, `globals_dtor` unmaps the arena and the words. The
+thread that loaded the module keeps the block MINIT ran on.
+
+The engine's executor globals are read the same way, per thread: the calling thread's TSRM block
+plus `executor_globals_offset`, taken on that thread at its first request and never cached from
+MINIT.
+
+A php that does not export `tsrm_get_ls_cache` or `executor_globals_offset` is not a thread-safe
+php this module can serve. The module says so from `get_module`, before php reads its header, as
+an `E_CORE_ERROR`: `mc-php: this ZTS extension needs php's tsrm_get_ls_cache, which this php does
+not export`. php ends the process on an `E_CORE_ERROR` at startup. `tests/ext.sh` § 2c and
+`tests/both.sh` load the ZTS module into an NTS php, which lacks both names, and check the
+message.
+
+### What each request starts from
+
+A C extension keeps its per-request state in its module globals and its read-only state in
+static memory. The module does the same with what the compiled PHP writes:
+
+| per php thread, and copied from MINIT's at each request | names |
 |---|---|
-| `phx_ts_get` `phx_ts_ls0` | `tsrm_get_ls_cache` and the loading thread's TSRM block. Both are written once, in `get_module`, before php runs a request. |
+| the global variable table | `ph_globals` |
+| the constants | `ph_consts` |
+| the class registry, and `Closure` | `ph_classes` `ph_ce_closure` |
+| a class's static properties | a table per class (`phz_sp`), copied from the class's own |
+| a function's `static`s, and the list that resets them | the `phst_` slots, `ph_rsl` |
+| a call site's cache of php's function table | the `phf_` slots |
+| the engine's executor globals | `phx_eg` |
 
-In a ZTS php, the engine's executor globals are a thread's TSRM block plus
-`executor_globals_offset`. The module computes that address once, for the thread that loaded it,
-and serves only that thread. A request that a threaded SAPI starts on another php thread is refused
-by name in the module's RINIT. So the runtime's own per-thread state (this page) is never shared
-between php's request threads. It is still per OS thread for the module's own workers, exactly as
-in step 1. What serving several php request threads at once takes is step 3.
+The `phst_` and `phf_` slots are module globals the compiler generates. For a ZTS output
+`src/tls.mc` moves them into an area of their own, one per php thread (`phz_mod`), and rewrites
+every use to read it. At RINIT, `phz_privatize` copies MINIT's arrays and objects into the
+thread's arena: arrays and objects deeply, with one identity map per request, so a value two roots
+share stays one value and a cycle ends. A string MINIT built is not copied: it is module memory,
+interned and never counted. So a request writes only its own copy, and a request on another
+thread at the same moment never sees it.
 
-The engine guard of step 1 is unchanged in a ZTS module: a worker still gets an Error when it
-reaches php's engine. A ZTS php does give each thread its own engine, but a worker thread has none
-until someone starts one for it, and that belongs to step 3's API.
+MINIT's own memory is then read by every php thread and written by none. That is measured, not
+assumed: with `MCPHP_ZTS_READONLY=1`, MINIT ends by making the module's MINIT memory read-only
+(`mprotect`), so a request that wrote it would fault on the spot. `tests/frankenphp.sh` runs with
+it on.
+
+### What is not per thread, and why
+
+| what | why, and the measurement |
+|---|---|
+| strings built at MINIT | immutable (`ZS_MODULE`, interned, never counted). 3 runs of 4000 requests, 32 at a time, on 8 php threads, with MINIT's memory read-only: no fault. |
+| the module and function entries, arginfo, published class tables | built in MINIT and read-only after it, as in a C extension. Same measurement. |
+| an engine object built at MINIT | there is none: MINIT cannot build one. `new ArrayObject([1])` at a module's top level is `Uncaught Error: Class "ArrayObject" not found`, measured in an NTS php (macOS) and under FrankenPHP (ZTS), so no module state holds one. |
+| the module's own worker threads (step 1) | inside a php request thread they are still OTHER threads: a global, a static, `define()`, `class_alias()` and `register_shutdown_function()` still give them the Error of § Module state. Step 3's API is what changes that. |
+| an engine call from a worker | unchanged from step 1: a worker still gets an Error when it reaches php's engine. A ZTS php gives each of ITS threads an engine, but a worker has none until someone starts one, and that belongs to step 3. |
+
+### The gate, and the cost
+
+`tests/frankenphp.sh [aarch64|x86_64]` builds `tests/ext/zts/zts.php` as a ZTS module and loads it
+in FrankenPHP (`dunglas/frankenphp:php8.5-alpine`, php 8.5.11 ZTS) with 8 php threads and
+`MCPHP_ZTS_READONLY=1`. It sends 400 requests to warm up and then 4000, 32 at a time. Each request
+calls a function that writes a global array, a static, a class's static property and an object's
+property, defines a constant, throws and catches, makes a closure, calls a PHP function through
+php's function table, and echoes into an output buffer the script opened. The gate requires:
+
+- every answer is the formula's -- each request started from MINIT's state and saw only its own
+  writes;
+- the answers came from at least two php threads;
+- FrankenPHP's resident memory after the 4000 is within 32 MiB of what it was after the warm-up;
+- no fault in FrankenPHP's log.
+
+Measured on linux/aarch64 (Lima): 3 runs, every answer right, 5 php threads, resident memory
++2 MiB each time. CI runs it on the linux/aarch64 and linux/x86_64 legs.
+
+The per-thread road costs a lookup where the NTS module reads a global. `examples/decimal`'s
+`bench.php` (best of 9, 5 runs each, linux/aarch64): the NTS module under `php:8.5-alpine` 0.228
+ms, the ZTS module under `php:8.5-zts-alpine` 0.269 ms, +18%. The same script interpreted is
+2.526 ms and 2.650 ms: php's own ZTS build is 5% slower on its own.

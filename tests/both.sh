@@ -8,13 +8,14 @@
 # "both", inside php's NTS image; that writes build/hello.so and
 # build/hello-zts.so (src/build.mc). Then:
 #
-#   php:8.5-alpine      loads hello.so, runs check.php, and REFUSES hello-zts.so
+#   php:8.5-alpine      loads hello.so, runs check.php, and is REFUSED by
+#                       hello-zts.so, which names the TSRM symbol it lacks
 #   php:8.5-zts-alpine  loads hello-zts.so, runs check.php, and REFUSES hello.so
 #
-# and the two check.php outputs are the same bytes. A refusal is php's own
-# (`Unable to initialize module`, the two build ids): the module header is what
-# the loader compares, and the header is the only thing the two differ in
-# besides the engine's globals.
+# and the two check.php outputs are the same bytes. The ZTS php's refusal is
+# its own (`Unable to initialize module`, the two build ids); the NTS php
+# never gets as far as the header, because the ZTS module's get_module finds
+# no tsrm_get_ls_cache and says so (lib/php_zts.mc).
 #
 # Needs docker and a cross-built compiler (tests/linux.sh says how); on a macOS
 # host, run it inside the Linux VM, as tests/linux.sh is run.
@@ -32,7 +33,7 @@ esac
 bin=build/mc-php-linux-$nick
 [ -f "$bin" ] || { echo "tests/both.sh: no $bin" >&2; exit 2; }
 EX=examples/hello
-cfg=$EX/.mcphp.linux.toml.both-test
+cfg=$EX/.mcphp-test-both.toml
 sed 's/^thread_safety = .*/thread_safety = "both"/' $EX/mcphp.linux.toml > "$cfg"
 fail=0
 say() { printf '  %s\n' "$*"; }
@@ -61,7 +62,8 @@ say "two outputs: hello.so $(wc -c < $EX/build/hello.so | tr -d ' ') bytes, hell
 load() {
     run "$1" "php -d extension=$root/$EX/build/$2 -r 'exit(extension_loaded(\"hello\") ? 0 : 3);' && php -d extension=$root/$EX/build/$2 $EX/check.php" > "/tmp/both.$2.out" 2>&1
 }
-# IMAGE SO: refused by php, by name
+# IMAGE SO: refused by php, by name -- its own header check, `Unable to
+# initialize module` with the two build ids
 refuse() {
     run "$1" "php -d extension=$root/$EX/build/$2 -r 'echo extension_loaded(\"hello\") ? \"loaded\" : \"not loaded\", PHP_EOL;'" > "/tmp/both.$2.ref" 2>&1
     if grep -q 'Unable to initialize module' "/tmp/both.$2.ref" && grep -q '^not loaded' "/tmp/both.$2.ref"; then
@@ -70,13 +72,26 @@ refuse() {
         bad "$1 did not refuse $2:"; sed 's/^/      /' "/tmp/both.$2.ref"
     fi
 }
+# IMAGE SO: the ZTS module refuses an NTS php itself, from get_module, before
+# php reads its header: the TSRM symbol it needs is not exported
+# (lib/php_zts.mc phx_ts_module). An E_CORE_ERROR while php starts up ends
+# the process, so nothing after the message runs.
+refuse_ts() {
+    run "$1" "php -d extension=$root/$EX/build/$2 -r 'echo \"ran\", PHP_EOL;'" > "/tmp/both.$2.ref" 2>&1
+    if grep -q "mc-php: this ZTS extension needs php's tsrm_get_ls_cache, which this php does not export" "/tmp/both.$2.ref" \
+       && ! grep -q '^ran' "/tmp/both.$2.ref"; then
+        say "$1 is refused by $2: it needs tsrm_get_ls_cache, which this php does not export"
+    else
+        bad "$2 did not refuse $1:"; sed 's/^/      /' "/tmp/both.$2.ref"
+    fi
+}
 if load php:8.5-alpine hello.so; then say "php:8.5-alpine loads hello.so: check.php $(wc -l < /tmp/both.hello.so.out | tr -d ' ') lines"
 else bad "php:8.5-alpine and hello.so:"; sed 's/^/      /' /tmp/both.hello.so.out; fi
 if load php:8.5-zts-alpine hello-zts.so; then say "php:8.5-zts-alpine loads hello-zts.so: check.php $(wc -l < /tmp/both.hello-zts.so.out | tr -d ' ') lines"
 else bad "php:8.5-zts-alpine and hello-zts.so:"; sed 's/^/      /' /tmp/both.hello-zts.so.out; fi
 if cmp -s /tmp/both.hello.so.out /tmp/both.hello-zts.so.out; then say "the two check.php outputs are the same bytes"
 else bad "the two check.php outputs differ"; diff /tmp/both.hello.so.out /tmp/both.hello-zts.so.out | sed -n '1,12p' | sed 's/^/      /'; fi
-refuse php:8.5-alpine hello-zts.so
+refuse_ts php:8.5-alpine hello-zts.so
 refuse php:8.5-zts-alpine hello.so
 
 [ "$fail" = 0 ] || { echo "  both: something failed"; exit 1; }
