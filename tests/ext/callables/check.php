@@ -25,3 +25,4 @@ foreach (['nope', new stdClass, 5, null] as $bad) {
     try { pk\callm($bad); } catch (Error $x) { echo get_class($x), ": ", $x->getMessage(), "\n"; }
 }
 echo pk\arrow_spoil(), " ", pk\arrow_odd(2), " ", pk\arrow_odd(1), " ", pk\arrow_later(), " ", pk\arrow_nested(), "\n";
+echo pk\shadow_a(), " ", pk\shadow_b(), " ", pk\shadow_c(), " ", pk\shadow_d(), " ", pk\shadow_wide(), "\n";

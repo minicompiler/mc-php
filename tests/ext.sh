@@ -781,6 +781,19 @@ else
 fi
 rm -rf "$tmp/build"
 
+# a closure that captures its own parameter's name is php's compile-time
+# Fatal error on this road too, in php's words, exit 255
+cp tests/g/125-closure-lexical-param.php "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+"$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/lx.out" 2> "$tmp/lx.err"; lx=$?
+if [ "$lx" = 255 ] && grep -q "^Fatal error: Cannot use lexical variable \$x as a parameter name in .*r.php on line 6$" "$tmp/lx.out" \
+   && [ ! -f "$tmp/build/r.$sx" ]; then
+    say "closures: a parameter named like a lexical variable is php's own compile-time Fatal error, exit 255, no module"
+else
+    bad "closures: the lexical-variable parameter (exit $lx)"; sed 's/^/      /' "$tmp/lx.out" "$tmp/lx.err" | head -6
+fi
+rm -rf "$tmp/build"
+
 # --- 20. compiled functions on several OS threads at once --------------------
 # tests/ext/threads: the module's threads against php calling the same
 # function one thread at a time (a recording: php has no mcphp_threads)

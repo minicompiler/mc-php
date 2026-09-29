@@ -1325,3 +1325,15 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   (exit 139 before, php's bytes after); the same cases in `tests/ext/callables` for the
   extension road (it did not crash there before: the slot held a readable value). The
   FrankenPHP test's arrow fn is back after its try.
+- Closure parameter shadowing (2026-09-29, branch `closure-shadow`, from main e8d3b64): an arrow
+  function captured the enclosing variable a parameter of its own names, and the capture was
+  read into the parameter's slot after the parameter: `$x = 100; fn($x) => fn() => $x * 2` gave
+  200 for `(5)()` (php 10), `fn() => fn($x) => $x + 1` gave 1000 (php 2), a nested arrow got the
+  function's `$x` instead of its outer arrow's parameter. Now a closure never captures a name
+  its parameter uses; `function ($x) use ($x)` is php's compile-time Fatal error, in php's
+  words, exit 255 (`ph_phpfatal_x`, stack trace). Also found and fixed in the same capture
+  list: an arrow function captured only the first 16 enclosing variables, so a 17th read as
+  undefined (warning, wrong value); the lists are now sized by the scope. Fixtures
+  `tests/g/124-closure-shadow.php` (all wrong on main), `125-closure-lexical-param.php` (main
+  printed 7); the same cases in `tests/ext/callables` (main: `200 1000 6 16`), and ext.sh checks
+  the Fatal on the extension road.
