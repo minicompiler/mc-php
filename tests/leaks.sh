@@ -184,6 +184,20 @@ if "$BIN" build "$t/val" --config "$t/val/r.toml" > "$t/v.out" 2>&1; then
 else
     bad "the values module: it would not build"; sed "s/^/      /" "$t/v.out"
 fi
+# a module that publishes a class: engine objects the module makes and php
+# makes, their properties and methods, 300 rounds
+mkdir -p "$t/cls"
+cp tests/ext/classes/classes.php "$t/cls/r.php"
+{ cat tests/ext/classes/check.php
+  printf "%s\n" "for (\$k = 0; \$k < 300; \$k++) { \$b = pc\\make(\$k); \$b->add(1); pc\\bump(\$b); \$c = new pc\\Box(\$k, \"s\$k\"); \$c->describe(); }"
+} > "$t/cls/run.php"
+sed -i "s#__DIR__ . \x27/classes.php\x27#__DIR__ . \x27/r.php\x27#" "$t/cls/run.php"
+sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.so\"|" examples/hello/mcphp.linux.toml | dbg /dev/stdin > "$t/cls/r.toml"
+if "$BIN" build "$t/cls" --config "$t/cls/r.toml" > "$t/c.out" 2>&1; then
+    leakfree "a published class, made by the module and by php (tests/ext/classes), 300 rounds" -d extension="$t/cls/build/r.so" "$t/cls/run.php"
+else
+    bad "the classes module: it would not build"; sed "s/^/      /" "$t/c.out"
+fi
 [ "$fail" = 0 ] || { echo "  leaks: something failed"; exit 1; }
 echo "  leaks: every request ended with nothing of the module still allocated"
 '

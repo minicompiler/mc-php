@@ -1,8 +1,9 @@
 <?php
 // The SOURCE the extension compiler is meant to consume: this file is to
 // compile to the awaitable.so that awaitable.mc produces today by hand. No C,
-// no phpize. mc-php refuses it today, by name, and README.md lists every
-// refusal between the two; tests/examples.sh pins the first one.
+// no phpize. It compiles; README.md lists what its bodies still wait for, and
+// tests/examples.sh records how far check.php gets through the compiled
+// module (and, on Windows, pins #[Extern]'s refusal).
 
 namespace awaitable;
 
@@ -33,7 +34,17 @@ final class Intent {
 // There is no async, so await does what await does: it SUSPENDS and RUNS to
 // completion. It always hands back an Intent -- the envelope is the wide type,
 // never narrowed to the callable's own return value.
-function await(callable $fn, mixed ...$args): Intent {}
+function await(callable $fn, mixed ...$args): Intent {
+    $i = new Intent();
+    try {
+        $i->data = $fn(...$args);
+    } catch (\Throwable $e) {
+        $i->failed = true;
+        $i->exception = $e;
+    }
+    $i->done = true;
+    return $i;
+}
 
 // The sync primitives are for PARALLELISM AND CONCURRENCY, not for async: they
 // coordinate the threads that run underneath, and they are what caps and joins

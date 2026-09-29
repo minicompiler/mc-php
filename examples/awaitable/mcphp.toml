@@ -2,21 +2,18 @@
 #
 #     mc-php build examples/awaitable --config examples/awaitable/mcphp.toml
 #
-# This is the build the example is WAITING for, and today it is refused by
-# name at the first declaration mc-php does not take yet.
-# README.md lists every refusal behind that one, found by removing each in
-# turn; tests/examples.sh runs this build on every host and requires the
-# first -- the day it moves, the gate says so. Until then the example is the
-# hand-written awaitable.mc, which tests/examples.sh compiles with plain mc
-# and links itself.
-#
-# One file and not one per host: the refusal is raised while PARSING, before
-# any [linker] line is read.
+# This is the build the example is WORKING TOWARD. It compiles; tests/examples.sh
+# loads what it writes and records how many of check.expect's lines check.php
+# already prints through it (README.md lists what the bodies still wait for).
+# Until every line does, the example is the hand-written awaitable.mc, which
+# tests/examples.sh compiles with plain mc and links itself. On Windows the
+# build stops at #[Extern]'s named refusal, which the gate pins.
 
 [project]
 entry = "awaitable.src.php"
 out = "build/awaitable.so"
 kind = "exe"
+opt = 1
 
 [linker]
 cmd = "ld"

@@ -66,6 +66,8 @@ INSTRUMENTS = {
     'ext/requests.php': 'the php -S driver tests/ext.sh step 10 runs: it grades a module and is never compiled',
     'ext/values/values.php': 'the module tests/ext.sh step 17 builds and runs, loaded and interpreted',
     'ext/values/check.php': 'the script tests/ext.sh step 17 runs against it: it grades a module and is never compiled',
+    'ext/classes/classes.php': 'the module tests/ext.sh step 18 builds and runs, loaded and interpreted',
+    'ext/classes/check.php': 'the script tests/ext.sh step 18 runs against it: it grades a module and is never compiled',
 }
 
 

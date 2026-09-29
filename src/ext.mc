@@ -604,3 +604,51 @@ void ph_ext_emit(uptr fl, i64 line) {
 }
 
 #embed ph_ext_rt "../lib/php_ext.mc"
+
+// ---- a published class -------------------------------------------------------
+// Called by src/class.mc when a class the extension publishes ends: one handler
+// per method -- the engine's object as $this, the compiled body
+// (lib/php_ext.mc's phx_mh) -- and, where the class's own entries are filled
+// at MINIT, its method table and the call that registers it with the engine
+// (phx_cls_end), after its properties and methods are in the runtime's class.
+void ph_ext_publish(uptr cname, uptr ceg, i64 flags, uptr fl, i64 line) {
+    ph_cfill(ph_stmt_of(ph_call("phx_cls_begin", 0, 0, 0, 0, 0, TY_VOID)));
+    i64 i = 0;
+    loop {
+        if (i >= ph_npm) break;
+        uptr mname = ld64(ph_pm_name + i * 8);
+        uptr mfn = ld64(ph_pm_fn + i * 8);
+        uptr hname = p_cat("x_", mfn, 0, cstrlen(mfn));
+        uptr full = p_cat(cname, "::", 0, 2);
+        full = p_cat(full, mname, 0, cstrlen(mname));
+        u8 hv[32];
+        st64(hv, ph_ext_ident("ex", TY_UPTR));
+        st64(hv + 8, ph_ext_ident("rv", TY_UPTR));
+        st64(hv + 16, ph_ext_addr(mfn));
+        st64(hv + 24, ph_raw(full, cstrlen(full)));
+        i64 p0 = param_new(TY_UPTR, "ex");
+        i64 p1 = param_new(TY_UPTR, "rv");
+        set_nd_next(p0, p1);
+        i64 h = node_new(N_FUNC, line, fl);
+        set_nd_name(h, hname);
+        set_nd_type(h, TY_VOID);
+        set_nd_a(h, p0);
+        set_nd_b(h, ph_ext_block(ph_stmt_of(ph_calln("phx_mh", hv, 4, TY_VOID))));
+        top_add(h);
+        u8 mv[32];
+        st64(mv, ph_raw(mname, cstrlen(mname)));
+        st64(mv + 8, ph_ext_addr(hname));
+        st64(mv + 16, ph_int(ld64(ph_pm_nreq + i * 8)));
+        st64(mv + 24, ph_int(ld64(ph_pm_vis + i * 8)));
+        ph_cfill(ph_stmt_of(ph_calln("phx_meth", mv, 4, TY_VOID)));
+        i64 k = 0;
+        loop {
+            if (k >= ld64(ph_pm_np + i * 8)) break;
+            uptr pn = ld64(ph_pm_pn + (i * 6 + k) * 8);
+            ph_cfill(ph_stmt_of(ph_c1("phx_marg", ph_raw(pn, cstrlen(pn)), TY_VOID)));
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    ph_cfill(ph_stmt_of(ph_c3("phx_cls_end", ph_ceref(ceg), ph_raw(cname, cstrlen(cname)), ph_int(flags), TY_VOID)));
+}

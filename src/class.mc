@@ -250,7 +250,23 @@ uptr ph_anon_name;
 uptr ph_anon_args;                   // `new class (args)`: read where they are
 i64  ph_anon_nargs;
 
+// A published class's methods, as the class body is read (src/ext.mc's
+// handlers are built from them when the class ends)
+#define PH_MAXPM 64
+uptr ph_pm_name[PH_MAXPM];
+uptr ph_pm_fn[PH_MAXPM];
+i64  ph_pm_vis[PH_MAXPM];
+i64  ph_pm_np[PH_MAXPM];
+i64  ph_pm_nreq[PH_MAXPM];
+uptr ph_pm_pn[PH_MAXPM * 6];
+i64  ph_npm;
+// what ph_method_body read of the parameters of the method it just compiled
+i64  ph_mb_np;
+i64  ph_mb_nreq;
+uptr ph_mb_pn[6];
+
 void ph_class(uptr fl, i64 line, i64 flags) {
+    i64 pub = 0;
     i64 kind = 0;                                    // 0 class 1 interface 2 trait 3 enum
     if (ph_is("interface")) kind = 1;
     if (ph_is("trait")) kind = 2;
@@ -272,12 +288,20 @@ void ph_class(uptr fl, i64 line, i64 flags) {
         if (ph_tid != T_IDENT) err_at2(fl, line, "mc-php: a php class needs a name", ph_tname);
         cname = ph_ns_decl(ph_tname);               // `ns\Name` inside a namespace
         ph_next();
-        // An extension publishes what the source names without a leading
-        // underscore; a class is not published yet (the back end registers
-        // none), so one that would be is refused rather than compiled into a
-        // module php cannot see it in. `_Name` is module-private and fine.
-        if (ph_ext && ld8(ph_ns_last(cname)) != 95)
-            ph_todo2(fl, line, "a class an extension would publish", cname);
+        // An extension PUBLISHES what the source names without a leading
+        // underscore (lib/php_ext.mc § published classes); `_Name` is
+        // module-private. What is published is a plain class at a file's top
+        // level; the rest is refused by name rather than left out.
+        if (ph_ext && ld8(ph_ns_last(cname)) != 95) {
+            if (kind == 1) ph_todo2(fl, line, "an interface an extension would publish", cname);
+            if (kind == 2) ph_todo2(fl, line, "a trait an extension would publish", cname);
+            if (kind == 3) ph_todo2(fl, line, "an enum an extension would publish", cname);
+            if (!ph_toplevel) ph_todo2(fl, line, "a class declared inside a function of an extension", cname);
+            if (ph_is("extends") || ph_is("implements"))
+                ph_todo2(fl, line, "a published class that extends or implements another", cname);
+            pub = 1;
+            ph_npm = 0;
+        }
     }
     if (kind == 3) { if (ph_accept(":", 1)) ph_skip_type(); }
 
@@ -441,9 +465,22 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             ph_in_static = stat;
             uptr savefn = ph_cur_fn;
             ph_cur_fn = mname;
+            if (pub && stat) ph_todo2(mfl, mline, "a static method of a published class", mname);
+            if (pub && isabs) ph_todo2(mfl, mline, "an abstract method of a published class", mname);
             ph_method_body(mcname, cname, ceg, vis, stat, mline, mfl, isabs);
             ph_cur_fn = savefn;
             ph_in_static = saves;
+            if (pub) {
+                if (ph_npm >= PH_MAXPM) err_at(mfl, mline, "mc-php: too many methods in a published class");
+                st64(ph_pm_name + ph_npm * 8, mname);
+                st64(ph_pm_fn + ph_npm * 8, mcname);
+                st64(ph_pm_vis + ph_npm * 8, vis);
+                st64(ph_pm_np + ph_npm * 8, ph_mb_np);
+                st64(ph_pm_nreq + ph_npm * 8, ph_mb_nreq);
+                i64 q = 0;
+                loop { if (q >= ph_mb_np) break; st64(ph_pm_pn + (ph_npm * 6 + q) * 8, ld64(ph_mb_pn + q * 8)); q = q + 1; }
+                ph_npm = ph_npm + 1;
+            }
             if (!isabs) {
                 // mc's N_ADDR carries the NAME itself (res_addr reads
                 // nd_name of the node), not a child N_IDENT
@@ -461,6 +498,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
         }
 
         // a property, with or without a declared type
+        if (pub && stat) ph_todo2(mfl, mline, "a static property of a published class", cname);
         if (!ph_at("$", 1)) ph_skip_type();
         if (!ph_at("$", 1)) ph_todo2(mfl, mline, "a php class member", ph_tname);
         loop {
@@ -469,7 +507,14 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             uptr pname = ph_tname;
             ph_next();
             i64 def = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
-            if (ph_accept("=", 1)) { i64 dv = ph_expr(0); def = ph_to_mixed(dv, ph_ety); }
+            if (ph_accept("=", 1)) {
+                i64 dv = ph_expr(0);
+                // an internal class's default is the engine's to keep for
+                // the process: a scalar or a string, not an array
+                if (pub && ph_ety != PT_INT && ph_ety != PT_FLOAT && ph_ety != PT_STRING && ph_ety != PT_BOOL && ph_ety != PT_NULL)
+                    ph_todo2(mfl, mline, "a published class's property whose default is not a scalar", pname);
+                def = ph_to_mixed(dv, ph_ety);
+            }
             uptr fn = "php_ce_prop";
             if (stat) fn = "php_ce_sprop";
             ph_cfill(ph_stmt_of(ph_c4(fn, ph_ceref(ceg), ph_strlit(pname, cstrlen(pname)), def, ph_int(vis), TY_VOID)));
@@ -483,6 +528,7 @@ void ph_class(uptr fl, i64 line, i64 flags) {
         ph_semi("expected ; after a php property");
     }
     ph_next();
+    if (pub) { ph_ext_publish(cname, ceg, flags, fl, line); ph_npm = 0; }
     ph_cur_cls = savec;
     ph_cur_ceg = saveg;
 }
@@ -522,6 +568,10 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     i64 pre = 0;
     i64 pret = 0;
     i64 np = 0;
+    // the parameters' names and the count before the first default, for a
+    // published class (ph_mb_*: set at the END, after a nested class's body)
+    u8 mbpn[48];
+    i64 mbreq = -1;
     loop {
         if (ph_at(")", 1)) break;
         i64 pvis = -1;
@@ -556,6 +606,8 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
         if (np >= 6) ph_todo(fl, line, "more than six parameters in a method");
         i64 dflt = 0;
         if (ph_accept("=", 1)) { i64 dv = ph_expr(0); dflt = ph_to_mixed(dv, ph_ety); }
+        st64(mbpn + np * 8, d + 1);
+        if (dflt && mbreq < 0) mbreq = np;
         ph_var_bind_raw(d, PT_MIXED);
         // a by-reference method parameter costs nothing: every one of them is
         // already the caller's zval pointer, so marking it a ref is all that
@@ -631,10 +683,13 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
         if (!ph_accept(",", 1)) break;
     }
     ph_want(")", 1, "expected ) in a php method");
+    if (mbreq < 0) mbreq = np;
     if (ph_at(":", 1)) { ph_next(); ph_skip_type(); }
     if (abstract) {
         ph_accept(";", 1);
         if (ph_at("{", 1)) ph_block();
+        ph_mb_np = np;
+        ph_mb_nreq = mbreq;
         ph_scope_restore(savenv);
         ph_hoist_head = hh;
         ph_hoist_tail = ht;
@@ -689,6 +744,10 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     ph_in_method = sm;
     ph_toplevel = stl;
     ph_nls = sls;
+    ph_mb_np = np;
+    ph_mb_nreq = mbreq;
+    i64 q = 0;
+    loop { if (q >= np) break; st64(ph_mb_pn + q * 8, ld64(mbpn + q * 8)); q = q + 1; }
 }
 
 
