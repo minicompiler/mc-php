@@ -70,6 +70,8 @@ INSTRUMENTS = {
     'ext/classes/check.php': 'the script tests/ext.sh step 18 runs against it: it grades a module and is never compiled',
     'ext/callables/callables.php': 'the module tests/ext.sh step 19 builds and runs, loaded and interpreted',
     'ext/callables/check.php': 'the script tests/ext.sh step 19 runs against it: it grades a module and is never compiled',
+    'ext/threads/threads.php': 'the module tests/ext.sh step 20 builds and runs on several threads',
+    'ext/threads/check.php': 'the script tests/ext.sh step 20 runs against it: it grades a module and is never compiled',
 }
 
 
