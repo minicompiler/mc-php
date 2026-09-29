@@ -759,20 +759,26 @@ void phx_throw() {
 // (docs/php-extension.md § What differs). object_init_ex runs the class's
 // create handler, which is what gives it php's file and line -- the
 // statement that is executing, as zend_throw_exception would.
-uptr phx_exc_obj(uptr o) {
-    uptr cn = php_obj_cname(o);
-    uptr m = php_zv_str(php_exm_message(o));
-    // the name is ours only for the lookup: released the way the engine
-    // releases a string, in case an autoloader kept a reference
-    uptr cz = phx_zstr(cn);
+// A class of the engine's by name. The name is ours only for the lookup:
+// released the way the engine releases a string, in case an autoloader kept
+// a reference.
+uptr phx_lookup(uptr name) {
+    uptr cz = phx_zstr(name);
     uptr ce = zend_lookup_class(cz);
     st32(cz, ld32(cz) - 1);
     if (!ld32(cz)) phx_ef(cz);
+    return ce;
+}
+
+uptr phx_exc_obj(uptr o) {
+    uptr cn = php_obj_cname(o);
+    uptr m = php_zv_str(php_exm_message(o));
+    uptr ce = phx_lookup(cn);
     uptr s = m;
     i64 code = 0;
     if (ce) code = php_zv_long(php_exm_code(o));
     if (!ce) {
-        ce = zend_lookup_class(phx_zstr(php_str_new("Exception", 9)));
+        ce = phx_lookup(php_str_new("Exception", 9));
         s = cn;
         if (php_strlen(m)) {
             s = php_str_concat(s, php_str_new(": ", 2));

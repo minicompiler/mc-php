@@ -19,3 +19,9 @@ function wrapped(callable $fn): array {
     return [];
 }
 function named(string $s): string { $f = 'strrev'; return $f($s) . ('str' . 'toupper')($s); }
+// a throwable class the engine does not know (module-private): it crosses as a
+// plain Exception naming it, which the interpreted source does not print, so
+// check.php leaves it to tests/leaks.sh's workload
+class _Oops extends \RuntimeException {}
+function oops(): \Throwable { return new _Oops("own", 4); }
+function thrown(): int { throw new _Oops("up"); }

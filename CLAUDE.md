@@ -1171,3 +1171,7 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   MEASURED in a request's first call (`phx_egx_find`: an exception thrown with nothing pending,
   found among the globals, cleared), with 960 as the fallback -- a fallback of 8 still passed
   step 19 on macOS, so the probe is what answers.
+  Review (reviewer agent, Copilot out of quota): `phx_exc_obj`'s fallback lookup of `Exception`
+  leaked its temporary `zend_string` on every throwable of a class the engine does not know.
+  Reproduced first -- `tests/leaks.sh` now throws a module-private `_Oops` 300 times: 600 blocks
+  left under a debug php -- and fixed with one lookup helper both lookups use (`phx_lookup`).

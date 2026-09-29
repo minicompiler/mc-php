@@ -199,11 +199,12 @@ else
     bad "the classes module: it would not build"; sed "s/^/      /" "$t/c.out"
 fi
 # a module that calls php callables and hands throwables back (the module of
-# tests/ext.sh step 19), 300 rounds
+# tests/ext.sh step 19), 300 rounds -- a throwable class the engine does not
+# know among them, which crosses by a fallback lookup
 mkdir -p "$t/cal"
 cp tests/ext/callables/callables.php "$t/cal/r.php"
 { cat tests/ext/callables/check.php
-  printf "%s\n" "for (\$k = 0; \$k < 300; \$k++) { pk\\call(\"strrev\", \"s\$k\"); pk\\call([new Svc, \"shout\"], \"x\"); pk\\call(fn(\$a) => \$a + 1, \$k); pk\\caught(function () { throw new LogicException(\"lx\"); }); pk\\keep(); pk\\wrapped(fn() => intdiv(1, 0)); try { pk\\callm(\"nope\"); } catch (Error \$x) {} }"
+  printf "%s\n" "for (\$k = 0; \$k < 300; \$k++) { pk\\call(\"strrev\", \"s\$k\"); pk\\call([new Svc, \"shout\"], \"x\"); pk\\call(fn(\$a) => \$a + 1, \$k); pk\\caught(function () { throw new LogicException(\"lx\"); }); pk\\keep(); pk\\wrapped(fn() => intdiv(1, 0)); try { pk\\callm(\"nope\"); } catch (Error \$x) {} pk\\oops(); try { pk\\thrown(); } catch (Exception \$x) {} }"
 } > "$t/cal/run.php"
 sed -i "s#__DIR__ . \x27/callables.php\x27#__DIR__ . \x27/r.php\x27#" "$t/cal/run.php"
 sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.so\"|" examples/hello/mcphp.linux.toml | dbg /dev/stdin > "$t/cal/r.toml"
