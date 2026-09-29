@@ -66,7 +66,7 @@ docker run -d --name "$name" --platform "$plat" -v "$root:$root" \
 up=0
 i=0
 while [ $i -lt 60 ]; do
-    if docker exec "$name" curl -fs "http://127.0.0.1:8080/?n=0" > /dev/null 2>&1; then up=1; break; fi
+    if docker exec "$name" curl -fs --max-time 10 "http://127.0.0.1:8080/?n=0" > /dev/null 2>&1; then up=1; break; fi
     sleep 1; i=$((i + 1))
 done
 if [ "$up" != 1 ]; then bad "FrankenPHP did not answer:"; docker logs "$name" 2>&1 | tail -20 | sed 's/^/      /'; exit 1; fi
@@ -75,7 +75,7 @@ say "php: $(docker exec "$name" php -r 'echo PHP_VERSION, " ", PHP_ZTS ? "ZTS" :
 rss() { docker exec "$name" sh -c 'grep VmRSS /proc/1/status' | awk '{print $2}'; }
 # LOAD N P TAG: N requests, P at once, n = k % 50; every answer kept
 load() {
-    docker exec "$name" sh -c "seq 1 $1 | awk '{print \$1 % 50}' | xargs -P $2 -I{} curl -fs 'http://127.0.0.1:8080/?n={}'" > "/tmp/fp.$3.$$" 2>/dev/null
+    docker exec "$name" sh -c "seq 1 $1 | awk '{print \$1 % 50}' | xargs -P $2 -I{} curl -fs --max-time 30 'http://127.0.0.1:8080/?n={}'" > "/tmp/fp.$3.$$" 2>/dev/null
 }
 load 400 $par warm
 r0=$(rss)

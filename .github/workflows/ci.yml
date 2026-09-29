@@ -279,6 +279,7 @@ jobs:
       # a memory bound, MINIT's memory read-only (tests/frankenphp.sh,
       # docs/threads.md § ZTS).
       - name: A ZTS module under FrankenPHP, concurrent requests
+        timeout-minutes: 20
         run: sh tests/frankenphp.sh ${{ matrix.arch }}
 
   # Built ON Windows and graded there. The compiler is mc-php's own source,

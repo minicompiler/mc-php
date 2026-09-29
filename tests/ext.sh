@@ -774,7 +774,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/k.build" 2>&1; then
         say "callables: a name, an array, a closure, __invoke and a spread called; throwables both ways -- $(wc -l < "$tmp/k.m" | tr -d ' ') lines, the interpreted source's"
     else
         bad "callables: the module (exit $km) and the interpreted source (exit $ki) differ"
-        diff "$tmp/k.i" "$tmp/k.m" | sed -n '1,12p' | sed 's/^/      /'
+        diff "$tmp/k.i" "$tmp/k.m" | sed -n '1,40p' | sed 's/^/      /'
     fi
 else
     bad "callables: it would not build"; sed 's/^/      /' "$tmp/k.build"

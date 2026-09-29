@@ -285,6 +285,11 @@ void phz_privatize() {
 // memory php frees at the end of the request. A call's first entry measures
 // EG(exception)'s offset by throwing one (phx_egx_find), which php cannot
 // take outside a running script, so that waits for the first real call.
+// the fast entry waits for EG(exception)'s offset to be measured (the swap
+// src/program.mc makes in phx_enter): a call, not the global, because
+// php_ext.mc names it before it declares it
+i64 phx_egx_ok() { return phx_egx_done; }
+
 i64 phx_ts_rinit(i64 mtype, i64 mnum) {
     phz_thread();
     i64 egx = phx_egx_done;
