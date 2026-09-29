@@ -81,8 +81,14 @@ else
 fi
 
 echo ""
+# ZTS=1: the runner's php is thread-safe (php8ts.dll). The fixture gate is the
+# PROGRAM road, which has no module header, so it is not run again for it.
+if [ "${ZTS:-0}" = 1 ]; then
+echo "== the fixture gate: SKIPPED on a ZTS php (the program road has no module header) =="
+else
 echo "== the fixture gate, on this host =="
 sh tests/fixtures.sh || fail=1
+fi
 
 echo ""
 echo "== the extension road, on this host =="

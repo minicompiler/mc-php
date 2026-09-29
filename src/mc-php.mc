@@ -21,7 +21,15 @@
 // Linux host layer does not carry. Windows has an entry per architecture too
 // (src/mc-php-windows-*.mc), built on Windows only.
 #include <mc/host>
-#include <mc/core>
+// <mc/core> is these seven parts and mc's main; mc-php's main is
+// src/build.mc's, which registers its own `build` first
+#include <mc/core_min>
+#include <mc/core_machines>
+#include <mc/core_writers>
+#include <mc/core_build>
+#include <mc/core_bundle>
+#include <mc/core_pkg>
+#include <mc/core_sandbox>
 #include <float>
 #include <machine_arm64_float>
 #include <machine_x86_64_float>

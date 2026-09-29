@@ -43,7 +43,13 @@ bin=build/mc-php-linux-$nick
     echo "  mc build src --config src/mc-php.linux-$arch.toml" >&2
     exit 2
 }
-img=${MCPHP_LINUX_IMAGE:-php:8.5-alpine}
+# ZTS=1 runs the extension gates against a thread-safe php instead: php's own
+# ZTS image. The fixture gate is the PROGRAM road, which has no module header
+# and ignores [php].thread_safety, so a ZTS run skips it and says so.
+zts=${ZTS:-0}
+img=php:8.5-alpine
+[ "$zts" = 1 ] && img=php:8.5-zts-alpine
+img=${MCPHP_LINUX_IMAGE:-$img}
 # mc itself, for the hand-written examples: a released mc for this host,
 # unpacked where CI unpacks it (build/mc-linux-<nick>/mc). It is a static
 # binary and runs in the container as it is.
@@ -59,11 +65,16 @@ file "$bin" 2>/dev/null | sed 's/^/  /'
 # binaries it writes land somewhere the gate does not sweep.
 exec docker run --rm --platform "$plat" \
     -v "$root:$root" -w "$root" \
-    -e BIN="$bin" -e MC="$mc" -e MCPHP_TMP=/tmp/mcphp-linux \
+    -e BIN="$bin" -e MC="$mc" -e MCPHP_TMP=/tmp/mcphp-linux -e ZTS="$zts" \
     "$img" sh -c '
 set -u
 mkdir -p /tmp/mcphp-linux
 apk add --no-cache perl lld >/dev/null 2>&1 || { echo "  cannot install perl and lld"; exit 2; }
+# ZTS: a C compiler too, so the C twins and the layout gate are built against
+# the headers of THIS php -- the thread-safe reference the module is graded beside
+if [ "$ZTS" = 1 ]; then
+    apk add --no-cache build-base >/dev/null 2>&1 || { echo "  cannot install build-base"; exit 2; }
+fi
 echo ""
 echo "  uname:  $(uname -srm)"
 echo "  php:    $(php -v | head -1)"
@@ -88,6 +99,10 @@ else
     echo "  THEY DIFFER (mc-php exit $mrc, php exit $prc)"; exit 1
 fi
 
+if [ "$ZTS" = 1 ]; then
+echo ""
+echo "== the fixture gate: SKIPPED on a ZTS php (the program road has no module header) =="
+else
 echo ""
 echo "== the fixture gate, on this host =="
 sh tests/fixtures.sh || exit 1
@@ -97,6 +112,7 @@ echo "== the fixture gate again, every string counted (MCPHP_RC=check) =="
 # tests/run.sh says why: the string discipline of the extension road, graded on
 # the program road by poisoning a string that reaches zero
 MCPHP__RC=check sh tests/fixtures.sh || exit 1
+fi
 
 echo ""
 echo "== the extension road, on this host =="

@@ -146,6 +146,58 @@ jobs:
             build/mc-php-linux-x86_64
           if-no-files-found: error
 
+  # The extension gates against a thread-safe php on macOS: setup-php's ZTS
+  # build (phpts: ts). tests/ext.sh and tests/examples.sh build every module
+  # from a copy of its project file that says thread_safety = "zts"
+  # (tests/ts.sh) and grade it against this php, C twins included. The fixture
+  # gate is the program road, which has no module header; the NTS job runs it.
+  zts-macos:
+    name: The extension gates (macos/arm64, zts)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install mc ${{ env.MC_VERSION }}
+        run: |
+          set -eu
+          asset="mc-$MC_VERSION-macos-arm64.tar.gz"
+          base="https://github.com/minicompiler/mc/releases/download/v$MC_VERSION"
+          curl -fsSL -o "$RUNNER_TEMP/$asset"        "$base/$asset"
+          curl -fsSL -o "$RUNNER_TEMP/$asset.sha256" "$base/$asset.sha256"
+          ( cd "$RUNNER_TEMP" && shasum -a 256 -c "$asset.sha256" )
+          mkdir -p "$RUNNER_TEMP/mc"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/mc" --strip-components=1
+          echo "$RUNNER_TEMP/mc" >> "$GITHUB_PATH"
+          mkdir -p "$HOME/.mc/libs"
+          cp -R "$RUNNER_TEMP/mc/lib/mc" "$HOME/.mc/libs/mc"
+
+      - name: Install PHP ${{ env.PHP_VERSION }} (ZTS)
+        uses: shivammathur/setup-php@v2
+        env:
+          phpts: ts
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          coverage: none
+
+      - name: Versions
+        run: |
+          mc --version
+          php --version | head -1
+          php -i | grep -E '^(PHP API|PHP Extension Build|Thread Safety|Debug Build) '
+          # a ZTS php, or this job measures nothing
+          php -i | grep -q '^Thread Safety => enabled'
+
+      - name: Build
+        run: mc build
+
+      - name: The extension road against a ZTS php
+        run: sh tests/ext.sh
+
+      - name: The examples against a ZTS php
+        run: sh tests/examples.sh
+
   # The Linux compilers are graded by RUNNING them: tests/linux.sh compiles
   # every fixture with the cross-built binary inside a container that has php
   # 8.5 of its own, and compares both streams and the exit code -- the same
@@ -201,6 +253,19 @@ jobs:
           # is for.
           sh tests/linux.sh ${{ matrix.arch }}
 
+      # The same extension gates against php's thread-safe image
+      # (php:8.5-zts-alpine): every project file is copied with
+      # thread_safety = "zts" (tests/ts.sh), and the C twins are built against
+      # that php's own headers. The fixture gate is the program road, which
+      # has no module header, and is not run twice.
+      - name: The extension gates against a ZTS php
+        run: ZTS=1 sh tests/linux.sh ${{ matrix.arch }}
+
+      # thread_safety = "both": one project, two outputs, each loaded by its
+      # own php and refused by the other (tests/both.sh).
+      - name: thread_safety = "both", each output in its php
+        run: sh tests/both.sh ${{ matrix.arch }}
+
   # Built ON Windows and graded there. The compiler is mc-php's own source,
   # compiled by the runner's mc.exe and linked by lld-link next to the three
   # files tests/winsys.sh writes (two import libraries' worth of names and two
@@ -208,15 +273,19 @@ jobs:
   # the same fixture gate as the other hosts and the extension gate with a DLL
   # the runner's php loads.
   windows:
-    name: The fixture gate (windows/${{ matrix.arch }})
+    name: The fixture gate (windows/${{ matrix.arch }}${{ matrix.tsl }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
+        # ts: which php the runner installs. The ZTS legs run the extension
+        # gates against php8ts.dll (tests/windows.sh, ZTS=1).
         include:
-          - { arch: x86_64,  nick: x86_64, runner: windows-latest }
-          - { arch: aarch64, nick: arm64,  runner: windows-11-arm }
+          - { arch: x86_64,  nick: x86_64, runner: windows-latest, ts: nts, tsl: "" }
+          - { arch: aarch64, nick: arm64,  runner: windows-11-arm, ts: nts, tsl: "" }
+          - { arch: x86_64,  nick: x86_64, runner: windows-latest, ts: zts, tsl: ", zts" }
+          - { arch: aarch64, nick: arm64,  runner: windows-11-arm, ts: zts, tsl: ", zts" }
     defaults:
       run:
         shell: bash
@@ -265,8 +334,10 @@ jobs:
             exit 1
           fi
 
-      - name: Install PHP ${{ env.PHP_VERSION }}
+      - name: Install PHP ${{ env.PHP_VERSION }} (${{ matrix.ts }})
         uses: shivammathur/setup-php@v2
+        env:
+          phpts: ${{ matrix.ts }}
         with:
           php-version: ${{ env.PHP_VERSION }}
           coverage: none
@@ -310,4 +381,6 @@ jobs:
           # in D:/a/_temp form means the same thing to both.
           TMPDIR=$(cygpath -m "$RUNNER_TEMP")
           export TMPDIR
+          ZTS=0; [ "${{ matrix.ts }}" = zts ] && ZTS=1
+          export ZTS
           sh tests/windows.sh ${{ matrix.arch }}

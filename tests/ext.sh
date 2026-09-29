@@ -50,7 +50,12 @@ fail=0
 . "$here/tmp.sh"
 mcphp_tmp_init mcphp-ext
 tmp=$MCPHP_TMP
-trap 'rm -rf "$tmp"' EXIT
+. "$here/ts.sh"
+mcphp_ts_init
+# a ZTS php grades a copy of the file that says "zts" (tests/ts.sh)
+cfg0=$cfg
+cfg=$(mcphp_ts_cfg "$cfg")
+trap 'rm -rf "$tmp"; mcphp_ts_clean' EXIT
 trap 'exit 130' INT
 
 say() { printf '  %s\n' "$*"; }
@@ -104,12 +109,17 @@ tv() { sed -n "s/^$1 = *\(.*\)\$/\1/p" "$cfg" | head -1 | tr -d '"'; }
 api=$(pv 'PHP API'); bid=$(pv 'PHP Extension Build')
 zts=false; [ "$(pv 'Thread Safety')" = enabled ] && zts=true
 dbg=false; [ "$(pv 'Debug Build')" = yes ] && dbg=true
-for pair in "api:$api" "build_id:$bid" "thread_safety:$zts" "debug:$dbg"; do
+# The build id is compared the way the compiler writes it: the stated one with
+# its thread-safety word made this output's (src/ext.mc ph_ts_bid) -- the file
+# says ",NTS" and a ZTS output carries ",TS".
+tsw=NTS; [ "$zts" = true ] && tsw=TS
+for pair in "api:$api" "build_id:$bid" "thread_safety:$TSV" "debug:$dbg"; do
     k=${pair%%:*}; want=${pair#*:}
     got=$(tv "$k")
-    [ "$got" = "$want" ] || bad "$cfg: php.$k is $got, this php says $want (re-measure: php -i)"
+    [ "$k" = build_id ] && got=$(printf '%s' "$got" | sed -E "s/,N?TS(,|\$)/,$tsw\1/")
+    [ "$got" = "$want" ] || bad "$cfg0: php.$k is $got, this php says $want (re-measure: php -i)"
 done
-say "php: api $api, build $bid, zts $zts, debug $dbg -- and $cfg says so"
+say "php: api $api, build $bid, zts $zts, debug $dbg -- and $cfg0 says so (thread_safety = \"$TSV\" for this php)"
 
 # --- 3. the build ----------------------------------------------------------
 out=$tmp/hello.$sx

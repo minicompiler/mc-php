@@ -29,7 +29,7 @@
 # names: no php development pack and no Windows SDK.
 #
 # NTS ONLY. This file targets the non-thread-safe php (php8.dll, and
-# `thread_safety = false` / `NTS` in the build id below), which is what the CI
+# `thread_safety = "nts"` / `NTS` in the build id below), which is what the CI
 # runners carry and the only Windows php this has been measured against. A
 # thread-safe php is php8ts.dll and refuses an NTS module at load; nothing
 # here selects it, and no ZTS build has been run on Windows (docs/plan.md § 5).
@@ -67,12 +67,12 @@ version = "0.1.0"
 #
 #     PHP API             => 20250925             api
 #     PHP Extension Build => API20250925,NTS,VS17 build_id
-#     Thread Safety       => disabled             thread_safety = false
+#     Thread Safety       => disabled             thread_safety = "nts"
 #     Debug Build         => no                   debug = false
 [php]
 api = 20250925
 build_id = "API20250925,NTS,VS17"
-thread_safety = false
+thread_safety = "nts"
 debug = false
 # unchecked reads, as C (docs/semantics.md): see mcphp.toml
 checked_reads = false

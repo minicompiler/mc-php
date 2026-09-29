@@ -510,6 +510,28 @@ i64 ph_dollar_expr() {
 // calls is_dir, is_file and filesize, all three of which reach php_stat_mode
 // and php_stat_size and therefore stat(), and it is green on both
 // architectures.
+// src with its one occurrence of `from` replaced by `to`, as a new
+// NUL-terminated buffer; a source that lacks it is this compiler's own bug
+uptr ph_swap(uptr src, i64 n, uptr from, uptr to) {
+    i64 fl = cstrlen(from);
+    i64 tl = cstrlen(to);
+    i64 i = 0;
+    loop {
+        if (i + fl > n) break;
+        if (mem_eq(src + i, from, fl)) {
+            uptr r = xalloc(n - fl + tl + 1);
+            mem_copy(r, src, i);
+            mem_copy(r + i, to, tl);
+            mem_copy(r + i + tl, src + i + fl, n - i - fl);
+            st8(r + n - fl + tl, 0);
+            return r;
+        }
+        i = i + 1;
+    }
+    err_at2("mc-php", 1, "mc-php: the runtime source lacks what a ZTS build swaps", from);
+    return src;
+}
+
 void ph_push_rt_host() {
     uptr os = host_os();
     if (str_eq(os, "macos")) {
@@ -524,6 +546,13 @@ void ph_push_rt_host() {
     // host layer that declares ExitProcess.
     if (str_eq(os, "windows")) {
         if (!ph_ext) p_push_source("php runtime entry", ph_rt_win_st, ph_rt_win_st_size);
+        // a ZTS php is php8ts.dll: the one name the host layer's php_dlsym
+        // asks for is swapped in the SOURCE, so the NTS output is untouched
+        if (ph_ext_zts) {
+            uptr w = ph_swap(ph_rt_win, ph_rt_win_size, "GetModuleHandleA(\"php8.dll\")", "GetModuleHandleA(\"php8ts.dll\")");
+            p_push_source("php runtime host", w, cstrlen(w));
+            return;
+        }
         p_push_source("php runtime host", ph_rt_win, ph_rt_win_size);
         return;
     }
@@ -569,6 +598,9 @@ void user_init() {
     // three: a push is a stack, and php_ext.mc reads the runtime's own
     // globals (ph_exc) -- a call binds after the whole unit is parsed, a
     // GLOBAL has to be declared before the line that names it.
+    // a ZTS output's additions (lib/php_zts.mc), parsed after php_ext.mc
+    // whose globals and #defines they name
+    if (ph_ext && ph_ext_zts) p_push_source("php extension zts", ph_zts_rt, ph_zts_rt_size);
     if (ph_ext) p_push_source("php extension runtime", ph_ext_rt, ph_ext_rt_size);
     if (!ph_ext) p_push_source("php program allocator", ph_prog_rt, ph_prog_rt_size);
     p_push_source("php runtime", ph_rt, ph_rt_size);

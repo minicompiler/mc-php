@@ -49,10 +49,10 @@ version = "0.1.0"
 #
 #     PHP API             => 20250925        api
 #     PHP Extension Build => API20250925,NTS build_id
-#     Thread Safety       => disabled        thread_safety = false
+#     Thread Safety       => disabled        thread_safety = "nts"
 #     Debug Build         => no              debug = false
 [php]
 api = 20250925
 build_id = "API20250925,NTS"
-thread_safety = false
+thread_safety = "nts"
 debug = false

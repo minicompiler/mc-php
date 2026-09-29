@@ -51,7 +51,9 @@ rootn=$(cygpath -m "$root" 2>/dev/null || echo "$root")
 mcphp_tmp_init mcphp-examples
 tmp=$MCPHP_TMP
 . "$here/lim.sh"
-trap 'rm -rf "$tmp"' EXIT
+. "$here/ts.sh"
+mcphp_ts_init
+trap 'rm -rf "$tmp"; mcphp_ts_clean' EXIT
 trap 'exit 130' INT
 
 say()  { printf '  %s\n' "$*"; }
@@ -60,9 +62,10 @@ skip() { printf '  SKIPPED %s\n' "$*"; }
 
 # build EX CFG ART: mc-php build, the artefact removed first so a failed
 # build is never graded on an old one (tests/ext.sh, the reviewer of #15).
+# For a ZTS php the build is from a copy of CFG that says so (tests/ts.sh).
 build() {
     rm -f "$1/build/$3"
-    if "$BIN" build "$1" --config "$2" > "$tmp/build.out" 2>&1 && [ -f "$1/build/$3" ]; then
+    if "$BIN" build "$1" --config "$(mcphp_ts_cfg "$2")" > "$tmp/build.out" 2>&1 && [ -f "$1/build/$3" ]; then
         return 0
     fi
     bad "mc-php build $2:"; sed 's/^/      /' "$tmp/build.out"
