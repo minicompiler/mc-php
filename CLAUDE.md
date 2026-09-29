@@ -1298,3 +1298,11 @@ changed what the compiler does. The hosts branch is that commit and it is delete
        `.mcphp-zts-*` and `.mcphp-test-*`; a SIGKILL leaving it is documented.
     5. `php8.lib` -> `php8ts.lib` only for a Windows target and only as a whole word.
     6. `ph_swap` refuses a text that occurs twice or never.
+    - CI found one more (5158ea0): RINIT's call left a home chunk, so `phx_enter`'s fast path
+      never reached the one-time EG(exception) measurement; on Windows the measured offset
+      is not 960 and `callables` failed on both ZTS legs. A ZTS-only swap makes the fast path
+      wait for the measurement; a module with the offset forced wrong reproduced it on
+      linux/aarch64 (exit 255 before, php's bytes after). CI 36553774441 all 8 jobs green;
+      FrankenPHP linux/x86_64 native 3/3 green (5, 6 and 8 php threads). The run before the
+      fix HUNG at FrankenPHP's first request on linux/x86_64 native (cancelled after 10 min);
+      that cause is not established.
