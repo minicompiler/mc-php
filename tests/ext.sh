@@ -142,6 +142,35 @@ tsref 's/^thread_safety = .*/thread_safety = false/' 'mc-php: thread_safety is "
 tsref 's/^build_id = .*/build_id = "API20250925"/' 'mc-php: the build id names no thread safety (,NTS or ,TS): php.build_id' && tsn=$((tsn + 1))
 say "thread_safety: $tsn of 3 wrong files refused at the key's own line and column"
 
+# --- 2c. "both": two outputs, and THIS php takes only its own ---------------
+# One project, thread_safety = "both" (src/build.mc): build/hello.$sx for an
+# NTS php and build/hello-zts.$sx for a ZTS one. The php under test loads the
+# one for its kind and refuses the other by name. Every leg grades the half its
+# php can; tests/both.sh loads each half in its own php on Linux.
+sed 's/^thread_safety = .*/thread_safety = "both"/' "$cfg0" > "$EX/.both-test.toml"
+rm -f "$EX/build/hello.$sx" "$EX/build/hello-zts.$sx"
+if "$BIN" build "$EX" --config "$EX/.both-test.toml" > "$tmp/both.out" 2>&1 \
+   && [ -f "$EX/build/hello.$sx" ] && [ -f "$EX/build/hello-zts.$sx" ]; then
+    mine=hello.$sx; other=hello-zts.$sx
+    [ "$TSV" = zts ] && { mine=hello-zts.$sx; other=hello.$sx; }
+    cp "$EX/build/$mine" "$tmp/b-mine.$sx"; cp "$EX/build/$other" "$tmp/b-other.$sx"
+    bm=$(cygpath -m "$tmp/b-mine.$sx" 2>/dev/null || echo "$tmp/b-mine.$sx")
+    bo=$(cygpath -m "$tmp/b-other.$sx" 2>/dev/null || echo "$tmp/b-other.$sx")
+    ml=$("$PHP" -d extension="$bm" -r 'echo extension_loaded("hello") ? "yes" : "no";' 2>&1 | tr -d '\r')
+    ol=$("$PHP" -d extension="$bo" -r 'echo extension_loaded("hello") ? "yes" : "no";' 2>&1 | tr -d '\r')
+    # refused: by its header where the file loads, and on Windows by the
+    # loader, before any header is read -- a ZTS module imports php8ts.dll
+    # and an NTS php does not have it (and the other way round)
+    case "$ml|$ol" in
+        yes\|*"Unable to initialize module"*no|yes\|*"Unable to load dynamic library"*no)
+            say "both: two outputs; this $TSV php loads $mine and refuses $other" ;;
+        *) bad "both: $mine says \"$ml\", $other says \"$ol\"" ;;
+    esac
+else
+    bad "both: the build:"; sed 's/^/      /' "$tmp/both.out"
+fi
+rm -f "$EX/.both-test.toml" "$EX/build/hello.$sx" "$EX/build/hello-zts.$sx"
+
 # --- 3. the build ----------------------------------------------------------
 out=$tmp/hello.$sx
 rm -f "$out"
