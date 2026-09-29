@@ -810,6 +810,16 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_c3("php_thr_run", fp, ph_to_int(ph_a(tav, 1), ph_aty(tav, 1)),
                      ph_to_int(ph_a(tav, 2), ph_aty(tav, 2)), TY_I64);
     }
+    // mcphp_vm(): the process's virtual size in bytes (committed bytes on
+    // Windows), -1 when the host cannot say -- the gate that sees a thread's
+    // arena kept after it ends (tests/c/10-threads-vm.php). Internal.
+    if (str_eq(name, "mcphp_vm")) {
+        u8 vnp[8];
+        ph_read_args(1, fl, line, vnp);
+        if (ld64(vnp) != 0) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        ph_ety = PT_INT;
+        return ph_call("ph_os_vm", 0, 0, 0, 0, 0, TY_I64);
+    }
     // func_num_args() / func_get_arg(k): answered from the callee's OWN
     // parameters, which need no run-time table -- D6 refuses `func_get_args`
     // by name and that one stays refused (docs/plan.md section 3, D6).

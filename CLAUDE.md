@@ -1229,8 +1229,12 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     every entry into php's engine. Both guards are **interim until step 3**: module globals
     become shared, one copy, as in C.
   No atomics: only literals and class entries cross threads, and neither is ever counted.
-  - Each other thread gets its own mapped arena and no Zend allocator. The arena is unmapped at
-    join unless the thread pinned it.
+  - Each other thread gets its own mapped arena and no Zend allocator. Its arena and block are
+    always unmapped at join, because a thread never pins. The review found that a first version
+    kept a 256 MiB arena for any thread that called one of six builtins: a set/restore of the
+    error or exception handler, `strtok`, or `fopen`. `tests/c/10-threads-vm` measures the
+    process's virtual size (`mcphp_vm()`: `task_info`, `/proc/self/statm`,
+    `K32GetProcessMemoryInfo`). It grew 8192 MiB before the fix and stays under 256 MiB after.
   - Only the booting thread flips `ph_tcur`: to 0 before the first thread is created, and back
     after the last join. A thread may start threads of its own. Every thread checks the flip at
     its start and at its end.

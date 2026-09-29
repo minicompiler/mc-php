@@ -93,9 +93,10 @@ void php_die(uptr msg, i64 n) { php_flush(); write(2, msg, n); exit(255); }
 // an _emalloc block is whatever the allocator had. Every allocation site
 // writes what it reads (the audit is docs/php-extension.md § The memory).
 #define PH_ZBIG 4096                // a block bigger than this is never bumped: it gets its own
-// ... and another thread (lib/php_rt.mc § other threads) pins its ARENA:
-// what it stored into module state lives in it
-void php_pin() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); if (((uptr) ld64(phT + PHT_ph_zalloc)) || ld64(phT + PHT_ph_tidx)) st64(phT + PHT_ph_pin, 1); }
+// Another thread (§ other threads) has no Zend chunk, so it never pins: the
+// module state that would outlive it refuses it (ph_shared_off), and its
+// block and arena are unmapped when it is joined.
+void php_pin() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); if (((uptr) ld64(phT + PHT_ph_zalloc))) st64(phT + PHT_ph_pin, 1); }
 
 uptr php_alloc(i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (((uptr) ld64(phT + PHT_ph_zalloc))) {
@@ -10868,10 +10869,9 @@ void php_request_reset() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 // one executor for the whole process). A string a thread builds is its own
 // arena's and immutable, as every string is on the program road. Module
 // state -- a global, a static, a constant -- refuses it for now
-// (ph_shared_off, interim until the thread API makes it shared); anything
-// else that pins (php_pin) keeps the thread's arena when it ends, as
-// malloc'd memory outlives a C thread. Otherwise the arena goes with the
-// thread.
+// (ph_shared_off, interim until the thread API makes it shared), so nothing
+// outside the thread points into its arena: the arena and the block go with
+// the thread, always (tests/c/10-threads-vm measures it).
 //
 // php_thr_run is the internal start the runtime's own gates use
 // (`mcphp_threads('f', $n, $arg)`, src/builtin.mc): n threads, thread i
@@ -10980,7 +10980,7 @@ i64 php_thr_run(uptr fn, i64 n, i64 arg) { uptr phT = ph_tcur; if (!phT) phT = p
         if (v < 0 || sum < 0) sum = 0 - 1;
         if (sum >= 0) sum = sum + v;
         uptr b = ld64(r + PHR_BLOCK);
-        if (!ld64(b + PHT_ph_pin)) ph_os_unmap(ld64(b + PHT_ph_hbase), ld64(b + PHT_ph_hlim));
+        ph_os_unmap(ld64(b + PHT_ph_hbase), ld64(b + PHT_ph_hlim));
         ph_os_unmap(b, PHT_SIZE);
         i = i + 1;
     }

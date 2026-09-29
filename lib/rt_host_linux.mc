@@ -114,6 +114,27 @@ uptr ph_os_map(i64 n) {
 void ph_os_unmap(uptr p, i64 n) { munmap(p, n); }
 // the size of a thread's arena: reserved (MAP_NORESERVE): pages are touched as used
 i64 ph_os_arena() { return 268435456; }
+// the process's virtual size in bytes, -1 when it cannot be read: the first
+// field of /proc/self/statm, in pages (mcphp_vm(), a test gate)
+extern i64 sysconf(i64 name);
+i64 ph_os_vm() {
+    u8 b[128];
+    i64 fd = open("/proc/self/statm", 0, 0) & 0xffffffff;
+    if (fd == 0xffffffff) return 0 - 1;
+    i64 n = read(fd, b, 127);
+    close(fd);
+    i64 v = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(b + i);
+        if (c < 48 || c > 57) break;
+        v = v * 10 + c - 48;
+        i = i + 1;
+    }
+    if (i == 0) return 0 - 1;
+    return v * sysconf(30);                                  // _SC_PAGESIZE
+}
 // a thread on an 8 MiB stack (a secondary thread's default is smaller than
 // the booting one's, and compiled php recurses as deep); 0 when it started
 i64 ph_thr_create(uptr fn, uptr arg, uptr h) {

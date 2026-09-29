@@ -97,8 +97,20 @@ Each other thread gets the following:
   mixed from the starting thread's seed.
 - **No Zend allocator** (`ph_zalloc` = 0). So its strings live in its arena and never touch Zend.
 
-When the thread ends, its arena is unmapped. The exception is a PINNED arena: if the thread
-stored into module state, that state lives in the arena, so the arena is kept.
+When the thread ends, its arena and its block are always unmapped. A thread never pins
+(`php_pin` pins only a Zend chunk, which such a thread does not have). The one case where a pin
+would matter is a thread storing into module state, and step 1 refuses that. A first version did
+pin: it kept the whole arena of any thread that installed a handler, or called `strtok` or
+`fopen`. That was 256 MiB (64 MiB on Windows) per thread per call, and it kept memory that nothing
+pointed into any more. `tests/c/10-threads-vm.php` measures the process's virtual size around
+4 rounds of 8 threads that call those six builtins. Its bound is 256 MiB, and the first version
+grew by 8192 MiB. The measurement is `mcphp_vm()`:
+
+- macOS: `task_info`'s `virtual_size`;
+- Linux: `/proc/self/statm`;
+- Windows: the committed bytes, from `K32GetProcessMemoryInfo`.
+
+`tests/leaks.sh` counts Zend blocks, so it cannot see this kind of leak.
 
 Output from another thread goes to fd 1 directly. On the extension road, this bypasses php's
 output layer, because that layer is part of php's engine.
@@ -134,6 +146,11 @@ must never enter them. Every road into the engine first checks the thread's inde
 
 On another thread, each of them throws the runtime's `Error`:
 `mc-php: php's engine called from another thread (this php has one engine for the process)`.
+
+This guard has one consequence that is easy to miss, on the extension road. An error handler that
+php installed is a php callable, so calling it goes through `phx_vcall`. A thread inherits the
+handler of the thread that started it. So a thread that raises a warning while such a handler is
+installed gets the Error instead of the handler's call.
 
 **This guard is interim until step 3,** which gives another thread a road into the engine: a
 ZTS context, or a call handed to the thread php runs on.

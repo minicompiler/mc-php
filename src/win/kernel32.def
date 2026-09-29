@@ -20,6 +20,7 @@ GetModuleFileNameA
 GetModuleHandleA
 GetProcAddress
 GetStdHandle
+K32GetProcessMemoryInfo
 MoveFileExA
 ReadFile
 RemoveDirectoryA

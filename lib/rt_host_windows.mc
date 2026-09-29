@@ -45,6 +45,7 @@ extern uptr CreateThread(uptr sa, i64 stack, uptr fn, uptr arg, i64 flags, uptr 
 extern i64  WaitForSingleObject(uptr h, i64 ms);
 extern uptr VirtualAlloc(uptr addr, i64 n, i64 type, i64 prot);
 extern i64  VirtualFree(uptr addr, i64 n, i64 type);
+extern i64  K32GetProcessMemoryInfo(uptr h, uptr pmc, i64 cb);
 extern uptr GetModuleHandleA(uptr name);
 extern uptr GetProcAddress(uptr h, uptr name);
 extern i64  GetFileAttributesA(uptr name);
@@ -392,6 +393,15 @@ uptr ph_os_map(i64 n) { return VirtualAlloc(0, n, 0x3000, 4); }
 void ph_os_unmap(uptr p, i64 n) { VirtualFree(p, 0, 0x8000); }        // MEM_RELEASE
 // the size of a thread's arena: committed up front, which the system charges: kept smaller
 i64 ph_os_arena() { return 67108864; }
+// the process's committed bytes, -1 when they cannot be read:
+// PROCESS_MEMORY_COUNTERS.PagefileUsage, which a committed arena counts in
+// (mcphp_vm(), a test gate)
+i64 ph_os_vm() {
+    u8 m[72];
+    st64(m, 72);
+    if (!rtw_int(K32GetProcessMemoryInfo(0 - 1, m, 72))) return 0 - 1;
+    return ld64(m + 56);
+}
 // a thread on an 8 MiB stack; 0 when it started. The HANDLE is the join's.
 i64 ph_thr_create(uptr fn, uptr arg, uptr h) {
     uptr t = CreateThread(0, 8388608, fn, arg, 0, 0);
