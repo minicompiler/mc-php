@@ -37,6 +37,13 @@ i64  phx_ts_ego;                    // executor_globals_offset's value
 u8   phx_ts_id[8];                  // the module's TSRM resource id (an int php writes)
 uptr phx_ts_minit0;                 // the module's own MINIT (mc_php_minit)
 uptr phz_snap_area;                 // the statics as MINIT left them
+// EG(exception)'s offset a thread starts from, until it measures its own:
+// the headers' value, or -- MCPHP_ZTS_EGX_WRONG=1, a test's switch -- 456,
+// EG(function_table) on php 8.5 Linux (aarch64 and x86_64, read off the ZTS
+// headers with offsetof): never NULL in a request, so a thread that reads
+// "an exception is pending" there without having measured is caught
+// (tests/frankenphp.sh)
+i64  phz_egx0;
 
 // the runtime block of the php thread whose TSRM block is ls: the loading
 // thread's is the one MINIT ran on, every other one is the module's TSRM
@@ -83,6 +90,7 @@ uptr phz_thread() {
     }
     st64(b + PHT_phz_mod, m);
     st64(b + PHT_phx_eg, ls + phx_ts_ego);
+    st64(b + PHT_phx_egx, phz_egx0);               // until this thread measures its own
     // php's output layer, as phx_module wired it on the main block: without
     // these two a module's echo on this thread would bypass every ob level
     st64(b + PHT_ph_osink, ld64(ph_tmain + PHT_ph_osink));
@@ -285,20 +293,23 @@ void phz_privatize() {
 // memory php frees at the end of the request. A call's first entry measures
 // EG(exception)'s offset by throwing one (phx_egx_find), which php cannot
 // take outside a running script, so that waits for the first real call.
+// Offset and flag are this thread's words (src/tls.mc): RINIT holds the
+// measurement off by setting the flag in ITS block, and no other thread can
+// read that value or write it back.
 // the fast entry waits for EG(exception)'s offset to be measured (the swap
 // src/program.mc makes in phx_enter): a call, not the global, because
 // php_ext.mc names it before it declares it
 i64 phx_egx_ok() { return phx_egx_done; }
 
 i64 phx_ts_rinit(i64 mtype, i64 mnum) {
-    phz_thread();
-    i64 egx = phx_egx_done;
-    phx_egx_done = 1;
+    uptr b = phz_thread();
+    i64 egx = ld64(b + PHT_phx_egx_done);
+    st64(b + PHT_phx_egx_done, 1);
     phx_enter();
     php_pin();
     phz_privatize();
     phx_leave();
-    phx_egx_done = egx;
+    st64(b + PHT_phx_egx_done, egx);
     return 0;
 }
 i64 phx_ts_rshutdown(i64 mtype, i64 mnum) {
@@ -367,6 +378,10 @@ uptr phx_ts_module(uptr me) {
     ph_tcur = 0;
     uptr phT = ph_tmain;
     phx_eg = phx_ts_ls0 + phx_ts_ego;
+    phz_egx0 = EGX_EXCEPTION;
+    uptr wv = getenv("MCPHP_ZTS_EGX_WRONG");
+    if (wv) { if (ld8(wv) == 49) phz_egx0 = 456; }
+    phx_egx = phz_egx0;
     if (phz_area_size()) {
         uptr a = php_alloc(phz_area_size());
         phz_area_init(a);

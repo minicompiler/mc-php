@@ -38,6 +38,11 @@ i64 ph_tls_off(uptr n) {
         if (str_eq(n, "ph_classes")) return PHT_ph_classes;
         if (str_eq(n, "ph_ce_closure")) return PHT_ph_ce_closure;
         if (str_eq(n, "ph_rsl")) return PHT_ph_rsl;
+        // EG(exception)'s offset is measured per thread, in the thread's own
+        // engine: no thread ever writes what another reads, so no ordering
+        // between the offset and its flag is needed on any CPU
+        if (str_eq(n, "phx_egx")) return PHT_phx_egx;
+        if (str_eq(n, "phx_egx_done")) return PHT_phx_egx_done;
     }
     return 0 - 1;
 }

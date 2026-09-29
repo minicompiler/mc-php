@@ -1306,3 +1306,13 @@ changed what the compiler does. The hosts branch is that commit and it is delete
       FrankenPHP linux/x86_64 native 3/3 green (5, 6 and 8 php threads). The run before the
       fix HUNG at FrankenPHP's first request on linux/x86_64 native (cancelled after 10 min);
       that cause is not established.
+    - Re-check finding (MEDIUM-HIGH): `phx_ts_rinit` saved and restored the process-wide
+      `phx_egx_done`, which another php thread could write back as 1 before any thread
+      measured. `phx_egx` and `phx_egx_done` are now per-thread words (src/tls.mc, ZTS only,
+      PHT 12424/12432, block 12440); RINIT sets the flag in its own block; each php thread
+      measures once in its own engine. Gate: `MCPHP_ZTS_EGX_WRONG=1` starts every thread from
+      offset 456 (EG(function_table)); frankenphp.sh's readiness probe calls nothing in the
+      module and the warm-up's 400 first requests must be right, with a throwing callable and
+      a variable-called php function. A build that never measures fails all 400; the old
+      shared-flag race did NOT reproduce in 8 runs (5 with the non-calling probe); the fix
+      stands by construction. NTS cmp 27/27 identical.

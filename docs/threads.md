@@ -254,7 +254,11 @@ thread that loaded the module keeps the block MINIT ran on.
 
 The engine's executor globals are read the same way, per thread: the calling thread's TSRM block
 plus `executor_globals_offset`, taken on that thread at its first request and never cached from
-MINIT.
+MINIT. `EG(exception)`'s offset, which the runtime measures by throwing one at a thread's first
+call (it is not the headers' 960 on Windows), is a per-thread word too, and so is the flag that
+says it was measured: RINIT holds the measurement off by setting the flag in its OWN block, so no
+thread ever reads or writes back another thread's value. Each php thread measures once, in its
+own engine.
 
 A php that does not export `tsrm_get_ls_cache` or `executor_globals_offset` is not a thread-safe
 php this module can serve. The module says so from `get_module`, before php reads its header, as
@@ -313,11 +317,21 @@ php's function table, and echoes into an output buffer the script opened. The ga
 - every answer is the formula's -- each request started from MINIT's state and saw only its own
   writes;
 - the answers came from at least two php threads;
+- with `MCPHP_ZTS_EGX_WRONG=1` every php thread starts from a wrong `EG(exception)` offset (456,
+  `EG(function_table)`, never NULL), and the warm-up's 400 requests -- every thread's first ones,
+  32 at a time, after a readiness probe that calls nothing in the module -- must all come out
+  right, including a callable that throws and one of php's own functions called through a
+  variable, which a wrong offset breaks;
 - FrankenPHP's resident memory after the 4000 is within 32 MiB of what it was after the warm-up;
 - no fault in FrankenPHP's log.
 
-Measured on linux/aarch64 (Lima): 3 runs, every answer right, 5 php threads, resident memory
-+2 MiB each time. CI runs it on the linux/aarch64 and linux/x86_64 legs.
+Measured on linux/aarch64 (Lima): 3 runs, every answer right, 5 to 8 php threads, resident
+memory +2..3 MiB. CI runs it on the linux/aarch64 and linux/x86_64 legs. The `EG(exception)`
+check has teeth: a build whose threads never measure fails all 400 warm-up answers. What it did
+NOT reproduce, in 8 runs, is the race the per-thread flag removes (a shared flag one thread's
+RINIT could write back as 1 before any thread measured): that fix stands by construction, not
+by a failing run. The Windows ZTS legs, where the measured offset is not 960, run the single
+threaded extension gates only: there is no threaded SAPI there.
 
 The per-thread road costs a lookup where the NTS module reads a global. `examples/decimal`'s
 `bench.php` (best of 9, 5 runs each, linux/aarch64): the NTS module under `php:8.5-alpine` 0.228

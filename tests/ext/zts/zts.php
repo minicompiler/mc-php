@@ -22,8 +22,8 @@ function zts_say(int $n): void {
     echo "|", 3 * $n;
 }
 
-// n|calls|a|list|count|items|K|s|f|R|helper|thread
-function work(int $n): string {
+// n|calls|a|list|count|items|K|s|f|R|helper|boom:rev|thread
+function work(int $n, callable $boom): string {
     global $zts_g, $zts_box;
     static $calls = 0;
     $calls++;
@@ -44,6 +44,14 @@ function work(int $n): string {
     }
     if (!defined('ZTS_R')) define('ZTS_R', $n);
     $h = zts_helper($n);
+    // php's engine called through a callable -- one that throws, and one of
+    // php's own functions that does not: after each the module reads
+    // EG(exception) at the offset THIS thread measured, and
+    // MCPHP_ZTS_EGX_WRONG makes that offset wrong until the thread measures
+    // it (a wrong one reads a pending exception where there is none)
+    $rev = 'strrev';
+    try { $boom($n); $b = "none"; } catch (LogicException $x) { $b = (string) $x->getMessage(); }
+    $b = $b . ":" . (string) $rev("z$n");
     return $n . "|" . $calls . "|" . $zts_g['a'] . "|" . count($zts_g['list']) . "|" . _Box::$count
-        . "|" . $k . "|" . ZTS_K . "|" . $s . "|" . $f($n) . "|" . ZTS_R . "|" . $h . "|" . mcphp_thread();
+        . "|" . $k . "|" . ZTS_K . "|" . $s . "|" . $f($n) . "|" . ZTS_R . "|" . $h . "|" . $b . "|" . mcphp_thread();
 }

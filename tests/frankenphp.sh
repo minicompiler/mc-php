@@ -16,6 +16,10 @@
 #     0, a constant a request defines is its own, a call through php's
 #     function table reaches THIS request's function;
 #   * the answers came from more than one php thread (mcphp_thread());
+#   * with MCPHP_ZTS_EGX_WRONG=1 every php thread starts from a WRONG offset
+#     of EG(exception), and each measures its own at its first call: the
+#     warm-up's requests -- every thread's first ones, 32 at a time -- must
+#     all see an exception php's engine throws, as the later ones must;
 #   * FrankenPHP's resident memory after the whole load is within a bound of
 #     what it was after a warm-up: no leak across requests.
 #
@@ -59,18 +63,18 @@ say "built: $(wc -c < $D/build/zts.so | tr -d ' ') bytes"
 
 threads=8
 docker run -d --name "$name" --platform "$plat" -v "$root:$root" \
-    -e MCPHP_ZTS_READONLY=1 -e MCPHP_FP_THREADS=$threads -e MCPHP_FP_ROOT="$root/$D" \
+    -e MCPHP_ZTS_READONLY=1 -e MCPHP_ZTS_EGX_WRONG=1 -e MCPHP_FP_THREADS=$threads -e MCPHP_FP_ROOT="$root/$D" \
     dunglas/frankenphp:php8.5-alpine sh -c \
     "echo 'extension=$root/$D/build/zts.so' > /usr/local/etc/php/conf.d/zz-mcphp.ini; exec frankenphp run --config $root/$D/Caddyfile" >/dev/null
 # up when it answers
 up=0
 i=0
 while [ $i -lt 60 ]; do
-    if docker exec "$name" curl -fs --max-time 10 "http://127.0.0.1:8080/?n=0" > /dev/null 2>&1; then up=1; break; fi
+    if docker exec "$name" curl -fs --max-time 10 "http://127.0.0.1:8080/up.php" > /dev/null 2>&1; then up=1; break; fi
     sleep 1; i=$((i + 1))
 done
 if [ "$up" != 1 ]; then bad "FrankenPHP did not answer:"; docker logs "$name" 2>&1 | tail -20 | sed 's/^/      /'; exit 1; fi
-say "php: $(docker exec "$name" php -r 'echo PHP_VERSION, " ", PHP_ZTS ? "ZTS" : "NTS";'), FrankenPHP with $threads php threads, MCPHP_ZTS_READONLY=1"
+say "php: $(docker exec "$name" php -r 'echo PHP_VERSION, " ", PHP_ZTS ? "ZTS" : "NTS";'), FrankenPHP with $threads php threads, MCPHP_ZTS_READONLY=1 MCPHP_ZTS_EGX_WRONG=1"
 
 rss() { docker exec "$name" sh -c 'grep VmRSS /proc/1/status' | awk '{print $2}'; }
 # LOAD N P TAG: N requests, P at once, n = k % 50; every answer kept
@@ -82,20 +86,28 @@ r0=$(rss)
 load "$reqs" "$par" run
 r1=$(rss)
 
-# the formula: n|1|1+n|3|1|1|7|<s>|2n|n|n+1000|thread|3n
+# the formula: n|1|1+n|3|1|1|7|<s>|2n|n|n+1000|b<n>:<strrev(z<n>)>|thread|3n
 check() {
     awk -F'|' '
+    function rv(x,   i, o) { o = ""; for (i = length(x); i > 0; i--) o = o substr(x, i, 1); return o }
     function s(n,   c) { c = sprintf("%c", 97 + n % 26); return c c c ":{\"n\":" n "}!" (n % 2 ? "odd " n : "even") }
-    NF != 13 { bad++; if (shown++ < 3) print "      got  " $0 > "/dev/stderr"; next }
+    NF != 14 { bad++; if (shown++ < 3) print "      got  " $0 > "/dev/stderr"; next }
     {
         n = $1
-        want = n "|1|" (1 + n) "|3|1|1|7|" s(n) "|" (2 * n) "|" n "|" (n + 1000) "|" (3 * n)
-        got = $1; for (i = 2; i <= 11; i++) got = got "|" $i; got = got "|" $13
+        want = n "|1|" (1 + n) "|3|1|1|7|" s(n) "|" (2 * n) "|" n "|" (n + 1000) "|b" n ":" rv("z" n) "|" (3 * n)
+        got = $1; for (i = 2; i <= 12; i++) got = got "|" $i; got = got "|" $14
         if (got != want) { bad++; if (shown++ < 3) print "      want " want "\n      got  " got > "/dev/stderr" }
-        ok++; t[$12] = 1
+        ok++; t[$13] = 1
     }
     END { nt = 0; for (k in t) nt++; print ok + 0, bad + 0, nt }' "$1"
 }
+set -- $(check "/tmp/fp.warm.$$")
+wlines=$(wc -l < "/tmp/fp.warm.$$" | tr -d ' ')
+if [ "$wlines" = 400 ] && [ "$2" = 0 ]; then
+    say "the warm-up, every php thread's first requests at once from a wrong EG(exception) offset: 400 answers, every one the formula's, from $3 php threads"
+else
+    bad "the warm-up: $wlines answers of 400, $2 wrong"
+fi
 set -- $(check "/tmp/fp.run.$$")
 ok=$1; wrong=$2; nthreads=$3
 lines=$(wc -l < "/tmp/fp.run.$$" | tr -d ' ')

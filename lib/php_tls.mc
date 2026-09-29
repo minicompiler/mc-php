@@ -116,4 +116,6 @@
 #define PHT_phz_idm            12400   // uptr  the identity map of a copy: (from, to) pairs
 #define PHT_phz_idn            12408   // i64
 #define PHT_phz_idc            12416   // i64   its capacity
-#define PHT_SIZE_ZTS           12424
+#define PHT_phx_egx            12424   // i64   EG(exception)'s offset, as this thread measured it
+#define PHT_phx_egx_done       12432   // i64   1 once it did (or while RINIT must not)
+#define PHT_SIZE_ZTS           12440
