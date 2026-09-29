@@ -73,7 +73,7 @@ apk add --no-cache perl lld >/dev/null 2>&1 || { echo "  cannot install perl and
 # ZTS: a C compiler too, so the C twins and the layout gate are built against
 # the headers of THIS php -- the thread-safe reference the module is graded beside
 if [ "$ZTS" = 1 ]; then
-    apk add --no-cache build-base >/dev/null 2>&1 || { echo "  cannot install build-base"; exit 2; }
+    apk add --no-cache build-base curl-dev >/dev/null 2>&1 || { echo "  cannot install build-base and curl-dev"; exit 2; }
 fi
 echo ""
 echo "  uname:  $(uname -srm)"
