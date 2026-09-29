@@ -586,6 +586,35 @@ void phx_esc_from(i64 from) {
     if (ph_en > from) ph_en = from;
 }
 
+// What a call held, released with the call still OPEN (phx_leave_slow): the
+// last reference to an engine object runs its __destruct, and when that is a
+// method of this module it is a call nested in this release -- on this
+// call's allocator, which must not be torn down yet (it was, and a destructor
+// that allocated corrupted php's heap). What those destructors hold in turn
+// lands above the list's top: it is released next round, unless one of them
+// pinned the call (a global it wrote), and then it is kept with the call.
+void phx_esc_open() {
+    phx_depth = 1;
+    loop {
+        i64 top = ph_en;
+        if (top <= phx_efloor) break;
+        i64 i = top;
+        loop {
+            if (i <= phx_efloor) break;
+            i = i - 1;
+            uptr e = ld64(ph_esc + i * 8);
+            st64(ph_esc + i * 8, 0);
+            if (e & 1) phx_unhold(e - 1);
+            else if (e) php_str_release(e);
+        }
+        i64 k = 0;
+        loop { if (top + k >= ph_en) break; st64(ph_esc + (phx_efloor + k) * 8, ld64(ph_esc + (top + k) * 8)); k = k + 1; }
+        ph_en = phx_efloor + k;
+        if (ph_pin || ph_nob) break;
+    }
+    phx_depth = 0;
+}
+
 // the arena and its copy are 8-aligned, and the copy has 8 bytes to spare
 void phx_copy(uptr d, uptr s, i64 n) {
     i64 i = 0;
@@ -821,6 +850,12 @@ void phx_leave_slow() {
     if (!phx_depth) { if (!phx_mark) phx_snapshot(); return; }
     phx_depth = phx_depth - 1;
     if (phx_depth) return;
+    // what the call held goes while the call is still open (phx_esc_open)
+    if (!ph_pin && !ph_nob && ph_en > phx_efloor) {
+        phx_esc_open();
+        php_flush();
+        phx_throw();
+    }
     // the runtime object that stood for a caught engine exception is made of
     // the call's memory: kept past it, a later call's object at the same
     // address would be taken for it (phx_throw, phx_r2e)

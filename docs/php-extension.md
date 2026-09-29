@@ -276,8 +276,16 @@ each stream and exit the same. These are the places where they would not:
   it crossed, not the module's `new`.
 * **Calling a non-callable array or `"C::m"` string** is php's `Error` with
   `zend_call_function`'s message (`Invalid callback ...`), not the one `$f()` says in a script.
-* **Destructors and `register_shutdown_function`** do not run. A program runs them when it ends;
-  a module's request end (RSHUTDOWN) restores state and does not call back into php code, and
+* **A published class's `__destruct` runs at the end of the module's call** when the last
+  reference to the object dies inside the module (an object the module makes and drops): what a
+  call holds of the engine's is released when the call returns to php, not when a variable goes
+  out of scope. An object php holds is destroyed where php destroys it. For the same reason a
+  method of a published class called from a loop INSIDE the module keeps what each call made --
+  measured at about 500 bytes a call -- until the module's call returns: a million such calls in
+  one call exhaust a 128 MB `memory_limit`.
+* **Destructors of the program itself and `register_shutdown_function`** do not run. A program
+  runs them when it ends; a module's request end (RSHUTDOWN) restores state and does not call
+  back into php code, and
   `module_shutdown_func` is 0 on purpose -- running `php_shutdown`'s destructors into a stdout
   the SAPI is tearing down would be worse than not.
 * **The argument check is strict always**, as above. The RETURN is checked on both roads with

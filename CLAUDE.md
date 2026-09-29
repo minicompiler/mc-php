@@ -1175,3 +1175,14 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   leaked its temporary `zend_string` on every throwable of a class the engine does not know.
   Reproduced first -- `tests/leaks.sh` now throws a module-private `_Oops` 300 times: 600 blocks
   left under a debug php -- and fixed with one lookup helper both lookups use (`phx_lookup`).
+  Same review: `phx_mh`'s `$this` proxy was suspected of delaying `__destruct`.
+  Measured: an object php holds is destroyed where php destroys it (a loop of method calls, then
+  `unset`, prints in php's order). What the review led to is a CRASH: an object the module makes
+  and drops is released at the module call's end, and its `__destruct` -- a module method -- ran
+  as a call nested in `phx_leave_slow` after the call's allocator was torn down; a destructor
+  that allocated left the next call with `zend_mm_heap corrupted` (exit 134). The holds are now
+  released with the call still open (`phx_esc_open`: at depth 1, round by round, keeping what a
+  pinning destructor holds). `tests/ext/classes` gained that shape (it aborts without the fix).
+  Written down, not fixed: such a destructor runs at the call's end rather than at php's moment,
+  and a published method called from a loop inside the module keeps ~500 bytes a call until the
+  call returns (a million calls exhaust 128 MB).
