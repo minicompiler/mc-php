@@ -1,7 +1,9 @@
 // php_zts.mc -- what an extension for a thread-safe php adds (src/program.mc
 // pushes it only when the output is ZTS: [php].thread_safety = "zts", or the
 // ZTS half of "both"). Nothing in the NTS output changes: the NTS module is
-// byte for byte what it was before this file existed (tests/zts.sh).
+// byte for byte what it was before this file existed (measured with cmp over
+// every NTS module this repository builds, macOS and Linux aarch64/x86_64:
+// docs/php-extension.md § Thread safety).
 //
 // A ZTS php keeps every engine global in a block per thread, reached through
 // TSRM: EG(x) is `tsrm_get_ls_cache() + executor_globals_offset`, and php

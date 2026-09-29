@@ -1247,3 +1247,29 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     `sample` shows equal totals for the module and the difference in `f__dec_umul`, whose inner
     loop is instruction-identical, so the difference is alignment. two-extensions: 1.14x against
     1.17x. An always-TLS variant measured 0.265 ms (+18%).
+- threads, step 2 (2026-09-29, branch `threads-zts`, from main 24aed04): **ZTS extensions and
+  `[php].thread_safety = "nts" | "zts" | "both"`**. The default is `nts`, and the output depends
+  only on the file.
+  - An unknown value is refused at its `file:line:col`. The old booleans are refused with the
+    word that replaces each.
+  - The build id's `,NTS`/`,TS` word is made the output's own (`ph_ts_bid`).
+  - A ZTS output pushes `lib/php_zts.mc`, and `get_module` ends with `phx_ts_module`:
+    - `EG` is read as `tsrm_get_ls_cache() + executor_globals_offset`, both found by dlsym.
+      `EG(exception)` is 960 on both builds, and the layout gate is 85/85 against the ZTS
+      headers.
+    - An RINIT/RSHUTDOWN pair refuses a request on any php thread other than the loading one.
+    - On Windows, `php_dlsym` asks `php8ts.dll`. The host source is swapped only for ZTS.
+  - `"both"`: mc-php's entries now include mc's seven parts plus `src/build.mc`'s own main,
+    which re-registers `build`. It builds the NTS output in process, then the ZTS output in a
+    child from a hidden copy of the file (out gets `-zts`, `thread_safety = "zts"`, and
+    `php8.lib` becomes `php8ts.lib`).
+  - NTS inertness: every NTS module the repo builds (hello, decimal, extA, extB, awaitable and
+    the four tests/ext modules) is `cmp`-identical, before and after, on macOS and on Linux
+    aarch64 and x86_64. Windows is identical by construction: nothing NTS-side changed.
+  - Tests:
+    - `tests/ts.sh`: a ZTS php grades hidden zts copies of the files;
+    - `ZTS=1 tests/linux.sh`: php:8.5-zts-alpine, with the C twins built against its headers;
+    - `tests/both.sh`: each output is loaded in its own php, and the other php refuses it;
+    - `ext.sh` 2b (three refusals) and 2c ("both" on every leg).
+  - CI adds a macOS ZTS job (setup-php `phpts: ts`), ZTS Windows legs (x86_64 and aarch64), and
+    the ZTS and both steps on the Linux legs.
