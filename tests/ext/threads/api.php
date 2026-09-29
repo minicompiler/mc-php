@@ -10,3 +10,6 @@ echo "a joined thread's values: ", th\keep(3), "\n";
 echo "a detached thread's values: ", th\keep_detached(5), "\n";
 echo "rethrown: ", th\rethrow(), "\n";
 echo "a php callable: ", th\refuse(fn() => 1), "\n";
+echo "destructors: ", th\dtors(), "\n";
+// last, and echoing nothing after it: the thread's line is the output's last
+th\detach_late(100);

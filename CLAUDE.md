@@ -1363,8 +1363,10 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     10000 threads keep 3.6 / 19.6 / 180 MB resident and reserve 6 / 62 / 625 MiB -- ~18 KB and
     64 KiB per thread, bounded by use; a `ponytail:` note names the upgrade.
   - Unjoined threads are waited for at the program's or request's end; the first one's
-    exception is the program's uncaught one (exe) or a warning (extension). Detached threads are
-    waited for too (the design said they would die with the process on exe).
+    exception is the program's uncaught one (exe) or a warning (extension). A detached thread is
+    `std::thread::detach`'s on the program road: not waited for, not unmapped, ended by the
+    process's exit (touching state during the final destructors is UB, documented); the
+    extension road's RSHUTDOWN waits for it, so one that never ends blocks RSHUTDOWN.
   - Tests: `tests/c/11-thread-api` (a joined and a detached thread's stored string/array/object
     read after them, shared mode sticky after the last join, nested threads, rethrow),
     `tests/c/12-thread-unjoined`, `tests/ext/threads/api.php` (ext.sh § 20b), leaks.sh's API
@@ -1390,5 +1392,15 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     (+0.5%); program road (`benchprog.php`, best of 25) 56.38 -> 56.17..56.48 ms, noise.
   - Found, pre-existing, not fixed: a closure whose body throws inside a `try` fails to compile
     with `break out of range`; a top-level variable created only by `global` in a function is
-    undefined at top level. New gap, documented: a copy made for another thread is not armed for
-    `__destruct` (an object a thread returns never runs its destructor).
+    undefined at top level.
+  - Review of #42 (three findings, fixed in the PR): (1) `php_thr_start` published the record in
+    `ph_ttab` before `PHA_ROOT`/`PHA_ID` were written, so a concurrent `mcphp_thread_running()` or
+    `php_thr_endall` scan could skip it -- now the handle is reserved under the lock and the
+    record published under it after the thread exists, every field a scan reads already written;
+    (2) copies are armed for `__destruct` (`php_dt_arm` in `php_tc_obj`; a worker runs its list at
+    its end, `php_dt_run`): each copy distinct, destructed once by its owner -- fixture
+    `tests/c/13-thread-destruct` (6 lines; the PR's first head printed 0) and 3 lines in
+    `api.php`; (3) the program's end skips detached records (`php_thr_endall(root, free,
+    skipdet)`) -- fixture `tests/c/14-thread-detach-exit`, a detached thread that never returns:
+    exits in 4 ms, and the first head was still running after 5 s; `api.php` ends with a detached
+    thread's line that RSHUTDOWN waited for.

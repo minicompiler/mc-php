@@ -771,7 +771,7 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) { uptr phT = ph_tcur; if (!phT) phT = ph_
     // Step 3): waited for, joined or detached; one neither joined nor
     // detached that ended on a throwable is reported, as a warning -- the
     // request is over, there is nothing left to catch it
-    uptr te = php_thr_endall(phT, 0);
+    uptr te = php_thr_endall(phT, 0, 0);
     if (te) php_thr_report(te);
     php_flush();
     php_request_reset();
@@ -808,7 +808,7 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) { uptr phT = ph_tcur; if (!phT) phT = ph_
     // last: the strings shared mode kept, the memory the request's threads
     // kept, and shared mode off
     if (ld64(phT + PHT_ph_shared)) php_str_undefer(phT);
-    php_thr_endall(phT, 1);
+    php_thr_endall(phT, 1, 0);
     return 0;
 }
 

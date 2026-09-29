@@ -386,10 +386,16 @@ $c = mcphp_hardware_concurrency(): int;     // logical CPUs, as std::thread's
   program road as php reports an uncaught exception (`set_exception_handler` runs, else the fatal
   error), on the extension road as a warning, `mc-php: a thread neither joined nor detached ended
   on an uncaught DomainException: <message>`. This is gentler than `std::terminate`.
-- **A detached thread** is waited for at the same point, on both roads. The design said it would
-  die with the process on the program road; waiting is what the implementation does, because the
-  process's exit would otherwise unmap memory the thread is still using. A detached thread's
-  exception is not reported: nobody asked for it.
+- **A detached thread**, as `std::thread::detach`:
+  - On the program road, the program's end does NOT wait for it: the process's exit ends it. Its
+    memory is not released before the exit, so it may still run while the program's final
+    destructors do. A detached thread that touches module state or output at that point is
+    undefined behaviour, as in C++. `tests/c/14-thread-detach-exit` detaches a thread that never
+    returns, and the program exits at once.
+  - On the extension road, RSHUTDOWN waits for it: the request's memory is released while the
+    process lives on, so the thread cannot outlive it. A detached thread that never ends
+    therefore blocks RSHUTDOWN, and with it the php worker that runs the request.
+  - Its exception is not reported: nobody asked for it.
 - **Where it can be called.** On the extension road the five builtins are compiled INTO the
   module and are not published: two mc-php modules loaded together would both declare them. A
   module offers threads to its scripts through its own published functions, for example
@@ -459,10 +465,14 @@ responsibility, as in C). Each of these is undefined behaviour, not merely nonde
 What else to know:
 - Output a worker writes goes to fd 1 directly, as in step 1. On the extension road this
   bypasses php's output layer, which is part of php's engine.
-- A copy made for another thread is not armed for `__destruct`. An argument's destructor stays
-  with the original, and runs once. An object a thread builds and returns never runs its
-  destructor, on either side of the join (measured: php would run it at the end). Arming the copy
-  is left for later.
+- **Destructors, as ext/parallel's copies.** Every copy is a distinct object, and each object is
+  destructed once, by the thread that owns it. A worker destructs the objects it created -- its
+  copies of the arguments included -- when it ends. The joiner owns its copy of the result and
+  destructs it at its own end. One source copied twice (into an argument, then back into a
+  result) is two objects, each destructed once. An object a worker stored into module state is
+  destructed at that worker's end too, while module state still points at it. (On the extension
+  road a request's own objects run no destructor at its end: docs/php-extension.md.)
+  `tests/c/13-thread-destruct` and `tests/ext/threads/api.php` count the lines.
 
 ### The memory retention ceiling
 
@@ -524,12 +534,17 @@ included; the NTS inertness `cmp` does not apply to this step.
   arguments copied, a rethrow, `not joinable` twice, what a joined thread stored into three
   globals (a string, an array and an object) read after its join, the same for a detached thread
   polled until `mcphp_thread_running()` is 0, nested threads, and shared mode still set after the
-  last join. A build that releases a joined thread's arena at the join (step 1's model, with the
+  last join.
+- `tests/c/13-thread-destruct.php` and `14-thread-detach-exit.php`: the destructor rule, and a
+  detached thread that never returns while the program exits at once (a program that waited
+  would be killed by `tests/lim.sh`'s bound). A build that releases a joined thread's arena at the join (step 1's model, with the
   result copied first) crashes on it with SIGSEGV; so does the extension road's
   `tests/ext/threads/api.php` (`tests/ext.sh` § 20b).
 - `tests/c/12-thread-unjoined.php`: unjoined threads waited for, and the exception reported
   through `set_exception_handler`.
-- `tests/ext/threads`: the API from a module, recorded, with the refusal message per NTS/ZTS.
+- `tests/ext/threads`: the API from a module, recorded, with the refusal message per NTS/ZTS, the
+  destructor lines, and a detached thread's last line, printed before php ends because RSHUTDOWN
+  waited for it.
 - `tests/frankenphp.sh`: a request of the ZTS gate starts an API thread that writes the request's
   global and static; the formula checks both.
 - `tests/leaks.sh`: the API on the extension road, 0 Zend blocks leaked.

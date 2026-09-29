@@ -88,3 +88,29 @@ function refuse(callable $f): string {
 }
 // shared mode: the flag, and whether a fresh string would be written in place
 function mode(): string { $s = str_repeat("m", 3); return mcphp_shared_mode() . " " . mcphp_str_mine($s); }
+// a copy made for another thread is a distinct object, destructed once by
+// the thread that owns it: the worker destructs its copy of the argument and
+// what it made when it ends; the request's copies of the results are the
+// request's (and a module's request end runs no destructor,
+// docs/php-extension.md)
+final class _D {
+    public function __construct(public int $n) {}
+    public function __destruct() { echo "dtor ", $this->n, "\n"; }
+}
+function d_peek(_D $d): int { return $d->n; }
+function d_make(int $n): _D { return new _D($n); }
+function d_pass(_D $d): _D { return $d; }
+function dtors(): string {
+    $a = new _D(1);
+    $r1 = mcphp_thread_join(mcphp_thread_start(fn(_D $x): int => d_peek($x), $a));
+    $r2 = mcphp_thread_join(mcphp_thread_start(fn(int $n): _D => d_make($n), 2));
+    $r3 = mcphp_thread_join(mcphp_thread_start(fn(_D $x): _D => d_pass($x), $a));
+    return $r1 . " " . $r2->n . " " . $r3->n . " " . (($r3 === $a) ? "same" : "distinct");
+}
+// a detached thread the request does not wait for itself: RSHUTDOWN does,
+// so its line comes out before php ends
+function late(int $ms): int { usleep($ms * 1000); echo "the detached thread finished inside the request\n"; return 1; }
+function detach_late(int $ms): string {
+    mcphp_thread_detach(mcphp_thread_start(fn(int $m): int => late($m), $ms));
+    return "detached, running " . mcphp_thread_running();
+}

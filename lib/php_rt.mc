@@ -3295,12 +3295,14 @@ uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3,
 
 uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5);
 
+void php_dt_run(uptr phT);
 void php_shutdown() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (ld64(phT + PHT_ph_dt_ran)) return;
     st64(phT + PHT_ph_dt_ran, 1);
-    // every thread the API started is waited for; one neither joined nor
-    // detached that ended on a throwable ends the program as an uncaught one
-    uptr te = php_thr_endall(phT, 0);
+    // every thread the API started is waited for but a detached one, which
+    // the process's exit ends, as in C; one neither joined nor detached that
+    // ended on a throwable ends the program as an uncaught one
+    uptr te = php_thr_endall(phT, 0, 1);
     if (te) { st64(phT + PHT_ph_exc, te); php_uncaught(); }
     // php runs register_shutdown_function() callbacks first, then destructors
     if (((uptr) ld64(phT + PHT_ph_sdfn))) {
@@ -3319,7 +3321,14 @@ void php_shutdown() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
             i = i + 1;
         }
     }
+    php_dt_run(phT);
+}
+
+// the destructors of the objects this thread created, newest first: the
+// program's end (php_shutdown) and a thread of the API's end
+void php_dt_run(uptr phT) {
     uptr n = ((uptr) ld64(phT + PHT_ph_dt_head));
+    st64(phT + PHT_ph_dt_head, 0);
     loop {
         if (!n) break;
         uptr o = ld64(n);
@@ -11103,7 +11112,8 @@ void ph_tnotjoinable(i64 id) {
 
 // A deep copy into the current thread's arena: arrays and compiled objects
 // are copied, one identity map per copy (a value two slots share stays one,
-// a cycle ends); a string is shared -- the arena that holds it is kept, and
+// a cycle ends), and each copied object joins the copying thread's
+// destructor list, as ext/parallel's copies do; a string is shared -- the arena that holds it is kept, and
 // shared mode stops it being freed or written in place; an engine object
 // stays the engine's (a thread that uses it gets the engine guard's Error).
 uptr php_tc_arr(uptr src, uptr m);
@@ -11115,6 +11125,8 @@ uptr php_tc_obj(uptr o, uptr m) {
     i64 i = 0;
     loop { if (i >= OBJ_HDR) break; st64(c + i, ld64(o + i)); i = i + 8; }
     php_zv_cp(php_arr_islot(m, o), php_zlong(c));
+    // a distinct object, destructed once by the thread that copied it
+    php_dt_arm(c);
     st64(c + 24, php_tc_arr(ld64(o + 24), m));
     if (ld64(o + 32)) st64(c + 32, php_arr_copy(ld64(o + 32)));
     // a closure's bound $this is a pointer in its props: the object too
@@ -11181,6 +11193,9 @@ uptr php_thr_api_body(uptr rec) {
                          ld64(rec + PHA_ARG + 16), ld64(rec + PHA_ARG + 24), ld64(rec + PHA_ARG + 32));
     if (ld64(phT + PHT_ph_exc)) { st64(rec + PHA_EXC, ld64(phT + PHT_ph_exc)); st64(phT + PHT_ph_exc, 0); r = 0; }
     st64(rec + PHA_RES, r);
+    // the objects this thread created, its copies of the arguments included,
+    // are destructed at its end; the joiner gets copies of its own
+    php_dt_run(phT);
     php_flush();
     ph_lock();
     st64(rec + PHA_STATE, 1);
@@ -11221,7 +11236,9 @@ i64 php_thr_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
         ph_ttab = t;
         ph_tcap = c;
     }
-    st64(ph_ttab + id * 8, rec);
+    // the handle is reserved here and the record published below, once every
+    // field a scan reads is written and the host's handle exists:
+    // php_thr_running and php_thr_endall never see half a record
     ph_unlock();
     uptr b = php_thr_block(phT, id);
     uptr root = ld64(phT + PHT_ph_troot);
@@ -11241,6 +11258,9 @@ i64 php_thr_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     if (n > 4) st64(rec + PHA_ARG + 32, php_tc_val(a5));
     ph_tset(phT);
     if (ph_thr_create(&php_thr_api_body, rec, rec + PHA_H) != 0) php_die("mc-php: cannot start a thread\n", 30);
+    ph_lock();
+    st64(ph_ttab + id * 8, rec);
+    ph_unlock();
     return id;
 }
 
@@ -11321,7 +11341,9 @@ void php_thr_report(uptr ez) {
 // of it is waited for, joined or detached; the first one neither joined nor
 // detached that ended on a throwable is answered (0 when none). free: release
 // the kept arenas too (the request's end; a program's end leaves them to exit).
-uptr php_thr_endall(uptr root, i64 free) {
+// skipdet: a detached thread is neither waited for nor touched -- the
+// program's end, where the process's exit ends it, as in C.
+uptr php_thr_endall(uptr root, i64 free, i64 skipdet) {
     if (!ph_tapi) return 0;
     uptr exc = 0;
     loop {
@@ -11331,7 +11353,7 @@ uptr php_thr_endall(uptr root, i64 free) {
         loop {
             if (id > ph_tnext) break;
             uptr r = ld64(ph_ttab + id * 8);
-            if (r && ld64(r + PHA_ROOT) == root) { rec = r; st64(ph_ttab + id * 8, 0); break; }
+            if (r && ld64(r + PHA_ROOT) == root && !(skipdet && ld64(r + PHA_DET))) { rec = r; st64(ph_ttab + id * 8, 0); break; }
             id = id + 1;
         }
         ph_unlock();
