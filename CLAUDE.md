@@ -1414,3 +1414,9 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   compiler: exit 139); the same shapes in `tests/ext/callables` (main: `it would not build`).
   The grid gains `Zend/tests/closures/closure_021` (a closure whose try rethrows), plain and in
   check mode; `tests/grid/green-Zend_tests.txt` records it.
+  Review addition: `ph_closure` now also saves, empties and restores `src/packed.mc`'s answer
+  (`pkx_names`/`pkx_fixed`), as `ph_function` saves it. It EMPTIES it and does not scan: the
+  proof is for a plain function only, as `packed.mc`'s header says. No failing repro exists:
+  a function whose body contains `function` or `fn` fails the scan, so today the answer around
+  a closure is always empty. `--dump-ast` of 178 fixtures and examples is identical before and
+  after.

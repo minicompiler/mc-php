@@ -250,6 +250,16 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         ub = ub + 1;
     }
     i64 body = 0;
+    // src/packed.mc's answer is per function, saved and put back as
+    // ph_function does, and EMPTY here: the proof is made for a plain
+    // function only (packed.mc's header), so a closure body lowers no array
+    // as packed. Today no enclosing answer can be non-empty around a closure
+    // -- a body that contains `function` or `fn` fails the scan -- but the
+    // answer must not depend on that.
+    uptr spk = pkx_names;
+    uptr spf = pkx_fixed;
+    pkx_names = 0;
+    pkx_fixed = 0;
     if (arrow) {
         ph_want("=>", 2, "expected => in a php arrow function");
         i64 rv = ph_expr(0);
@@ -259,6 +269,8 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         set_nd_a(body, ph_wrap(r));
     }
     if (!arrow) body = ph_block();
+    pkx_names = spk;
+    pkx_fixed = spf;
     // php's rule for fn(): capture, by value at creation, the variables the
     // body names and no other -- one it does not name is never read, and may
     // be a slot nothing assigned on this path (a catch's $e)
