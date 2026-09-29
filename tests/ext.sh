@@ -121,6 +121,27 @@ for pair in "api:$api" "build_id:$bid" "thread_safety:$TSV" "debug:$dbg"; do
 done
 say "php: api $api, build $bid, zts $zts, debug $dbg -- and $cfg0 says so (thread_safety = \"$TSV\" for this php)"
 
+# --- 2b. [php].thread_safety says what it can mean, or is refused ---------
+# The value names the php the OUTPUT is for and the compiler never asks a php
+# (docs/mcphp-toml.md § [php]). Anything else is refused at its own
+# file:line:col, the old booleans with the word that replaces each; and a
+# build id with no ,NTS or ,TS word cannot be made the output's own.
+tsref() { # SED WANT: a copy of the file edited by SED is refused with WANT
+    sed "$1" "$cfg" > "$EX/.ts-ref.toml"
+    "$BIN" build "$EX" --config "$EX/.ts-ref.toml" > "$tmp/tsref.out" 2>&1; rc=$?
+    got=$(tail -1 "$tmp/tsref.out" | tr -d '\r')
+    rm -f "$EX/.ts-ref.toml"
+    case "$got" in
+        *.ts-ref.toml:[0-9]*:[0-9]*": $2") [ "$rc" = 1 ] && return 0 ;;
+    esac
+    bad "thread_safety: exit $rc, want 1 and \"$2\""; printf '      got %s\n' "$got"; return 1
+}
+tsn=0
+tsref 's/^thread_safety = .*/thread_safety = "maybe"/' 'mc-php: thread_safety must be "nts", "zts" or "both": php.thread_safety' && tsn=$((tsn + 1))
+tsref 's/^thread_safety = .*/thread_safety = false/' 'mc-php: thread_safety is "nts", "zts" or "both" (false is "nts", true is "zts"): php.thread_safety' && tsn=$((tsn + 1))
+tsref 's/^build_id = .*/build_id = "API20250925"/' 'mc-php: the build id names no thread safety (,NTS or ,TS): php.build_id' && tsn=$((tsn + 1))
+say "thread_safety: $tsn of 3 wrong files refused at the key's own line and column"
+
 # --- 3. the build ----------------------------------------------------------
 out=$tmp/hello.$sx
 rm -f "$out"

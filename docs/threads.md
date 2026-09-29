@@ -232,3 +232,25 @@ This is a test hook, not an API. These tests use it:
 - `tests/c/09-threads.php` (the program road);
 - `tests/ext/threads` (the extension road, `tests/ext.sh` step 20);
 - the threads block of `tests/leaks.sh`.
+
+## ZTS: a module for a thread-safe php (step 2)
+
+`[php].thread_safety = "zts"`, or the ZTS half of `"both"`
+([mcphp-toml.md](mcphp-toml.md) § `php.thread_safety`), builds a module that a thread-safe php
+loads. The only runtime difference is `lib/php_zts.mc`, which is pushed for that output alone. It
+adds two globals to the inventory:
+
+| names | why it is safe |
+|---|---|
+| `phx_ts_get` `phx_ts_ls0` | `tsrm_get_ls_cache` and the loading thread's TSRM block. Both are written once, in `get_module`, before php runs a request. |
+
+In a ZTS php, the engine's executor globals are a thread's TSRM block plus
+`executor_globals_offset`. The module computes that address once, for the thread that loaded it,
+and serves only that thread. A request that a threaded SAPI starts on another php thread is refused
+by name in the module's RINIT. So the runtime's own per-thread state (this page) is never shared
+between php's request threads. It is still per OS thread for the module's own workers, exactly as
+in step 1. What serving several php request threads at once takes is step 3.
+
+The engine guard of step 1 is unchanged in a ZTS module: a worker still gets an Error when it
+reaches php's engine. A ZTS php does give each thread its own engine, but a worker thread has none
+until someone starts one for it, and that belongs to step 3's API.

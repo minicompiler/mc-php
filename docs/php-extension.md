@@ -302,18 +302,32 @@ each stream and exit the same. These are the places where they would not:
 
 ## Thread safety
 
-`[php].thread_safety` is carried into the module header because the loader compares it. A ZTS php
-refuses an NTS module by name.
+`[php].thread_safety` says which php the module is for: `"nts"` (the default), `"zts"`, or `"both"`
+for one of each from the same project ([mcphp-toml.md](mcphp-toml.md) § `php.thread_safety`). The
+loader compares the header's `zts` and build id, so a php refuses a module built for the other
+kind, by name.
 
-Since threads step 1 (`docs/threads.md`), the RUNTIME keeps its state per thread. That state is
-the arena, the call's chunk, the pending exception, the output buffer and the parsers' cursors.
-Compiled functions run correctly on several OS threads at once. `tests/ext.sh` step 20 proves
-this inside a loaded module.
+A ZTS module differs from an NTS one in three places, all in `lib/php_zts.mc` and pushed only for
+a ZTS output:
 
-This is **not** a claim about php's engine. A thread other than the one php runs on gets an
-Error when it tries to enter the engine. Nothing here has been run under a ZTS php, which is
-threads step 2. Build for the php you have. Until step 2's measurement exists, that php should be
-NTS.
+- **the engine's globals.** A ZTS php has no `executor_globals` symbol. Its executor globals are
+  the calling thread's TSRM block plus `executor_globals_offset`, and php exports
+  `tsrm_get_ls_cache` and that offset. `EG(exception)` is at the same offset on both builds:
+  `tests/ext/abi.c` prints 960 against the NTS and the ZTS headers alike, and the runtime still
+  measures it at the first call.
+- **one php thread.** The module serves the php thread that loaded it. That covers every request
+  of the CLI and of a single-threaded SAPI. A request that a threaded SAPI starts on another
+  thread is refused at its start, by name (an `E_CORE_ERROR` from the module's RINIT), because the
+  runtime's state belongs to the loading thread. Lifting that is threads step 3.
+- **Windows.** The ZTS php is `php8ts.dll`. The module is linked against `php8ts.lib`, and the
+  runtime's `php_dlsym` asks `php8ts.dll` for the names it looks up at load.
+
+**An NTS module is byte for byte what it was before thread safety was a choice.** The `cmp` of
+every NTS output this repository builds, before and after, is in the PR that added it.
+
+The runtime keeps its own state per thread (`docs/threads.md`). A worker thread that the module
+starts still gets an Error when it reaches php's engine. That is interim until step 3 on both
+builds.
 
 ## The memory
 
@@ -537,7 +551,7 @@ What `mc-php build` reads today, of the schema in [`docs/mcphp-toml.md`](mcphp-t
 | `extension.version` | default `"0.0.0"` |
 | `php.api` | required -- `php -i` line `PHP API` |
 | `php.build_id` | required -- `PHP Extension Build` |
-| `php.thread_safety` | required -- `Thread Safety` |
+| `php.thread_safety` | `"nts"` (default), `"zts"` or `"both"` -- `Thread Safety`; see [Thread safety](#thread-safety) |
 | `php.debug` | required -- `Debug Build` |
 
 and mc's own `[project]`, `[linker]`, `[target]` and `[include]` carry the rest, because
@@ -556,8 +570,8 @@ file, which is how this repository already spells its own cross-builds -- and `p
 a NAMED refusal:
 
 ```
-mcphp.toml:1: mc-php: [php].bin is not implemented: state php.api, php.build_id,
-php.thread_safety and php.debug (php -i prints all four)
+mcphp.toml:1: mc-php: [php].bin is not implemented: state php.api, php.build_id and php.debug,
+and php.thread_safety unless it is nts (php -i prints all four)
 ```
 
 Reading the four out of a php binary means spawning one and parsing its output, which belongs to

@@ -28,11 +28,11 @@
 # Every one of them is an import library tests/winsys.sh writes from a list of
 # names: no php development pack and no Windows SDK.
 #
-# NTS ONLY. This file targets the non-thread-safe php (php8.dll, and
-# `thread_safety = "nts"` / `NTS` in the build id below), which is what the CI
-# runners carry and the only Windows php this has been measured against. A
-# thread-safe php is php8ts.dll and refuses an NTS module at load; nothing
-# here selects it, and no ZTS build has been run on Windows (docs/plan.md § 5).
+# This file targets the non-thread-safe php (php8.dll, and
+# `thread_safety = "nts"` / `NTS` in the build id below). A thread-safe php is
+# php8ts.dll and refuses an NTS module at load: `thread_safety = "zts"` with
+# php8ts.lib in [linker] builds for it, and `"both"` builds the two, swapping
+# php8.lib for php8ts.lib in the second (docs/mcphp-toml.md § php.thread_safety).
 
 [project]
 entry = "decimal.php"
