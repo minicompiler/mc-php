@@ -814,6 +814,22 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
     else
         bad "threads: exit $tm"; sed -n '1,8p' "$tmp/t.m" | sed 's/^/      /'
     fi
+    # --- 20b. the thread API (docs/threads.md § Step 3), on this road: the
+    # module's compiled callables on threads, what a joined and a detached
+    # thread stored kept after them, a throwable rethrown at the join, shared
+    # mode (the flag set, a fresh string no longer written in place) and a php
+    # callable refused -- by name, which differs between NTS and ZTS
+    "$PHP" -d extension="$tmp/build/r.$sx" tests/ext/threads/api.php 2>&1 | tr -d '\r' > "$tmp/t.a"; ta=$?
+    ref="mc-php: a php callable cannot run on another thread in a php without thread safety; build the module with thread_safety = \"zts\", or pass a compiled function"
+    [ "$TSV" = zts ] && ref="mc-php: a php callable cannot run on another thread yet: its own php context on the worker is threads step 3b; pass a compiled function"
+    printf '%s\n' "before any thread: 0 1" "4 threads through the API: agree" "after the joins: 1 0" \
+        "a joined thread's values: kkk 3 3" "a detached thread's values: kkkkk 5 5" "rethrown: caught from a thread" \
+        "a php callable: $ref" > "$tmp/t.aw"
+    if [ "$ta" = 0 ] && cmp -s "$tmp/t.aw" "$tmp/t.a"; then
+        say "thread API: compiled callables on threads, kept values after a join and a detach, a rethrow, shared mode, the php callable refused"
+    else
+        bad "thread API (exit $ta)"; diff "$tmp/t.aw" "$tmp/t.a" | sed -n '1,12p' | sed 's/^/      /'
+    fi
 else
     bad "threads: it would not build"; sed 's/^/      /' "$tmp/t.build"
 fi

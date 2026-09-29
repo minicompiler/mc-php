@@ -400,8 +400,8 @@ uptr phx_ts_module(uptr me) {
 
 // a thread the MODULE starts (lib/php_rt.mc's php_thr_block, renamed _nts in
 // a ZTS build): the starter's block plus the words a ZTS build keeps there,
-// which the thread only reads -- module state refuses another thread
-// (ph_shared_off), and so does php's engine
+// which the thread shares: the request's module state is every thread's
+// (threads step 3), and php's engine refuses another thread
 uptr php_thr_block(uptr from, i64 idx) {
     uptr b = php_thr_block_nts(from, idx);
     st64(b + PHT_ph_globals, ld64(from + PHT_ph_globals));

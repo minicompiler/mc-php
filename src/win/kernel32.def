@@ -1,5 +1,6 @@
 LIBRARY kernel32.dll
 EXPORTS
+AcquireSRWLockExclusive
 CloseHandle
 CreateDirectoryA
 CreateFileA
@@ -7,6 +8,7 @@ CreateProcessA
 CreateThread
 DeleteFileA
 ExitProcess
+GetActiveProcessorCount
 GetCommandLineA
 GetCurrentDirectoryA
 GetCurrentProcessId
@@ -23,6 +25,7 @@ GetStdHandle
 K32GetProcessMemoryInfo
 MoveFileExA
 ReadFile
+ReleaseSRWLockExclusive
 RemoveDirectoryA
 SetCurrentDirectoryA
 SetEnvironmentVariableA

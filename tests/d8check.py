@@ -72,6 +72,7 @@ INSTRUMENTS = {
     'ext/callables/check.php': 'the script tests/ext.sh step 19 runs against it: it grades a module and is never compiled',
     'ext/threads/threads.php': 'the module tests/ext.sh step 20 builds and runs on several threads',
     'ext/threads/check.php': 'the script tests/ext.sh step 20 runs against it: it grades a module and is never compiled',
+    'ext/threads/api.php': 'the script tests/ext.sh step 20b runs against it: it grades a module and is never compiled',
     'ext/zts/zts.php': 'the module tests/frankenphp.sh builds as a ZTS module and loads in FrankenPHP under concurrent requests',
     'ext/zts/index.php': 'the script FrankenPHP runs for each request in tests/frankenphp.sh: it grades a module and is never compiled',
     'ext/zts/up.php': 'the page tests/frankenphp.sh polls until FrankenPHP answers: it calls nothing in the module and is never compiled',

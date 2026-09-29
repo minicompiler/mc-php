@@ -1,0 +1,15 @@
+hardware concurrency at least 1: yes
+running before any thread: 0
+shared mode before any thread: 0
+square(12) on a thread: 144
+a closure's capture: 42
+the thread's copies: 4,1000,1; ours: 3 1 0
+rethrown at join: DomainException from the thread 7
+mc-php: thread 4 is not joinable
+mc-php: thread 12345 is not joinable
+what a joined thread stored: ssss 4 4 4 from a thread
+join after detach: mc-php: thread 6 is not joinable
+what a detached thread stored: ssssss 6 6 6
+threads of threads: 30
+running at the end: 0
+shared mode after the last join: 1

@@ -387,6 +387,17 @@ i64 ph_tkey;
 uptr ph_tget() { return TlsGetValue(ph_tkey); }
 void ph_tset(uptr b) { TlsSetValue(ph_tkey, b); }
 void ph_tinit() { ph_tkey = rtw_int(TlsAlloc()); }
+// The runtime's own lock (lib/php_rt.mc § the thread API): a slim
+// reader/writer lock, which needs no initialisation (SRWLOCK_INIT is zero).
+// Not the user's lock: those are step 4.
+extern void AcquireSRWLockExclusive(uptr l);
+extern void ReleaseSRWLockExclusive(uptr l);
+u8 ph_lk[8];
+void ph_lock() { AcquireSRWLockExclusive(ph_lk); }
+void ph_unlock() { ReleaseSRWLockExclusive(ph_lk); }
+// the logical processors of every group (mcphp_hardware_concurrency)
+extern i64 GetActiveProcessorCount(i64 group);
+i64 ph_os_ncpu() { i64 n = rtw_int(GetActiveProcessorCount(0xffff)); if (n < 1) return 1; return n; }
 // fresh zeroed pages: reserved and committed (MEM_COMMIT | MEM_RESERVE,
 // PAGE_READWRITE), 0 when the system says no
 uptr ph_os_map(i64 n) { return VirtualAlloc(0, n, 0x3000, 4); }

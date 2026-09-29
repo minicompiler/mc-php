@@ -822,6 +822,74 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_c3("php_thr_run", fp, ph_to_int(ph_a(tav, 1), ph_aty(tav, 1)),
                      ph_to_int(ph_a(tav, 2), ph_aty(tav, 2)), TY_I64);
     }
+    // The thread API (docs/threads.md § Step 3), the primitive layer:
+    //   mcphp_thread_start(callable $fn, mixed ...$args): int
+    //   mcphp_thread_join(int $t): mixed
+    //   mcphp_thread_detach(int $t): void
+    //   mcphp_thread_running(): int
+    //   mcphp_hardware_concurrency(): int
+    // lib/php_rt.mc § the thread API does the work; the arguments go by value.
+    if (str_eq(name, "mcphp_thread_start")) {
+        u8 snp[8];
+        uptr sav = ph_read_args(6, fl, line, snp);
+        i64 sn = ld64(snp);
+        if (sn < 1) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        if (sn > 6) ph_todo2(fl, line, "more than five arguments for a thread in", name);
+        i64 c = node_new(N_CALL, line, fl);
+        set_nd_name(c, "php_thr_start");
+        set_nd_type(c, TY_I64);
+        i64 a0 = ph_to_mixed(ph_a(sav, 0), ph_aty(sav, 0));
+        set_nd_a(c, a0);
+        i64 cnt = ph_int(sn - 1);
+        set_nd_next(a0, cnt);
+        i64 prev = cnt;
+        i64 si = 1;
+        loop {
+            if (si > 5) break;
+            i64 av = ph_int(0);
+            if (si < sn) av = ph_to_mixed(ph_a(sav, si), ph_aty(sav, si));
+            set_nd_next(prev, av);
+            prev = av;
+            si = si + 1;
+        }
+        ph_can_throw = 1;
+        ph_ety = PT_INT;
+        return c;
+    }
+    if (str_eq(name, "mcphp_thread_join") || str_eq(name, "mcphp_thread_detach")) {
+        u8 jnp[8];
+        uptr jav = ph_read_args(1, fl, line, jnp);
+        if (ld64(jnp) != 1) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        i64 h = ph_to_int(ph_a(jav, 0), ph_aty(jav, 0));
+        if (str_eq(name, "mcphp_thread_detach")) { ph_ety = PT_NULL; return ph_c1("php_thr_detach", h, ty_pzv); }
+        ph_ety = PT_MIXED;
+        return ph_c1("php_thr_join", h, ty_pzv);
+    }
+    if (str_eq(name, "mcphp_thread_running") || str_eq(name, "mcphp_hardware_concurrency")) {
+        u8 rnp[8];
+        ph_read_args(1, fl, line, rnp);
+        if (ld64(rnp) != 0) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        ph_ety = PT_INT;
+        if (str_eq(name, "mcphp_thread_running")) return ph_call("php_thr_running", 0, 0, 0, 0, 0, TY_I64);
+        return ph_call("ph_os_ncpu", 0, 0, 0, 0, 0, TY_I64);
+    }
+    // mcphp_shared_mode() and mcphp_str_mine($s): the test gates of shared
+    // mode (docs/threads.md § Step 3) -- the flag, and whether the runtime
+    // would write $s in place. Internal.
+    if (str_eq(name, "mcphp_shared_mode")) {
+        u8 mnp[8];
+        ph_read_args(1, fl, line, mnp);
+        if (ld64(mnp) != 0) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        ph_ety = PT_INT;
+        return ph_call("php_thr_shared", 0, 0, 0, 0, 0, TY_I64);
+    }
+    if (str_eq(name, "mcphp_str_mine")) {
+        u8 snp2[8];
+        uptr sav2 = ph_read_args(1, fl, line, snp2);
+        if (ld64(snp2) != 1) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        ph_ety = PT_INT;
+        return ph_c1("php_thr_mine", ph_to_str(ph_a(sav2, 0), ph_aty(sav2, 0)), TY_I64);
+    }
     // mcphp_vm(): the process's virtual size in bytes (committed bytes on
     // Windows), -1 when the host cannot say -- the gate that sees a thread's
     // arena kept after it ends (tests/c/10-threads-vm.php). Internal.

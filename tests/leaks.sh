@@ -224,6 +224,12 @@ cp tests/ext/threads/threads.php "$t/thr/r.php"
 sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.so\"|" examples/hello/mcphp.linux.toml | dbg /dev/stdin > "$t/thr/r.toml"
 if "$BIN" build "$t/thr" --config "$t/thr/r.toml" > "$t/th.out" 2>&1; then
     leakfree "compiled functions on OS threads (tests/ext/threads), 30 rounds of 4" -d extension="$t/thr/build/r.so" "$t/thr/run.php"
+    # the thread API (tests/ext.sh step 20b): shared mode defers every free of
+    # a string to the end of the request, which must still leave nothing
+    { cat tests/ext/threads/api.php
+      printf "%s\n" "for (\$k = 0; \$k < 30; \$k++) { th\\api(4, 50); th\\keep(4); th\\rethrow(); }"
+    } > "$t/thr/api.php"
+    leakfree "the thread API (tests/ext/threads/api.php), 30 rounds" -d extension="$t/thr/build/r.so" "$t/thr/api.php"
 else
     bad "the threads module: it would not build"; sed "s/^/      /" "$t/th.out"
 fi
