@@ -26,3 +26,4 @@ foreach (['nope', new stdClass, 5, null] as $bad) {
 }
 echo pk\arrow_spoil(), " ", pk\arrow_odd(2), " ", pk\arrow_odd(1), " ", pk\arrow_later(), " ", pk\arrow_nested(), "\n";
 echo pk\shadow_a(), " ", pk\shadow_b(), " ", pk\shadow_c(), " ", pk\shadow_d(), " ", pk\shadow_wide(), "\n";
+echo pk\try_closure("ok"), " ", pk\try_closure("bad"), " ", pk\try_finally(), "\n";

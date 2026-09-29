@@ -157,6 +157,7 @@ php-src/Zend/tests/closures/closure_007.phpt
 php-src/Zend/tests/closures/closure_009.phpt
 php-src/Zend/tests/closures/closure_011.phpt
 php-src/Zend/tests/closures/closure_015.phpt
+php-src/Zend/tests/closures/closure_021.phpt
 php-src/Zend/tests/closures/closure_023.phpt
 php-src/Zend/tests/closures/closure_024.phpt
 php-src/Zend/tests/closures/closure_049.phpt

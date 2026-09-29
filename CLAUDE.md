@@ -1404,3 +1404,19 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     skipdet)`) -- fixture `tests/c/14-thread-detach-exit`, a detached thread that never returns:
     exits in 4 ms, and the first head was still running after 5 s; `api.php` ends with a detached
     thread's line that RSHUTDOWN waited for.
+- Closure inside a try (2026-09-29, branch `closure-try`, from main b96f096): a closure written
+  inside a `try` inherited the enclosing try's state (`ph_in_try`, and a function's
+  finally flag and value, `ph_frf`/`ph_frv`) while its loop stack was reset, so a throw in its
+  body compiled as a break out of a try it is not in: `break out of range` for a closure in a
+  try, SIGSEGV in the compiler for a longer body, and `unknown name` (the outer finally's flag)
+  for a closure whose own try has only a finally. `ph_closure` now saves and clears the three,
+  as `ph_function` and methods already did. Fixture `tests/g/127-closure-in-try.php` (main's
+  compiler: exit 139); the same shapes in `tests/ext/callables` (main: `it would not build`).
+  The grid gains `Zend/tests/closures/closure_021` (a closure whose try rethrows), plain and in
+  check mode; `tests/grid/green-Zend_tests.txt` records it.
+  Review addition: `ph_closure` now also saves, empties and restores `src/packed.mc`'s answer
+  (`pkx_names`/`pkx_fixed`), as `ph_function` saves it. It EMPTIES it and does not scan: the
+  proof is for a plain function only, as `packed.mc`'s header says. No failing repro exists:
+  a function whose body contains `function` or `fn` fails the scan, so today the answer around
+  a closure is always empty. `--dump-ast` of 178 fixtures and examples is identical before and
+  after.

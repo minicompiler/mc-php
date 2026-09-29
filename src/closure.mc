@@ -183,6 +183,12 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     i64 sst = ph_in_static;
     i64 stl = ph_toplevel;
     i64 sls = ph_nls;
+    // a closure's body is a function of its own: the try it is written in
+    // is not around it (ph_function does the same), or a throw in its body
+    // would emit a break out of a try the closure is not inside
+    i64 sit = ph_in_try;
+    uptr sfv = ph_frv;
+    uptr sff = ph_frf;
     i64 sph = ph_pend_head;
     i64 spt = ph_pend_tail;
     i64 srrc = ph_fn_retref;
@@ -194,6 +200,9 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_fn_retref = 0;
     ph_toplevel = 0;
     ph_nls = 0;
+    ph_in_try = 0;
+    ph_frv = 0;
+    ph_frf = 0;
     ph_in_method = 1;
     ph_in_static = 0;
 
@@ -241,6 +250,16 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         ub = ub + 1;
     }
     i64 body = 0;
+    // src/packed.mc's answer is per function, saved and put back as
+    // ph_function does, and EMPTY here: the proof is made for a plain
+    // function only (packed.mc's header), so a closure body lowers no array
+    // as packed. Today no enclosing answer can be non-empty around a closure
+    // -- a body that contains `function` or `fn` fails the scan -- but the
+    // answer must not depend on that.
+    uptr spk = pkx_names;
+    uptr spf = pkx_fixed;
+    pkx_names = 0;
+    pkx_fixed = 0;
     if (arrow) {
         ph_want("=>", 2, "expected => in a php arrow function");
         i64 rv = ph_expr(0);
@@ -250,6 +269,8 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         set_nd_a(body, ph_wrap(r));
     }
     if (!arrow) body = ph_block();
+    pkx_names = spk;
+    pkx_fixed = spf;
     // php's rule for fn(): capture, by value at creation, the variables the
     // body names and no other -- one it does not name is never read, and may
     // be a slot nothing assigned on this path (a catch's $e)
@@ -314,6 +335,9 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_in_static = sst;
     ph_toplevel = stl;
     ph_nls = sls;
+    ph_in_try = sit;
+    ph_frv = sfv;
+    ph_frf = sff;
     ph_pend_head = sph;
     ph_pend_tail = spt;
     // an arrow function's creation site, now that its body said what it names
