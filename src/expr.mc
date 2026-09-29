@@ -167,12 +167,10 @@ i64 ph_interp(uptr raw, i64 n) {
         st8(d2 + 1 + (k - j), 0);
         i64 vt = PT_MIXED;
         i64 v = 0;
-        if (ph_var_find(d2) < 0) v = ph_undef_read(d2, 0);
+        if (ph_var_find(d2) < 0) v = ph_c1("php_undef_var", ph_raw(d2 + 1, cstrlen(d2) - 1), ty_pzv);
         if (!v) {
-            vt = ph_var_type(d2);
-            v = node_new(N_IDENT, ph_tline, ph_tfile);
-            set_nd_name(v, ph_mangle(d2, "v_"));
-            set_nd_type(v, ph_mcty(vt));
+            v = ph_var_node(d2, 0);
+            vt = ph_ety;
         }
         i64 sv = ph_to_str(v, vt);
         if (acc) acc = ph_c2("php_str_concat", acc, sv, ty_pstr);
@@ -301,34 +299,28 @@ void ph_pending_stmt(i64 s) {
 // null is a value of `mixed`, which D4 (c) already lowers to a zval -- so the
 // read is expressible without the variable gaining a type: a later `$x = 5`
 // still declares $x an int. The refusal is retired.
-// The read of a name nothing has bound yet: php's undefined-variable read --
-// unless, at the top level, some function declares it `global`: then it is
-// THE global, which that function may already have written, so the global
-// table is asked when the read runs (a top-level assignment binds the name
-// through php_gvar instead, ph_assign).
-i64 ph_undef_read(uptr d, i64 quiet) {
-    if (ph_toplevel && ph_gset_has(d)) {
-        i64 q = node_new(N_INT, ph_tline, ph_tfile);
-        set_nd_val(q, quiet);
-        set_nd_type(q, TY_I64);
-        return ph_c2("php_gget", ph_strlit(d + 1, cstrlen(d + 1)), q, ty_pzv);
-    }
-    if (quiet) return ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
-    return ph_c1("php_undef_var", ph_raw(d + 1, cstrlen(d) - 1), ty_pzv);
-}
-
 i64 ph_var_ref(uptr d) {
     if (ph_var_find(d) < 0) {
         ph_ety = PT_MIXED;
         // `$x ?? d` reads without warning, and the token after the name is
         // what says so -- the same test ph_index makes after its `]`.
-        return ph_undef_read(d, ph_at("??", 2));
+        if (ph_at("??", 2)) return ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
+        return ph_c1("php_undef_var", ph_raw(d + 1, cstrlen(d) - 1), ty_pzv);
     }
+    return ph_var_node(d, ph_at("??", 2));
+}
+
+// a bound variable's value. At the top level a name bound to the global table
+// (ph_gtop_has) reads through php_gread, php's warning for an entry no one
+// assigned -- except under `??` (quiet), which asks without one
+i64 ph_var_node(uptr d, i64 quiet) {
     i64 t = ph_var_type(d);
     i64 n = node_new(N_IDENT, ph_tline, ph_tfile);
     set_nd_name(n, ph_mangle(d, "v_"));
     set_nd_type(n, ph_mcty(t));
     ph_ety = t;
+    if (!quiet && ph_toplevel && ph_gtop_has(d))
+        return ph_c2("php_gread", n, ph_raw(d + 1, cstrlen(d) - 1), ty_pzv);
     return n;
 }
 
@@ -644,9 +636,7 @@ i64 ph_primary() {
         ph_next();
         if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         i64 t = ph_var_type(d);
-        i64 lv = node_new(N_IDENT, line, fl);
-        set_nd_name(lv, ph_mangle(d, "v_"));
-        set_nd_type(lv, ph_mcty(t));
+        i64 lv = ph_var_node(d, 0);         // the read: php_gread for a global
         i64 val = 0;
         if (t == PT_MIXED) {
             uptr f = "php_zv_inc";

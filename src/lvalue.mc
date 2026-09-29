@@ -446,9 +446,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         if (semi) ph_semi("expected ; after ++/--");
         if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         i64 t = ph_var_type(d);
-        i64 lv = node_new(N_IDENT, line, fl);
-        set_nd_name(lv, ph_mangle(d, "v_"));
-        set_nd_type(lv, ph_mcty(t));
+        i64 lv = ph_var_node(d, 0);         // the read: php_gread for a global
         i64 val = 0;
         if (t == PT_MIXED) {
             uptr f = "php_zv_inc";
@@ -477,9 +475,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         ph_next();
         if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         i64 lt = ph_var_type(d);
-        i64 lv = node_new(N_IDENT, line, fl);
-        set_nd_name(lv, ph_mangle(d, "v_"));
-        set_nd_type(lv, ph_mcty(lt));
+        i64 lv = ph_var_node(d, 0);         // the read: php_gread for a global
         i64 r = ph_expr(0);
         i64 rt = ph_ety;
         if (semi) ph_semi("expected ; after a php assignment");
@@ -592,7 +588,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
             if (ph_var_type(d) != PT_MIXED)
                 ph_todo2(fl, line, "a reference bound to a php variable of type", ph_tyname(ph_var_type(d)));
             ph_set_ref(d);
-            return ph_wrap(ph_set(ph_mangle(d, "v_"), cell));
+            return ph_wrap(ph_rebind(d, cell, 1));
         }
         if (semi) ph_semi("expected ; after a php assignment");
         // `$a = &$b` where $b does not exist: php creates it as null, silently
@@ -606,7 +602,9 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         i64 sr = node_new(N_IDENT, line, fl);
         set_nd_name(sr, ph_mangle(src, "v_"));
         set_nd_type(sr, ty_pzv);
-        return ph_wrap(ph_set(ph_mangle(d, "v_"), sr));
+        // a reference to a global no one assigned creates it, null
+        if (ph_toplevel && ph_gtop_has(src)) sr = ph_c1("php_gdef", sr, ty_pzv);
+        return ph_wrap(ph_rebind(d, sr, 1));
     }
     if (ph_pk_has(d)) return ph_pk_init(d, fl, line, semi);
     i64 v = ph_expr(0);
@@ -889,7 +887,12 @@ i64 ph_destructure(uptr fl, i64 line, i64 br, i64 semi) {
                 i64 lvr = node_new(N_IDENT, line, fl);
                 set_nd_name(lvr, ph_mangle(d, "v_"));
                 set_nd_type(lvr, ty_pzv);
-                st2 = ph_expr_stmt_of(ph_c2("php_zv_store", lvr, v, ty_pzv));
+                // a plain statement: the pattern's pendings (the right-hand
+                // side's temporaries) are wrapped once, in front of the
+                // whole block -- ph_expr_stmt_of here put them after the
+                // targets already assigned
+                st2 = node_new(N_EXPRSTMT, line, fl);
+                set_nd_a(st2, ph_c2("php_zv_store", lvr, v, ty_pzv));
             }
         }
         if (!st2) {
@@ -915,19 +918,6 @@ i64 ph_destructure(uptr fl, i64 line, i64 br, i64 semi) {
 // holding what php's read of it answers, instead of being refused: `mixed` is
 // a zval (D4 (c)) and null is one of its values.
 void ph_bind_undef(uptr d, uptr fl, i64 line, i64 quiet) {
-    // at the top level, a name some function declares `global` is THE
-    // global: read it (php's warning when no `global` made it yet), then
-    // bind the name to the table's entry, which that read or a later
-    // function's `global` share
-    if (ph_toplevel && ph_gset_has(d)) {
-        ph_var_bind(d, PT_MIXED);
-        ph_set_ref(d);
-        i64 rd = ph_undef_read(d, quiet);
-        i64 bind = ph_set(ph_mangle(d, "v_"), ph_c1("php_gvar", ph_strlit(d + 1, cstrlen(d + 1)), ty_pzv));
-        ph_pending_stmt(ph_expr_stmt_of(rd));
-        ph_pending_stmt(bind);
-        return;
-    }
     ph_var_bind(d, PT_MIXED);
     if (ph_refset_has(d)) ph_set_ref(d);
     i64 v = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
@@ -1465,6 +1455,14 @@ i64 ph_stmt_1() {
                 one = node_new(N_EXPRSTMT, line, fl);
                 set_nd_a(one, ph_c2("php_arr_unset", cur, k, TY_VOID));
             }
+            // a top-level name bound to the global table: the ENTRY goes back
+            // to "does not exist", which is what php's unset of a global does
+            if (!one && ph_toplevel && ph_gtop_has(d)) {
+                i64 gz = node_new(N_IDENT, line, fl);
+                set_nd_name(gz, ph_mangle(d, "v_"));
+                set_nd_type(gz, ty_pzv);
+                one = ph_expr_stmt_of(ph_c1("php_gunset", gz, TY_VOID));
+            }
             if (!one) {
                 i64 t = ph_var_type(d);
                 if (t != PT_MIXED)
@@ -1978,7 +1976,7 @@ i64 ph_foreach(uptr fl, i64 line) {
     set_nd_type(iref2, TY_I64);
     uptr getf = "php_it_val";
     if (byref) getf = "php_it_ref";
-    i64 setv = ph_set(ph_mangle(val, "v_"), ph_c2(getf, aref2, iref2, ty_pzv));
+    i64 setv = ph_rebind(val, ph_c2(getf, aref2, iref2, ty_pzv), byref);
     i64 head = setv;
     if (key) {
         i64 aref3 = node_new(N_IDENT, line, fl);
@@ -1987,7 +1985,7 @@ i64 ph_foreach(uptr fl, i64 line) {
         i64 iref3 = node_new(N_IDENT, line, fl);
         set_nd_name(iref3, iname);
         set_nd_type(iref3, TY_I64);
-        i64 setk = ph_set(ph_mangle(key, "v_"), ph_c2("php_it_key", aref3, iref3, ty_pzv));
+        i64 setk = ph_rebind(key, ph_c2("php_it_key", aref3, iref3, ty_pzv), 0);
         set_nd_next(setk, setv);
         head = setk;
     }

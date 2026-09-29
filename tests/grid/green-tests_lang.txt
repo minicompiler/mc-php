@@ -29,7 +29,6 @@ php-src/tests/lang/array_shortcut_005.phpt
 php-src/tests/lang/bison1.phpt
 php-src/tests/lang/bug18872.phpt
 php-src/tests/lang/bug21849.phpt
-php-src/tests/lang/bug22231.phpt
 php-src/tests/lang/bug23384.phpt
 php-src/tests/lang/bug23624.phpt
 php-src/tests/lang/bug24054.phpt
@@ -102,4 +101,5 @@ php-src/tests/lang/string/unicode_escape.phpt
 php-src/tests/lang/string/unicode_escape_legacy.phpt
 php-src/tests/lang/string/unicode_escape_surrogates.phpt
 php-src/tests/lang/string_decimals_001.phpt
+php-src/tests/lang/this_assignment.phpt
 php-src/tests/lang/throw_variation_001.phpt

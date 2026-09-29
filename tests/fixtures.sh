@@ -186,6 +186,23 @@ else
     echo "  FAIL  packed: $pk / $pn accepted in g/105; lowered in g/106 where the proof must fail: ${pe:-none}"
     fail=1
 fi
+# g/128's globals: every top-level name some function declares `global` is
+# bound to its table entry ONCE, as the top level's first statements, and
+# nowhere else -- not per read, not inside the loop (src/vars.mc ph_gtop_bind)
+"$MCPHP_BIN" --dump-ast $P/g/128-global-toplevel.php > "$tmp/gt.ast" 2>&1
+gw=$(grep -o 'global \$[a-z_]*\(, *\$[a-z_]*\)*' $P/g/128-global-toplevel.php | grep -o '\$[a-z_]*' | sort -u | wc -l | tr -d ' ')
+# a call at main's own level (four spaces: a direct child of its block, so
+# in no loop and no branch), one per name, and not one call anywhere else
+gn=$(awk '/^FUNC.* name=main$/ { m = 1; next } /^FUNC/ { m = 0 }
+          m && /^    ASSIGN name=v_/ { a = 1; next } m && a && /^      CALL .*name=php_gtop$/ { n++ } { a = 0 }
+          END { print n + 0 }' "$tmp/gt.ast")
+gu=$(grep -c '^ .*CALL .*name=php_gtop$' "$tmp/gt.ast")
+if [ "$gw" -gt 0 ] && [ "$gn" = "$gw" ] && [ "$gu" = "$gw" ]; then
+    echo "  globals: g/128's $gw names bound to the table once each, at main's own level and nowhere else"
+else
+    echo "  FAIL  globals: g/128 names $gw; php_gtop calls at main's level $gn, in the whole program $gu"
+    fail=1
+fi
 # src/opt.mc's concatenation windows: g/112's every substr() is a piece of a
 # concatenation, so its compiled functions have php_str_catwN and not one php_substr
 # (a fusion that never fired would pass the differential just as well).

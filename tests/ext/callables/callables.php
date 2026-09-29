@@ -90,3 +90,16 @@ tg_set(41);
 $tg_seen = $tg + 1;
 $tg_str = "seen $tg";
 function top_global(): string { global $tg_seen, $tg_str; return $tg_seen . " " . $tg_str; }
+// the same table at MINIT: unset removes the global, the first [] or keyed
+// write makes its array, and a closure's use captures its value
+function tg_mk(): void { global $tg_gone; $tg_gone = 1; }
+tg_mk();
+unset($tg_gone);
+$tg_app[] = 1;
+$tg_app[] = 2;
+$tg_key["k"] = "kay";
+$tg_used = (function () use ($tg) { return $tg; })();
+function top_global2(): string {
+    global $tg_app, $tg_key, $tg_gone, $tg_used;
+    return count($tg_app) . " " . $tg_key["k"] . " " . var_export($tg_gone, true) . " " . $tg_used;
+}

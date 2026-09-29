@@ -18,6 +18,14 @@ i64 ph_cap_site(uptr an, uptr unames, uptr urefs, i64 nu, uptr used, i64 line, u
         i64 vr = node_new(N_IDENT, line, fl);
         set_nd_name(vr, ph_mangle(un2, "v_"));
         set_nd_type(vr, ph_mcty(vt));
+        // a top-level name bound to the global table: captured by value it
+        // is READ (php's warning for an entry no one assigned; an arrow
+        // function's implicit capture asks without one), captured by
+        // reference it is created, null, as php does
+        i64 gt = ph_toplevel && ph_gtop_has(un2);
+        if (gt && !ld64(urefs + ui * 8) && !used) vr = ph_c2("php_gread", vr, ph_raw(un2 + 1, cstrlen(un2) - 1), ty_pzv);
+        if (gt && !ld64(urefs + ui * 8) && used) vr = ph_c1("php_gq", vr, ty_pzv);
+        if (gt && ld64(urefs + ui * 8)) vr = ph_c1("php_gdef", vr, ty_pzv);
         if (ld64(urefs + ui * 8)) {
             if (!ph_is_ref(un2)) ph_todo2(fl, line, "a by-reference use of a php variable of type", ph_tyname(vt));
             set_nd_type(vr, ty_pzv);

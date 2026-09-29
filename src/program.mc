@@ -18,6 +18,9 @@ void ph_program() {
     // `<?=` opens a file too, and it is an ECHO: leave it for the statement
     // loop below, which takes the echo branch on it
     if (!ph_at("<?=", 3)) ph_next();              // <?php
+    // php's top-level scope is the global table: every name some function
+    // declares `global` is its entry here, bound once, before anything runs
+    ph_gtop_bind();
     loop {
         if (ph_tid == T_EOF) break;
         if (ph_ns_close()) continue;
@@ -44,6 +47,14 @@ void ph_program() {
     // no program -- phx_leave is the flush plus the bridge that turns a
     // pending php throwable into a Zend one, the same pair every handler
     // uses.
+    i64 gp = ph_gtop_prologue();
+    if (gp) {
+        i64 gt = gp;
+        loop { if (!nd_next(gt)) break; gt = nd_next(gt); }
+        if (ph_main_head) set_nd_next(gt, ph_main_head);
+        if (!ph_main_head) ph_main_tail = gt;
+        ph_main_head = gp;
+    }
     i64 fin = 0;
     i64 fin2 = 0;
     if (ph_ext) {
@@ -453,7 +464,32 @@ void ph_checked_config() {
     toml_err_key("php.checked_reads", "mc-php: expected true or false");
 }
 
+// `$GLOBALS` is refused by name, at its own line: php's view of the global
+// table as an array is not built (the top level reaches the table through
+// its variables, ph_gtop_bind). Comments and single-quoted strings are not
+// code; a double-quoted string or a heredoc interpolates, so it is searched.
+void ph_scan_globals(uptr name, uptr src, i64 len) {
+    i64 i = 0;
+    loop {
+        if (i >= len) break;
+        i64 c = ld8(src + i);
+        if (c != 34) {
+            i64 hop = ph_scan_hop(src, len, i);
+            if (hop != i) { i = hop; continue; }
+        }
+        if (c == 36 && i + 8 <= len && str_eq(xstrdup(src + i + 1, 7), "GLOBALS")
+            && (i + 8 == len || !ph_nmb(ld8(src + i + 8), 0))) {
+            i64 line = 1;
+            i64 j = 0;
+            loop { if (j >= i) break; if (ld8(src + j) == 10) line = line + 1; j = j + 1; }
+            ph_refuse2(name, line, "the global table as an array", "$GLOBALS", "D6");
+        }
+        i = i + 1;
+    }
+}
+
 void ph_on_source(uptr name, uptr src, i64 len) {
+    if (ph_pushing || ph_ends(name, ".php")) ph_scan_globals(name, src, len);
     ph_scan_decl(src, len);
     ph_scan_brf(src, len);
     ph_scan_refs(src, len);

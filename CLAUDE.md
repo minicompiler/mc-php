@@ -1422,16 +1422,33 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   after.
 - A top-level global only `global` creates (2026-09-29, branch `global-toplevel`, from main
   bfad1cb): the top level bound a name some function declares `global` to the global table only
-  at its first top-level ASSIGNMENT, so a top-level read before one -- `set(); echo $g;` after
-  `function set() { global $g; $g = 42; }` -- was php's undefined-variable warning and null. Now
-  such a read (`ph_undef_read`: `ph_var_ref`, both string-interpolation sites) asks the table at
-  run time (`php_gget(name, quiet)`: the entry, else php's warning, or nothing under `??`), and a
-  top-level write through the name (`ph_bind_undef`, `$g++`) reads it the same way and binds
-  it through `php_gvar`. The ZTS road reads the request's own table (the name is lowered per
-  thread); the table 3a's threads share is the one read. Fixture `tests/g/128-global-toplevel.php`
-  (main: a warning where php prints 42); `tests/ext/callables` reads one at MINIT (main: the
-  module and the interpreted source differ); `tests/c/11-thread-api` drops its workaround and
-  reads what a thread stored with no top-level initialisation; FrankenPHP's `zts.php` reads one
-  at MINIT, carried into every request's copy (the formula's `7` field is `77`). The grid gains
-  `tests/lang/007`, `Zend/tests/nullsafe_operator/040` and
-  `static_variables/static_variables_global_2`, plain and in check mode.
+  at its first top-level ASSIGNMENT, so `set(); echo $g;` after `function set() { global $g;
+  $g = 42; }` read an undefined variable (php: 42). The review of the first version (a runtime
+  lookup patched into each read site) found three sites it missed -- `unset($g)` cleared only the
+  local, the first `$a[] = 1` / `$a[0] = 1` made a local array, `use ($g)` was refused (D4) --
+  and a table lookup per `$g++` in a loop. The fix is the ROOT instead: php's top-level scope is
+  the global table. Every name the scan saw declared `global` (`ph_gset`) is bound once, before
+  the first top-level statement (`ph_gtop_bind`, `src/vars.mc`; `ph_gtop_prologue` writes
+  `v_g = php_gtop("g")` at main's own level), so every top-level path -- read, write, `[]`,
+  compound, `unset`, `&`, `use`, foreach, destructuring -- goes through the ordinary local slot,
+  which IS the entry. An entry no one assigned is IS_UNDEF (php's "does not exist"): a read goes
+  through `php_gread` (the warning), `isset`/`??` see it unset, `unset()` is `php_gunset`, a
+  function's `global` (`php_gvar`) makes it null, as php's does. Rebinding sites (foreach's
+  variables, `$g = &$x`) go through `ph_rebind`, which stores into the entry or makes the entry
+  that zval (`php_gbind`); a capture by value reads it (`php_gread`, an arrow function's quietly
+  with `php_gq`), by reference creates it (`php_gdef`). Found and fixed on the way: a
+  destructuring into a reference target flushed the right-hand side's pending temporaries after
+  the targets already assigned (main: SIGSEGV; fixture `tests/g/129-destructure-ref.php`). `$GLOBALS` is refused by name at its own line
+  (D6, `ph_scan_globals`). Residual, on record: an arrow function's implicit capture of an
+  unassigned global reads null without php's warning inside its body. Names a `require`d file
+  declares `global` are only known when it is pushed and keep the old first-assignment binding.
+  Files with no `global` compile to the same user code as main (136 of 136, `--dump-ast`).
+  Tests: `tests/g/128-global-toplevel.php` (main and the first version both refuse or differ) and
+  its `--dump-ast` read-back in `tests/fixtures.sh` (one `php_gtop` per name at main's own level,
+  none elsewhere); `tests/r/d6-globals.php`; `tests/ext/callables` at MINIT (read, unset, `[]`,
+  a key, `use`); `tests/c/11-thread-api` without its workaround; FrankenPHP's `zts.php` reads one
+  at MINIT (the `7` field is `77`). The grid gains `tests/lang/007`,
+  `Zend/tests/nullsafe_operator/040`, `static_variables/static_variables_global_2`,
+  `tests/lang/this_assignment` and `Zend/tests/bug40509`, and loses 11 tests that name
+  `$GLOBALS` and passed only because their output did not depend on it (78 more grid tests are
+  refused, all by the `$GLOBALS` rule), plain and in check mode.
