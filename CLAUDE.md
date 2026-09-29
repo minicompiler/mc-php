@@ -1337,3 +1337,7 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   `tests/g/124-closure-shadow.php` (all wrong on main), `125-closure-lexical-param.php` (main
   printed 7); the same cases in `tests/ext/callables` (main: `200 1000 6 16`), and ext.sh checks
   the Fatal on the extension road.
+  - Review addition: `use ($a, $a)` is php's `Cannot use variable $a twice` compile-time Fatal
+    (stack trace, exit 255), checked in the use loop itself; main accepted it and printed 1,
+    and past `ph_nvar + 16` repeats died with the wrong reason. Fixture
+    `tests/g/126-closure-use-twice.php`; ext.sh asserts both Fatal errors on stdout AND stderr.

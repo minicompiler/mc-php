@@ -45,7 +45,8 @@ i64 ph_cap_site(uptr an, uptr unames, uptr urefs, i64 nu, uptr used, i64 line, u
     return mk;
 }
 
-// is `name` one of the closure's parameters
+// is `name` one of the n names at `names` (the closure's parameters, or the
+// use list so far)
 i64 ph_is_param(uptr name, uptr pnames, i64 np) {
     i64 i = 0;
     loop { if (i >= np) break; if (str_eq(ld64(pnames + i * 8), name)) return 1; i = i + 1; }
@@ -141,6 +142,9 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
                 // php's own compile-time error, with its stack trace
                 if (ph_is_param(un, pnames, np))
                     ph_phpfatal_x(fl, line, p_cat(p_cat("Cannot use lexical variable ", un, 0, cstrlen(un)), " as a parameter name", 0, 20), 1);
+                // php refuses a name the use list already has, however many
+                if (ph_is_param(un, unames, nu))
+                    ph_phpfatal_x(fl, line, p_cat(p_cat("Cannot use variable ", un, 0, cstrlen(un)), " twice", 0, 6), 1);
                 if (ph_var_find(un) < 0) ph_refuse2(fl, line, "an undefined php variable in use", un, "D4");
                 if (nu >= ucap) ph_todo(fl, line, "a use list longer than the variables in scope");
                 st64(unames + nu * 8, un);

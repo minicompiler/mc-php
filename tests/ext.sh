@@ -781,18 +781,25 @@ else
 fi
 rm -rf "$tmp/build"
 
-# a closure that captures its own parameter's name is php's compile-time
-# Fatal error on this road too, in php's words, exit 255
-cp tests/g/125-closure-lexical-param.php "$tmp/r.php"
-rm -f "$tmp/build/r.$sx"
-"$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/lx.out" 2> "$tmp/lx.err"; lx=$?
-if [ "$lx" = 255 ] && grep -q "^Fatal error: Cannot use lexical variable \$x as a parameter name in .*r.php on line 6$" "$tmp/lx.out" \
-   && [ ! -f "$tmp/build/r.$sx" ]; then
-    say "closures: a parameter named like a lexical variable is php's own compile-time Fatal error, exit 255, no module"
-else
-    bad "closures: the lexical-variable parameter (exit $lx)"; sed 's/^/      /' "$tmp/lx.out" "$tmp/lx.err" | head -6
-fi
-rm -rf "$tmp/build"
+# php's compile-time Fatal errors about a closure's captures are the same on
+# this road: a parameter named like a use-list variable, and a use list that
+# names one variable twice. Both forms, php's words, exit 255, no module.
+for lx in 125-closure-lexical-param:"Cannot use lexical variable \$x as a parameter name":6 \
+          126-closure-use-twice:"Cannot use variable \$a twice":5; do
+    lf=${lx%%:*}; lr=${lx#*:}; lm=${lr%:*}; ll=${lr##*:}
+    cp "tests/g/$lf.php" "$tmp/r.php"
+    rm -f "$tmp/build/r.$sx"
+    "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/lx.out" 2> "$tmp/lx.err"; lc=$?
+    if [ "$lc" = 255 ] && grep -q "^Fatal error: $lm in .*r.php on line $ll\$" "$tmp/lx.out" \
+       && grep -q "^PHP Fatal error:  $lm in .*r.php on line $ll\$" "$tmp/lx.err" \
+       && [ "$(grep -c '^#0 {main}$' "$tmp/lx.out")" = 1 ] && [ "$(grep -c '^#0 {main}$' "$tmp/lx.err")" = 1 ] \
+       && [ ! -f "$tmp/build/r.$sx" ]; then
+        say "closures: $lm -- php's compile-time Fatal error on stdout and stderr, exit 255, no module"
+    else
+        bad "closures: $lm (exit $lc)"; sed 's/^/      /' "$tmp/lx.out" "$tmp/lx.err" | head -8
+    fi
+    rm -rf "$tmp/build"
+done
 
 # --- 20. compiled functions on several OS threads at once --------------------
 # tests/ext/threads: the module's threads against php calling the same
