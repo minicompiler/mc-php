@@ -62,6 +62,9 @@ extern i64  GetCurrentDirectoryA(i64 size, uptr buf);
 extern i64  SetCurrentDirectoryA(uptr name);
 extern i64  GetLastError();
 extern void SetLastError(i64 code);
+extern void AcquireSRWLockExclusive(uptr l);
+extern void ReleaseSRWLockExclusive(uptr l);
+extern i64  GetActiveProcessorCount(i64 group);
 
 // The flags the runtime writes and only this file reads. They are the
 // Microsoft C runtime's values (_O_*, and O_CREAT is mc's lib/sys_windows.mc
@@ -389,14 +392,12 @@ void ph_tset(uptr b) { TlsSetValue(ph_tkey, b); }
 void ph_tinit() { ph_tkey = rtw_int(TlsAlloc()); }
 // The runtime's own lock (lib/php_rt.mc § the thread API): a slim
 // reader/writer lock, which needs no initialisation (SRWLOCK_INIT is zero).
-// Not the user's lock: those are step 4.
-extern void AcquireSRWLockExclusive(uptr l);
-extern void ReleaseSRWLockExclusive(uptr l);
+// Not the user's lock: those are step 4. (Both are declared at the top: below
+// the `#dylib` they would be imports of ucrtbase.dll.)
 u8 ph_lk[8];
 void ph_lock() { AcquireSRWLockExclusive(ph_lk); }
 void ph_unlock() { ReleaseSRWLockExclusive(ph_lk); }
 // the logical processors of every group (mcphp_hardware_concurrency)
-extern i64 GetActiveProcessorCount(i64 group);
 i64 ph_os_ncpu() { i64 n = rtw_int(GetActiveProcessorCount(0xffff)); if (n < 1) return 1; return n; }
 // fresh zeroed pages: reserved and committed (MEM_COMMIT | MEM_RESERVE,
 // PAGE_READWRITE), 0 when the system says no
