@@ -27,6 +27,7 @@ php-src/Zend/tests/array_hash_zero.phpt
 php-src/Zend/tests/array_unpack/gh19303.phpt
 php-src/Zend/tests/array_unpack/unpack_string_keys_compile_time.phpt
 php-src/Zend/tests/array_unpack_string_keys.phpt
+php-src/Zend/tests/arrow_functions/001.phpt
 php-src/Zend/tests/arrow_functions/002.phpt
 php-src/Zend/tests/assign_dim_op_same_var.phpt
 php-src/Zend/tests/assign_to_var_001.phpt
