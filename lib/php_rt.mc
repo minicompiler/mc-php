@@ -54,6 +54,7 @@
 u8   ph_tmain[PHT_SIZE];            // the block of the thread that booted
 uptr ph_tcur;                       // ph_tmain while no other thread runs, then 0
 i64  ph_mt;                         // 1 once another thread runs compiled code
+i64  ph_tkeyed;                     // 1 once the host's slot exists: made once, never freed
 
 uptr ph_tslow() {
     if (ph_mt) return ph_tget();
@@ -10865,11 +10866,12 @@ void php_request_reset() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 // the booting thread bumps ph_heap -- so a thread never touches another's
 // temporaries, and never calls Zend (a php without ZTS has one allocator and
 // one executor for the whole process). A string a thread builds is its own
-// arena's and immutable, as every string is on the program road. What it
-// writes into module state -- a global, a static, a constant -- PINS it
-// (php_pin), and a pinned thread's arena is kept when it ends: the value it
-// stored outlives it, as malloc'd memory outlives a C thread. Otherwise the
-// arena goes with the thread.
+// arena's and immutable, as every string is on the program road. Module
+// state -- a global, a static, a constant -- refuses it for now
+// (ph_shared_off, interim until the thread API makes it shared); anything
+// else that pins (php_pin) keeps the thread's arena when it ends, as
+// malloc'd memory outlives a C thread. Otherwise the arena goes with the
+// thread.
 //
 // php_thr_run is the internal start the runtime's own gates use
 // (`mcphp_threads('f', $n, $arg)`, src/builtin.mc): n threads, thread i
@@ -10886,12 +10888,20 @@ void php_request_reset() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 #define PHR_SIZE   48
 
 // the thread's entry: its block becomes its thread-local slot, then f runs
+// The fast path (ph_tcur = ph_tmain) is off from before the first thread
+// starts until after the last one is joined: a thread checks it at both ends.
+void ph_thr_check() {
+    if (ph_tcur || !ph_mt) php_die("mc-php: a thread ran on the booting thread's fast path\n", 55);
+}
+
 uptr php_thr_body(uptr rec) {
     uptr phT = ld64(rec + PHR_BLOCK);
     ph_tset(phT);
+    ph_thr_check();
     i64 r = callp(ld64(rec + PHR_FN), ld64(rec + PHR_ARG), ld64(rec + PHR_IDX));
     if (ld64(phT + PHT_ph_exc)) { r = 0 - 1; st64(phT + PHT_ph_exc, 0); }
     php_flush();
+    ph_thr_check();
     st64(rec + PHR_RES, r);
     return 0;
 }
@@ -10930,18 +10940,22 @@ uptr php_thr_block(uptr from, i64 idx) {
 
 i64 php_thr_run(uptr fn, i64 n, i64 arg) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (n < 1 || n > PH_TMAX) php_die("mc-php: a thread count outside 1..64\n", 37);
-    if (ld64(phT + PHT_ph_tidx)) php_die("mc-php: threads started from a thread\n", 38);
-    // the first time: the booting thread's slot is its block, and from now
-    // on every function asks the slot
-    if (!ph_mt) {
-        ph_tinit();
+    // Only the booting thread flips the fast path, and only around the whole
+    // run: a thread that starts threads of its own (outer == 0) already runs
+    // with ph_tcur = 0, and joins its threads before it returns -- so when
+    // the booting thread's joins are done, every thread is gone.
+    i64 outer = !ld64(phT + PHT_ph_tidx);
+    // the booting thread's slot is its block, and from now on every function
+    // asks the slot
+    if (outer) {
+        if (!ph_tkeyed) { ph_tinit(); ph_tkeyed = 1; }
         ph_tset(ph_tmain);
         ph_mt = 1;
         ph_tcur = 0;
     }
     // the class the first closure makes: the registry is shared, so it is
     // written here and not by whichever thread closes over something first
-    if (!ph_ce_closure) ph_ce_closure = php_ce_new(php_str_new("Closure", 7));
+    if (outer && !ph_ce_closure) ph_ce_closure = php_ce_new(php_str_new("Closure", 7));
     uptr recs = php_alloc(n * PHR_SIZE);
     i64 i = 0;
     loop {
@@ -10971,7 +10985,9 @@ i64 php_thr_run(uptr fn, i64 n, i64 arg) { uptr phT = ph_tcur; if (!phT) phT = p
         i = i + 1;
     }
     // no other thread runs: the booting thread's fast path again
-    ph_mt = 0;
-    ph_tcur = ph_tmain;
+    if (outer) {
+        ph_mt = 0;
+        ph_tcur = ph_tmain;
+    }
     return sum;
 }

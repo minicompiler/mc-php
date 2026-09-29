@@ -39,8 +39,8 @@ The buffers follow the scalars. The block is 12320 bytes.
 | `ph_heap` | the booting thread's arena. Every other thread has its own (`ph_hbase`). |
 | `ph_classes` `ph_ce_stdclass` `ph_ce_closure` | written at bootstrap. `ph_ce_closure` is lazy, so `php_thr_run` makes it on the booting thread before any other thread starts. |
 | `ph_str_e` `ph_ch1` `ph_p10_done` | these were lazy. `php_bootstrap` now builds them eagerly: the empty string, all 256 one-byte strings and the powers of ten. |
-| `ph_consts` | written by `define()` and read by `constant()`. A read from another thread is safe, because the booting thread is blocked in `php_thr_run` while the others run. A write gets an Error. `php_const_get` no longer creates the table when it reads. |
-| `ph_globals` `ph_rsl` | the global variable table and a static's reset list. Another thread gets an Error (`ph_shared_off`). |
+| `ph_consts` | written by `define()` and read by `constant()`. A read from another thread is safe, because the booting thread is blocked in `php_thr_run` while the others run. A write gets an Error, which is **interim until step 3** (see "Module state" below). `php_const_get` no longer creates the table when it reads. |
+| `ph_globals` `ph_rsl` | the global variable table and a static's reset list. Another thread gets an Error (`ph_shared_off`). This is **interim until step 3**. |
 | `ph_rcchk` `phx_stats` | process-wide settings, read once from the environment. |
 | `ph_eng` `phx_engt` `phx_eg` `phx_pce` `phx_zalloc_fn` `phx_egx` `phx_egx_done` | the engine's addresses and offsets, resolved on the booting thread. Another thread never enters the engine (see "php's engine" below). |
 | `phx_me` `phx_fe` `phx_ai` `phx_nfn` `phx_nai` `phx_cfe` `phx_ncm` `phx_cfirst` | the module entry, the function entries, the arginfo and the published class tables. They are built in MINIT and read-only after it. |
@@ -58,7 +58,7 @@ The buffers follow the scalars. The block is 12320 bytes.
 | `phm_` | a byte map built from a literal | built in `ph_lit_init`, after the literals. |
 | `ce_` | a class entry | built at bootstrap, and read-only after it. |
 | `phf_` | a call site's cache of php's function table | written only through `phx_flook`, which another thread cannot reach. |
-| `phst_` | a function `static` | `php_static` refuses another thread (`ph_shared_off`). |
+| `phst_` | a function `static` | `php_static` refuses another thread (`ph_shared_off`). This is **interim until step 3**. |
 
 One more shared write is allowed and is benign: the hash that a string caches in its own header.
 A literal is shared, and two threads can hash it at the same time. Both threads write the same
@@ -103,6 +103,25 @@ stored into module state, that state lives in the arena, so the arena is kept.
 Output from another thread goes to fd 1 directly. On the extension road, this bypasses php's
 output layer, because that layer is part of php's engine.
 
+## Module state: interim until step 3
+
+The approved plan says a module's memory is shared, as a C module's is. A global or a static
+that one thread writes is seen by the other threads, and the developer handles the races. That
+is step 3's semantics, and these values stay ONE shared copy. They are not moved into the thread
+block, now or later.
+
+Step 1 does not yet make a shared write safe. A value that another thread stores lives in that
+thread's arena, and the stores are not ordered. So in step 1 another thread gets an Error, not
+a crash, when it reaches module state:
+
+- a `global`;
+- a `static`;
+- `define()`;
+- `class_alias()`.
+
+The message is `mc-php: a global variable is shared by every thread: another thread may not
+reach it`. **This is interim until step 3; module globals become shared.**
+
 ## php's engine
 
 A php built without ZTS has one executor and one allocator for the whole process. Another thread
@@ -116,8 +135,36 @@ must never enter them. Every road into the engine first checks the thread's inde
 On another thread, each of them throws the runtime's `Error`:
 `mc-php: php's engine called from another thread (this php has one engine for the process)`.
 
+**This guard is interim until step 3,** which gives another thread a road into the engine: a
+ZTS context, or a call handed to the thread php runs on.
+
 `tests/ext/threads` proves it: `th\probe` calls a function that only php knows. From the thread
 that php runs on, it answers 1002. From 4 other threads, each thread catches the Error.
+
+## The fast path's flip
+
+`ph_tcur` is written only by the booting thread, and only at these two points:
+
+- **It goes to 0 before the first thread is created.** A thread reads `ph_tcur` only after
+  `pthread_create` or `CreateThread` has returned, and that call orders the store before the
+  new thread.
+- **It goes back to `ph_tmain` only after the last join.** The join orders every store of a
+  thread before the booting thread goes on.
+
+A thread that starts threads of its own does not touch the flip. It already runs with `ph_tcur`
+at 0, and it joins its own threads before it returns. So when the booting thread's joins are
+done, every thread is gone. The host's slot (`pthread_key_create`, `TlsAlloc`) is made once and
+reused on every run.
+
+Each of these is tested:
+
+- **Before and after.** Every thread checks at its start and at its end that the fast path is
+  off. If the flip ran early or late, the check calls `php_die`. `ph_thr_check` runs on every
+  thread of every test.
+- **Nested.** `tests/c/09-threads.php` has 4 threads that each start 3 threads. There are
+  3 rounds, and each round is compared with the booting thread's own `work()`.
+- **Reused slot.** `tests/c/09-threads.php` runs 1500 times in a row, one thread each run. That
+  is more runs than macOS has keys, 512, so a slot made per run would run out.
 
 ## Refcounts: no atomics
 
@@ -158,8 +205,8 @@ instruction identical. So the difference is the loop's alignment, not the new co
 
 `mcphp_threads('f', $n, $arg)` runs the compiled function `f(int $arg, int $i): int` on `$n` OS
 threads (1..64) and returns the sum of the results. It returns -1 if a thread ends with an
-uncaught throwable. `f` must be a literal that names a function declared above the call. Only the
-thread that booted may call it.
+uncaught throwable. `f` must be a literal that names a function declared above the call. Both the thread
+that booted and a thread it started may call it.
 
 This is a test hook, not an API. These tests use it:
 

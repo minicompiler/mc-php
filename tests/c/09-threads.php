@@ -47,6 +47,12 @@ function shared(int $x, int $id): int {
     return $k;
 }
 
+// A thread that starts threads of its own: its three answer work() as the
+// booting thread's would, and the fast path stays off until all are joined
+// (lib/php_rt.mc's ph_thr_check dies otherwise).
+function nest(int $iters, int $id): int { return mcphp_threads('work', 3, $iters); }
+function one(int $x, int $id): int { return $x + $id; }
+
 $g = 5;
 $n = 8;
 $iters = 400;
@@ -58,3 +64,10 @@ for ($round = 0; $round < 5; $round++) {
 }
 echo "and this thread still works: ", work(10, 3) === work(10, 3) ? "yes" : "no", "\n";
 echo "module state from this thread: ", shared(0, 0), ", from 4 others: ", mcphp_threads('shared', 4, 0), "\n";
+$w3 = work(60, 0) + work(60, 1) + work(60, 2);
+for ($round = 0; $round < 3; $round++)
+    echo "nested round $round: ", mcphp_threads('nest', 4, 60) === 4 * $w3 ? "4 threads of 3 agree" : "MISMATCH", "\n";
+$ok = 0;
+for ($i = 0; $i < 1500; $i++) $ok += mcphp_threads('one', 1, $i) === $i ? 1 : 0;
+echo "1500 runs one after another: $ok answered\n";
+echo "and this thread after them: ", work(10, 3) === work(10, 3) ? "yes" : "no", "\n";
