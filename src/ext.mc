@@ -40,8 +40,9 @@ uptr ph_ext_name;
 uptr ph_ext_ver;
 uptr ph_ext_bid;
 i64  ph_ext_api;
-i64  ph_ext_zts;
+i64  ph_ext_zts;                // the module header's zts: 1 for the ZTS output
 i64  ph_ext_dbg;
+i64  ph_ts_both;                // [php].thread_safety = "both" (src/build.mc)
 
 // the top-level php functions, in source order: what get_module registers
 #define PH_MAXEXP 256
@@ -51,7 +52,7 @@ i64  ph_expl[PH_MAXEXP];        // refusal points at the function and not at <?p
 i64 ph_nexp;
 
 // A TOML boolean is TEXT in mc's parser (the table is flat and every value is
-// a string), so "true" is what `thread_safety = true` reads as.
+// a string), so "true" is what `debug = true` reads as.
 i64 ph_ext_bool(uptr path, uptr what) {
     uptr v = toml_get(path);
     if (!v) err_at2("mcphp.toml", 1, "mc-php: this extension needs it", what);
@@ -85,7 +86,59 @@ i64 ph_ext_has_table() {
     return 0;
 }
 
+// [php].thread_safety: "nts" (the default), "zts" or "both" -- which php the
+// OUTPUT is for, stated and never read off a php on this machine: the bytes
+// depend on the file alone. "both" builds two outputs from one project
+// (src/build.mc); this process then builds the NTS one. The key describes an
+// extension's module header; the program road has none and ignores it, but a
+// value it cannot mean is refused on either road, at its own position.
+// The TOML booleans this key took before are refused with the word that
+// replaces them.
+void ph_ts_config() {
+    uptr v = toml_get("php.thread_safety");
+    if (!v) return;
+    if (str_eq(v, "nts")) return;
+    if (str_eq(v, "zts")) { ph_ext_zts = 1; return; }
+    if (str_eq(v, "both")) { ph_ts_both = 1; return; }
+    if (str_eq(v, "false") || str_eq(v, "true"))
+        toml_err_key("php.thread_safety", "mc-php: thread_safety is \"nts\", \"zts\" or \"both\" (false is \"nts\", true is \"zts\")");
+    toml_err_key("php.thread_safety", "mc-php: thread_safety must be \"nts\", \"zts\" or \"both\"");
+}
+
+// The build id php compares is the stated one with its thread-safety word
+// made this output's: `API20250925,NTS` becomes `API20250925,TS` for the ZTS
+// output (`,NTS,VS17` on Windows becomes `,TS,VS17`) -- which is what lets
+// "both" name one build id for two outputs. A build id that names neither
+// word is refused rather than guessed at.
+uptr ph_ts_word(uptr b, i64 i) {
+    // ",NTS" or ",TS" starting at i, ending at a ',' or the end: its length, 0
+    if (ld8(b + i) != 44) return 0;
+    i64 k = i + 1;
+    if (ld8(b + k) == 78) k = k + 1;                          // N
+    if (ld8(b + k) != 84 || ld8(b + k + 1) != 83) return 0;   // TS
+    k = k + 2;
+    if (ld8(b + k) != 0 && ld8(b + k) != 44) return 0;
+    return k - i;
+}
+uptr ph_ts_bid(uptr b) {
+    i64 n = cstrlen(b);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 w = ph_ts_word(b, i);
+        if (w) {
+            uptr t = ",NTS";
+            if (ph_ext_zts) t = ",TS";
+            return p_cat(p_cat(xstrdup(b, i), t, 0, cstrlen(t)), b + i + w, 0, n - i - w);
+        }
+        i = i + 1;
+    }
+    toml_err_key("php.build_id", "mc-php: the build id names no thread safety (,NTS or ,TS)");
+    return b;
+}
+
 void ph_ext_config() {
+    ph_ts_config();
     uptr name = toml_get("extension.name");
     if (!name && !ph_ext_has_table()) return;   // the program road
     if (!name) err_at2("mcphp.toml", 1, "mc-php: this extension needs it", "extension.name");
@@ -95,13 +148,13 @@ void ph_ext_config() {
     if (!ph_ext_ver) ph_ext_ver = "0.0.0";
     if (toml_get("php.bin")) {
         err_at("mcphp.toml", 1,
-               "mc-php: [php].bin is not implemented: state php.api, php.build_id, php.thread_safety and php.debug (php -i prints all four)");
+               "mc-php: [php].bin is not implemented: state php.api, php.build_id and php.debug, and php.thread_safety unless it is nts (php -i prints all four)");
     }
     ph_ext_bid = toml_get("php.build_id");
     if (!ph_ext_bid) err_at2("mcphp.toml", 1, "mc-php: this extension needs it", "php.build_id");
     ph_ext_api = toml_int("php.api", 0);
     if (!ph_ext_api) err_at2("mcphp.toml", 1, "mc-php: this extension needs it", "php.api");
-    ph_ext_zts = ph_ext_bool("php.thread_safety", "php.thread_safety");
+    ph_ext_bid = ph_ts_bid(ph_ext_bid);
     ph_ext_dbg = ph_ext_bool("php.debug", "php.debug");
 }
 
@@ -578,7 +631,10 @@ void ph_ext_get_module(uptr fl, i64 line) {
     // SAPI is already tearing down. The slot is there when it is earned.
     st64(mv + 56, ph_int(0));
     i64 r = node_new(N_RETURN, line, fl);
-    set_nd_a(r, ph_calln("phx_module", mv, 8, TY_UPTR));
+    i64 mcall = ph_calln("phx_module", mv, 8, TY_UPTR);
+    // a ZTS output ends with lib/php_zts.mc's step; the NTS one is unchanged
+    if (ph_ext_zts) mcall = ph_c1("phx_ts_module", mcall, TY_UPTR);
+    set_nd_a(r, mcall);
     if (tail) set_nd_next(tail, r);
     if (!tail) head = r;
     i64 f = node_new(N_FUNC, line, fl);
@@ -604,6 +660,7 @@ void ph_ext_emit(uptr fl, i64 line) {
 }
 
 #embed ph_ext_rt "../lib/php_ext.mc"
+#embed ph_zts_rt "../lib/php_zts.mc"
 
 // ---- a published class -------------------------------------------------------
 // Called by src/class.mc when a class the extension publishes ends: one handler

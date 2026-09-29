@@ -5,6 +5,7 @@
 | [plan.md](plan.md) | the plan, the decisions D1..D10, the test grid and the open mc gaps. **Read it first.** |
 | [php-extension.md](php-extension.md) | the extension back end: what it compiles, what it refuses by name, and the four places a module differs from the interpreted source |
 | [threads.md](threads.md) | the runtime on several OS threads: the inventory of its state, the thread block, what another thread may not reach, and what it costs |
+| [mc-internals.md](mc-internals.md) | every name mc-php uses from mc that mc does not freeze, grouped, with the reason, and the mc version it is pinned to |
 | [php-abi.md](php-abi.md) | every Zend number the back end rests on, what it was read off, and how to re-read it |
 | [mcphp-toml.md](mcphp-toml.md) | the `mcphp.toml` project file -- the schema. `php-extension.md` § The project file is the part implemented |
 | [layout.md](layout.md) | what is in each directory, and the one rule about `probes/` |

@@ -29,7 +29,104 @@ i64 ph_tls_off(uptr n) {
     if (str_eq(n, "ph_pool")) return PHT_ph_pool;
     if (str_eq(n, "ph_pcap")) return PHT_ph_pcap;
     if (str_eq(n, "phx_lz")) return PHT_phx_lz;
+    // A ZTS module (lib/php_zts.mc): the engine's globals and the module
+    // state a request writes are this php thread's too
+    if (ph_ext_zts) {
+        if (str_eq(n, "phx_eg")) return PHT_phx_eg;
+        if (str_eq(n, "ph_globals")) return PHT_ph_globals;
+        if (str_eq(n, "ph_consts")) return PHT_ph_consts;
+        if (str_eq(n, "ph_classes")) return PHT_ph_classes;
+        if (str_eq(n, "ph_ce_closure")) return PHT_ph_ce_closure;
+        if (str_eq(n, "ph_rsl")) return PHT_ph_rsl;
+        // EG(exception)'s offset is measured per thread, in the thread's own
+        // engine: no thread ever writes what another reads, so no ordering
+        // between the offset and its flag is needed on any CPU
+        if (str_eq(n, "phx_egx")) return PHT_phx_egx;
+        if (str_eq(n, "phx_egx_done")) return PHT_phx_egx_done;
+    }
     return 0 - 1;
+}
+
+// ---- a ZTS module's own words, per php thread ------------------------------
+// The words this compiler emits that a request WRITES -- a function's
+// `static` (phst_*) and a call site's cache of php's function table (phf_*,
+// the function and the request it was found in) -- are one copy per php
+// thread in a ZTS module: every use of one is `ld64(phT + PHT_phz_mod) + off`
+// into the thread's area, and the global itself stays as the area's template
+// (a phf_ carries the call's name and packed word, which never change). Three
+// functions are generated for lib/php_zts.mc: the area's size, its fill from
+// the templates, and the statics' reset from what MINIT left in them.
+uptr ph_tza_name;
+uptr ph_tza_off;
+uptr ph_tza_words;
+i64  ph_tza_n;
+i64  ph_tza_size;
+i64 ph_tza_is(uptr n) {
+    if (ld8(n) != 112 || ld8(n + 1) != 104) return 0;                     // "ph"
+    if (ld8(n + 2) == 115 && ld8(n + 3) == 116 && ld8(n + 4) == 95) return 1;   // "phst_"
+    if (ld8(n + 2) == 102 && ld8(n + 3) == 95) return 1;                   // "phf_"
+    return 0;
+}
+i64 ph_tza_find(uptr n) {
+    i64 i = 0;
+    loop { if (i >= ph_tza_n) break; if (str_eq(ld64(ph_tza_name + i * 8), n)) return i; i = i + 1; }
+    return 0 - 1;
+}
+void ph_tza_scan(i64 root) {
+    i64 cap = 0;
+    i64 g = root;
+    loop { if (!g) break; if (nd_kind(g) == N_GLOBAL && ph_tza_is(nd_name(g))) cap = cap + 1; g = nd_next(g); }
+    ph_tza_name = xalloc(cap * 8 + 8);
+    ph_tza_off = xalloc(cap * 8 + 8);
+    ph_tza_words = xalloc(cap * 8 + 8);
+    g = root;
+    loop {
+        if (!g) break;
+        if (nd_kind(g) == N_GLOBAL && ph_tza_is(nd_name(g))) {
+            i64 w = nd_val(g);
+            if (w < 1) w = 1;
+            st64(ph_tza_name + ph_tza_n * 8, nd_name(g));
+            st64(ph_tza_off + ph_tza_n * 8, ph_tza_size);
+            st64(ph_tza_words + ph_tza_n * 8, w);
+            ph_tza_size = ph_tza_size + w * 8;
+            ph_tza_n = ph_tza_n + 1;
+        }
+        g = nd_next(g);
+    }
+}
+
+i64 ph_tz_int(i64 at, i64 v) {
+    i64 o = node_new(N_INT, nd_line(at), nd_file(at));
+    set_nd_val(o, v);
+    set_nd_type(o, TY_I64);
+    return o;
+}
+i64 ph_tz_id(i64 at, uptr name, i64 ty) {
+    i64 t = node_new(N_IDENT, nd_line(at), nd_file(at));
+    set_nd_name(t, name);
+    set_nd_type(t, ty);
+    return t;
+}
+i64 ph_tz_add(i64 at, i64 a, i64 b) {
+    i64 x = node_new(N_BINARY, nd_line(at), nd_file(at));
+    set_nd_op(x, ph_tok("+", 1));
+    set_nd_a(x, a);
+    set_nd_b(x, b);
+    set_nd_type(x, TY_UPTR);
+    return x;
+}
+i64 ph_tz_call(i64 at, uptr name, i64 a, i64 b, i64 ty) {
+    i64 c = node_new(N_CALL, nd_line(at), nd_file(at));
+    set_nd_name(c, name);
+    set_nd_a(c, a);
+    if (b) set_nd_next(a, b);
+    set_nd_type(c, ty);
+    return c;
+}
+// the area word of entry i: ld64(phT + PHT_phz_mod) + off
+i64 ph_tza_addr(i64 at, i64 i) {
+    i64 base = ph_tz_call(at, "ld64", ph_tls_addr(at, PHT_phz_mod), 0, TY_I64);
+    return ph_tz_add(at, base, ph_tz_int(at, ld64(ph_tza_off + i * 8)));
 }
 
 i64 ph_tls_used;
@@ -56,6 +153,16 @@ void ph_tls_walk(i64 n) {
         i64 k = nd_kind(n);
         i64 off = 0 - 1;
         if (k == N_IDENT || k == N_ASSIGN) off = ph_tls_off(nd_name(n));
+        if (k == N_IDENT && ph_tza_n && ph_tza_is(nd_name(n))) {
+            i64 ai = ph_tza_find(nd_name(n));
+            if (ai >= 0) {
+                i64 keep0 = nd_next(n);
+                node_assign(n, ph_tza_addr(n, ai));
+                set_nd_next(n, keep0);
+                n = keep0;
+                continue;
+            }
+        }
         if (off >= 0 && k == N_IDENT) {
             i64 keep = nd_next(n);
             i64 ty = nd_type(n);
@@ -190,7 +297,79 @@ i64 ph_truthy_not(i64 x) {
     return u;
 }
 
+// The three functions lib/php_zts.mc calls, appended to the unit once every
+// function is lowered (their templates are the globals themselves, which the
+// walk would otherwise turn into area words):
+//
+//   i64  phz_area_size()                    the area's bytes
+//   void phz_area_init(uptr a)              every word from its template
+//   void phz_statics(uptr a, uptr snap)     each static from MINIT's value
+//                                           (phz_zref: a copy, or 0)
+i64 ph_tz_fn(i64 at, uptr name, i64 ty, i64 params, i64 body) {
+    i64 b = node_new(N_BLOCK, nd_line(at), nd_file(at));
+    set_nd_a(b, body);
+    i64 f = node_new(N_FUNC, nd_line(at), nd_file(at));
+    set_nd_name(f, name);
+    set_nd_type(f, ty);
+    set_nd_a(f, params);
+    set_nd_b(f, b);
+    return f;
+}
+i64 ph_tz_stmt(i64 at, i64 e) {
+    i64 s = node_new(N_EXPRSTMT, nd_line(at), nd_file(at));
+    set_nd_a(s, e);
+    return s;
+}
+i64 ph_tza_emit(i64 at) {
+    // phz_area_size
+    i64 r = node_new(N_RETURN, nd_line(at), nd_file(at));
+    set_nd_a(r, ph_tz_int(at, ph_tza_size));
+    i64 f1 = ph_tz_fn(at, "phz_area_size", TY_I64, 0, r);
+    // phz_area_init(a) and phz_statics(a, snap)
+    i64 h2 = 0;
+    i64 t2 = 0;
+    i64 h3 = 0;
+    i64 t3 = 0;
+    i64 i = 0;
+    loop {
+        if (i >= ph_tza_n) break;
+        uptr nm = ld64(ph_tza_name + i * 8);
+        i64 off = ld64(ph_tza_off + i * 8);
+        i64 k = 0;
+        loop {
+            if (k >= ld64(ph_tza_words + i * 8)) break;
+            i64 dst = ph_tz_add(at, ph_tz_id(at, "a", TY_UPTR), ph_tz_int(at, off + k * 8));
+            i64 src = ph_tz_call(at, "ld64", ph_tz_add(at, ph_tz_id(at, nm, TY_UPTR), ph_tz_int(at, k * 8)), 0, TY_I64);
+            i64 s = ph_tz_stmt(at, ph_tz_call(at, "st64", dst, src, TY_VOID));
+            if (t2) set_nd_next(t2, s);
+            if (!t2) h2 = s;
+            t2 = s;
+            k = k + 1;
+        }
+        if (ld8(nm + 2) == 115) {                                         // phst_
+            i64 dst = ph_tz_add(at, ph_tz_id(at, "a", TY_UPTR), ph_tz_int(at, off));
+            i64 old = ph_tz_call(at, "ld64", ph_tz_add(at, ph_tz_id(at, "snap", TY_UPTR), ph_tz_int(at, off)), 0, TY_I64);
+            i64 cp = ph_tz_call(at, "phz_zref", old, 0, TY_UPTR);
+            i64 s = ph_tz_stmt(at, ph_tz_call(at, "st64", dst, cp, TY_VOID));
+            if (t3) set_nd_next(t3, s);
+            if (!t3) h3 = s;
+            t3 = s;
+        }
+        i = i + 1;
+    }
+    if (!h2) h2 = node_new(N_BLOCK, nd_line(at), nd_file(at));
+    if (!h3) h3 = node_new(N_BLOCK, nd_line(at), nd_file(at));
+    i64 f2 = ph_tz_fn(at, "phz_area_init", TY_VOID, param_new(TY_UPTR, "a"), h2);
+    i64 p3 = param_new(TY_UPTR, "a");
+    set_nd_next(p3, param_new(TY_UPTR, "snap"));
+    i64 f3 = ph_tz_fn(at, "phz_statics", TY_VOID, p3, h3);
+    set_nd_next(f1, f2);
+    set_nd_next(f2, f3);
+    return f1;
+}
+
 i64 ph_tls_pass(i64 root) {
+    if (ph_ext && ph_ext_zts) ph_tza_scan(root);
     i64 f = root;
     loop {
         if (!f) break;
@@ -228,6 +407,11 @@ i64 ph_tls_pass(i64 root) {
             }
         }
         f = nd_next(f);
+    }
+    if (ph_ext && ph_ext_zts) {
+        i64 last = root;
+        loop { if (!nd_next(last)) break; last = nd_next(last); }
+        set_nd_next(last, ph_tza_emit(root));
     }
     return root;
 }

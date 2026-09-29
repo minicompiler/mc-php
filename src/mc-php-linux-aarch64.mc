@@ -14,7 +14,15 @@
 //
 //   mc build src --config src/mc-php.linux-aarch64.toml
 #include <mc/host_linux_aarch64>
-#include <mc/core>
+// <mc/core> is these seven parts and mc's main; mc-php's main is
+// src/build.mc's, which registers its own `build` first
+#include <mc/core_min>
+#include <mc/core_machines>
+#include <mc/core_writers>
+#include <mc/core_build>
+#include <mc/core_bundle>
+#include <mc/core_pkg>
+#include <mc/core_sandbox>
 #include "host_extra_linux.mc"
 #include <float>
 #include <machine_arm64_float>

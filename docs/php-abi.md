@@ -26,7 +26,7 @@ not a dependency of the thing it grades.
 | 0 | u16 | `size` | 168 |
 | 4 | u32 | `zend_api` | `[php].api` |
 | 8 | u8 | `zend_debug` | `[php].debug` |
-| 9 | u8 | `zts` | `[php].thread_safety` |
+| 9 | u8 | `zts` | 1 for the ZTS output of `[php].thread_safety` (`"zts"`, or the ZTS half of `"both"`) |
 | 16 | ptr | `ini_entry` | 0 |
 | 24 | ptr | `deps` | 0 -- `[[extension.deps]]` is designed and not implemented |
 | 32 | ptr | `name` | `[extension].name` |

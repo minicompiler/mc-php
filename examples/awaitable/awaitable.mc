@@ -502,7 +502,15 @@ void ent(uptr fe, i64 i, uptr name, uptr h, uptr ai, i64 na, i64 fl) {
 }
 
 i64 minit(i64 ty, i64 num) {
+    // executor_globals on an NTS php; on a ZTS php there is no such symbol and
+    // the executor's globals are the loading thread's TSRM block plus
+    // executor_globals_offset (lib/php_zts.mc says the same for mc-php)
     st64(&eg, dlsym(RTLD_DEFAULT, "executor_globals"));
+    if (!ld64(&eg)) {
+        uptr tg = dlsym(RTLD_DEFAULT, "tsrm_get_ls_cache");
+        uptr to = dlsym(RTLD_DEFAULT, "executor_globals_offset");
+        if (tg && to) st64(&eg, callp(tg) + ld64(to));
+    }
     st64(&sip, dlsym(RTLD_DEFAULT, "zend_string_init_interned"));
     st64(&hnd, dlsym(RTLD_DEFAULT, "std_object_handlers"));
     st64(&exc_ce, dlsym(RTLD_DEFAULT, "zend_ce_exception"));

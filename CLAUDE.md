@@ -1247,3 +1247,72 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     `sample` shows equal totals for the module and the difference in `f__dec_umul`, whose inner
     loop is instruction-identical, so the difference is alignment. two-extensions: 1.14x against
     1.17x. An always-TLS variant measured 0.265 ms (+18%).
+- threads, step 2 (2026-09-29, branch `threads-zts`, from main 24aed04): **ZTS extensions and
+  `[php].thread_safety = "nts" | "zts" | "both"`**. The default is `nts`, and the output depends
+  only on the file.
+  - An unknown value is refused at its `file:line:col`. The old booleans are refused with the
+    word that replaces each.
+  - The build id's `,NTS`/`,TS` word is made the output's own (`ph_ts_bid`).
+  - A ZTS output pushes `lib/php_zts.mc`, and `get_module` ends with `phx_ts_module`:
+    - `EG` is read as `tsrm_get_ls_cache() + executor_globals_offset`, both found by dlsym.
+      `EG(exception)` is 960 on both builds, and the layout gate is 85/85 against the ZTS
+      headers.
+    - (superseded by the review round below) An RINIT/RSHUTDOWN pair refused a request on any
+      php thread other than the loading one.
+    - On Windows, `php_dlsym` asks `php8ts.dll`. The host source is swapped only for ZTS.
+  - `"both"`: mc-php's entries now include mc's seven parts plus `src/build.mc`'s own main,
+    which re-registers `build`. It builds the NTS output in process, then the ZTS output in a
+    child from a hidden copy of the file (out gets `-zts`, `thread_safety = "zts"`, and
+    `php8.lib` becomes `php8ts.lib`).
+  - NTS inertness: every NTS module the repo builds (hello, decimal, extA, extB, awaitable and
+    the four tests/ext modules) is `cmp`-identical, before and after, on macOS and on Linux
+    aarch64 and x86_64. Windows is identical by construction: nothing NTS-side changed.
+  - Tests:
+    - `tests/ts.sh`: a ZTS php grades hidden zts copies of the files;
+    - `ZTS=1 tests/linux.sh`: php:8.5-zts-alpine, with the C twins built against its headers;
+    - `tests/both.sh`: each output is loaded in its own php, and the other php refuses it;
+    - `ext.sh` 2b (three refusals) and 2c ("both" on every leg).
+  - CI adds a macOS ZTS job (setup-php `phpts: ts`), ZTS Windows legs (x86_64 and aarch64), and
+    the ZTS and both steps on the Linux legs.
+  - Review round (PR #39), six findings:
+    1. Real multi-thread ZTS (`docs/threads.md` § ZTS). TSRM module globals: php gives every
+       php thread a runtime block (`globals_size/id_ptr/ctor/dtor`), set up at the thread's
+       first request, released by `globals_dtor`. EG is read per thread. Per php thread, and
+       copied from MINIT's at each request (`phz_privatize`): globals, constants, the class
+       registry, statics, static properties, the call-site caches (`phst_`/`phf_` moved into a
+       per-thread area by `src/tls.mc`). MINIT's memory is read-only under
+       `MCPHP_ZTS_READONLY=1`. Gate `tests/frankenphp.sh` (FrankenPHP 8.5.11 ZTS, 8 php
+       threads, 400 warm-up + 4000 requests 32 at a time): every answer right, 5 threads,
+       RSS +2..3 MiB, on aarch64 (3 runs) and x86_64 under emulation (2000/16); CI on both
+       Linux legs. Cost on decimal's bench: 0.228 ms NTS vs 0.269 ms ZTS (+18%); interpreted
+       php itself +5%. Found on the way, NOT a ZTS defect and not fixed here: an arrow function
+       captures every enclosing variable, so a `$e` a catch never assigned is an unset slot --
+       SIGSEGV exit 139 on main's own compiler, program road, NTS.
+    2. A php without `tsrm_get_ls_cache`/`executor_globals_offset` gets an `E_CORE_ERROR` from
+       `get_module` naming the symbol; `ext.sh` 2c and `both.sh` check it (NTS php loading the
+       ZTS output).
+    3. The unfrozen mc names: `tests/mcnames.mc` (217: 64 functions, 5 globals, 145 defines, 3
+       C functions) and `docs/mc-internals.md`, pinned to mc 1.3.0; `tests/mcnames.sh --strict`
+       in CI names a missing name or a changed arity and the mc version.
+    4. The ZTS copy is `.mcphp-zts-<pid>-<file>`, removed on every path; `.gitignore` has
+       `.mcphp-zts-*` and `.mcphp-test-*`; a SIGKILL leaving it is documented.
+    5. `php8.lib` -> `php8ts.lib` only for a Windows target and only as a whole word.
+    6. `ph_swap` refuses a text that occurs twice or never.
+    - CI found one more (5158ea0): RINIT's call left a home chunk, so `phx_enter`'s fast path
+      never reached the one-time EG(exception) measurement; on Windows the measured offset
+      is not 960 and `callables` failed on both ZTS legs. A ZTS-only swap makes the fast path
+      wait for the measurement; a module with the offset forced wrong reproduced it on
+      linux/aarch64 (exit 255 before, php's bytes after). CI 36553774441 all 8 jobs green;
+      FrankenPHP linux/x86_64 native 3/3 green (5, 6 and 8 php threads). The run before the
+      fix HUNG at FrankenPHP's first request on linux/x86_64 native (cancelled after 10 min);
+      that cause is not established.
+    - Re-check finding (MEDIUM-HIGH): `phx_ts_rinit` saved and restored the process-wide
+      `phx_egx_done`, which another php thread could write back as 1 before any thread
+      measured. `phx_egx` and `phx_egx_done` are now per-thread words (src/tls.mc, ZTS only,
+      PHT 12424/12432, block 12440); RINIT sets the flag in its own block; each php thread
+      measures once in its own engine. Gate: `MCPHP_ZTS_EGX_WRONG=1` starts every thread from
+      offset 456 (EG(function_table)); frankenphp.sh's readiness probe calls nothing in the
+      module and the warm-up's 400 first requests must be right, with a throwing callable and
+      a variable-called php function. A build that never measures fails all 400; the old
+      shared-flag race did NOT reproduce in 8 runs (5 with the non-calling probe); the fix
+      stands by construction. NTS cmp 27/27 identical.

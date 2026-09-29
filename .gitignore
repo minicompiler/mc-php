@@ -31,3 +31,9 @@ probes/t9/out/
 
 probes/t10/mc-php
 probes/t10/out/
+
+# the ZTS copy of a project file src/build.mc writes for thread_safety =
+# "both" (removed when the build ends; a SIGKILLed build leaves it), and the
+# copies the test scripts write beside a project file
+.mcphp-zts-*
+.mcphp-test-*

@@ -25,3 +25,9 @@ uptr realpath(uptr path, uptr resolved) {
     loop { if (i >= n) break; if (ld8(resolved + i) == 92) st8(resolved + i, 47); i = i + 1; }
     return resolved;
 }
+
+// the process id: src/build.mc names the ZTS copy of a project file after
+// this process (src/host_extra_macos.mc has the macOS one)
+extern i64 GetCurrentProcessId();
+
+i64 ph_pid() { return c_int(GetCurrentProcessId()); }

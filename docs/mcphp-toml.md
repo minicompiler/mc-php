@@ -133,7 +133,7 @@ and they are all that is consulted. Measured against php-src's own `Zend/zend_mo
 |---|---|---|---|
 | `php.api` | integer | `PHP API` | `zend_api` |
 | `php.build_id` | string | `PHP Extension Build` | `build_id` |
-| `php.thread_safety` | boolean | `Thread Safety` | `zts` |
+| `php.thread_safety` | `"nts"`, `"zts"` or `"both"` | `Thread Safety` | `zts` |
 | `php.debug` | boolean | `Debug Build` | `zend_debug` |
 | `php.bin` | string | — | a php binary to read the four out of, instead of stating them |
 
@@ -156,11 +156,45 @@ which is written as:
 [php]
 api           = 20250925
 build_id      = "API20250925,NTS"
-thread_safety = false
+thread_safety = "nts"
 debug         = false
 ```
 
-Nothing else about php is read. In particular **no php header file is opened**, which is the
+Nothing else about php is read.
+
+### `php.thread_safety` -- which php the output is for
+
+| value | output |
+|---|---|
+| `"nts"` (the default) | one module for a php without thread safety (`Thread Safety => disabled`) |
+| `"zts"` | one module for a thread-safe php (`Thread Safety => enabled`) |
+| `"both"` | the two, from one project: `[project].out` is the NTS module and the ZTS one is the same name with `-zts` before its extension -- `build/hello.so` and `build/hello-zts.so`, `build/hello.dll` and `build/hello-zts.dll` |
+
+The value is stated, never read off a php on the machine: the output depends on this file and
+nothing else. Anything else is refused at the key's own `file:line:col`. The TOML booleans this key
+took before are refused with the word that replaces them (`false` is `"nts"`, `true` is `"zts"`).
+
+`php.build_id` names the NTS build id or the TS one, and the compiler writes the output's own:
+`API20250925,NTS` becomes `API20250925,TS` for the ZTS module, `API20250925,NTS,VS17` becomes
+`API20250925,TS,VS17`. So one project file serves both, and a build id with neither `,NTS` nor
+`,TS` in it is refused at its position.
+
+What `"both"` does: `mc-php build` builds the NTS module, then builds the ZTS one in a second
+process from a copy of this file beside it, with three lines changed -- `thread_safety = "zts"`,
+the `-zts` output name, and, for a Windows target only, `php8.lib` in `[linker]` replaced by
+`php8ts.lib` wherever it is a whole word (a thread-safe php on Windows is `php8ts.dll`, and the
+import library names it; a `myphp8.lib` is left alone). With `"zts"` alone, the `[linker]` line
+is yours to write, so write `php8ts.lib`.
+
+The copy is named `.mcphp-zts-<pid>-<file>` -- the id of the `mc-php build` process, so two builds
+of one project at once never share it -- and it is removed when the build ends, whether the second
+build succeeded, failed or crashed. The one case no code can clean is a build killed from outside
+(`kill -9`) while the copy exists: it stays beside your project file. The `.mcphp-zts-` prefix is
+how to find it, it is safe to delete, and this repository's `.gitignore` carries the prefix; add it
+to yours.
+
+The PROGRAM road has no module header, so it ignores this key. A value the key cannot mean is
+refused there too. In particular **no php header file is opened**, which is the
 whole point: `php-config`, `phpize` and the development package are not on the road.
 
 ### `php.checked_reads` -- the reads C leaves unchecked, checked as a trap

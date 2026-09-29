@@ -50,7 +50,12 @@ fail=0
 . "$here/tmp.sh"
 mcphp_tmp_init mcphp-ext
 tmp=$MCPHP_TMP
-trap 'rm -rf "$tmp"' EXIT
+. "$here/ts.sh"
+mcphp_ts_init
+# a ZTS php grades a copy of the file that says "zts" (tests/ts.sh)
+cfg0=$cfg
+cfg=$(mcphp_ts_cfg "$cfg")
+trap 'rm -rf "$tmp"; mcphp_ts_clean' EXIT
 trap 'exit 130' INT
 
 say() { printf '  %s\n' "$*"; }
@@ -104,12 +109,76 @@ tv() { sed -n "s/^$1 = *\(.*\)\$/\1/p" "$cfg" | head -1 | tr -d '"'; }
 api=$(pv 'PHP API'); bid=$(pv 'PHP Extension Build')
 zts=false; [ "$(pv 'Thread Safety')" = enabled ] && zts=true
 dbg=false; [ "$(pv 'Debug Build')" = yes ] && dbg=true
-for pair in "api:$api" "build_id:$bid" "thread_safety:$zts" "debug:$dbg"; do
+# The build id is compared the way the compiler writes it: the stated one with
+# its thread-safety word made this output's (src/ext.mc ph_ts_bid) -- the file
+# says ",NTS" and a ZTS output carries ",TS".
+tsw=NTS; [ "$zts" = true ] && tsw=TS
+for pair in "api:$api" "build_id:$bid" "thread_safety:$TSV" "debug:$dbg"; do
     k=${pair%%:*}; want=${pair#*:}
     got=$(tv "$k")
-    [ "$got" = "$want" ] || bad "$cfg: php.$k is $got, this php says $want (re-measure: php -i)"
+    [ "$k" = build_id ] && got=$(printf '%s' "$got" | sed -E "s/,N?TS(,|\$)/,$tsw\1/")
+    [ "$got" = "$want" ] || bad "$cfg0: php.$k is $got, this php says $want (re-measure: php -i)"
 done
-say "php: api $api, build $bid, zts $zts, debug $dbg -- and $cfg says so"
+say "php: api $api, build $bid, zts $zts, debug $dbg -- and $cfg0 says so (thread_safety = \"$TSV\" for this php)"
+
+# --- 2b. [php].thread_safety says what it can mean, or is refused ---------
+# The value names the php the OUTPUT is for and the compiler never asks a php
+# (docs/mcphp-toml.md § [php]). Anything else is refused at its own
+# file:line:col, the old booleans with the word that replaces each; and a
+# build id with no ,NTS or ,TS word cannot be made the output's own.
+tsref() { # SED WANT: a copy of the file edited by SED is refused with WANT
+    sed "$1" "$cfg" > "$EX/.ts-ref.toml"
+    "$BIN" build "$EX" --config "$EX/.ts-ref.toml" > "$tmp/tsref.out" 2>&1; rc=$?
+    got=$(tail -1 "$tmp/tsref.out" | tr -d '\r')
+    rm -f "$EX/.ts-ref.toml"
+    case "$got" in
+        *.ts-ref.toml:[0-9]*:[0-9]*": $2") [ "$rc" = 1 ] && return 0 ;;
+    esac
+    bad "thread_safety: exit $rc, want 1 and \"$2\""; printf '      got %s\n' "$got"; return 1
+}
+tsn=0
+tsref 's/^thread_safety = .*/thread_safety = "maybe"/' 'mc-php: thread_safety must be "nts", "zts" or "both": php.thread_safety' && tsn=$((tsn + 1))
+tsref 's/^thread_safety = .*/thread_safety = false/' 'mc-php: thread_safety is "nts", "zts" or "both" (false is "nts", true is "zts"): php.thread_safety' && tsn=$((tsn + 1))
+tsref 's/^build_id = .*/build_id = "API20250925"/' 'mc-php: the build id names no thread safety (,NTS or ,TS): php.build_id' && tsn=$((tsn + 1))
+say "thread_safety: $tsn of 3 wrong files refused at the key's own line and column"
+
+# --- 2c. "both": two outputs, and THIS php takes only its own ---------------
+# One project, thread_safety = "both" (src/build.mc): build/hello.$sx for an
+# NTS php and build/hello-zts.$sx for a ZTS one. The php under test loads the
+# one for its kind and refuses the other by name. Every leg grades the half its
+# php can; tests/both.sh loads each half in its own php on Linux.
+sed 's/^thread_safety = .*/thread_safety = "both"/' "$cfg0" > "$EX/.mcphp-test-both.toml"
+rm -f "$EX/build/hello.$sx" "$EX/build/hello-zts.$sx"
+if "$BIN" build "$EX" --config "$EX/.mcphp-test-both.toml" > "$tmp/both.out" 2>&1 \
+   && [ -f "$EX/build/hello.$sx" ] && [ -f "$EX/build/hello-zts.$sx" ]; then
+    mine=hello.$sx; other=hello-zts.$sx
+    [ "$TSV" = zts ] && { mine=hello-zts.$sx; other=hello.$sx; }
+    cp "$EX/build/$mine" "$tmp/b-mine.$sx"; cp "$EX/build/$other" "$tmp/b-other.$sx"
+    bm=$(cygpath -m "$tmp/b-mine.$sx" 2>/dev/null || echo "$tmp/b-mine.$sx")
+    bo=$(cygpath -m "$tmp/b-other.$sx" 2>/dev/null || echo "$tmp/b-other.$sx")
+    ml=$("$PHP" -d extension="$bm" -r 'echo extension_loaded("hello") ? "yes" : "no";' 2>&1 | tr -d '\r')
+    ol=$("$PHP" -d extension="$bo" -r 'echo extension_loaded("hello") ? "yes" : "no";' 2>&1 | tr -d '\r')
+    # refused: an NTS module by a ZTS php's header check; a ZTS module in an
+    # NTS php by the module itself, from get_module, naming the TSRM symbol
+    # this php does not export (lib/php_zts.mc phx_ts_module, an E_CORE_ERROR,
+    # which php answers by exiting); and on Windows by the loader, before any
+    # of that -- a ZTS module imports php8ts.dll and an NTS php does not have
+    # it (and the other way round)
+    case "$ml|$ol" in
+        yes\|*"Unable to initialize module"*no|yes\|*"Unable to load dynamic library"*no)
+            say "both: two outputs; this $TSV php loads $mine and refuses $other" ;;
+        "yes|"*"mc-php: this ZTS extension needs php's tsrm_get_ls_cache, which this php does not export"*)
+            say "both: two outputs; this $TSV php loads $mine, and $other refuses this php by name: tsrm_get_ls_cache is missing" ;;
+        *) bad "both: $mine says \"$ml\", $other says \"$ol\"" ;;
+    esac
+else
+    bad "both: the build:"; sed 's/^/      /' "$tmp/both.out"
+fi
+# the ZTS copy of the project file (.mcphp-zts-<pid>-<file>) is gone
+left=$(ls -a "$EX" | grep '^\.mcphp-zts-' | tr '\n' ' ')
+if [ -n "$left" ]; then bad "both: left behind: $left"; rm -f "$EX"/.mcphp-zts-*
+else say "both: no .mcphp-zts- copy left beside the project file"; fi
+rm -f "$EX/.mcphp-test-both.toml" "$EX/build/hello.$sx" "$EX/build/hello-zts.$sx"
 
 # --- 3. the build ----------------------------------------------------------
 out=$tmp/hello.$sx
@@ -705,7 +774,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/k.build" 2>&1; then
         say "callables: a name, an array, a closure, __invoke and a spread called; throwables both ways -- $(wc -l < "$tmp/k.m" | tr -d ' ') lines, the interpreted source's"
     else
         bad "callables: the module (exit $km) and the interpreted source (exit $ki) differ"
-        diff "$tmp/k.i" "$tmp/k.m" | sed -n '1,12p' | sed 's/^/      /'
+        diff "$tmp/k.i" "$tmp/k.m" | sed -n '1,40p' | sed 's/^/      /'
     fi
 else
     bad "callables: it would not build"; sed 's/^/      /' "$tmp/k.build"

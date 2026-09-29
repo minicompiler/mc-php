@@ -9,8 +9,9 @@
 //
 // A second `extern` of a name the host layer already declared is `function
 // declared twice`, so this cannot simply be declared in src/ for every host.
-// It is per-entry, exactly like the host layer it completes, and there is no
-// macOS twin because the macOS host layer already has the one name in it.
+// It is per-entry, exactly like the host layer it completes. The macOS twin,
+// src/host_extra_macos.mc, has no realpath because the macOS host layer
+// already declares it.
 //
 // The consequence, measured natively with mc 1.1.0 on linux/aarch64 rather
 // than reasoned about: `mc build` -- which is src/mc-php.mc, the `<mc/host>`
@@ -19,3 +20,9 @@
 // per-host config is the NATIVE road on Linux as well as the cross one, and
 // mc.toml, src/mc-php.mc and the README all say so.
 extern uptr realpath(uptr path, uptr resolved);
+
+// getpid(2): src/build.mc names the ZTS copy of a project file after this
+// process (src/host_extra_macos.mc has the macOS one)
+extern i64 getpid();
+
+i64 ph_pid() { return c_int(getpid()); }

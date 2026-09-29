@@ -29,5 +29,5 @@ version = "0.1.0"
 [php]
 api = 20250925
 build_id = "API20250925,NTS"
-thread_safety = false
+thread_safety = "nts"
 debug = false
