@@ -337,3 +337,186 @@ The per-thread road costs a lookup where the NTS module reads a global. `example
 `bench.php` (best of 9, 5 runs each, linux/aarch64): the NTS module under `php:8.5-alpine` 0.228
 ms, the ZTS module under `php:8.5-zts-alpine` 0.269 ms, +18%. The same script interpreted is
 2.526 ms and 2.650 ms: php's own ZTS build is 5% slower on its own.
+
+## Step 3: the thread API (design, for approval)
+
+Status: DESIGN ONLY. Nothing below is implemented yet. The owner's model is `std::thread`: real
+OS threads, memory shared as in C, and races are the developer's. Threads are a goal of their own:
+they do not depend on `await` or on http.
+
+### The API
+
+Five builtins, compiled by mc-php on both roads:
+
+```php
+$t = mcphp_thread_start(callable $fn, mixed ...$args): int;  // a handle
+$r = mcphp_thread_join(int $t): mixed;      // the result; rethrows what $fn threw
+mcphp_thread_detach(int $t): void;          // runs on; nobody joins it
+$n = mcphp_thread_running(): int;           // threads started and not finished
+$c = mcphp_hardware_concurrency(): int;     // logical CPUs, as std::thread's
+```
+
+- **Names.** The `mcphp_` prefix is mc-php's own. php has no function with it, and the step 1 and
+  step 2 test hooks already use it (`mcphp_threads`, `mcphp_thread`, `mcphp_vm`). ext/parallel
+  is classes in the `parallel\` namespace, so it cannot collide either.
+- **An int handle, not an object.** It is a value, so it crosses nothing and is never counted.
+  Joining or detaching a handle twice, or one that is not a thread, throws `Error`:
+  `mc-php: thread N is not joinable`.
+- **The callable** is a closure, `f(...)`, `[$obj, 'm']` or an invokable object. It is not a
+  string: D6 still refuses a string callable. `$args` are passed by value.
+- **An exception** that `$fn` does not catch ends the thread. `join` throws it on the joining
+  thread. The object is a copy, as a result is.
+- **A thread neither joined nor detached** when the program ends (exe) or the request ends
+  (extension) is waited for. If it ended on an exception, that exception is reported as php
+  reports an uncaught one. This is gentler than `std::terminate`, and it is documented.
+- **A detached thread:**
+  - On the program road, it dies with the process, as in C.
+  - On the extension road, RSHUTDOWN waits for it. A thread must not outlive the request whose
+    state it shares.
+- **Where it can be called.** On the extension road the five builtins are compiled INTO the
+  module and are not published: two mc-php modules loaded together would both declare them. A
+  module offers threads to its scripts through its own published functions, for example
+  `function run_all(callable ...$jobs): array`.
+
+### What crosses, and how
+
+**Arguments, results and exceptions are copied.** `$args`, the callable's captured variables,
+the result and the exception are deep-copied, as `phz_privatize` copies MINIT's state:
+- arrays and compiled objects are copied, with one identity map per copy, so a value two slots
+  share stays one value and a cycle ends;
+- strings are copied into the receiving thread's arena.
+
+The copy is made when the thread is started and again when it is joined. The worker's arena is
+then unmapped, as in step 1, so nothing a worker built can be reached after its join. **No type
+is shared by reference through the API.** Shared memory is module state, next.
+
+**Module state is shared, like C** (the step-1 refusals go):
+
+| state | step 3 |
+|---|---|
+| a `global` | one variable for the program (exe) or the request (extension), seen by every thread |
+| a `static` | the same |
+| `define()` | allowed from any thread; the constants table is shared |
+| `class_alias()` | still refused on another thread: the class table is the program's code, and C has no runtime equivalent |
+| `register_shutdown_function()` | still refused on another thread: only the starting thread's list runs |
+
+Two things make a shared write memory-safe. Neither makes it race-free.
+
+- **Publication copies.** While more than one thread runs, a value stored into a global, a static
+  or a constant is deep-copied into a SHARED heap and FROZEN before its address is stored.
+  - Frozen means never counted, never freed and never written in place. A string gets the
+    interned flag that literals already carry, and every counting path already skips that flag.
+    Arrays and objects get the same treatment, with a flag measured in 3a.
+  - A write through a frozen array (`$g['k'] = 1`) is therefore copy-on-write: the writer
+    builds a new array and publishes that.
+  - The shared heap is released when the program ends (exe) or the request ends (extension).
+    By then every thread has been joined.
+  - Without this, a worker's store would point into its own arena, which is unmapped at its
+    join. Counting would also race: counts are not atomic, and step 1 measured why they should
+    not be.
+- **Values already in module state freeze when the first thread starts.** The starting thread
+  walks its roots (`php_roots`) once and flags them. So no thread ever counts a value another
+  thread can reach.
+
+**Unsafe without a lock** (the locks are step 4; until then this is the developer's
+responsibility, as in C):
+- Two threads writing the same variable, or one writing while another reads it. This is a data
+  race: the last store wins, and a reader may see either the old value or the new one. The store
+  of the frozen value's address is one aligned 64-bit word, so a reader never sees half of it.
+  But there is no ordering, so, as in C, this is undefined, not merely nondeterministic.
+- Read-modify-write, such as `$count++`, `$g['a'] += 1` or `$list[] = $x`: updates get lost.
+- `define()` of the same name from two threads at once.
+- Performance: a write into a large shared array copies it while threads run. That is O(n) per
+  write, and it is the price of the frozen model. Step 4's locks do not remove it.
+
+### Each road
+
+**Program road (exe).** Everything is compiled, so every thread is a native OS thread with no
+Zend. This is step 1's machinery, with its own block and its own arena, behind the public API,
+plus the copying and the shared module state above. Windows is covered by `CreateThread` and
+`TlsGetValue`, as in step 1. `mcphp_hardware_concurrency` is `sysconf(_SC_NPROCESSORS_ONLN)` on
+Linux, `hw.logicalcpu` on macOS and `GetSystemInfo` on Windows.
+
+**Extension road, compiled callables (NTS and ZTS).** A closure or function that mc-php compiled
+runs natively on the worker, as on the program road. It gets its own arena and never touches
+Zend's allocator. The module state it shares is the starting REQUEST's:
+- In ZTS, a thread started by a request shares that request's globals and statics, not a new
+  copy of MINIT's.
+- Two FrankenPHP requests still share nothing, as in step 2.
+
+The worker's block points at the request's module words instead of privatizing them.
+
+**Extension road, php callables, NTS: refused.** A php without thread safety has one executor for
+the process, so a php closure or function cannot run on another thread. The alternative was a
+child process: fork, the serialized arguments in, the serialized result out. It was rejected for
+three reasons:
+1. **Portability.** Windows has no fork, so the same module would behave differently per OS.
+2. **Semantics.** A child's writes to module state are its own copy. That contradicts the shared
+   model this step defines, and it would silently answer differently from the ZTS road.
+3. **The host.** Forking a php worker in the middle of a request is unsafe under threaded or
+   evented SAPIs. It duplicates their sockets and locks.
+
+So `mcphp_thread_start` with a php callable on an NTS module throws `Error`:
+`mc-php: a php callable cannot run on another thread in a php without thread safety; build the
+module with thread_safety = "zts", or pass a compiled function`.
+
+**Extension road, php callables, ZTS: a php context of their own on the worker** (split 3b
+below):
+- The worker thread becomes a php thread. `ts_resource_ex(0, NULL)` gives it its TSRM storage.
+  `php_request_startup()` gives it a request, with its own EG, CG, PG, SG and Zend allocator.
+  `php_request_shutdown()` and `ts_free_thread()` end both when the callable returns.
+  All four are exported by php 8.5 ZTS (measured, `nm -D` of `php:8.5-zts-alpine`).
+- The step-1 engine guards (`phx_offthread`) are lifted in that context: it IS a php thread, so
+  the engine is its own.
+- The module's block on that thread shares the starting request's module words, as above.
+- **What the context gets:**
+  - **INI:** the starting request's current values. Each entry the request modified is re-applied
+    with `zend_alter_ini_entry`.
+  - **Includes:** none are run again.
+  - **Functions and classes:** the callable and everything it names must be reachable. Two
+    options, to be decided by a probe before 3b is built:
+    - (a) Share the starting request's user functions and classes. php 8 keeps each op_array's
+      run-time cache behind `ZEND_MAP_PTR`, per thread, which is how opcache shares op_arrays
+      between threads. The starting request outlives the worker, because RSHUTDOWN waits.
+    - (b) Copy the callable alone, as ext/parallel does. Then a callable that names a function
+      or class of the script fails in the worker with php's own "undefined" Error.
+
+    (a) keeps php's meaning and is preferred. (b) is the fallback if the probe shows that
+    op_arrays cannot be shared safely.
+  - **Arguments and results:** copied across the two contexts, engine values through `zval_copy`
+    semantics, with the same deep-copy rule.
+
+### What changes for code that does not use threads
+
+The copying, the freezing and the shared heap run only when `ph_mt` is set, which is only after
+the first thread starts. A program that starts no thread keeps the single-threaded fast path.
+
+The step-1 refusals live in the runtime, though. Removing them, and adding the counting-path
+checks for frozen arrays and objects, changes the bytes of every output, NTS modules included.
+The NTS inertness `cmp` therefore applies only where the thread code is pushed conditionally. 3a
+measures whether the counting checks can reuse the existing interned flag (no change) or need a
+new one, and reports the byte difference on the 9 NTS modules either way.
+
+### The split: two PRs, in order
+
+**3a: the API, the program road, compiled callables on the extension road, shared module state.**
+- The five builtins, the copies, the frozen publication, and the shared heap.
+- The step-1 refusals removed, except `class_alias` and `register_shutdown_function`.
+- The NTS php-callable refusal.
+- On a ZTS module, a php callable is refused as well, with a message that names 3b.
+- Windows on both roads.
+- Gates:
+  - fixtures that fail before the change (`tests/c`, recordings: php has no such API);
+  - `tests/ext` loaded and interpreted where php can answer;
+  - leaks;
+  - a C twin (pthreads and Win32) of one threaded example, for reference and perf;
+  - the llvm-mc sweep;
+  - the NTS byte report above.
+
+**3b: php callables on a ZTS worker in a php context of their own.**
+- First a probe of option (a) against (b).
+- Then the context, the INI copy, the lifted engine guards, and the argument and result copies
+  across contexts.
+- Gates: a FrankenPHP gate with php closures on threads (Linux), and the Windows ZTS legs.
+
+Both PRs are labeled `release:minor`.
