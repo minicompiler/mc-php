@@ -707,6 +707,8 @@ void phx_enter() {
 }
 void phx_enter_slow() {
     php_bootstrap();
+    // a request's first call (MINIT has ended): nothing is pending
+    if (!phx_egx_done && phx_mark && phx_eg) phx_egx_find();
     phx_zalloc_fn = &phx_zalloc;
     if (!phx_depth) {
         ph_pin = 0;
@@ -1223,7 +1225,26 @@ uptr phx_eg;                        // &executor_globals, found at get_module
 uptr phx_pce;                       // the proxies' class, made before MINIT ends
 u64  phx_engt[7];                   // lib/php_rt.mc's ph_eng
 
-i64 phx_zexc() { return ld64(phx_eg + EGX_EXCEPTION) != 0; }
+// EG(exception)'s offset, MEASURED once in the first call rather than taken
+// from the headers alone: executor_globals is laid out differently on Windows
+// (an OSVERSIONINFOEX member sits before it). The first handler runs with
+// nothing pending, so an exception thrown there is found among the globals
+// and cleared; EGX_EXCEPTION (tests/ext/abi.c) is what it finds elsewhere,
+// and the fallback.
+i64 phx_egx = EGX_EXCEPTION;
+i64 phx_egx_done;
+void phx_egx_find() {
+    phx_egx_done = 1;
+    uptr x = zend_throw_exception(0, "", 0);
+    i64 off = 0;
+    loop {
+        if (off >= 8192) break;
+        if (ld64(phx_eg + off) == x) { phx_egx = off; break; }
+        off = off + 8;
+    }
+    zend_clear_exception();
+}
+i64 phx_zexc() { return ld64(phx_eg + phx_egx) != 0; }
 
 // a reference the module takes on an engine array or object
 void phx_hold(uptr p) {

@@ -1165,4 +1165,9 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   `tests/g/104-callable-value.php` is green, and the grid gains three `__invoke` tests
   (`bug70179`, `dereference_004`, `bug46409`).
   `AW_PROGRESS` 6 -> 9 (`reset()` is next: the bodies). `tests/ext.sh` step 19
-  (`tests/ext/callables`), `tests/leaks.sh` (the callables module, 300 rounds).
+  (`tests/ext/callables`), `tests/leaks.sh` (the callables module, 300 rounds). windows/x86_64
+  CI then found `EG(exception)` at the wrong place: `executor_globals` carries an
+  `OSVERSIONINFOEX` before it on Windows, so the headers' 960 is not Windows's offset. It is now
+  MEASURED in a request's first call (`phx_egx_find`: an exception thrown with nothing pending,
+  found among the globals, cleared), with 960 as the fallback -- a fallback of 8 still passed
+  step 19 on macOS, so the probe is what answers.
