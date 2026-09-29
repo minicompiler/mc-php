@@ -788,6 +788,38 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         ph_ety = PT_MIXED;
         return ph_c2("php_f_pack", ph_to_mixed(ph_a(avp, 0), ph_aty(avp, 0)), ph_c1("php_zarr", ar2, ty_pzv), ty_pzv);
     }
+    // mcphp_threads('f', $n, $arg): the runtime's own gate of its threads
+    // (lib/php_rt.mc § other threads) -- n OS threads, thread i running the
+    // compiled f(arg, i), the sum of what they returned. Internal: the public
+    // thread API is a later step. f is a function declared above, taking
+    // (int, int) and returning int, named by a literal.
+    if (str_eq(name, "mcphp_threads")) {
+        u8 tnp[8];
+        uptr tav = ph_read_args(3, fl, line, tnp);
+        if (ld64(tnp) != 3) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        uptr tf = ph_alit(tav, 0);
+        if (!tf) err_at2(fl, line, "mc-php: mcphp_threads() names its function by a literal", name);
+        i64 tfi = ph_fn_find(tf);
+        if (tfi < 0 || ld64(ph_fnp + tfi * 8) != 2 || ld64(ph_fret + tfi * 8) != PT_INT
+            || ld64(ph_fpt + (tfi * PH_MAXP) * 8) != PT_INT || ld64(ph_fpt + (tfi * PH_MAXP + 1) * 8) != PT_INT)
+            err_at2(fl, line, "mc-php: mcphp_threads() runs a function declared above as f(int, int): int", tf);
+        i64 fp = node_new(N_ADDR, line, fl);
+        set_nd_name(fp, ph_mangle(ld64(ph_fname + tfi * 8), "f_"));
+        set_nd_type(fp, TY_UPTR);
+        ph_ety = PT_INT;
+        return ph_c3("php_thr_run", fp, ph_to_int(ph_a(tav, 1), ph_aty(tav, 1)),
+                     ph_to_int(ph_a(tav, 2), ph_aty(tav, 2)), TY_I64);
+    }
+    // mcphp_vm(): the process's virtual size in bytes (committed bytes on
+    // Windows), -1 when the host cannot say -- the gate that sees a thread's
+    // arena kept after it ends (tests/c/10-threads-vm.php). Internal.
+    if (str_eq(name, "mcphp_vm")) {
+        u8 vnp[8];
+        ph_read_args(1, fl, line, vnp);
+        if (ld64(vnp) != 0) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        ph_ety = PT_INT;
+        return ph_call("ph_os_vm", 0, 0, 0, 0, 0, TY_I64);
+    }
     // func_num_args() / func_get_arg(k): answered from the callee's OWN
     // parameters, which need no run-time table -- D6 refuses `func_get_args`
     // by name and that one stays refused (docs/plan.md section 3, D6).

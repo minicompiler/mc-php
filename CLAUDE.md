@@ -1216,3 +1216,34 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   the twin and the compiled module when php has pcntl. The counters were checked against
   the twin and `awaitable.mc`: they count threads, so `parallel` leaves `completed()`/`peak()` at
   0 -- now a `check.php` line (38 lines; `AW_PROGRESS` 32).
+- threads, step 1 (2026-09-29, branch `threads-runtime`, from main bac2dcf): **the runtime's
+  state per thread** (`docs/threads.md`). The inventory covers 122 mutable globals in `lib/`.
+  94 of them move into a per-thread block (`lib/php_tls.mc`, 12320 bytes, scalars first). Every
+  function that touches the block opens with `phT = ph_tcur; if (!phT) phT = ph_tslow();`. While
+  only the booting thread runs, that is one load and a branch. While other threads run, it asks
+  `pthread_getspecific`/`TlsGetValue`. `src/tls.mc` lowers the 7 names that generated code uses.
+  The rest stays shared, with a reason for each:
+  - written at bootstrap: the shared lazy values are now built eagerly;
+  - read-only after MINIT;
+  - refused from another thread with an Error: globals, statics, `define()`, `class_alias()`, and
+    every entry into php's engine. Both guards are **interim until step 3**: module globals
+    become shared, one copy, as in C.
+  No atomics: only literals and class entries cross threads, and neither is ever counted.
+  - Each other thread gets its own mapped arena and no Zend allocator. Its arena and block are
+    always unmapped at join, because a thread never pins. The review found that a first version
+    kept a 256 MiB arena for any thread that called one of six builtins: a set/restore of the
+    error or exception handler, `strtok`, or `fopen`. `tests/c/10-threads-vm` measures the
+    process's virtual size (`mcphp_vm()`: `task_info`, `/proc/self/statm`,
+    `K32GetProcessMemoryInfo`). It grew 8192 MiB before the fix and stays under 256 MiB after.
+  - Only the booting thread flips `ph_tcur`: to 0 before the first thread is created, and back
+    after the last join. A thread may start threads of its own. Every thread checks the flip at
+    its start and at its end.
+  - The host's thread-local key is created once. The first version created one per run, which
+    leaks keys.
+  - `mcphp_threads('f', $n, $arg)` is a test-only gate.
+  - Tests: `tests/c/09-threads` (8 threads x 5 rounds; nested 4 x 3; 1500 runs in a row; module
+    state refused), `tests/ext.sh` step 20, and a threads block in `tests/leaks.sh`.
+  - Cost on decimal, 15 rounds interleaved: main 0.225 ms (1.78x C), this 0.231 (1.83x), +2.7%.
+    `sample` shows equal totals for the module and the difference in `f__dec_umul`, whose inner
+    loop is instruction-identical, so the difference is alignment. two-extensions: 1.14x against
+    1.17x. An always-TLS variant measured 0.265 ms (+18%).

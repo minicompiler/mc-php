@@ -213,6 +213,20 @@ if "$BIN" build "$t/cal" --config "$t/cal/r.toml" > "$t/k.out" 2>&1; then
 else
     bad "the callables module: it would not build"; sed "s/^/      /" "$t/k.out"
 fi
+# compiled functions on several OS threads at once (the module of tests/ext.sh
+# step 20): each thread bumps an arena of its own, and nothing php allocates may be
+# left by it, 30 rounds of 4 threads
+mkdir -p "$t/thr"
+cp tests/ext/threads/threads.php "$t/thr/r.php"
+{ cat tests/ext/threads/check.php
+  printf "%s\n" "for (\$k = 0; \$k < 30; \$k++) { th\\run(4, 50); }"
+} > "$t/thr/run.php"
+sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.so\"|" examples/hello/mcphp.linux.toml | dbg /dev/stdin > "$t/thr/r.toml"
+if "$BIN" build "$t/thr" --config "$t/thr/r.toml" > "$t/th.out" 2>&1; then
+    leakfree "compiled functions on OS threads (tests/ext/threads), 30 rounds of 4" -d extension="$t/thr/build/r.so" "$t/thr/run.php"
+else
+    bad "the threads module: it would not build"; sed "s/^/      /" "$t/th.out"
+fi
 [ "$fail" = 0 ] || { echo "  leaks: something failed"; exit 1; }
 echo "  leaks: every request ended with nothing of the module still allocated"
 '

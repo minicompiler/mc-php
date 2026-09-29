@@ -166,7 +166,7 @@ for f in $P/c/*.php; do
         fail=1
     fi
 done
-echo "  C behaviour: $ncok / $nc answer their recording (wrap, in-range reads, a hash, checked_reads, #[Extern])"
+echo "  C behaviour: $ncok / $nc answer their recording (wrap, in-range reads, a hash, checked_reads, #[Extern], threads)"
 # The packed int array (src/packed.mc) is a LOWERING, and a differential only
 # says the answers are php's -- a proof that silently never fires would pass
 # it too. So the lowering is read back: every pk_* function of g/105 must

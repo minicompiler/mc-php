@@ -302,13 +302,18 @@ each stream and exit the same. These are the places where they would not:
 
 ## Thread safety
 
-`[php].thread_safety` is carried into the module header because the loader compares it, and a ZTS
-php refuses an NTS module by name. It is **not** a claim that the runtime is thread safe: the
-module's arena, the call's chunk, the class table and the pending-exception flag are process
-globals, and a ZTS php running two requests in two threads through one loaded module would share
-all four. Nothing here has
-been run under a ZTS php. Build for the php you have, and until that measurement exists, that
-php should be NTS.
+`[php].thread_safety` is carried into the module header because the loader compares it. A ZTS php
+refuses an NTS module by name.
+
+Since threads step 1 (`docs/threads.md`), the RUNTIME keeps its state per thread. That state is
+the arena, the call's chunk, the pending exception, the output buffer and the parsers' cursors.
+Compiled functions run correctly on several OS threads at once. `tests/ext.sh` step 20 proves
+this inside a loaded module.
+
+This is **not** a claim about php's engine. A thread other than the one php runs on gets an
+Error when it tries to enter the engine. Nothing here has been run under a ZTS php, which is
+threads step 2. Build for the php you have. Until step 2's measurement exists, that php should be
+NTS.
 
 ## The memory
 

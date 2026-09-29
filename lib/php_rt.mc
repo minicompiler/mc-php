@@ -31,11 +31,43 @@
 // chmod/putenv/unsetenv, the O_ and S_IF flags, and php_stat_mode and
 // php_stat_size -- and the host layer is what answers all of it.
 
+// ---- the thread block -------------------------------------------------------
+// Everything the runtime changes while code runs -- the arena's top, the
+// string pool, the pending throwable, the output buffer, a parser's cursor,
+// an extension call's chunk -- is one block per THREAD, laid out by
+// lib/php_tls.mc (PHT_*), never a global. A function that touches it opens
+// with
+//
+//     uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+//
+// and reads and writes `ld64(phT + PHT_x)` / `st64(phT + PHT_x, v)`. While
+// only the thread that booted runs compiled code, ph_tcur IS its block
+// (ph_tmain): one load and a branch not taken. Once another thread runs,
+// ph_tcur is 0 and every function asks the host's thread-local slot
+// (ph_tslow -> ph_tget: pthread_getspecific, TlsGetValue).
+// What stays a global is written before any second thread can exist (the
+// class table, the literals, the extension's tables), is a process-wide
+// setting read once (MCPHP_RC=check, MCPHP_STATS), or is module state another
+// thread is refused (the global table, a `static`, define(), class_alias():
+// ph_shared_off): module memory, shared as a C extension's is.
+// docs/threads.md is the inventory.
+u8   ph_tmain[PHT_SIZE];            // the block of the thread that booted
+uptr ph_tcur;                       // ph_tmain while no other thread runs, then 0
+i64  ph_mt;                         // 1 once another thread runs compiled code
+i64  ph_tkeyed;                     // 1 once the host's slot exists: made once, never freed
+
+uptr ph_tslow() {
+    if (ph_mt) return ph_tget();
+    ph_tcur = ph_tmain;
+    return ph_tmain;
+}
+
 // ---- the arena (D7) --------------------------------------------------------
+// The booting thread bumps ph_heap; another thread bumps an arena of its own
+// the host maps for it (php_thr_start), both through ph_hbase/ph_hlim.
 #define PH_ARENA 50331648
 
 u8  ph_heap[50331648];
-i64 ph_top;
 
 void php_flush();
 void php_die(uptr msg, i64 n) { php_flush(); write(2, msg, n); exit(255); }
@@ -61,27 +93,28 @@ void php_die(uptr msg, i64 n) { php_flush(); write(2, msg, n); exit(255); }
 // an _emalloc block is whatever the allocator had. Every allocation site
 // writes what it reads (the audit is docs/php-extension.md § The memory).
 #define PH_ZBIG 4096                // a block bigger than this is never bumped: it gets its own
-uptr ph_zalloc;                     // the slow path; set = inside an extension call
-uptr ph_zcur;                       // the Zend chunk the call is bumping through
-i64  ph_zpos;
-i64  ph_zlim;
-i64  ph_pin;
-void php_pin() { if (ph_zalloc) ph_pin = 1; }
+// Another thread (§ other threads) has no Zend chunk, so it never pins: the
+// module state that would outlive it refuses it (ph_shared_off), and its
+// block and arena are unmapped when it is joined.
+void php_pin() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); if (((uptr) ld64(phT + PHT_ph_zalloc))) st64(phT + PHT_ph_pin, 1); }
 
-uptr php_alloc(i64 n) {
-    if (ph_zalloc) {
-        i64 z = (ph_zpos + 7) / 8 * 8;
+uptr php_alloc(i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) {
+        i64 z = (ld64(phT + PHT_ph_zpos) + 7) / 8 * 8;
         // n >= 0: a size that wrapped (a string of PHP_INT_MAX bytes plus its
         // header) is not a small block -- it goes to Zend, whose memory limit
         // refuses it by name
-        if (n >= 0 && n <= PH_ZBIG && z + n <= ph_zlim) { ph_zpos = z + n; return ph_zcur + z; }
-        return callp(ph_zalloc, n);
+        if (n >= 0 && n <= PH_ZBIG && z + n <= ld64(phT + PHT_ph_zlim)) { st64(phT + PHT_ph_zpos, z + n); return ((uptr) ld64(phT + PHT_ph_zcur)) + z; }
+        return callp(((uptr) ld64(phT + PHT_ph_zalloc)), n);
     }
-    i64 a = (ph_top + 7) / 8 * 8;
+    uptr hb = ld64(phT + PHT_ph_hbase);
+    // the booting thread's arena is ph_heap, set here on its first use
+    if (!hb) { hb = ph_heap; st64(phT + PHT_ph_hbase, hb); st64(phT + PHT_ph_hlim, PH_ARENA); }
+    i64 a = (ld64(phT + PHT_ph_top) + 7) / 8 * 8;
     // n against what is left, never `a + n`: a size near PHP_INT_MAX would wrap it
-    if (n < 0 || n > PH_ARENA - a) php_die("mc-php: arena exhausted\n", 24);
-    ph_top = a + n;
-    return ph_heap + a;
+    if (n < 0 || n > ld64(phT + PHT_ph_hlim) - a) php_die("mc-php: arena exhausted\n", 24);
+    st64(phT + PHT_ph_top, a + n);
+    return hb + a;
 }
 
 // ---- string: the zend_string shape (T3's probes/t3/zend.mc, verbatim) ------
@@ -133,47 +166,38 @@ void phx_ef(uptr p);
 uptr phx_er(uptr p, i64 n);
 void phx_pf(uptr p);
 i64  ph_rcchk;                      // MCPHP_RC=check: arena strings are counted, and poisoned at zero
-uptr ph_pool;                       // the temporaries: one reference each
-i64  ph_pn;
-i64  ph_pcap;
-uptr ph_esc;                        // the escaped strings: one reference each
-i64  ph_en;
-i64  ph_ecap;
-i64  ph_rc_inplace;                 // `.=` and `$s[$i] =` that wrote into the string itself,
-i64  ph_rc_copied;                  // and the ones that had to copy it (MCPHP_STATS)
-i64  ph_rc_built;                   // every string a call built (MCPHP_STATS, extension road)
 
 // a list's storage: Zend's inside a call (freed at RSHUTDOWN), the arena in
 // check mode (a program)
-uptr php_rc_grow(uptr old, i64 n, i64 cap) {
+uptr php_rc_grow(uptr old, i64 n, i64 cap) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr nb = 0;
-    if (ph_zalloc) nb = phx_em(cap * 8);
-    if (!ph_zalloc) nb = php_alloc(cap * 8);
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) nb = phx_em(cap * 8);
+    if (!((uptr) ld64(phT + PHT_ph_zalloc))) nb = php_alloc(cap * 8);
     i64 i = 0;
     loop { if (i >= n) break; st64(nb + i * 8, ld64(old + i * 8)); i = i + 1; }
-    if (old && ph_zalloc) phx_ef(old);
+    if (old && ((uptr) ld64(phT + PHT_ph_zalloc))) phx_ef(old);
     return nb;
 }
 
-void php_pool_push(uptr s) {
-    if (ph_pn == ph_pcap) { ph_pcap = ph_pcap * 2 + 256; ph_pool = php_rc_grow(ph_pool, ph_pn, ph_pcap); }
-    st64(ph_pool + ph_pn * 8, s);
-    ph_pn = ph_pn + 1;
+void php_pool_push(uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ld64(phT + PHT_ph_pn) == ld64(phT + PHT_ph_pcap)) { st64(phT + PHT_ph_pcap, ld64(phT + PHT_ph_pcap) * 2 + 256); st64(phT + PHT_ph_pool, php_rc_grow(((uptr) ld64(phT + PHT_ph_pool)), ld64(phT + PHT_ph_pn), ld64(phT + PHT_ph_pcap))); }
+    st64(((uptr) ld64(phT + PHT_ph_pool)) + ld64(phT + PHT_ph_pn) * 8, s);
+    st64(phT + PHT_ph_pn, ld64(phT + PHT_ph_pn) + 1);
 }
 
 // A string of n bytes, the header written and the NUL; the n bytes are the
 // caller's to write, every one of them (nothing here is zeroed). `pool` 0 is
 // a string whose one reference the caller keeps (php_str_append's copy).
-uptr php_str_mk(i64 n, i64 pool) {
+uptr php_str_mk(i64 n, i64 pool) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr s = 0;
-    if (ph_zalloc) {
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) {
         // a size that wrapped negative goes to _emalloc as a huge size_t,
         // which php's memory limit refuses by name, as php_alloc's does
         s = phx_em(ZS_HDR + n + 1);
-        ph_rc_built = ph_rc_built + 1;
+        st64(phT + PHT_ph_rc_built, ld64(phT + PHT_ph_rc_built) + 1);
         st32(s + 4, ZS_GC_STRING);
     }
-    if (!ph_zalloc) {
+    if (!((uptr) ld64(phT + PHT_ph_zalloc))) {
         s = php_alloc(ZS_HDR + n + 1);
         st32(s + 4, ZS_MODULE);
         if (ph_rcchk) st32(s + 4, ZS_GC_STRING);
@@ -184,7 +208,7 @@ uptr php_str_mk(i64 n, i64 pool) {
     st8(s + ZS_HDR + n, 0);
     if (pool && ld32(s + 4) == ZS_GC_STRING) {
         // php_pool_push's fast path, in place: one per string built
-        if (ph_pn < ph_pcap) { st64(ph_pool + ph_pn * 8, s); ph_pn = ph_pn + 1; }
+        if (ld64(phT + PHT_ph_pn) < ld64(phT + PHT_ph_pcap)) { st64(((uptr) ld64(phT + PHT_ph_pool)) + ld64(phT + PHT_ph_pn) * 8, s); st64(phT + PHT_ph_pn, ld64(phT + PHT_ph_pn) + 1); }
         else php_pool_push(s);
     }
     return s;
@@ -218,8 +242,8 @@ void php_str_release(uptr s) {
 
 // one more reference for whoever keeps `s`: the pool's, when `s` is the
 // temporary on top of it (it is then no longer a temporary), else a new one
-void php_rc_take(uptr s) {
-    if (ph_pn) { if (ld64(ph_pool + ph_pn * 8 - 8) == s) { ph_pn = ph_pn - 1; return; } }
+void php_rc_take(uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ld64(phT + PHT_ph_pn)) { if (ld64(((uptr) ld64(phT + PHT_ph_pool)) + ld64(phT + PHT_ph_pn) * 8 - 8) == s) { st64(phT + PHT_ph_pn, ld64(phT + PHT_ph_pn) - 1); return; } }
     if (ld32(s + 4) == ZS_DEAD) php_rc_dead(s);
     st32(s, ld32(s) + 1);
 }
@@ -234,13 +258,13 @@ uptr php_sset(uptr old, uptr nw) {
 
 // a string put where nothing counts it (a zval, an array key, a class entry,
 // a file row): kept until the call's chunk goes
-uptr php_str_esc(uptr s) {
+uptr php_str_esc(uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (!s) return s;
     if (ld32(s + 4) & ZS_INTERNED) return s;
     php_rc_take(s);
-    if (ph_en == ph_ecap) { ph_ecap = ph_ecap * 2 + 256; ph_esc = php_rc_grow(ph_esc, ph_en, ph_ecap); }
-    st64(ph_esc + ph_en * 8, s);
-    ph_en = ph_en + 1;
+    if (ld64(phT + PHT_ph_en) == ld64(phT + PHT_ph_ecap)) { st64(phT + PHT_ph_ecap, ld64(phT + PHT_ph_ecap) * 2 + 256); st64(phT + PHT_ph_esc, php_rc_grow(((uptr) ld64(phT + PHT_ph_esc)), ld64(phT + PHT_ph_en), ld64(phT + PHT_ph_ecap))); }
+    st64(((uptr) ld64(phT + PHT_ph_esc)) + ld64(phT + PHT_ph_en) * 8, s);
+    st64(phT + PHT_ph_en, ld64(phT + PHT_ph_en) + 1);
     return s;
 }
 
@@ -255,11 +279,11 @@ void php_rc_drain(i64 m);
 // taken or dropped (the take's pop and the push after the drain, which
 // cancel). The fast path alone, so src/opt.mc copies it into the caller.
 void php_rc_ret_slow(i64 m, uptr v);
-void php_rc_ret(i64 m, uptr v) {
-    if (ph_pn > m && ld64(ph_pool + (ph_pn << 3) - 8) == v) {
-        st64(ph_pool + (ph_pn << 3) - 8, ld64(ph_pool + (m << 3)));
-        st64(ph_pool + (m << 3), v);
-        if (ph_pn > m + 1) php_rc_drain(m + 1);
+void php_rc_ret(i64 m, uptr v) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ld64(phT + PHT_ph_pn) > m && ld64(((uptr) ld64(phT + PHT_ph_pool)) + (ld64(phT + PHT_ph_pn) << 3) - 8) == v) {
+        st64(((uptr) ld64(phT + PHT_ph_pool)) + (ld64(phT + PHT_ph_pn) << 3) - 8, ld64(((uptr) ld64(phT + PHT_ph_pool)) + (m << 3)));
+        st64(((uptr) ld64(phT + PHT_ph_pool)) + (m << 3), v);
+        if (ld64(phT + PHT_ph_pn) > m + 1) php_rc_drain(m + 1);
     } else php_rc_ret_slow(m, v);
 }
 void php_rc_ret_slow(i64 m, uptr v) {
@@ -279,8 +303,8 @@ i64 php_str_mine(uptr s) {
 // n bytes of room for a string we own, which may MOVE: _erealloc, php's
 // zend_string_extend. In check mode it always moves and the old block is
 // poisoned, so a stale pointer is caught rather than lucky.
-uptr php_str_grow(uptr s, i64 n) {
-    if (ph_zalloc) return phx_er(s, ZS_HDR + n + 1);
+uptr php_str_grow(uptr s, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) return phx_er(s, ZS_HDR + n + 1);
     uptr ns = php_alloc(ZS_HDR + n + 1);
     i64 i = 0;
     i64 w = ZS_HDR + ld64(s + 16) + 1;
@@ -355,11 +379,11 @@ uptr php_str_new(uptr b, i64 n) {
 u64 php_str_hash(uptr s);
 
 
-uptr php_str_mod(uptr b, i64 n) {
-    uptr za = ph_zalloc;
-    ph_zalloc = 0;
+uptr php_str_mod(uptr b, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr za = ((uptr) ld64(phT + PHT_ph_zalloc));
+    st64(phT + PHT_ph_zalloc, 0);
     uptr s = php_alloc(ZS_HDR + n + 1);
-    ph_zalloc = za;
+    st64(phT + PHT_ph_zalloc, za);
     st32(s, 1);
     st32(s + 4, ZS_MODULE);
     st64(s + 8, 0);
@@ -551,12 +575,12 @@ uptr php_str_catw4(uptr a, i64 sa, i64 na, uptr b, i64 sb, i64 nb, uptr c, i64 s
 // place (_erealloc, which may move it), anything else is copied into a new
 // string whose one reference the slot keeps, and the old one is released.
 // Either way the answer replaces the slot's reference: no php_sset around it.
-uptr php_str_append(uptr s, uptr x) {
+uptr php_str_append(uptr s, uptr x) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 la = ld64(s + 16);
     i64 lb = ld64(x + 16);
     if (!lb) return s;
     if (php_str_mine(s)) {
-        ph_rc_inplace = ph_rc_inplace + 1;
+        st64(phT + PHT_ph_rc_inplace, ld64(phT + PHT_ph_rc_inplace) + 1);
         uptr ns = php_str_grow(s, la + lb);
         uptr src = x;
         if (x == s) src = ns;               // `$s .= $s`: the bytes moved with it
@@ -566,7 +590,7 @@ uptr php_str_append(uptr s, uptr x) {
         st8(ns + ZS_HDR + la + lb, 0);
         return ns;
     }
-    ph_rc_copied = ph_rc_copied + 1;
+    st64(phT + PHT_ph_rc_copied, ld64(phT + PHT_ph_rc_copied) + 1);
     uptr o = php_str_mk(la + lb, 0);
     php_memcpy(o + ZS_HDR, s + ZS_HDR, la);
     php_memcpy(o + ZS_HDR + la, x + ZS_HDR, lb);
@@ -577,7 +601,7 @@ uptr php_str_append(uptr s, uptr x) {
 // `$s = $s . a . b` (and `. c`): the compiler's chain folded into one call,
 // with the slot's string first -- one growth for the whole chain. A piece that
 // IS the slot's string is read from where the growth left it.
-uptr php_str_appendv(uptr s, uptr a, uptr b, uptr c) {
+uptr php_str_appendv(uptr s, uptr a, uptr b, uptr c) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 la = ld64(s + 16);
     i64 l1 = ld64(a + 16);
     i64 l2 = ld64(b + 16);
@@ -585,13 +609,13 @@ uptr php_str_appendv(uptr s, uptr a, uptr b, uptr c) {
     if (c) l3 = ld64(c + 16);
     uptr o = 0;
     if (php_str_mine(s)) {
-        ph_rc_inplace = ph_rc_inplace + 1;
+        st64(phT + PHT_ph_rc_inplace, ld64(phT + PHT_ph_rc_inplace) + 1);
         o = php_str_grow(s, la + l1 + l2 + l3);
         st64(o + 8, 0);
     }
     i64 copied = 0;
     if (!o) {
-        ph_rc_copied = ph_rc_copied + 1;
+        st64(phT + PHT_ph_rc_copied, ld64(phT + PHT_ph_rc_copied) + 1);
         copied = 1;
         o = php_str_mk(la + l1 + l2 + l3, 0);
         php_memcpy(o + ZS_HDR, s + ZS_HDR, la);
@@ -614,20 +638,20 @@ uptr php_str_setoff(uptr s, i64 i, uptr cz);
 // `$s[$i] = c` on a counted slot: the byte written into the string itself
 // when nobody else holds it and the offset is inside it (php's own in-place
 // write); otherwise php_str_setoff's new string, stored the ordinary way
-uptr php_str_setoff_own(uptr s, i64 i, uptr cz) {
+uptr php_str_setoff_own(uptr s, i64 i, uptr cz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 n = ld64(s + 16);
     i64 k = i;
     if (k < 0) k = n + k;
     if (k >= 0 && k < n && php_str_mine(s)) {
         uptr c = php_zv_str(cz);
         if (ld64(c + 16)) {
-            ph_rc_inplace = ph_rc_inplace + 1;
+            st64(phT + PHT_ph_rc_inplace, ld64(phT + PHT_ph_rc_inplace) + 1);
             st8(s + ZS_HDR + k, ld8(c + ZS_HDR));
             st64(s + 8, 0);
             return s;
         }
     }
-    ph_rc_copied = ph_rc_copied + 1;
+    st64(phT + PHT_ph_rc_copied, ld64(phT + PHT_ph_rc_copied) + 1);
     return php_sset(s, php_str_setoff(s, i, cz));
 }
 
@@ -637,9 +661,9 @@ uptr php_str_setoff_own(uptr s, i64 i, uptr cz) {
 // The fast path calls nothing, so src/opt.mc copies it into the caller.
 uptr php_zstr(uptr s);
 uptr php_chr(i64 c);
-uptr php_str_sets_own(uptr s, i64 i, uptr c) {
+uptr php_str_sets_own(uptr s, i64 i, uptr c) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if ((u64) i < (u64) ld64(s + 16) && ld64(c + 16) && ld32(s) == 1 && (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) == 0) {
-        ph_rc_inplace = ph_rc_inplace + 1;
+        st64(phT + PHT_ph_rc_inplace, ld64(phT + PHT_ph_rc_inplace) + 1);
         st8(s + ZS_HDR + i, ld8(c + ZS_HDR));
         st64(s + 8, 0);
         return s;
@@ -649,9 +673,9 @@ uptr php_str_sets_own(uptr s, i64 i, uptr c) {
 uptr php_str_sets(uptr s, i64 i, uptr c) { return php_str_setoff(s, i, php_zstr(c)); }
 
 // `$s[$i] = chr(c)`: the byte itself, with no one-byte string between
-uptr php_str_setb_own(uptr s, i64 i, i64 c) {
+uptr php_str_setb_own(uptr s, i64 i, i64 c) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if ((u64) i < (u64) ld64(s + 16) && ld32(s) == 1 && (ld32(s + 4) & (ZS_INTERNED | ZS_PERSIST)) == 0) {
-        ph_rc_inplace = ph_rc_inplace + 1;
+        st64(phT + PHT_ph_rc_inplace, ld64(phT + PHT_ph_rc_inplace) + 1);
         st8(s + ZS_HDR + i, c & 255);
         st64(s + 8, 0);
         return s;
@@ -663,8 +687,8 @@ uptr php_str_setb(uptr s, i64 i, i64 c) { return php_str_setoff(s, i, php_zstr(p
 // a FRESH buffer's byte (src/rc.mc): the string is this function's own, so the
 // bound is the one test; past it, php_str_setb_own's road, and every
 // temporary that made goes before the call returns, so the pool is as it was
-uptr php_str_setb_f_slow(uptr s, i64 i, i64 c) {
-    i64 m = ph_pn;
+uptr php_str_setb_f_slow(uptr s, i64 i, i64 c) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 m = ld64(phT + PHT_ph_pn);
     uptr r = php_str_setb_own(s, i, c);
     php_rc_drain(m);
     return r;
@@ -1089,67 +1113,60 @@ f64 php_stof(uptr s) {
 }
 
 // ---- echo ------------------------------------------------------------------
-u8 ph_out[4096];
-i64 ph_outn;
 
 // The ONE place stdout is written. A program writes fd 1; an extension sets
 // ph_osink to php's own php_output_write (lib/php_ext.mc), so what a module
 // echoes goes through php's output layer and ob_start() sees it.
-uptr ph_osink;
-void php_out1(uptr b, i64 n) {
-    if (ph_osink) { callp(ph_osink, b, n); return; }
+void php_out1(uptr b, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_osink))) { callp(((uptr) ld64(phT + PHT_ph_osink)), b, n); return; }
     write(1, b, n);
 }
 
-void php_flush() { if (ph_outn) php_out1(ph_out, ph_outn); ph_outn = 0; }
+void php_flush() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); if (ld64(phT + PHT_ph_outn)) php_out1((phT + PHT_ph_out), ld64(phT + PHT_ph_outn)); st64(phT + PHT_ph_outn, 0); }
 
 // output capture: print_r($x, true), var_export($x, true) and php's own
 // ob_* family, which NESTS -- so this is a stack and php_ob_start is a push.
 // T8: it was one level, which made `ob_start(); print_r($x, true);` lose the
 // outer buffer.
 #define PH_MAXOB 16
-uptr ph_obb[PH_MAXOB];
-i64  ph_obn[PH_MAXOB];
-i64  ph_obc[PH_MAXOB];
-i64  ph_nob;
 
-void php_ob_start() {
-    if (ph_nob >= PH_MAXOB) return;
-    st64(ph_obb + ph_nob * 8, 0);
-    st64(ph_obn + ph_nob * 8, 0);
-    st64(ph_obc + ph_nob * 8, 0);
-    ph_nob = ph_nob + 1;
+void php_ob_start() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ld64(phT + PHT_ph_nob) >= PH_MAXOB) return;
+    st64((phT + PHT_ph_obb) + ld64(phT + PHT_ph_nob) * 8, 0);
+    st64((phT + PHT_ph_obn) + ld64(phT + PHT_ph_nob) * 8, 0);
+    st64((phT + PHT_ph_obc) + ld64(phT + PHT_ph_nob) * 8, 0);
+    st64(phT + PHT_ph_nob, ld64(phT + PHT_ph_nob) + 1);
 }
 
-void php_ob_put(i64 lv, uptr b, i64 n) {
-    i64 len = ld64(ph_obn + lv * 8);
-    i64 cap = ld64(ph_obc + lv * 8);
-    uptr buf = ld64(ph_obb + lv * 8);
+void php_ob_put(i64 lv, uptr b, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 len = ld64((phT + PHT_ph_obn) + lv * 8);
+    i64 cap = ld64((phT + PHT_ph_obc) + lv * 8);
+    uptr buf = ld64((phT + PHT_ph_obb) + lv * 8);
     if (len + n > cap) {
         i64 nc = cap * 2 + n + 256;
         uptr nb = php_alloc(nc);
         php_memcpy(nb, buf, len);
         buf = nb;
-        st64(ph_obb + lv * 8, nb);
-        st64(ph_obc + lv * 8, nc);
+        st64((phT + PHT_ph_obb) + lv * 8, nb);
+        st64((phT + PHT_ph_obc) + lv * 8, nc);
     }
     php_memcpy(buf + len, b, n);
-    st64(ph_obn + lv * 8, len + n);
+    st64((phT + PHT_ph_obn) + lv * 8, len + n);
 }
 
-void php_write(uptr b, i64 n) {
-    if (ph_nob) { php_ob_put(ph_nob - 1, b, n); return; }
+void php_write(uptr b, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ld64(phT + PHT_ph_nob)) { php_ob_put(ld64(phT + PHT_ph_nob) - 1, b, n); return; }
     if (n > 2048) { php_flush(); php_out1(b, n); return; }
-    if (ph_outn + n > 4096) php_flush();
-    php_memcpy(ph_out + ph_outn, b, n);
-    ph_outn = ph_outn + n;
+    if (ld64(phT + PHT_ph_outn) + n > 4096) php_flush();
+    php_memcpy((phT + PHT_ph_out) + ld64(phT + PHT_ph_outn), b, n);
+    st64(phT + PHT_ph_outn, ld64(phT + PHT_ph_outn) + n);
 }
 
 // pop the top buffer and answer what it caught
-uptr php_ob_get() {
-    if (!ph_nob) return php_str_new("", 0);
-    ph_nob = ph_nob - 1;
-    return php_str_new(ld64(ph_obb + ph_nob * 8), ld64(ph_obn + ph_nob * 8));
+uptr php_ob_get() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (!ld64(phT + PHT_ph_nob)) return php_str_new("", 0);
+    st64(phT + PHT_ph_nob, ld64(phT + PHT_ph_nob) - 1);
+    return php_str_new(ld64((phT + PHT_ph_obb) + ld64(phT + PHT_ph_nob) * 8), ld64((phT + PHT_ph_obn) + ld64(phT + PHT_ph_nob) * 8));
 }
 
 // php's own ob_* functions. On the EXTENSION road they are php's output
@@ -1158,7 +1175,6 @@ uptr php_ob_get() {
 // function. The runtime's stack below stays for what the runtime captures
 // itself (print_r($x, true) and friends), and is the whole of ob_* on the
 // program road.
-uptr ph_obx;
 #define PHOB_START     1
 #define PHOB_GET_CLEAN 2
 #define PHOB_CONTENTS  3
@@ -1169,70 +1185,70 @@ uptr ph_obx;
 #define PHOB_GET_FLUSH 8
 #define PHOB_FLUSH     9
 
-u8 php_f_ob_start(uptr a, uptr b, uptr c) {
-    if (ph_obx) return callp(ph_obx, PHOB_START);
+u8 php_f_ob_start(uptr a, uptr b, uptr c) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_obx))) return callp(((uptr) ld64(phT + PHT_ph_obx)), PHOB_START);
     php_ob_start();
     return 1;
 }
 
-uptr php_f_ob_get_clean() {
-    if (ph_obx) return callp(ph_obx, PHOB_GET_CLEAN);
-    if (!ph_nob) return php_zbool(0);
+uptr php_f_ob_get_clean() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_obx))) return callp(((uptr) ld64(phT + PHT_ph_obx)), PHOB_GET_CLEAN);
+    if (!ld64(phT + PHT_ph_nob)) return php_zbool(0);
     return php_zstr(php_ob_get());
 }
 
-uptr php_f_ob_get_contents() {
-    if (ph_obx) return callp(ph_obx, PHOB_CONTENTS);
-    if (!ph_nob) return php_zbool(0);
-    return php_zstr(php_str_new(ld64(ph_obb + (ph_nob - 1) * 8), ld64(ph_obn + (ph_nob - 1) * 8)));
+uptr php_f_ob_get_contents() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_obx))) return callp(((uptr) ld64(phT + PHT_ph_obx)), PHOB_CONTENTS);
+    if (!ld64(phT + PHT_ph_nob)) return php_zbool(0);
+    return php_zstr(php_str_new(ld64((phT + PHT_ph_obb) + (ld64(phT + PHT_ph_nob) - 1) * 8), ld64((phT + PHT_ph_obn) + (ld64(phT + PHT_ph_nob) - 1) * 8)));
 }
 
-uptr php_f_ob_get_length() {
-    if (ph_obx) return callp(ph_obx, PHOB_LENGTH);
-    if (!ph_nob) return php_zbool(0);
-    return php_zlong(ld64(ph_obn + (ph_nob - 1) * 8));
+uptr php_f_ob_get_length() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_obx))) return callp(((uptr) ld64(phT + PHT_ph_obx)), PHOB_LENGTH);
+    if (!ld64(phT + PHT_ph_nob)) return php_zbool(0);
+    return php_zlong(ld64((phT + PHT_ph_obn) + (ld64(phT + PHT_ph_nob) - 1) * 8));
 }
 
-i64 php_f_ob_get_level() {
-    if (ph_obx) return callp(ph_obx, PHOB_LEVEL);
-    return ph_nob;
+i64 php_f_ob_get_level() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_obx))) return callp(((uptr) ld64(phT + PHT_ph_obx)), PHOB_LEVEL);
+    return ld64(phT + PHT_ph_nob);
 }
 
-u8 php_f_ob_end_clean() {
-    if (ph_obx) return callp(ph_obx, PHOB_END_CLEAN);
-    if (!ph_nob) return 0;
-    ph_nob = ph_nob - 1;
+u8 php_f_ob_end_clean() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_obx))) return callp(((uptr) ld64(phT + PHT_ph_obx)), PHOB_END_CLEAN);
+    if (!ld64(phT + PHT_ph_nob)) return 0;
+    st64(phT + PHT_ph_nob, ld64(phT + PHT_ph_nob) - 1);
     return 1;
 }
 
 // the buffer goes to the level below it, or to the real output
-u8 php_f_ob_end_flush() {
-    if (ph_obx) return callp(ph_obx, PHOB_END_FLUSH);
-    if (!ph_nob) return 0;
-    uptr b = ld64(ph_obb + (ph_nob - 1) * 8);
-    i64 n = ld64(ph_obn + (ph_nob - 1) * 8);
-    ph_nob = ph_nob - 1;
+u8 php_f_ob_end_flush() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_obx))) return callp(((uptr) ld64(phT + PHT_ph_obx)), PHOB_END_FLUSH);
+    if (!ld64(phT + PHT_ph_nob)) return 0;
+    uptr b = ld64((phT + PHT_ph_obb) + (ld64(phT + PHT_ph_nob) - 1) * 8);
+    i64 n = ld64((phT + PHT_ph_obn) + (ld64(phT + PHT_ph_nob) - 1) * 8);
+    st64(phT + PHT_ph_nob, ld64(phT + PHT_ph_nob) - 1);
     if (n) php_write(b, n);
     return 1;
 }
 
-uptr php_f_ob_get_flush() {
-    if (ph_obx) return callp(ph_obx, PHOB_GET_FLUSH);
-    if (!ph_nob) return php_zbool(0);
-    uptr s = php_str_new(ld64(ph_obb + (ph_nob - 1) * 8), ld64(ph_obn + (ph_nob - 1) * 8));
+uptr php_f_ob_get_flush() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_obx))) return callp(((uptr) ld64(phT + PHT_ph_obx)), PHOB_GET_FLUSH);
+    if (!ld64(phT + PHT_ph_nob)) return php_zbool(0);
+    uptr s = php_str_new(ld64((phT + PHT_ph_obb) + (ld64(phT + PHT_ph_nob) - 1) * 8), ld64((phT + PHT_ph_obn) + (ld64(phT + PHT_ph_nob) - 1) * 8));
     php_f_ob_end_flush();
     return php_zstr(s);
 }
 
-u8 php_f_ob_flush() {
-    if (ph_obx) return callp(ph_obx, PHOB_FLUSH);
-    if (!ph_nob) return 0;
-    uptr b = ld64(ph_obb + (ph_nob - 1) * 8);
-    i64 n = ld64(ph_obn + (ph_nob - 1) * 8);
-    st64(ph_obn + (ph_nob - 1) * 8, 0);
+u8 php_f_ob_flush() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_obx))) return callp(((uptr) ld64(phT + PHT_ph_obx)), PHOB_FLUSH);
+    if (!ld64(phT + PHT_ph_nob)) return 0;
+    uptr b = ld64((phT + PHT_ph_obb) + (ld64(phT + PHT_ph_nob) - 1) * 8);
+    i64 n = ld64((phT + PHT_ph_obn) + (ld64(phT + PHT_ph_nob) - 1) * 8);
+    st64((phT + PHT_ph_obn) + (ld64(phT + PHT_ph_nob) - 1) * 8, 0);
     if (n) {
-        if (ph_nob > 1) php_ob_put(ph_nob - 2, b, n);
-        if (ph_nob < 2) { php_flush(); php_out1(b, n); }
+        if (ld64(phT + PHT_ph_nob) > 1) php_ob_put(ld64(phT + PHT_ph_nob) - 2, b, n);
+        if (ld64(phT + PHT_ph_nob) < 2) { php_flush(); php_out1(b, n); }
     }
     return 1;
 }
@@ -1262,12 +1278,6 @@ i64 php_echo_null() { return 0; }
 // `PHP Warning:  ` form to stderr when log_errors is on with no error_log.
 // The phpt runner sets log_errors=0, so only the stdout form is graded; the
 // stderr form is what makes probes/t8/g/*.php agree with a default php.
-uptr ph_dfile;
-i64  ph_dline;
-i64  ph_erep;                    // error_reporting(); E_ALL is 30719 on 8.5
-i64  ph_disp;                    // display_errors
-i64  ph_log;                     // log_errors
-i64  ph_quiet;                   // the @ operator's depth, and ob-internal use
 
 #define PHE_ERROR       1
 #define PHE_WARNING     2
@@ -1310,34 +1320,30 @@ i64  php_zv_type(uptr z);
 // set_error_handler(): the callable, and the one the previous call replaced.
 // A handler that returns anything but `false` suppresses php's own output,
 // which is what most tests that install one are checking.
-uptr ph_ehz;                                  // the current handler, 0 = none
-uptr ph_ehprev;
-i64  ph_ehmask;
-i64  ph_ehin;                                 // 1 while it is running
 
-void php_raise(i64 lv, uptr msg) {
-    if (ph_quiet && lv != PHE_USER_ERROR) return;
-    if (ph_ehz && !ph_ehin && (ph_ehmask & lv)) {
-        uptr fn = ph_dfile;
+void php_raise(i64 lv, uptr msg) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ld64(phT + PHT_ph_quiet) && lv != PHE_USER_ERROR) return;
+    if (((uptr) ld64(phT + PHT_ph_ehz)) && !ld64(phT + PHT_ph_ehin) && (ld64(phT + PHT_ph_ehmask) & lv)) {
+        uptr fn = ((uptr) ld64(phT + PHT_ph_dfile));
         if (!fn) fn = "";
-        ph_ehin = 1;
-        uptr r = php_call_zv(ph_ehz, 4, php_zlong(lv),
+        st64(phT + PHT_ph_ehin, 1);
+        uptr r = php_call_zv(((uptr) ld64(phT + PHT_ph_ehz)), 4, php_zlong(lv),
                              php_zstr(php_str_new(msg, php_cstrlen(msg))),
                              php_zstr(php_str_new(fn, php_cstrlen(fn))),
-                             php_zlong(ph_dline), 0);
-        ph_ehin = 0;
+                             php_zlong(ld64(phT + PHT_ph_dline)), 0);
+        st64(phT + PHT_ph_ehin, 0);
         // IS_FALSE is 2, and its #define is below this point in the file
         if (php_zv_type(r) != 2) {
             if (lv == PHE_USER_ERROR) { php_flush(); exit(255); }
             return;
         }
     }
-    if (!(ph_erep & lv)) return;
+    if (!(ld64(phT + PHT_ph_erep) & lv)) return;
     uptr lb = php_elabel(lv);
     i64 ml = php_cstrlen(msg);
-    uptr fn = ph_dfile;                       // a C string the compiler emitted
-    uptr ln = php_itos(ph_dline);
-    if (ph_log) {
+    uptr fn = ((uptr) ld64(phT + PHT_ph_dfile));                       // a C string the compiler emitted
+    uptr ln = php_itos(ld64(phT + PHT_ph_dline));
+    if (ld64(phT + PHT_ph_log)) {
         php_flush();
         php_ecs("PHP ");
         php_ecs(lb);
@@ -1349,7 +1355,7 @@ void php_raise(i64 lv, uptr msg) {
         write(2, ln + ZS_HDR, php_strlen(ln));
         php_ecs("\n");
     }
-    if (ph_disp) {
+    if (ld64(phT + PHT_ph_disp)) {
         php_write("\n", 1);
         php_write(lb, php_cstrlen(lb));
         php_write(": ", 2);
@@ -1365,28 +1371,26 @@ void php_raise(i64 lv, uptr msg) {
 
 // the message assembler: a fixed buffer, because a warning inside a loop must
 // not eat the arena D7 never frees.
-u8  ph_msg[1024];
-i64 ph_msgn;
 
-void php_mreset() { ph_msgn = 0; }
+void php_mreset() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st64(phT + PHT_ph_msgn, 0); }
 
-void php_mput(uptr b, i64 n) {
+void php_mput(uptr b, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = 0;
     loop {
         if (i >= n) break;
-        if (ph_msgn >= 1023) break;
-        st8(ph_msg + ph_msgn, ld8(b + i));
-        ph_msgn = ph_msgn + 1;
+        if (ld64(phT + PHT_ph_msgn) >= 1023) break;
+        st8((phT + PHT_ph_msg) + ld64(phT + PHT_ph_msgn), ld8(b + i));
+        st64(phT + PHT_ph_msgn, ld64(phT + PHT_ph_msgn) + 1);
         i = i + 1;
     }
-    st8(ph_msg + ph_msgn, 0);
+    st8((phT + PHT_ph_msg) + ld64(phT + PHT_ph_msgn), 0);
 }
 
 void php_mc(uptr s) { php_mput(s, php_cstrlen(s)); }
 void php_ms(uptr s) { php_mput(s + ZS_HDR, php_strlen(s)); }
 void php_mi(i64 v) { php_ms(php_itos(v)); }
 
-void php_raise_m(i64 lv) { php_raise(lv, ph_msg); }
+void php_raise_m(i64 lv) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); php_raise(lv, (phT + PHT_ph_msg)); }
 
 // the two shapes almost every call site wants
 void php_warn1(uptr a) { php_mreset(); php_mc(a); php_raise_m(PHE_WARNING); }
@@ -1395,12 +1399,12 @@ void php_depr1(uptr a) { php_mreset(); php_mc(a); php_raise_m(PHE_DEPRECATED); }
 
 // the compiler's per-statement position store goes through these, so the
 // generated code names two functions and not two globals.
-void php_pos(uptr f, i64 l) { ph_dfile = f; ph_dline = l; }
+void php_pos(uptr f, i64 l) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st64(phT + PHT_ph_dfile, f); st64(phT + PHT_ph_dline, l); }
 
 // the @ operator: php suppresses the diagnostic and keeps the value
-void php_quiet_on() { ph_quiet = ph_quiet + 1; }
-void php_quiet_off() { if (ph_quiet) ph_quiet = ph_quiet - 1; }
-void php_ln(i64 l) { ph_dline = l; }
+void php_quiet_on() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st64(phT + PHT_ph_quiet, ld64(phT + PHT_ph_quiet) + 1); }
+void php_quiet_off() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); if (ld64(phT + PHT_ph_quiet)) st64(phT + PHT_ph_quiet, ld64(phT + PHT_ph_quiet) - 1); }
+void php_ln(i64 l) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st64(phT + PHT_ph_dline, l); }
 
 // ---- the named diagnostics -------------------------------------------------
 // Each one is php-src's own text, checked against php 8.5.10 on this host.
@@ -3252,37 +3256,36 @@ i64 php_end() { php_flush(); return 0; }
 uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3,
                uptr a4, uptr a5, uptr a6);
 
-i64 ph_dt_ran;
 
 uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5);
 
-void php_shutdown() {
-    if (ph_dt_ran) return;
-    ph_dt_ran = 1;
+void php_shutdown() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ld64(phT + PHT_ph_dt_ran)) return;
+    st64(phT + PHT_ph_dt_ran, 1);
     // php runs register_shutdown_function() callbacks first, then destructors
-    if (ph_sdfn) {
-        i64 used = php_ht_used(ph_sdfn);
+    if (((uptr) ld64(phT + PHT_ph_sdfn))) {
+        i64 used = php_ht_used(((uptr) ld64(phT + PHT_ph_sdfn)));
         i64 i = 0;
         loop {
             if (i >= used) break;
-            uptr bk = php_ht_bkt(ph_sdfn, i);
+            uptr bk = php_ht_bkt(((uptr) ld64(phT + PHT_ph_sdfn)), i);
             if (ld8(bk + 8) != IS_UNDEF) {
                 uptr row = ld64(bk);
                 i64 nsa = php_zv_long(php_arr_iget(row, 4));
                 php_call_zv(php_arr_iget(row, 0), nsa, php_arr_iget(row, 1),
                             php_arr_iget(row, 2), php_arr_iget(row, 3), 0, 0);
-                ph_exc = 0;
+                st64(phT + PHT_ph_exc, 0);
             }
             i = i + 1;
         }
     }
-    uptr n = ph_dt_head;
+    uptr n = ((uptr) ld64(phT + PHT_ph_dt_head));
     loop {
         if (!n) break;
         uptr o = ld64(n);
         n = ld64(n + 8);
         php_mcall(o, php_str_new("__destruct", 10), 0, 0, 0, 0, 0, 0, 0, 0);
-        ph_exc = 0;
+        st64(phT + PHT_ph_exc, 0);
     }
 }
 
@@ -3464,7 +3467,6 @@ i64 php_strcasecmp(uptr a, uptr b) { return php_str_cmp(php_case(a, 0), php_case
 // print_r, var_export, get_object_vars, a clone and a dynamic read.
 #define OBJ_HDR 40
 
-i64 ph_objid;
 
 // ---- __destruct (docs/plan.md D7) -----------------------------------------
 // php runs a destructor when the last reference goes away. D7 has no refcount
@@ -3475,16 +3477,15 @@ i64 ph_objid;
 // list newest-first, so walking it IS that order. What is NOT implemented,
 // and what RESULTS.md counts: the destructor of an object that dies early --
 // a function local, an `unset`, a reassignment, a temporary.
-uptr ph_dt_head;
 
 uptr php_ce_lookup(uptr ce, i64 tab, uptr name);
 
-uptr php_obj_new(uptr ce) {
+uptr php_obj_new(uptr ce) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr o = php_alloc(OBJ_HDR);
     st32(o, 1);
     st32(o + 4, IS_OBJECT);
-    ph_objid = ph_objid + 1;
-    st32(o + 8, ph_objid);
+    st64(phT + PHT_ph_objid, ld64(phT + PHT_ph_objid) + 1);
+    st32(o + 8, ld64(phT + PHT_ph_objid));
     st64(o + 16, ce);
     st64(o + 24, php_arr_new(8));
     st64(o + 32, 0);                 // the readonly marks, made on first use
@@ -3495,7 +3496,7 @@ uptr php_obj_new(uptr ce) {
 // after its constructor returns normally -- php does not destruct one whose
 // constructor threw, and does not create one at all when an ARGUMENT to
 // `new` threw first (Zend/tests/try/catch_00{2,3,4}, exceptions/bug47771).
-void php_dt_arm(uptr o) {
+void php_dt_arm(uptr o) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr ce = php_obj_ce(o);
     if (!ce) return;
     if (!php_ce_lookup(ce, 24, php_str_new("__destruct", 10))) return;
@@ -3504,8 +3505,8 @@ void php_dt_arm(uptr o) {
     php_pin();
     uptr n = php_alloc(16);
     st64(n, o);
-    st64(n + 8, ph_dt_head);
-    ph_dt_head = n;
+    st64(n + 8, ((uptr) ld64(phT + PHT_ph_dt_head)));
+    st64(phT + PHT_ph_dt_head, n);
 }
 
 i64  php_obj_id(uptr o) { return ld32(o + 8); }
@@ -3682,9 +3683,9 @@ uptr php_it_ref(uptr a, i64 i) { return php_ht_bkt(a, i); }
 // strings are immutable here, and php interns its own one-byte strings the
 // same way (ZSTR_CHAR). A loop over $s[$i] allocates nothing.
 uptr ph_ch1;
-uptr php_str_ch(i64 c) {
-    uptr za = ph_zalloc;
-    if (!ph_ch1) { ph_zalloc = 0; ph_ch1 = php_alloc(256 * 8); ph_zalloc = za; }
+uptr php_str_ch(i64 c) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr za = ((uptr) ld64(phT + PHT_ph_zalloc));
+    if (!ph_ch1) { st64(phT + PHT_ph_zalloc, 0); ph_ch1 = php_alloc(256 * 8); st64(phT + PHT_ph_zalloc, za); }
     uptr s = ld64(ph_ch1 + c * 8);
     if (s) return s;
     u8 cb[8];
@@ -3741,7 +3742,7 @@ i64 php_str_byte(uptr s, i64 i) {
 i64  php_str_byte_c(uptr s, i64 i) { return ld8(s + ZS_HDR + i); }
 uptr php_str_off_c(uptr s, i64 i)  { return php_str_ch(ld8(s + ZS_HDR + i)); }
 
-void php_oob_slow(i64 i, i64 n) {
+void php_oob_slow(i64 i, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_flush();
     php_mreset();
     php_mc("mc-php: out-of-range read: offset ");
@@ -3749,11 +3750,11 @@ void php_oob_slow(i64 i, i64 n) {
     php_mc(", length ");
     php_mi(n);
     php_mc(" (");
-    if (ph_dfile) php_mc(ph_dfile);
+    if (((uptr) ld64(phT + PHT_ph_dfile))) php_mc(((uptr) ld64(phT + PHT_ph_dfile)));
     php_mc(":");
-    php_mi(ph_dline);
+    php_mi(ld64(phT + PHT_ph_dline));
     php_mc(")\n");
-    write(2, ph_msg, ph_msgn);
+    write(2, (phT + PHT_ph_msg), ld64(phT + PHT_ph_msgn));
     exit(134);
 }
 i64 php_str_byte_d(uptr s, i64 i) {
@@ -5222,17 +5223,16 @@ uptr php_f_abs(uptr z) {
 
 // a deterministic generator: a binary must give the same answer twice (D7's
 // sibling rule, docs/determinism.md), so there is no entropy here.
-u64 ph_seed;
-i64 php_f_mt_rand(uptr a, uptr b) {
-    ph_seed = ph_seed * 6364136223846793005 + 1442695040888963407;
-    u64 r = (ph_seed >> 33) & 2147483647;
+i64 php_f_mt_rand(uptr a, uptr b) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    st64(phT + PHT_ph_seed, ((u64) ld64(phT + PHT_ph_seed)) * 6364136223846793005 + 1442695040888963407);
+    u64 r = (((u64) ld64(phT + PHT_ph_seed)) >> 33) & 2147483647;
     if (php_zv_type(a) == IS_NULL) return r;
     i64 lo = php_zv_long(a);
     i64 hi = php_zv_long(b);
     if (hi <= lo) return lo;
     return lo + (r % (hi - lo + 1));
 }
-void php_f_srand(uptr z, uptr _p2) { ph_seed = php_zv_long(z); }
+void php_f_srand(uptr z, uptr _p2) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st64(phT + PHT_ph_seed, php_zv_long(z)); }
 i64 php_f_mt_getrandmax() { return 2147483647; }
 
 // ---- type and misc ---------------------------------------------------------
@@ -5562,10 +5562,10 @@ uptr php_new_ce_at(uptr ce, uptr file, i64 line) {
     return o;
 }
 
-uptr php_new(uptr name) {
-    uptr fn = ph_dfile;
+uptr php_new(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr fn = ((uptr) ld64(phT + PHT_ph_dfile));
     if (!fn) fn = "";
-    return php_new_at(name, php_str_new(fn, php_cstrlen(fn)), ph_dline);
+    return php_new_at(name, php_str_new(fn, php_cstrlen(fn)), ld64(phT + PHT_ph_dline));
 }
 
 uptr php_clone(uptr z) {
@@ -5762,9 +5762,8 @@ uptr php_obj_parr(uptr o, uptr name, uptr scope) { return php_zv_arr_w(php_obj_s
 // and a static call binds the named one unless it FORWARDS (a `parent::` or
 // `self::` from inside an instance method carries $this, and php keeps the
 // caller's binding for exactly those).
-uptr ph_lsb;
 
-uptr php_lsb_or(uptr decl) { if (ph_lsb) return ph_lsb; return decl; }
+uptr php_lsb_or(uptr decl) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); if (((uptr) ld64(phT + PHT_ph_lsb))) return ((uptr) ld64(phT + PHT_ph_lsb)); return decl; }
 
 // get_called_class(): the same binding, as a name. Not reflection (D6): it
 // answers one question about the call in progress and enumerates nothing.
@@ -5774,7 +5773,7 @@ uptr php_f_called_class(uptr decl) {
     return php_zstr(ld64(ce));
 }
 
-uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (php_is_proxy(o)) return callp(ld64(ph_eng + 24), o, name, n, a1, a2, a3, a4, a5, a6);
     uptr ce = php_obj_ce(o);
     uptr lk = php_case(name, 0);
@@ -5784,10 +5783,10 @@ uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, 
             php_vis_mdie(ce, lk, name, scope);
             return php_znull();
         }
-        uptr sv = ph_lsb;
-        ph_lsb = ce;
+        uptr sv = ((uptr) ld64(phT + PHT_ph_lsb));
+        st64(phT + PHT_ph_lsb, ce);
         uptr r = callp(ld64(b), o, a1, a2, a3, a4, a5, a6);
-        ph_lsb = sv;
+        st64(phT + PHT_ph_lsb, sv);
         return r;
     }
     uptr c = php_ht_find(ld64(ce + 80), php_str_hash(php_str_new("__call", 6)), php_str_new("__call", 6));
@@ -5843,7 +5842,7 @@ uptr php_zv_mcall(uptr z, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a
 }
 
 // Foo::bar(): a static call, and the one that carries `parent::`
-uptr php_scall(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+uptr php_scall(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr lk = php_case(name, 0);
     uptr b = php_ce_lookup(ce, 24, lk);
     if (!b && (ld64(ce + 64) & 8)) {
@@ -5875,12 +5874,12 @@ uptr php_scall(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr 
         php_vis_mdie(ce, lk, name, scope);
         return php_znull();
     }
-    uptr sv = ph_lsb;
+    uptr sv = ((uptr) ld64(phT + PHT_ph_lsb));
     // a forwarding call (`parent::m()` from an instance method) carries
     // $this and keeps the caller's binding; a named one rebinds
-    if (!thisp) ph_lsb = ce;
+    if (!thisp) st64(phT + PHT_ph_lsb, ce);
     uptr r = callp(ld64(b), thisp, a1, a2, a3, a4, a5, a6);
-    ph_lsb = sv;
+    st64(phT + PHT_ph_lsb, sv);
     return r;
 }
 
@@ -6080,6 +6079,8 @@ uptr php_enum_from(uptr ce, uptr v, i64 try) {
 uptr ph_ce_closure;
 
 uptr php_closure_new(i64 fn, uptr bound, uptr thisp) {
+    // made on the first closure; php_thr_run makes it before another thread
+    // runs, so only the booting thread ever writes it
     if (!ph_ce_closure) ph_ce_closure = php_ce_new(php_str_new("Closure", 7));
     uptr o = php_obj_new(ph_ce_closure);
     php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("fn", 2)), php_zlong(fn));
@@ -6284,7 +6285,7 @@ uptr php_pc_name(i64 want) {
     return php_str_new("array", 5);
 }
 
-uptr php_param_err(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) {
+uptr php_param_err(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr m = php_str_new("", 0);
     if (php_strlen(cls)) {
         m = php_str_concat(m, cls);
@@ -6316,9 +6317,9 @@ uptr php_param_err(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname)
     m = php_str_concat(m, php_str_new(", ", 2));
     m = php_str_concat(m, php_f_get_debug_type(z));
     m = php_str_concat(m, php_str_new(" given, called in ", 18));
-    m = php_str_concat(m, php_str_new(ph_dfile, php_cstrlen(ph_dfile)));
+    m = php_str_concat(m, php_str_new(((uptr) ld64(phT + PHT_ph_dfile)), php_cstrlen(((uptr) ld64(phT + PHT_ph_dfile)))));
     m = php_str_concat(m, php_str_new(" on line ", 9));
-    m = php_str_concat(m, php_itos(ph_dline));
+    m = php_str_concat(m, php_itos(ld64(phT + PHT_ph_dline)));
     php_throw_str(php_str_new("TypeError", 9), m);
     return php_znull();
 }
@@ -6331,12 +6332,12 @@ void php_ret_none(uptr fn, i64 want) {
     php_throw_str(php_str_new("TypeError", 9), m);
 }
 
-uptr php_param_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) {
+uptr php_param_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (!z) return z;                          // not passed: the default fills it
     // a whole argument list is checked before its call, with ONE check after
     // it: once something is pending the rest must not overwrite it, because
     // php reports the FIRST argument it refused
-    if (ph_exc) return z;
+    if (((uptr) ld64(phT + PHT_ph_exc))) return z;
     i64 t = php_zv_type(z);
     if (want == PC_ARRAY) {
         if (t == IS_ARRAY) return z;
@@ -6383,14 +6384,14 @@ uptr php_param_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argna
 // variable -- `f(int &$x)` with "5" leaves 6 behind, not '5' -- so the
 // coerced value is stored back into the SAME cell and that cell is what the
 // callee keeps: returning the new zval would have silently broken the alias.
-uptr php_param_coerce_ref(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) {
+uptr php_param_coerce_ref(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr c = php_param_coerce(z, want, cls, fn, argno, argname);
     if (!z || c == z) return z;
     // a FAILED coercion raised and answered null, and storing that wrote
     // null into the caller's own variable on the way out: php leaves it
     // exactly as it was. Measured -- `m(int &$x)` with an array printed
     // `NULL` here and `array(0) {}` there.
-    if (ph_exc) return z;
+    if (((uptr) ld64(phT + PHT_ph_exc))) return z;
     return php_zv_store(z, c);
 }
 
@@ -6408,21 +6409,21 @@ uptr php_ce_name(uptr ce) { return ld64(ce); }
 // fully created. php_obj_new registers every candidate, so a throwing
 // constructor takes it back off the list -- measured, five Zend/tests said so
 // (Zend/tests/try/catch_002 expects `Caught` and nothing else).
-uptr php_ctor(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+uptr php_ctor(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (php_is_proxy(o)) return php_mcall(o, name, scope, n, a1, a2, a3, a4, a5, a6);
     uptr ce = php_obj_ce(o);
     if (!php_ce_lookup(ce, 24, php_str_new("__construct", 11))) { php_dt_arm(o); return php_znull(); }
     uptr r = php_mcall(o, name, scope, n, a1, a2, a3, a4, a5, a6);
-    if (!ph_exc) php_dt_arm(o);
+    if (!((uptr) ld64(phT + PHT_ph_exc))) php_dt_arm(o);
     return r;
 }
 
-uptr php_ctor0(uptr o) {
+uptr php_ctor0(uptr o) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (php_is_proxy(o)) return php_mcall(o, php_str_new("__construct", 11), 0, 0, 0, 0, 0, 0, 0, 0);
     uptr ce = php_obj_ce(o);
     if (!php_ce_lookup(ce, 24, php_str_new("__construct", 11))) { php_dt_arm(o); return php_znull(); }
     uptr r = php_mcall(o, php_str_new("__construct", 11), 0, 0, 0, 0, 0, 0, 0, 0);
-    if (!ph_exc) php_dt_arm(o);
+    if (!((uptr) ld64(phT + PHT_ph_exc))) php_dt_arm(o);
     return r;
 }
 
@@ -6471,21 +6472,20 @@ uptr php_f_spl_object_hash(uptr z) {
 // h() even when g() threw. The value is then discarded, because the check
 // fires before the next statement.
 // ============================================================================
-uptr ph_exc;                                  // the pending throwable, 0 = none
 uptr ph_ce_stdclass;
 
-i64 php_thrown() { if (ph_exc) return 1; return 0; }
-uptr php_exc_get() { return ph_exc; }
-void php_exc_clear() { ph_exc = 0; }
+i64 php_thrown() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); if (((uptr) ld64(phT + PHT_ph_exc))) return 1; return 0; }
+uptr php_exc_get() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); return ((uptr) ld64(phT + PHT_ph_exc)); }
+void php_exc_clear() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st64(phT + PHT_ph_exc, 0); }
 
-uptr php_throw(uptr z) {
+uptr php_throw(uptr z) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (php_zv_type(z) != IS_OBJECT) {
         uptr m = php_str_new("Can only throw objects", 22);
-        ph_exc = 0;
+        st64(phT + PHT_ph_exc, 0);
         php_throw_str(php_str_new("Error", 5), m);
         return php_znull();
     }
-    ph_exc = z;
+    st64(phT + PHT_ph_exc, z);
     return php_znull();
 }
 
@@ -6544,16 +6544,22 @@ uptr php_sub(uptr name, i64 n, uptr parent) {
 
 i64 ph_boot_done;
 
-void php_bootstrap() {
+void php_bootstrap() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (ph_boot_done) return;
     ph_boot_done = 1;
+    // module memory another thread may read and must never build: the
+    // one-byte strings, the empty one, the powers of ten
+    php_str_short(ph_tmain, 0);
+    i64 c = 0;
+    loop { if (c > 255) break; php_str_ch(c); c = c + 1; }
+    ph_p10_init();
     // the phpt runner's INI, which is php-src's run-tests.php own default set:
     // error_reporting=E_ALL (30719 on 8.5), display_errors=1, log_errors=0.
     // A plain `php file.php` has log_errors=On, which is why the stderr form
     // exists at all; probes/t8/g/*.php compare both streams.
-    ph_erep = 30719;
-    ph_disp = 1;
-    ph_log = 1;
+    st64(phT + PHT_ph_erep, 30719);
+    st64(phT + PHT_ph_disp, 1);
+    st64(phT + PHT_ph_log, 1);
     php_ce_flag(php_ce_new(php_str_new("Throwable", 9)), 4);
     php_ce_flag(php_ce_new(php_str_new("Stringable", 10)), 4);
     php_ce_flag(php_ce_new(php_str_new("Countable", 9)), 4);
@@ -6597,20 +6603,20 @@ void php_bootstrap() {
 }
 
 // an uncaught throwable, in php's own words
-void php_uncaught() {
-    if (!ph_exc) return;
+void php_uncaught() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (!((uptr) ld64(phT + PHT_ph_exc))) return;
     // set_exception_handler(): php hands an uncaught throwable to it and
     // exits 255 afterwards, with none of the Fatal error text
-    if (ph_xhz) {
-        uptr hz = ph_xhz;
-        ph_xhz = 0;
-        uptr z = ph_exc;
-        ph_exc = 0;
+    if (((uptr) ld64(phT + PHT_ph_xhz))) {
+        uptr hz = ((uptr) ld64(phT + PHT_ph_xhz));
+        st64(phT + PHT_ph_xhz, 0);
+        uptr z = ((uptr) ld64(phT + PHT_ph_exc));
+        st64(phT + PHT_ph_exc, 0);
         php_call_zv(hz, 1, z, 0, 0, 0, 0);
         // measured on php 8.5.10: a handled uncaught exception exits 0
-        if (!ph_exc) { php_shutdown(); php_flush(); exit(0); }
+        if (!((uptr) ld64(phT + PHT_ph_exc))) { php_shutdown(); php_flush(); exit(0); }
     }
-    uptr o = ld64(ph_exc);
+    uptr o = ld64(((uptr) ld64(phT + PHT_ph_exc)));
     uptr s = php_str_concat(php_str_new("Uncaught ", 9), php_obj_cname(o));
     uptr m = php_zv_str(php_exm_message(o));
     if (php_strlen(m)) {
@@ -6627,12 +6633,12 @@ void php_uncaught() {
     s = php_str_concat(s, f);
     s = php_str_concat(s, php_str_new(" on line ", 9));
     s = php_str_concat(s, php_itos(ln));
-    ph_exc = 0;
+    st64(phT + PHT_ph_exc, 0);
     php_fatal(s);
 }
 
 // the runtime's own throws, now that the hierarchy exists
-i64 php_throw_cls(uptr cls, uptr msg) {
+i64 php_throw_cls(uptr cls, uptr msg) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_bootstrap();
     uptr ce = php_ce_find(cls);
     if (!ce) ce = php_ce_find(php_str_new("Error", 5));
@@ -6641,12 +6647,12 @@ i64 php_throw_cls(uptr cls, uptr msg) {
     php_zv_cpv(php_arr_sslot(php_obj_props(o), php_str_new("message", 7)), php_zstr(msg));
     // a throwable the RUNTIME raises is created where the program is, which
     // is the position the compiler last announced (php_pos).
-    uptr fn = ph_dfile;
+    uptr fn = ((uptr) ld64(phT + PHT_ph_dfile));
     if (!fn) fn = "";
     php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)),
               php_zstr(php_str_new(fn, php_cstrlen(fn))));
-    php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(ph_dline));
-    ph_exc = php_zobj(o);
+    php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(ld64(phT + PHT_ph_dline)));
+    st64(phT + PHT_ph_exc, php_zobj(o));
     return 0;
 }
 
@@ -6657,14 +6663,14 @@ uptr php_unhandled_match(uptr z) {
     return php_znull();
 }
 
-i64 php_catches(uptr name) {
-    if (!ph_exc) return 0;
-    return php_instanceof(ph_exc, name);
+i64 php_catches(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (!((uptr) ld64(phT + PHT_ph_exc))) return 0;
+    return php_instanceof(((uptr) ld64(phT + PHT_ph_exc)), name);
 }
 
-uptr php_catch_take() {
-    uptr z = ph_exc;
-    ph_exc = 0;
+uptr php_catch_take() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr z = ((uptr) ld64(phT + PHT_ph_exc));
+    st64(phT + PHT_ph_exc, 0);
     if (!z) return php_znull();
     return z;
 }
@@ -6672,13 +6678,29 @@ uptr php_catch_take() {
 f64 php_nan(i64 ignored) { return ph_unbits(0x7ff8000000000000); }
 f64 php_inf(i64 ignored) { return ph_unbits(0x7ff0000000000000); }
 
+// ---- module state every thread shares --------------------------------------
+// The global table, a function's `static`s, define() and class_alias() are the
+// module's, not a thread's: one table for every thread, with no lock. The
+// thread that booted is blocked in php_thr_run while the others run, so a read
+// from another thread is safe; a WRITE could race another worker and would
+// leave a pointer into an arena that is unmapped when that thread ends. So
+// another thread gets an Error instead (docs/threads.md).
+i64 ph_shared_off(uptr phT, uptr what, i64 n) {
+    if (!ld64(phT + PHT_ph_tidx)) return 0;
+    uptr m = php_str_concat(php_str_new("mc-php: ", 8), php_str_new(what, n));
+    m = php_str_concat(m, php_str_new(" is shared by every thread: another thread may not reach it", 59));
+    php_throw_cls(php_str_new("Error", 5), m);
+    return 1;
+}
+
 // ---- the global variable table --------------------------------------------
 // `global $x` and a top-level variable a function reaches through it share
 // ONE zval, allocated once and never moved -- the hash stores the pointer, so
 // a rehash cannot invalidate an alias.
 uptr ph_globals;
 
-uptr php_gvar(uptr name) {
+uptr php_gvar(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ph_shared_off(phT, "a global variable", 17)) return php_znull();
     php_pin();                                // the global table
     if (!ph_globals) ph_globals = php_arr_new(16);
     uptr b = php_ht_find(ph_globals, php_str_hash(name), name);
@@ -6692,13 +6714,14 @@ uptr php_gvar(uptr name) {
 // A static set inside an extension call is reset when the request ends, as
 // php does: its slot joins ph_rsl, which php_request_reset clears.
 uptr ph_rsl;
-uptr php_static(uptr slot, uptr init) {
+uptr php_static(uptr slot, uptr init) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ph_shared_off(phT, "a static variable", 17)) return php_znull();
     php_pin();
     uptr z = ld64(slot);
     if (z) return z;
     z = php_zv_val(init);
     st64(slot, z);
-    if (ph_zalloc) {
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) {
         uptr r = php_alloc(16);
         st64(r, slot);
         st64(r + 8, ph_rsl);
@@ -6710,15 +6733,16 @@ uptr php_static(uptr slot, uptr init) {
 // ---- named runtime constants ----------------------------------------------
 uptr ph_consts;
 
-void php_const_set(uptr name, uptr v) {
+void php_const_set(uptr name, uptr v) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ph_shared_off(phT, "define()", 8)) return;
     php_pin();
     if (!ph_consts) ph_consts = php_arr_new(16);
     php_zv_cpv(php_arr_sslot(ph_consts, name), v);
 }
 
 uptr php_const_get(uptr name) {
-    if (!ph_consts) { php_pin(); ph_consts = php_arr_new(16); }
-    uptr b = php_ht_find(ph_consts, php_str_hash(name), name);
+    uptr b = 0;
+    if (ph_consts) b = php_ht_find(ph_consts, php_str_hash(name), name);
     // an object in a constant is a HANDLE: what the caller writes into it is
     // module state
     if (b) { if (php_zv_type(b) == IS_OBJECT) php_pin(); return b; }
@@ -7198,13 +7222,13 @@ uptr php_f_ltrim_c(uptr z, uptr cz, i64 mode) {
 // memory beside the literal's own cache (php_str_lit's rule), and read by
 // every later call. `trim` says which reading: 1 php's trim mask, 0 a plain
 // set of bytes (strspn/strcspn).
-uptr php_bmap_lit(uptr cache, uptr set, i64 trim) {
+uptr php_bmap_lit(uptr cache, uptr set, i64 trim) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr m = ld64(cache);
     if (m) return m;
-    uptr za = ph_zalloc;
-    ph_zalloc = 0;
+    uptr za = ((uptr) ld64(phT + PHT_ph_zalloc));
+    st64(phT + PHT_ph_zalloc, 0);
     m = php_alloc(32);
-    ph_zalloc = za;
+    st64(phT + PHT_ph_zalloc, za);
     if (trim) php_tmap(set, m);
     if (!trim) php_bmap(set, m);
     st64(cache, m);
@@ -7374,7 +7398,8 @@ uptr php_ce_find(uptr name);
 uptr php_ce_reg();
 uptr php_case(uptr s, i64 up);
 
-u8 php_f_class_alias(uptr cz, uptr az, uptr autoz) {
+u8 php_f_class_alias(uptr cz, uptr az, uptr autoz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ph_shared_off(phT, "class_alias()", 13)) return 0;
     uptr cn = php_zv_str(cz);
     uptr ce = php_ce_find(cn);
     if (!ce) {
@@ -7390,8 +7415,6 @@ u8 php_f_class_alias(uptr cz, uptr az, uptr autoz) {
 
 // register_shutdown_function($fn, ...): php runs these at the end, before the
 // destructors. One list, called by php_shutdown.
-uptr ph_sdfn;
-i64  ph_nsdfn;
 
 // `n` is how many arguments AFTER the callback were really passed. The
 // library row pads the slots it was not given with php_znull(), so the
@@ -7400,9 +7423,12 @@ i64  ph_nsdfn;
 // then handed the callback three nulls, which func_num_args() can see. The
 // count comes from the CALL SITE, which is the only place that knows it:
 // ph_call special-cases the name, exactly as it does for array_push.
-u8 php_f_reg_shutdown(uptr f, uptr a1, uptr a2, uptr a3) {
+u8 php_f_reg_shutdown(uptr f, uptr a1, uptr a2, uptr a3) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    // php_shutdown runs the booting thread's list: one another thread wrote
+    // would be dropped without a word
+    if (ph_shared_off(phT, "register_shutdown_function()", 28)) return 0;
     php_pin();                                // ph_sdfn
-    if (!ph_sdfn) ph_sdfn = php_arr_new(8);
+    if (!((uptr) ld64(phT + PHT_ph_sdfn))) st64(phT + PHT_ph_sdfn, php_arr_new(8));
     uptr row = php_arr_new(8);
     php_zv_cpv(php_arr_islot(row, 0), f);
     php_zv_cpv(php_arr_islot(row, 1), a1);
@@ -7420,14 +7446,12 @@ u8 php_f_reg_shutdown(uptr f, uptr a1, uptr a2, uptr a3) {
     if (php_zv_type(a2) != IS_UNDEF) sn = 2;
     if (php_zv_type(a3) != IS_UNDEF) sn = 3;
     php_zv_cpv(php_arr_islot(row, 4), php_zlong(sn));
-    php_zv_cpv(php_arr_nextslot(ph_sdfn), php_zarr(row));
-    ph_nsdfn = ph_nsdfn + 1;
+    php_zv_cpv(php_arr_nextslot(((uptr) ld64(phT + PHT_ph_sdfn))), php_zarr(row));
+    st64(phT + PHT_ph_nsdfn, ld64(phT + PHT_ph_nsdfn) + 1);
     return 1;
 }
 
 // strtok($string, $token) / strtok($token): php keeps the cursor in a global
-uptr ph_tok_s;
-i64  ph_tok_i;
 
 i64 php_tok_in(uptr set, i64 c) {
     i64 n = php_strlen(set);
@@ -7436,12 +7460,12 @@ i64 php_tok_in(uptr set, i64 c) {
     return 0;
 }
 
-uptr php_f_strtok(uptr a, uptr b) {
+uptr php_f_strtok(uptr a, uptr b) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr set = 0;
     if (php_zv_type(b) != IS_NULL) {
         php_pin();                            // ph_tok_s outlives the call
-        ph_tok_s = php_zv_str(a);
-        ph_tok_i = 0;
+        st64(phT + PHT_ph_tok_s, php_zv_str(a));
+        st64(phT + PHT_ph_tok_i, 0);
         set = php_zv_str(b);
     }
     if (!set) {
@@ -7451,16 +7475,16 @@ uptr php_f_strtok(uptr a, uptr b) {
         }
         set = php_zv_str(a);
     }
-    if (!ph_tok_s) return php_zbool(0);
-    i64 n = php_strlen(ph_tok_s);
-    i64 i = ph_tok_i;
-    loop { if (i >= n) break; if (!php_tok_in(set, ld8(ph_tok_s + ZS_HDR + i))) break; i = i + 1; }
-    if (i >= n) { ph_tok_i = n; return php_zbool(0); }
+    if (!((uptr) ld64(phT + PHT_ph_tok_s))) return php_zbool(0);
+    i64 n = php_strlen(((uptr) ld64(phT + PHT_ph_tok_s)));
+    i64 i = ld64(phT + PHT_ph_tok_i);
+    loop { if (i >= n) break; if (!php_tok_in(set, ld8(((uptr) ld64(phT + PHT_ph_tok_s)) + ZS_HDR + i))) break; i = i + 1; }
+    if (i >= n) { st64(phT + PHT_ph_tok_i, n); return php_zbool(0); }
     i64 st = i;
-    loop { if (i >= n) break; if (php_tok_in(set, ld8(ph_tok_s + ZS_HDR + i))) break; i = i + 1; }
-    ph_tok_i = i + 1;
-    if (i > n) ph_tok_i = n;
-    return php_zstr(php_str_new(ph_tok_s + ZS_HDR + st, i - st));
+    loop { if (i >= n) break; if (php_tok_in(set, ld8(((uptr) ld64(phT + PHT_ph_tok_s)) + ZS_HDR + i))) break; i = i + 1; }
+    st64(phT + PHT_ph_tok_i, i + 1);
+    if (i > n) st64(phT + PHT_ph_tok_i, n);
+    return php_zstr(php_str_new(((uptr) ld64(phT + PHT_ph_tok_s)) + ZS_HDR + st, i - st));
 }
 
 // strnatcmp / strnatcasecmp: php's "natural order" -- a run of digits
@@ -8168,9 +8192,9 @@ u8 php_f_trigger(uptr m, uptr l) {
 }
 
 // error_reporting([$level]): php answers the OLD mask and sets the new one
-i64 php_f_error_reporting(uptr l) {
-    i64 old = ph_erep;
-    if (php_zv_type(l) != IS_NULL) ph_erep = php_zv_long(l);
+i64 php_f_error_reporting(uptr l) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 old = ld64(phT + PHT_ph_erep);
+    if (php_zv_type(l) != IS_NULL) st64(phT + PHT_ph_erep, php_zv_long(l));
     return old;
 }
 u8 php_f_contains(uptr h, uptr n) { return php_str_contains(php_zv_str(h), php_zv_str(n)); }
@@ -8241,33 +8265,27 @@ uptr php_zv_iter(uptr z) {
 // per-system and their names are not.
 
 #define PH_MAXFH 64
-i64  ph_fh_fd[PH_MAXFH];
-i64  ph_fh_eof[PH_MAXFH];
-i64  ph_fh_own[PH_MAXFH];            // 0 for the three std streams: never closed
-uptr ph_fh_name[PH_MAXFH];
-i64  ph_nfh;
-u8   ph_rdbuf[4096];
 
 uptr php_zres(i64 id) { uptr z = php_zv_alloc(); st64(z, id); php_zv_settype(z, IS_RESOURCE); return z; }
 
 // a resource argument -> the table row, or -1
-i64 php_res_id(uptr z) {
+i64 php_res_id(uptr z) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (php_zv_type(z) != IS_RESOURCE) return 0 - 1;
     i64 id = ld64(z);
-    if (id < 1 || id > ph_nfh) return 0 - 1;
-    if (ld64(ph_fh_fd + (id - 1) * 8) < 0) return 0 - 1;
+    if (id < 1 || id > ld64(phT + PHT_ph_nfh)) return 0 - 1;
+    if (ld64((phT + PHT_ph_fh_fd) + (id - 1) * 8) < 0) return 0 - 1;
     return id - 1;
 }
 
-i64 php_fh_new(i64 fd, uptr name, i64 own) {
+i64 php_fh_new(i64 fd, uptr name, i64 own) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_pin();                                // the file table
-    if (ph_nfh >= PH_MAXFH) return 0 - 1;
-    st64(ph_fh_fd + ph_nfh * 8, fd);
-    st64(ph_fh_eof + ph_nfh * 8, 0);
-    st64(ph_fh_own + ph_nfh * 8, own);
-    st64(ph_fh_name + ph_nfh * 8, name);          // a C string, never read back
-    ph_nfh = ph_nfh + 1;
-    return ph_nfh;                               // the id is 1-based
+    if (ld64(phT + PHT_ph_nfh) >= PH_MAXFH) return 0 - 1;
+    st64((phT + PHT_ph_fh_fd) + ld64(phT + PHT_ph_nfh) * 8, fd);
+    st64((phT + PHT_ph_fh_eof) + ld64(phT + PHT_ph_nfh) * 8, 0);
+    st64((phT + PHT_ph_fh_own) + ld64(phT + PHT_ph_nfh) * 8, own);
+    st64((phT + PHT_ph_fh_name) + ld64(phT + PHT_ph_nfh) * 8, name);          // a C string, never read back
+    st64(phT + PHT_ph_nfh, ld64(phT + PHT_ph_nfh) + 1);
+    return ld64(phT + PHT_ph_nfh);                               // the id is 1-based
 }
 
 i64 php_file_exists_c(uptr p) { if (access(p, 0) == 0) return 1; return 0; }
@@ -8284,28 +8302,23 @@ uptr php_cpath(uptr z) {
 
 // php's mode string -> the open flags, and whether the file must be created
 // first (mc's `open` is not variadic, so a create is creat() + reopen)
-i64 ph_mode_rw;                                  // O_RDONLY / O_WRONLY / O_RDWR
-i64 ph_mode_app;
-i64 ph_mode_trunc;
-i64 ph_mode_create;
-i64 ph_mode_excl;
 
-i64 php_parse_mode(uptr m, i64 n) {
-    ph_mode_rw = O_RDONLY;
-    ph_mode_app = 0;
-    ph_mode_trunc = 0;
-    ph_mode_create = 0;
-    ph_mode_excl = 0;
+i64 php_parse_mode(uptr m, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    st64(phT + PHT_ph_mode_rw, O_RDONLY);
+    st64(phT + PHT_ph_mode_app, 0);
+    st64(phT + PHT_ph_mode_trunc, 0);
+    st64(phT + PHT_ph_mode_create, 0);
+    st64(phT + PHT_ph_mode_excl, 0);
     if (n < 1) return 0;
     i64 c = ld8(m);
     i64 plus = 0;
     i64 i = 1;
     loop { if (i >= n) break; if (ld8(m + i) == '+') plus = 1; i = i + 1; }
-    if (c == 'r') { ph_mode_rw = O_RDONLY; if (plus) ph_mode_rw = O_RDWR; return 1; }
-    if (c == 'w') { ph_mode_rw = O_WRONLY; if (plus) ph_mode_rw = O_RDWR; ph_mode_trunc = 1; ph_mode_create = 1; return 1; }
-    if (c == 'a') { ph_mode_rw = O_WRONLY; if (plus) ph_mode_rw = O_RDWR; ph_mode_app = 1; ph_mode_create = 1; return 1; }
-    if (c == 'x') { ph_mode_rw = O_WRONLY; if (plus) ph_mode_rw = O_RDWR; ph_mode_create = 1; ph_mode_excl = 1; return 1; }
-    if (c == 'c') { ph_mode_rw = O_WRONLY; if (plus) ph_mode_rw = O_RDWR; ph_mode_create = 1; return 1; }
+    if (c == 'r') { st64(phT + PHT_ph_mode_rw, O_RDONLY); if (plus) st64(phT + PHT_ph_mode_rw, O_RDWR); return 1; }
+    if (c == 'w') { st64(phT + PHT_ph_mode_rw, O_WRONLY); if (plus) st64(phT + PHT_ph_mode_rw, O_RDWR); st64(phT + PHT_ph_mode_trunc, 1); st64(phT + PHT_ph_mode_create, 1); return 1; }
+    if (c == 'a') { st64(phT + PHT_ph_mode_rw, O_WRONLY); if (plus) st64(phT + PHT_ph_mode_rw, O_RDWR); st64(phT + PHT_ph_mode_app, 1); st64(phT + PHT_ph_mode_create, 1); return 1; }
+    if (c == 'x') { st64(phT + PHT_ph_mode_rw, O_WRONLY); if (plus) st64(phT + PHT_ph_mode_rw, O_RDWR); st64(phT + PHT_ph_mode_create, 1); st64(phT + PHT_ph_mode_excl, 1); return 1; }
+    if (c == 'c') { st64(phT + PHT_ph_mode_rw, O_WRONLY); if (plus) st64(phT + PHT_ph_mode_rw, O_RDWR); st64(phT + PHT_ph_mode_create, 1); return 1; }
     return 0;
 }
 
@@ -8316,7 +8329,7 @@ i64 php_streq_c(uptr s, uptr lit, i64 n) {
     return 1;
 }
 
-uptr php_f_fopen(uptr pz, uptr mz, uptr uz, uptr cz) {
+uptr php_f_fopen(uptr pz, uptr mz, uptr uz, uptr cz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr ps = php_zv_str(pz);
     uptr p = ps + ZS_HDR;
     uptr ms = php_zv_str(mz);
@@ -8332,7 +8345,7 @@ uptr php_f_fopen(uptr pz, uptr mz, uptr uz, uptr cz) {
         return php_zbool(0);
     }
     i64 have = php_file_exists_c(p);
-    if (ph_mode_excl && have) {
+    if (ld64(phT + PHT_ph_mode_excl) && have) {
         php_mreset();
         php_mc("fopen(");
         php_mput(p, php_strlen(ps));
@@ -8340,7 +8353,7 @@ uptr php_f_fopen(uptr pz, uptr mz, uptr uz, uptr cz) {
         php_raise_m(PHE_WARNING);
         return php_zbool(0);
     }
-    if (!have && !ph_mode_create) {
+    if (!have && !ld64(phT + PHT_ph_mode_create)) {
         php_mreset();
         php_mc("fopen(");
         php_mput(p, php_strlen(ps));
@@ -8349,8 +8362,8 @@ uptr php_f_fopen(uptr pz, uptr mz, uptr uz, uptr cz) {
         return php_zbool(0);
     }
     // create or truncate with creat(), which is the non-variadic road
-    if (ph_mode_create) {
-        if (!have || ph_mode_trunc) {
+    if (ld64(phT + PHT_ph_mode_create)) {
+        if (!have || ld64(phT + PHT_ph_mode_trunc)) {
             i64 cf = creat(p, 420);
             if (cf < 0) {
                 php_mreset();
@@ -8363,8 +8376,8 @@ uptr php_f_fopen(uptr pz, uptr mz, uptr uz, uptr cz) {
             close(cf);
         }
     }
-    i64 fl = ph_mode_rw;
-    if (ph_mode_app) fl = fl | O_APPEND;
+    i64 fl = ld64(phT + PHT_ph_mode_rw);
+    if (ld64(phT + PHT_ph_mode_app)) fl = fl | O_APPEND;
     i64 fd = open(p, fl, 0);
     if (fd < 0) {
         php_mreset();
@@ -8379,27 +8392,27 @@ uptr php_f_fopen(uptr pz, uptr mz, uptr uz, uptr cz) {
     return php_zres(id);
 }
 
-u8 php_f_fclose(uptr rz) {
+u8 php_f_fclose(uptr rz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return 0;
-    if (ld64(ph_fh_own + i * 8)) close(ld64(ph_fh_fd + i * 8));
-    st64(ph_fh_fd + i * 8, 0 - 1);
+    if (ld64((phT + PHT_ph_fh_own) + i * 8)) close(ld64((phT + PHT_ph_fh_fd) + i * 8));
+    st64((phT + PHT_ph_fh_fd) + i * 8, 0 - 1);
     return 1;
 }
 
-uptr php_f_fwrite(uptr rz, uptr sz, uptr lz) {
+uptr php_f_fwrite(uptr rz, uptr sz, uptr lz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return php_zbool(0);
     uptr s = php_zv_str(sz);
     i64 n = php_strlen(s);
     if (lz) { if (php_zv_type(lz) != IS_NULL) { i64 l = php_zv_long(lz); if (l < n) n = l; } }
     php_flush();
-    i64 w = write(ld64(ph_fh_fd + i * 8), s + ZS_HDR, n);
+    i64 w = write(ld64((phT + PHT_ph_fh_fd) + i * 8), s + ZS_HDR, n);
     if (w < 0) return php_zbool(0);
     return php_zlong(w);
 }
 
-uptr php_f_fread(uptr rz, uptr lz) {
+uptr php_f_fread(uptr rz, uptr lz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return php_zbool(0);
     i64 n = php_zv_long(lz);
@@ -8410,9 +8423,9 @@ uptr php_f_fread(uptr rz, uptr lz) {
         return php_zbool(0);
     }
     uptr o = php_str_alloc(n);
-    i64 got = read(ld64(ph_fh_fd + i * 8), o + ZS_HDR, n);
+    i64 got = read(ld64((phT + PHT_ph_fh_fd) + i * 8), o + ZS_HDR, n);
     if (got < 0) got = 0;
-    if (!got) st64(ph_fh_eof + i * 8, 1);
+    if (!got) st64((phT + PHT_ph_fh_eof) + i * 8, 1);
     st64(o + 16, got);
     st8(o + ZS_HDR + got, 0);
     return php_zstr(o);
@@ -8420,19 +8433,19 @@ uptr php_f_fread(uptr rz, uptr lz) {
 
 // fgets reads one byte at a time: there is no buffered stream here and a
 // shared descriptor must not be read past its line
-uptr php_f_fgets(uptr rz, uptr lz) {
+uptr php_f_fgets(uptr rz, uptr lz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return php_zbool(0);
     i64 cap = 8192;
     if (lz) { if (php_zv_type(lz) != IS_NULL) { i64 l = php_zv_long(lz); if (l > 1) cap = l - 1; } }
     uptr o = php_str_alloc(cap);
     i64 n = 0;
-    i64 fd = ld64(ph_fh_fd + i * 8);
+    i64 fd = ld64((phT + PHT_ph_fh_fd) + i * 8);
     loop {
         if (n >= cap) break;
         u8 b[8];
         i64 g = read(fd, b, 1);
-        if (g < 1) { if (!n) st64(ph_fh_eof + i * 8, 1); break; }
+        if (g < 1) { if (!n) st64((phT + PHT_ph_fh_eof) + i * 8, 1); break; }
         st8(o + ZS_HDR + n, ld8(b));
         n = n + 1;
         if (ld8(b) == 10) break;
@@ -8443,22 +8456,22 @@ uptr php_f_fgets(uptr rz, uptr lz) {
     return php_zstr(o);
 }
 
-uptr php_f_fgetc(uptr rz) {
+uptr php_f_fgetc(uptr rz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return php_zbool(0);
     u8 b[8];
-    i64 g = read(ld64(ph_fh_fd + i * 8), b, 1);
-    if (g < 1) { st64(ph_fh_eof + i * 8, 1); return php_zbool(0); }
+    i64 g = read(ld64((phT + PHT_ph_fh_fd) + i * 8), b, 1);
+    if (g < 1) { st64((phT + PHT_ph_fh_eof) + i * 8, 1); return php_zbool(0); }
     return php_zstr(php_str_new(b, 1));
 }
 
-u8 php_f_feof(uptr rz) {
+u8 php_f_feof(uptr rz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return 1;
-    if (ld64(ph_fh_eof + i * 8)) return 1;
+    if (ld64((phT + PHT_ph_fh_eof) + i * 8)) return 1;
     // php's feof is "a read has already hit the end", and so is this one:
     // the position against the size is the same answer for a regular file
-    i64 fd = ld64(ph_fh_fd + i * 8);
+    i64 fd = ld64((phT + PHT_ph_fh_fd) + i * 8);
     i64 cur = lseek(fd, 0, 1);
     if (cur < 0) return 0;
     i64 end = lseek(fd, 0, 2);
@@ -8467,29 +8480,29 @@ u8 php_f_feof(uptr rz) {
     return 0;
 }
 
-i64 php_f_fseek(uptr rz, uptr oz, uptr wz) {
+i64 php_f_fseek(uptr rz, uptr oz, uptr wz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return 0 - 1;
     i64 w = 0;
     if (wz) { if (php_zv_type(wz) != IS_NULL) w = php_zv_long(wz); }
-    if (lseek(ld64(ph_fh_fd + i * 8), php_zv_long(oz), w) < 0) return 0 - 1;
-    st64(ph_fh_eof + i * 8, 0);
+    if (lseek(ld64((phT + PHT_ph_fh_fd) + i * 8), php_zv_long(oz), w) < 0) return 0 - 1;
+    st64((phT + PHT_ph_fh_eof) + i * 8, 0);
     return 0;
 }
 
-uptr php_f_ftell(uptr rz) {
+uptr php_f_ftell(uptr rz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return php_zbool(0);
-    i64 p = lseek(ld64(ph_fh_fd + i * 8), 0, 1);
+    i64 p = lseek(ld64((phT + PHT_ph_fh_fd) + i * 8), 0, 1);
     if (p < 0) return php_zbool(0);
     return php_zlong(p);
 }
 
-u8 php_f_rewind(uptr rz) {
+u8 php_f_rewind(uptr rz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return 0;
-    if (lseek(ld64(ph_fh_fd + i * 8), 0, 0) < 0) return 0;
-    st64(ph_fh_eof + i * 8, 0);
+    if (lseek(ld64((phT + PHT_ph_fh_fd) + i * 8), 0, 0) < 0) return 0;
+    st64((phT + PHT_ph_fh_eof) + i * 8, 0);
     return 1;
 }
 
@@ -8651,44 +8664,42 @@ u8 php_f_is_file(uptr pz) {
 
 // set_error_handler(callable, levels) -> the previous handler or null.
 // register/restore is a one-deep stack, which is what the corpus uses.
-uptr php_f_set_error_handler(uptr hz, uptr lz) {
+uptr php_f_set_error_handler(uptr hz, uptr lz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_pin();                                // the handler outlives the call
-    uptr old = ph_ehz;
-    ph_ehprev = old;
-    ph_ehmask = 32767;
-    if (lz) { if (php_zv_type(lz) != IS_NULL) ph_ehmask = php_zv_long(lz); }
-    if (!hz) ph_ehz = 0;
-    if (hz) { if (php_zv_type(hz) == IS_NULL) ph_ehz = 0; }
-    if (hz) { if (php_zv_type(hz) != IS_NULL) ph_ehz = hz; }
+    uptr old = ((uptr) ld64(phT + PHT_ph_ehz));
+    st64(phT + PHT_ph_ehprev, old);
+    st64(phT + PHT_ph_ehmask, 32767);
+    if (lz) { if (php_zv_type(lz) != IS_NULL) st64(phT + PHT_ph_ehmask, php_zv_long(lz)); }
+    if (!hz) st64(phT + PHT_ph_ehz, 0);
+    if (hz) { if (php_zv_type(hz) == IS_NULL) st64(phT + PHT_ph_ehz, 0); }
+    if (hz) { if (php_zv_type(hz) != IS_NULL) st64(phT + PHT_ph_ehz, hz); }
     if (!old) return php_znull();
     return old;
 }
 
-u8 php_f_restore_error_handler() {
+u8 php_f_restore_error_handler() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_pin();                                // the handler outlives the call
-    ph_ehz = ph_ehprev;
-    ph_ehprev = 0;
+    st64(phT + PHT_ph_ehz, ((uptr) ld64(phT + PHT_ph_ehprev)));
+    st64(phT + PHT_ph_ehprev, 0);
     return 1;
 }
 
 // set_exception_handler(): the callable an UNCAUGHT throwable reaches
-uptr ph_xhz;
-uptr ph_xhprev;
 
-uptr php_f_set_exception_handler(uptr hz) {
+uptr php_f_set_exception_handler(uptr hz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_pin();                                // the handler outlives the call
-    uptr old = ph_xhz;
-    ph_xhprev = old;
-    ph_xhz = 0;
-    if (hz) { if (php_zv_type(hz) != IS_NULL) ph_xhz = hz; }
+    uptr old = ((uptr) ld64(phT + PHT_ph_xhz));
+    st64(phT + PHT_ph_xhprev, old);
+    st64(phT + PHT_ph_xhz, 0);
+    if (hz) { if (php_zv_type(hz) != IS_NULL) st64(phT + PHT_ph_xhz, hz); }
     if (!old) return php_znull();
     return old;
 }
 
-u8 php_f_restore_exception_handler() {
+u8 php_f_restore_exception_handler() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_pin();                                // the handler outlives the call
-    ph_xhz = ph_xhprev;
-    ph_xhprev = 0;
+    st64(phT + PHT_ph_xhz, ((uptr) ld64(phT + PHT_ph_xhprev)));
+    st64(phT + PHT_ph_xhprev, 0);
     return 1;
 }
 
@@ -8712,9 +8723,6 @@ u8 php_f_restore_exception_handler() {
 // sscanf($str, $format): php's own C-like scanner. With no extra arguments
 // it answers an array of the conversions; a directive that finds nothing
 // yields null, and a literal that does not match stops the scan.
-i64 ph_sc_p;
-uptr ph_sc_s;
-i64 ph_sc_n;
 
 // a scanset is `a-z` (a dash range), not trim's `a..z`
 i64 php_scanset(uptr set, i64 c) {
@@ -8738,20 +8746,20 @@ i64 php_scanset(uptr set, i64 c) {
 
 i64 php_sc_ws(i64 c) { if (c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12) return 1; return 0; }
 
-void php_sc_skipws() {
+void php_sc_skipws() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     loop {
-        if (ph_sc_p >= ph_sc_n) break;
-        if (!php_sc_ws(ld8(ph_sc_s + ph_sc_p))) break;
-        ph_sc_p = ph_sc_p + 1;
+        if (ld64(phT + PHT_ph_sc_p) >= ld64(phT + PHT_ph_sc_n)) break;
+        if (!php_sc_ws(ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p)))) break;
+        st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1);
     }
 }
 
-uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr str = php_zv_str(sz);
     uptr fmt = php_zv_str(fz);
-    ph_sc_s = str + ZS_HDR;
-    ph_sc_n = php_strlen(str);
-    ph_sc_p = 0;
+    st64(phT + PHT_ph_sc_s, str + ZS_HDR);
+    st64(phT + PHT_ph_sc_n, php_strlen(str));
+    st64(phT + PHT_ph_sc_p, 0);
     uptr out = php_arr_new(8);
     uptr f = fmt + ZS_HDR;
     i64 fn = php_strlen(fmt);
@@ -8761,18 +8769,18 @@ uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5,
         i64 fc = ld8(f + i);
         if (php_sc_ws(fc)) { php_sc_skipws(); i = i + 1; continue; }
         if (fc != 37) {
-            if (ph_sc_p >= ph_sc_n) break;
-            if (ld8(ph_sc_s + ph_sc_p) != fc) break;
-            ph_sc_p = ph_sc_p + 1;
+            if (ld64(phT + PHT_ph_sc_p) >= ld64(phT + PHT_ph_sc_n)) break;
+            if (ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p)) != fc) break;
+            st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1);
             i = i + 1;
             continue;
         }
         i = i + 1;
         if (i >= fn) break;
         if (ld8(f + i) == 37) {
-            if (ph_sc_p >= ph_sc_n) break;
-            if (ld8(ph_sc_s + ph_sc_p) != 37) break;
-            ph_sc_p = ph_sc_p + 1;
+            if (ld64(phT + PHT_ph_sc_p) >= ld64(phT + PHT_ph_sc_n)) break;
+            if (ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p)) != 37) break;
+            st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1);
             i = i + 1;
             continue;
         }
@@ -8789,18 +8797,18 @@ uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5,
         i64 conv = ld8(f + i);
         i = i + 1;
         if (conv != 99) php_sc_skipws();                  // %c does not skip
-        i64 st = ph_sc_p;
+        i64 st = ld64(phT + PHT_ph_sc_p);
         if (conv == 100 || conv == 105 || conv == 117) {  // d i u
-            if (ph_sc_p < ph_sc_n) { i64 sg = ld8(ph_sc_s + ph_sc_p); if (sg == 45 || sg == 43) ph_sc_p = ph_sc_p + 1; }
+            if (ld64(phT + PHT_ph_sc_p) < ld64(phT + PHT_ph_sc_n)) { i64 sg = ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p)); if (sg == 45 || sg == 43) st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1); }
             loop {
-                if (ph_sc_p >= ph_sc_n) break;
-                if (width >= 0 && ph_sc_p - st >= width) break;
-                i64 d = ld8(ph_sc_s + ph_sc_p);
+                if (ld64(phT + PHT_ph_sc_p) >= ld64(phT + PHT_ph_sc_n)) break;
+                if (width >= 0 && ld64(phT + PHT_ph_sc_p) - st >= width) break;
+                i64 d = ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p));
                 if (d < 48 || d > 57) break;
-                ph_sc_p = ph_sc_p + 1;
+                st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1);
             }
-            if (ph_sc_p == st) { php_arr_push(out, php_znull()); break; }
-            php_arr_push(out, php_zlong(php_stoi(php_str_new(ph_sc_s + st, ph_sc_p - st))));
+            if (ld64(phT + PHT_ph_sc_p) == st) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zlong(php_stoi(php_str_new(((uptr) ld64(phT + PHT_ph_sc_s)) + st, ld64(phT + PHT_ph_sc_p) - st))));
             continue;
         }
         if (conv == 120 || conv == 88 || conv == 111 || conv == 98) {   // x X o b
@@ -8809,57 +8817,57 @@ uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5,
             if (conv == 98) base = 2;
             i64 v = 0;
             loop {
-                if (ph_sc_p >= ph_sc_n) break;
-                if (width >= 0 && ph_sc_p - st >= width) break;
-                i64 d = ld8(ph_sc_s + ph_sc_p);
+                if (ld64(phT + PHT_ph_sc_p) >= ld64(phT + PHT_ph_sc_n)) break;
+                if (width >= 0 && ld64(phT + PHT_ph_sc_p) - st >= width) break;
+                i64 d = ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p));
                 i64 dv = 0 - 1;
                 if (d >= 48 && d <= 57) dv = d - 48;
                 if (d >= 97 && d <= 102) dv = d - 87;
                 if (d >= 65 && d <= 70) dv = d - 55;
                 if (dv < 0 || dv >= base) break;
                 v = v * base + dv;
-                ph_sc_p = ph_sc_p + 1;
+                st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1);
             }
-            if (ph_sc_p == st) { php_arr_push(out, php_znull()); break; }
+            if (ld64(phT + PHT_ph_sc_p) == st) { php_arr_push(out, php_znull()); break; }
             php_arr_push(out, php_zlong(v));
             continue;
         }
         if (conv == 101 || conv == 102 || conv == 103 || conv == 69 || conv == 71) {   // e f g
-            if (ph_sc_p < ph_sc_n) { i64 sg = ld8(ph_sc_s + ph_sc_p); if (sg == 45 || sg == 43) ph_sc_p = ph_sc_p + 1; }
+            if (ld64(phT + PHT_ph_sc_p) < ld64(phT + PHT_ph_sc_n)) { i64 sg = ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p)); if (sg == 45 || sg == 43) st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1); }
             loop {
-                if (ph_sc_p >= ph_sc_n) break;
-                if (width >= 0 && ph_sc_p - st >= width) break;
-                i64 d = ld8(ph_sc_s + ph_sc_p);
-                if (d >= 48 && d <= 57) { ph_sc_p = ph_sc_p + 1; continue; }
-                if (d == 46) { ph_sc_p = ph_sc_p + 1; continue; }
+                if (ld64(phT + PHT_ph_sc_p) >= ld64(phT + PHT_ph_sc_n)) break;
+                if (width >= 0 && ld64(phT + PHT_ph_sc_p) - st >= width) break;
+                i64 d = ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p));
+                if (d >= 48 && d <= 57) { st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1); continue; }
+                if (d == 46) { st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1); continue; }
                 if (d == 101 || d == 69) {
-                    i64 j = ph_sc_p + 1;
-                    if (j < ph_sc_n) { i64 g = ld8(ph_sc_s + j); if (g == 43 || g == 45) j = j + 1; }
-                    if (j < ph_sc_n) { i64 g2 = ld8(ph_sc_s + j); if (g2 >= 48 && g2 <= 57) { ph_sc_p = j; continue; } }
+                    i64 j = ld64(phT + PHT_ph_sc_p) + 1;
+                    if (j < ld64(phT + PHT_ph_sc_n)) { i64 g = ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + j); if (g == 43 || g == 45) j = j + 1; }
+                    if (j < ld64(phT + PHT_ph_sc_n)) { i64 g2 = ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + j); if (g2 >= 48 && g2 <= 57) { st64(phT + PHT_ph_sc_p, j); continue; } }
                 }
                 break;
             }
-            if (ph_sc_p == st) { php_arr_push(out, php_znull()); break; }
-            php_arr_push(out, php_zdouble(php_stof(php_str_new(ph_sc_s + st, ph_sc_p - st))));
+            if (ld64(phT + PHT_ph_sc_p) == st) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zdouble(php_stof(php_str_new(((uptr) ld64(phT + PHT_ph_sc_s)) + st, ld64(phT + PHT_ph_sc_p) - st))));
             continue;
         }
         if (conv == 99) {                                  // c
             i64 w = 1;
             if (width > 0) w = width;
-            if (ph_sc_p + w > ph_sc_n) { php_arr_push(out, php_znull()); break; }
-            php_arr_push(out, php_zstr(php_str_new(ph_sc_s + ph_sc_p, w)));
-            ph_sc_p = ph_sc_p + w;
+            if (ld64(phT + PHT_ph_sc_p) + w > ld64(phT + PHT_ph_sc_n)) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zstr(php_str_new(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p), w)));
+            st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + w);
             continue;
         }
         if (conv == 115) {                                 // s
             loop {
-                if (ph_sc_p >= ph_sc_n) break;
-                if (width >= 0 && ph_sc_p - st >= width) break;
-                if (php_sc_ws(ld8(ph_sc_s + ph_sc_p))) break;
-                ph_sc_p = ph_sc_p + 1;
+                if (ld64(phT + PHT_ph_sc_p) >= ld64(phT + PHT_ph_sc_n)) break;
+                if (width >= 0 && ld64(phT + PHT_ph_sc_p) - st >= width) break;
+                if (php_sc_ws(ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p)))) break;
+                st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1);
             }
-            if (ph_sc_p == st) { php_arr_push(out, php_znull()); break; }
-            php_arr_push(out, php_zstr(php_str_new(ph_sc_s + st, ph_sc_p - st)));
+            if (ld64(phT + PHT_ph_sc_p) == st) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zstr(php_str_new(((uptr) ld64(phT + PHT_ph_sc_s)) + st, ld64(phT + PHT_ph_sc_p) - st)));
             continue;
         }
         if (conv == 91) {                                  // [set]
@@ -8870,15 +8878,15 @@ uptr php_f_sscanf(uptr sz, uptr fz, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5,
             uptr set = php_str_new(f + sb, i - sb);
             if (i < fn) i = i + 1;                         // the ]
             loop {
-                if (ph_sc_p >= ph_sc_n) break;
-                if (width >= 0 && ph_sc_p - st >= width) break;
-                i64 inx = php_scanset(set, ld8(ph_sc_s + ph_sc_p));
+                if (ld64(phT + PHT_ph_sc_p) >= ld64(phT + PHT_ph_sc_n)) break;
+                if (width >= 0 && ld64(phT + PHT_ph_sc_p) - st >= width) break;
+                i64 inx = php_scanset(set, ld8(((uptr) ld64(phT + PHT_ph_sc_s)) + ld64(phT + PHT_ph_sc_p)));
                 if (neg) { if (inx) break; }
                 if (!neg) { if (!inx) break; }
-                ph_sc_p = ph_sc_p + 1;
+                st64(phT + PHT_ph_sc_p, ld64(phT + PHT_ph_sc_p) + 1);
             }
-            if (ph_sc_p == st) { php_arr_push(out, php_znull()); break; }
-            php_arr_push(out, php_zstr(php_str_new(ph_sc_s + st, ph_sc_p - st)));
+            if (ld64(phT + PHT_ph_sc_p) == st) { php_arr_push(out, php_znull()); break; }
+            php_arr_push(out, php_zstr(php_str_new(((uptr) ld64(phT + PHT_ph_sc_s)) + st, ld64(phT + PHT_ph_sc_p) - st)));
             continue;
         }
         break;
@@ -9048,25 +9056,24 @@ uptr php_f_sys_get_temp_dir() {
 
 // a counter, not a random: one process, and the name must not collide with
 // its own earlier answers
-i64 ph_tmpseq;
 
-uptr php_f_tempnam(uptr dz, uptr pz) {
+uptr php_f_tempnam(uptr dz, uptr pz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr d = php_zv_str(dz);
     uptr p = php_zv_str(pz);
     if (!php_strlen(d)) d = php_f_sys_get_temp_dir();
     loop {
-        ph_tmpseq = ph_tmpseq + 1;
+        st64(phT + PHT_ph_tmpseq, ld64(phT + PHT_ph_tmpseq) + 1);
         uptr nm = php_str_concat(d, php_str_new("/", 1));
         nm = php_str_concat(nm, p);
         nm = php_str_concat(nm, php_str_new("mcp", 3));
-        nm = php_str_concat(nm, php_itos(getpid() * 100000 + ph_tmpseq));
+        nm = php_str_concat(nm, php_itos(getpid() * 100000 + ld64(phT + PHT_ph_tmpseq)));
         if (!php_file_exists_c(nm + ZS_HDR)) {
             i64 fd = creat(nm + ZS_HDR, 384);
             if (fd < 0) return php_zbool(0);
             close(fd);
             return php_zstr(nm);
         }
-        if (ph_tmpseq > 100000) return php_zbool(0);
+        if (ld64(phT + PHT_ph_tmpseq) > 100000) return php_zbool(0);
     }
     return php_zbool(0);
 }
@@ -9100,17 +9107,17 @@ uptr php_f_realpath(uptr pz) {
     return php_zstr(ps);
 }
 
-uptr php_f_stream_get_contents(uptr rz) {
+uptr php_f_stream_get_contents(uptr rz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return php_zbool(0);
-    i64 fd = ld64(ph_fh_fd + i * 8);
+    i64 fd = ld64((phT + PHT_ph_fh_fd) + i * 8);
     uptr acc = php_str_new("", 0);
     loop {
-        i64 g = read(fd, ph_rdbuf, 4096);
+        i64 g = read(fd, (phT + PHT_ph_rdbuf), 4096);
         if (g < 1) break;
-        acc = php_str_concat(acc, php_str_new(ph_rdbuf, g));
+        acc = php_str_concat(acc, php_str_new((phT + PHT_ph_rdbuf), g));
     }
-    st64(ph_fh_eof + i * 8, 1);
+    st64((phT + PHT_ph_fh_eof) + i * 8, 1);
     return php_zstr(acc);
 }
 
@@ -9326,11 +9333,10 @@ u8 php_f_parse_str(uptr sz, uptr oz) {
 // uniqid(): php's is the time in microseconds as 13 hex digits. There is no
 // clock here, so it is a counter seeded by the pid -- unique within a
 // process and between concurrent ones, which is what every use of it needs.
-i64 ph_uniqseq;
 
-uptr php_f_uniqid(uptr pz, uptr mz) {
-    ph_uniqseq = ph_uniqseq + 1;
-    i64 v = getpid() * 1048576 + ph_uniqseq;
+uptr php_f_uniqid(uptr pz, uptr mz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    st64(phT + PHT_ph_uniqseq, ld64(phT + PHT_ph_uniqseq) + 1);
+    i64 v = getpid() * 1048576 + ld64(phT + PHT_ph_uniqseq);
     uptr o = php_str_alloc(13);
     i64 i = 12;
     loop {
@@ -9361,20 +9367,17 @@ f64 php_bits_f64(i64 v) { u8 b[8]; st64(b, v); return ldf64(b); }
 i64 php_f32_bits(f64 x) { u8 b[8]; stf32(b, (f32) x); return ld32(b); }
 f64 php_bits_f32(i64 v) { u8 b[8]; st32(b, v); return (f64) ldf32(b); }
 
-uptr ph_pk;                          // the output, grown by php_pk_need
-i64  ph_pkn;
-i64  ph_pkc;
 
-void php_pk_need(i64 n) {
-    if (ph_pkn + n <= ph_pkc) return;
-    i64 nc = ph_pkc * 2 + n + 64;
+void php_pk_need(i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ld64(phT + PHT_ph_pkn) + n <= ld64(phT + PHT_ph_pkc)) return;
+    i64 nc = ld64(phT + PHT_ph_pkc) * 2 + n + 64;
     uptr nb = php_alloc(nc);
-    php_memcpy(nb, ph_pk, ph_pkn);
-    ph_pk = nb;
-    ph_pkc = nc;
+    php_memcpy(nb, ((uptr) ld64(phT + PHT_ph_pk)), ld64(phT + PHT_ph_pkn));
+    st64(phT + PHT_ph_pk, nb);
+    st64(phT + PHT_ph_pkc, nc);
 }
 
-void php_pk_b(i64 v) { php_pk_need(1); st8(ph_pk + ph_pkn, v & 255); ph_pkn = ph_pkn + 1; }
+void php_pk_b(i64 v) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); php_pk_need(1); st8(((uptr) ld64(phT + PHT_ph_pk)) + ld64(phT + PHT_ph_pkn), v & 255); st64(phT + PHT_ph_pkn, ld64(phT + PHT_ph_pkn) + 1); }
 
 void php_pk_int(i64 v, i64 w, i64 be) {
     i64 i = 0;
@@ -9388,12 +9391,11 @@ void php_pk_int(i64 v, i64 w, i64 be) {
 }
 
 // the repeater after a code: a count, `*`, or nothing (1)
-i64 ph_pk_star;
 
-i64 php_pk_rep(uptr f, i64 n, uptr pi) {
+i64 php_pk_rep(uptr f, i64 n, uptr pi) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = ld64(pi);
-    ph_pk_star = 0;
-    if (i < n && ld8(f + i) == '*') { ph_pk_star = 1; st64(pi, i + 1); return 0 - 1; }
+    st64(phT + PHT_ph_pk_star, 0);
+    if (i < n && ld8(f + i) == '*') { st64(phT + PHT_ph_pk_star, 1); st64(pi, i + 1); return 0 - 1; }
     i64 v = 0;
     i64 got = 0;
     loop {
@@ -9409,15 +9411,15 @@ i64 php_pk_rep(uptr f, i64 n, uptr pi) {
     return v;
 }
 
-uptr php_f_pack(uptr fz, uptr az) {
+uptr php_f_pack(uptr fz, uptr az) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr f = php_zv_str(fz);
     i64 fn = php_strlen(f);
     uptr args = php_arr_new(8);
     if (az) { if (php_zv_type(az) == IS_ARRAY) args = ld64(az); }
     i64 na = php_count(args);
-    ph_pk = 0;
-    ph_pkn = 0;
-    ph_pkc = 0;
+    st64(phT + PHT_ph_pk, 0);
+    st64(phT + PHT_ph_pkn, 0);
+    st64(phT + PHT_ph_pkc, 0);
     i64 ai = 0;
     u8 pi[8];
     st64(pi, 0);
@@ -9427,7 +9429,7 @@ uptr php_f_pack(uptr fz, uptr az) {
         i64 code = ld8(f + ZS_HDR + i);
         st64(pi, i + 1);
         i64 rep = php_pk_rep(f + ZS_HDR, fn, pi);
-        i64 star = ph_pk_star;
+        i64 star = ld64(phT + PHT_ph_pk_star);
         // the string codes take ONE argument and the repeater is a width
         if (code == 'a' || code == 'A' || code == 'Z') {
             if (ai >= na) break;
@@ -9471,8 +9473,8 @@ uptr php_f_pack(uptr fz, uptr az) {
             continue;
         }
         if (code == 'x') { i64 k = 0; if (star) rep = 1; loop { if (k >= rep) break; php_pk_b(0); k = k + 1; } continue; }
-        if (code == 'X') { i64 k = 0; if (star) rep = 1; loop { if (k >= rep) break; if (ph_pkn) ph_pkn = ph_pkn - 1; k = k + 1; } continue; }
-        if (code == '@') { if (star) rep = 0; loop { if (ph_pkn >= rep) break; php_pk_b(0); } if (ph_pkn > rep) ph_pkn = rep; continue; }
+        if (code == 'X') { i64 k = 0; if (star) rep = 1; loop { if (k >= rep) break; if (ld64(phT + PHT_ph_pkn)) st64(phT + PHT_ph_pkn, ld64(phT + PHT_ph_pkn) - 1); k = k + 1; } continue; }
+        if (code == '@') { if (star) rep = 0; loop { if (ld64(phT + PHT_ph_pkn) >= rep) break; php_pk_b(0); } if (ld64(phT + PHT_ph_pkn) > rep) st64(phT + PHT_ph_pkn, rep); continue; }
         // the numeric codes take `rep` arguments
         i64 cnt = rep;
         if (star) cnt = na - ai;
@@ -9496,7 +9498,7 @@ uptr php_f_pack(uptr fz, uptr az) {
             k = k + 1;
         }
     }
-    return php_zstr(php_str_new(ph_pk, ph_pkn));
+    return php_zstr(php_str_new(((uptr) ld64(phT + PHT_ph_pk)), ld64(phT + PHT_ph_pkn)));
 }
 
 i64 php_unp_int(uptr s, i64 off, i64 w, i64 be, i64 sign) {
@@ -9517,7 +9519,7 @@ i64 php_unp_int(uptr s, i64 off, i64 w, i64 be, i64 sign) {
     return v;
 }
 
-uptr php_f_unpack(uptr fz, uptr sz, uptr oz) {
+uptr php_f_unpack(uptr fz, uptr sz, uptr oz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr f = php_zv_str(fz);
     uptr s = php_zv_str(sz);
     i64 fn = php_strlen(f);
@@ -9534,7 +9536,7 @@ uptr php_f_unpack(uptr fz, uptr sz, uptr oz) {
         u8 pi[8];
         st64(pi, i);
         i64 rep = php_pk_rep(f + ZS_HDR, fn, pi);
-        i64 star = ph_pk_star;
+        i64 star = ld64(phT + PHT_ph_pk_star);
         i = ld64(pi);
         // the name runs to the next `/`
         i64 ns = i;
@@ -9897,7 +9899,6 @@ void php_ser(uptr z, i64 depth) {
 // one php writes -- `/` escaped, non-ASCII as \uXXXX by default, a float
 // printed with serialize_precision -1 (the shortest round trip), and an
 // array that is a LIST as [..] and anything else as {..}.
-i64 ph_js_bad;                              // 1 when the input was not UTF-8
 
 void php_js_hex4(i64 v) {
     php_write("\\u", 2);
@@ -9913,7 +9914,7 @@ void php_js_hex4(i64 v) {
     }
 }
 
-void php_js_str(uptr s) {
+void php_js_str(uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_write("\"", 1);
     i64 n = php_strlen(s);
     uptr b = s + ZS_HDR;
@@ -9937,19 +9938,19 @@ void php_js_str(uptr s) {
         if (c >= 192 && c < 224) { cp = c - 192; len = 2; }
         if (c >= 224 && c < 240) { cp = c - 224; len = 3; }
         if (c >= 240 && c < 248) { cp = c - 240; len = 4; }
-        if (len == 0 || i + len > n) { ph_js_bad = 1; return; }
+        if (len == 0 || i + len > n) { st64(phT + PHT_ph_js_bad, 1); return; }
         i64 k = 1;
         loop {
             if (k >= len) break;
             i64 cc = ld8(b + i + k);
-            if (cc < 128 || cc >= 192) { ph_js_bad = 1; return; }
+            if (cc < 128 || cc >= 192) { st64(phT + PHT_ph_js_bad, 1); return; }
             cp = cp * 64 + (cc - 128);
             k = k + 1;
         }
-        if (cp < 128) { ph_js_bad = 1; return; }
-        if (len == 3 && cp < 2048) { ph_js_bad = 1; return; }
-        if (len == 4 && cp < 65536) { ph_js_bad = 1; return; }
-        if (cp >= 55296 && cp < 57344) { ph_js_bad = 1; return; }
+        if (cp < 128) { st64(phT + PHT_ph_js_bad, 1); return; }
+        if (len == 3 && cp < 2048) { st64(phT + PHT_ph_js_bad, 1); return; }
+        if (len == 4 && cp < 65536) { st64(phT + PHT_ph_js_bad, 1); return; }
+        if (cp >= 55296 && cp < 57344) { st64(phT + PHT_ph_js_bad, 1); return; }
         if (cp < 65536) php_js_hex4(cp);
         if (cp >= 65536) {
             i64 v = cp - 65536;
@@ -9961,7 +9962,7 @@ void php_js_str(uptr s) {
     php_write("\"", 1);
 }
 
-void php_js(uptr z, i64 depth) {
+void php_js(uptr z, i64 depth) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 t = php_zv_type(z);
     if (t == IS_NULL || t == IS_UNDEF) { php_write("null", 4); return; }
     if (t == IS_TRUE)  { php_write("true", 4); return; }
@@ -9969,7 +9970,7 @@ void php_js(uptr z, i64 depth) {
     if (t == IS_LONG)  { php_echo_int(ld64(z)); return; }
     if (t == IS_DOUBLE) {
         f64 d = ldf64(z);
-        if (ph_is_nan(d) || ph_is_inf(d)) { ph_js_bad = 2; php_write("0", 1); return; }
+        if (ph_is_nan(d) || ph_is_inf(d)) { st64(phT + PHT_ph_js_bad, 2); php_write("0", 1); return; }
         u8 b[64];
         i64 n = php_fmt_f64(b, d, 17);
         php_write(b, n);
@@ -9977,7 +9978,7 @@ void php_js(uptr z, i64 depth) {
         return;
     }
     if (t == IS_STRING) { php_js_str(ld64(z)); return; }
-    if (depth > 512) { ph_js_bad = 3; return; }
+    if (depth > 512) { st64(phT + PHT_ph_js_bad, 3); return; }
     uptr h = 0;
     i64 list = 0;
     if (t == IS_ARRAY) { h = ld64(z); list = php_f_array_is_list(z); }
@@ -10008,58 +10009,53 @@ void php_js(uptr z, i64 depth) {
     if (!list) php_write("}", 1);
 }
 
-uptr php_f_json_encode(uptr z, uptr flags, uptr depth) {
-    ph_js_bad = 0;
+uptr php_f_json_encode(uptr z, uptr flags, uptr depth) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    st64(phT + PHT_ph_js_bad, 0);
     php_ob_start();
     php_js(z, 0);
     uptr r = php_ob_get();
-    if (ph_js_bad) return php_zbool(0);
+    if (ld64(phT + PHT_ph_js_bad)) return php_zbool(0);
     return php_zstr(r);
 }
 
-uptr php_f_json_last_error_msg() {
-    if (!ph_js_bad) return php_zstr(php_str_new("No error", 8));
-    if (ph_js_bad == 1) return php_zstr(php_str_new("Malformed UTF-8 characters, possibly incorrectly encoded", 56));
-    if (ph_js_bad == 2) return php_zstr(php_str_new("Inf and NaN cannot be JSON encoded", 34));
-    if (ph_js_bad == 4) return php_zstr(php_str_new("Syntax error", 12));
+uptr php_f_json_last_error_msg() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (!ld64(phT + PHT_ph_js_bad)) return php_zstr(php_str_new("No error", 8));
+    if (ld64(phT + PHT_ph_js_bad) == 1) return php_zstr(php_str_new("Malformed UTF-8 characters, possibly incorrectly encoded", 56));
+    if (ld64(phT + PHT_ph_js_bad) == 2) return php_zstr(php_str_new("Inf and NaN cannot be JSON encoded", 34));
+    if (ld64(phT + PHT_ph_js_bad) == 4) return php_zstr(php_str_new("Syntax error", 12));
     return php_zstr(php_str_new("Maximum stack depth exceeded", 28));
 }
 
-i64 php_f_json_last_error() {
-    if (!ph_js_bad) return 0;
-    if (ph_js_bad == 1) return 5;
-    if (ph_js_bad == 2) return 7;
-    if (ph_js_bad == 4) return 4;
+i64 php_f_json_last_error() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (!ld64(phT + PHT_ph_js_bad)) return 0;
+    if (ld64(phT + PHT_ph_js_bad) == 1) return 5;
+    if (ld64(phT + PHT_ph_js_bad) == 2) return 7;
+    if (ld64(phT + PHT_ph_js_bad) == 4) return 4;
     return 1;
 }
 
 // the reader: a cursor into the string, json's grammar
-i64 ph_jd_p;
-uptr ph_jd_s;
-i64 ph_jd_n;
-i64 ph_jd_bad;
-i64 ph_jd_assoc;
 
 uptr php_jd_val(i64 depth);
 
-void php_jd_ws() {
+void php_jd_ws() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     loop {
-        if (ph_jd_p >= ph_jd_n) break;
-        i64 c = ld8(ph_jd_s + ph_jd_p);
-        if (c == 32 || c == 9 || c == 10 || c == 13) { ph_jd_p = ph_jd_p + 1; continue; }
+        if (ld64(phT + PHT_ph_jd_p) >= ld64(phT + PHT_ph_jd_n)) break;
+        i64 c = ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p));
+        if (c == 32 || c == 9 || c == 10 || c == 13) { st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1); continue; }
         break;
     }
 }
 
-i64 php_jd_lit(uptr w, i64 n) {
-    if (ph_jd_p + n > ph_jd_n) return 0;
+i64 php_jd_lit(uptr w, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ld64(phT + PHT_ph_jd_p) + n > ld64(phT + PHT_ph_jd_n)) return 0;
     i64 i = 0;
     loop {
         if (i >= n) break;
-        if (ld8(ph_jd_s + ph_jd_p + i) != ld8(w + i)) return 0;
+        if (ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p) + i) != ld8(w + i)) return 0;
         i = i + 1;
     }
-    ph_jd_p = ph_jd_p + n;
+    st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + n);
     return 1;
 }
 
@@ -10086,45 +10082,45 @@ void php_jd_utf8(uptr sb, uptr np, i64 cp) {
     st64(np, n + 4);
 }
 
-i64 php_jd_hex4() {
+i64 php_jd_hex4() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 v = 0;
     i64 i = 0;
     loop {
         if (i >= 4) break;
-        if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; return 0; }
-        i64 c = ld8(ph_jd_s + ph_jd_p);
+        if (ld64(phT + PHT_ph_jd_p) >= ld64(phT + PHT_ph_jd_n)) { st64(phT + PHT_ph_jd_bad, 1); return 0; }
+        i64 c = ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p));
         i64 d = 0 - 1;
         if (c >= 48 && c <= 57) d = c - 48;
         if (c >= 97 && c <= 102) d = c - 87;
         if (c >= 65 && c <= 70) d = c - 55;
-        if (d < 0) { ph_jd_bad = 1; return 0; }
+        if (d < 0) { st64(phT + PHT_ph_jd_bad, 1); return 0; }
         v = v * 16 + d;
-        ph_jd_p = ph_jd_p + 1;
+        st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1);
         i = i + 1;
     }
     return v;
 }
 
-uptr php_jd_str() {
-    ph_jd_p = ph_jd_p + 1;                                    // the opening "
-    uptr sb = php_alloc(ph_jd_n * 4 + 8);
+uptr php_jd_str() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1);                                    // the opening "
+    uptr sb = php_alloc(ld64(phT + PHT_ph_jd_n) * 4 + 8);
     u8 np[8];
     st64(np, 0);
     loop {
-        if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
-        i64 c = ld8(ph_jd_s + ph_jd_p);
-        if (c == 34) { ph_jd_p = ph_jd_p + 1; break; }
+        if (ld64(phT + PHT_ph_jd_p) >= ld64(phT + PHT_ph_jd_n)) { st64(phT + PHT_ph_jd_bad, 1); break; }
+        i64 c = ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p));
+        if (c == 34) { st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1); break; }
         if (c != 92) {
             i64 n0 = ld64(np);
             st8(sb + n0, c);
             st64(np, n0 + 1);
-            ph_jd_p = ph_jd_p + 1;
+            st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1);
             continue;
         }
-        ph_jd_p = ph_jd_p + 1;
-        if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
-        i64 e = ld8(ph_jd_s + ph_jd_p);
-        ph_jd_p = ph_jd_p + 1;
+        st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1);
+        if (ld64(phT + PHT_ph_jd_p) >= ld64(phT + PHT_ph_jd_n)) { st64(phT + PHT_ph_jd_bad, 1); break; }
+        i64 e = ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p));
+        st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1);
         i64 out = 0 - 1;
         if (e == 34) out = 34;
         if (e == 92) out = 92;
@@ -10140,16 +10136,16 @@ uptr php_jd_str() {
             st64(np, n1 + 1);
             continue;
         }
-        if (e != 117) { ph_jd_bad = 1; break; }
+        if (e != 117) { st64(phT + PHT_ph_jd_bad, 1); break; }
         i64 cp = php_jd_hex4();
-        if (ph_jd_bad) break;
+        if (ld64(phT + PHT_ph_jd_bad)) break;
         if (cp >= 55296 && cp < 56320) {
-            if (ph_jd_p + 1 < ph_jd_n) {
-                if (ld8(ph_jd_s + ph_jd_p) == 92) {
-                    if (ld8(ph_jd_s + ph_jd_p + 1) == 117) {
-                        ph_jd_p = ph_jd_p + 2;
+            if (ld64(phT + PHT_ph_jd_p) + 1 < ld64(phT + PHT_ph_jd_n)) {
+                if (ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p)) == 92) {
+                    if (ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p) + 1) == 117) {
+                        st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 2);
                         i64 lo = php_jd_hex4();
-                        if (ph_jd_bad) break;
+                        if (ld64(phT + PHT_ph_jd_bad)) break;
                         cp = 65536 + (cp - 55296) * 1024 + (lo - 56320);
                     }
                 }
@@ -10160,82 +10156,82 @@ uptr php_jd_str() {
     return php_str_new(sb, ld64(np));
 }
 
-uptr php_jd_num() {
-    i64 st = ph_jd_p;
+uptr php_jd_num() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 st = ld64(phT + PHT_ph_jd_p);
     i64 isf = 0;
-    if (ph_jd_p < ph_jd_n) { if (ld8(ph_jd_s + ph_jd_p) == 45) ph_jd_p = ph_jd_p + 1; }
+    if (ld64(phT + PHT_ph_jd_p) < ld64(phT + PHT_ph_jd_n)) { if (ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p)) == 45) st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1); }
     loop {
-        if (ph_jd_p >= ph_jd_n) break;
-        i64 c = ld8(ph_jd_s + ph_jd_p);
-        if (c >= 48 && c <= 57) { ph_jd_p = ph_jd_p + 1; continue; }
-        if (c == 46 || c == 101 || c == 69) { isf = 1; ph_jd_p = ph_jd_p + 1; continue; }
+        if (ld64(phT + PHT_ph_jd_p) >= ld64(phT + PHT_ph_jd_n)) break;
+        i64 c = ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p));
+        if (c >= 48 && c <= 57) { st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1); continue; }
+        if (c == 46 || c == 101 || c == 69) { isf = 1; st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1); continue; }
         if (c == 43 || c == 45) {
-            i64 pv = ld8(ph_jd_s + ph_jd_p - 1);
-            if (pv == 101 || pv == 69) { ph_jd_p = ph_jd_p + 1; continue; }
+            i64 pv = ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p) - 1);
+            if (pv == 101 || pv == 69) { st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1); continue; }
         }
         break;
     }
-    if (ph_jd_p == st) { ph_jd_bad = 1; return php_znull(); }
-    uptr t = php_str_new(ph_jd_s + st, ph_jd_p - st);
+    if (ld64(phT + PHT_ph_jd_p) == st) { st64(phT + PHT_ph_jd_bad, 1); return php_znull(); }
+    uptr t = php_str_new(((uptr) ld64(phT + PHT_ph_jd_s)) + st, ld64(phT + PHT_ph_jd_p) - st);
     if (isf) return php_zdouble(php_stof(t));
     return php_zlong(php_stoi(t));
 }
 
-uptr php_jd_val(i64 depth) {
+uptr php_jd_val(i64 depth) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_jd_ws();
-    if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; return php_znull(); }
-    if (depth > 512) { ph_jd_bad = 3; return php_znull(); }
-    i64 c = ld8(ph_jd_s + ph_jd_p);
+    if (ld64(phT + PHT_ph_jd_p) >= ld64(phT + PHT_ph_jd_n)) { st64(phT + PHT_ph_jd_bad, 1); return php_znull(); }
+    if (depth > 512) { st64(phT + PHT_ph_jd_bad, 3); return php_znull(); }
+    i64 c = ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p));
     if (c == 34) return php_zstr(php_jd_str());
     if (php_jd_lit("true", 4)) return php_zbool(1);
     if (php_jd_lit("false", 5)) return php_zbool(0);
     if (php_jd_lit("null", 4)) return php_znull();
     if (c == 91) {
-        ph_jd_p = ph_jd_p + 1;
+        st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1);
         uptr a = php_arr_new(8);
         php_jd_ws();
-        if (ph_jd_p < ph_jd_n) { if (ld8(ph_jd_s + ph_jd_p) == 93) { ph_jd_p = ph_jd_p + 1; return php_zarr(a); } }
+        if (ld64(phT + PHT_ph_jd_p) < ld64(phT + PHT_ph_jd_n)) { if (ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p)) == 93) { st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1); return php_zarr(a); } }
         loop {
             php_arr_push(a, php_jd_val(depth + 1));
-            if (ph_jd_bad) break;
+            if (ld64(phT + PHT_ph_jd_bad)) break;
             php_jd_ws();
-            if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
-            i64 d = ld8(ph_jd_s + ph_jd_p);
-            ph_jd_p = ph_jd_p + 1;
+            if (ld64(phT + PHT_ph_jd_p) >= ld64(phT + PHT_ph_jd_n)) { st64(phT + PHT_ph_jd_bad, 1); break; }
+            i64 d = ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p));
+            st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1);
             if (d == 93) break;
-            if (d != 44) { ph_jd_bad = 1; break; }
+            if (d != 44) { st64(phT + PHT_ph_jd_bad, 1); break; }
         }
         return php_zarr(a);
     }
     if (c == 123) {
-        ph_jd_p = ph_jd_p + 1;
+        st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1);
         uptr a = php_arr_new(8);
         php_jd_ws();
         i64 empty = 0;
-        if (ph_jd_p < ph_jd_n) { if (ld8(ph_jd_s + ph_jd_p) == 125) { ph_jd_p = ph_jd_p + 1; empty = 1; } }
+        if (ld64(phT + PHT_ph_jd_p) < ld64(phT + PHT_ph_jd_n)) { if (ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p)) == 125) { st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1); empty = 1; } }
         if (!empty) {
             loop {
                 php_jd_ws();
-                if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
-                if (ld8(ph_jd_s + ph_jd_p) != 34) { ph_jd_bad = 1; break; }
+                if (ld64(phT + PHT_ph_jd_p) >= ld64(phT + PHT_ph_jd_n)) { st64(phT + PHT_ph_jd_bad, 1); break; }
+                if (ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p)) != 34) { st64(phT + PHT_ph_jd_bad, 1); break; }
                 uptr k = php_jd_str();
-                if (ph_jd_bad) break;
+                if (ld64(phT + PHT_ph_jd_bad)) break;
                 php_jd_ws();
-                if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
-                if (ld8(ph_jd_s + ph_jd_p) != 58) { ph_jd_bad = 1; break; }
-                ph_jd_p = ph_jd_p + 1;
+                if (ld64(phT + PHT_ph_jd_p) >= ld64(phT + PHT_ph_jd_n)) { st64(phT + PHT_ph_jd_bad, 1); break; }
+                if (ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p)) != 58) { st64(phT + PHT_ph_jd_bad, 1); break; }
+                st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1);
                 uptr v = php_jd_val(depth + 1);
-                if (ph_jd_bad) break;
+                if (ld64(phT + PHT_ph_jd_bad)) break;
                 php_zv_cp(php_arr_sslot(a, k), v);
                 php_jd_ws();
-                if (ph_jd_p >= ph_jd_n) { ph_jd_bad = 1; break; }
-                i64 d = ld8(ph_jd_s + ph_jd_p);
-                ph_jd_p = ph_jd_p + 1;
+                if (ld64(phT + PHT_ph_jd_p) >= ld64(phT + PHT_ph_jd_n)) { st64(phT + PHT_ph_jd_bad, 1); break; }
+                i64 d = ld8(((uptr) ld64(phT + PHT_ph_jd_s)) + ld64(phT + PHT_ph_jd_p));
+                st64(phT + PHT_ph_jd_p, ld64(phT + PHT_ph_jd_p) + 1);
                 if (d == 125) break;
-                if (d != 44) { ph_jd_bad = 1; break; }
+                if (d != 44) { st64(phT + PHT_ph_jd_bad, 1); break; }
             }
         }
-        if (ph_jd_assoc) return php_zarr(a);
+        if (ld64(phT + PHT_ph_jd_assoc)) return php_zarr(a);
         uptr o = php_obj_new(ph_ce_stdclass);
         i64 used = php_ht_used(a);
         i64 i = 0;
@@ -10252,23 +10248,23 @@ uptr php_jd_val(i64 depth) {
         return php_zobj(o);
     }
     if (c == 45 || (c >= 48 && c <= 57)) return php_jd_num();
-    ph_jd_bad = 1;
+    st64(phT + PHT_ph_jd_bad, 1);
     return php_znull();
 }
 
-uptr php_f_json_decode(uptr z, uptr assoc, uptr depth, uptr flags) {
-    ph_js_bad = 0;
-    ph_jd_bad = 0;
+uptr php_f_json_decode(uptr z, uptr assoc, uptr depth, uptr flags) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    st64(phT + PHT_ph_js_bad, 0);
+    st64(phT + PHT_ph_jd_bad, 0);
     uptr s = php_zv_str(z);
-    ph_jd_s = s + ZS_HDR;
-    ph_jd_n = php_strlen(s);
-    ph_jd_p = 0;
-    ph_jd_assoc = 0;
-    if (php_zv_type(assoc) != IS_NULL) { if (php_zv_bool(assoc)) ph_jd_assoc = 1; }
+    st64(phT + PHT_ph_jd_s, s + ZS_HDR);
+    st64(phT + PHT_ph_jd_n, php_strlen(s));
+    st64(phT + PHT_ph_jd_p, 0);
+    st64(phT + PHT_ph_jd_assoc, 0);
+    if (php_zv_type(assoc) != IS_NULL) { if (php_zv_bool(assoc)) st64(phT + PHT_ph_jd_assoc, 1); }
     uptr r = php_jd_val(0);
     php_jd_ws();
-    if (ph_jd_p != ph_jd_n) ph_jd_bad = 1;
-    if (ph_jd_bad) { ph_js_bad = 4; return php_znull(); }
+    if (ld64(phT + PHT_ph_jd_p) != ld64(phT + PHT_ph_jd_n)) st64(phT + PHT_ph_jd_bad, 1);
+    if (ld64(phT + PHT_ph_jd_bad)) { st64(phT + PHT_ph_js_bad, 4); return php_znull(); }
     return r;
 }
 
@@ -10279,21 +10275,17 @@ uptr php_f_serialize(uptr z) {
 }
 
 // the reader: a cursor into the string, php's grammar
-i64 ph_us_p;
-uptr ph_us_s;
-i64 ph_us_n;
-i64 ph_us_bad;
 
-i64 php_us_int() {
+i64 php_us_int() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 neg = 0;
-    if (ph_us_p < ph_us_n && ld8(ph_us_s + ph_us_p) == '-') { neg = 1; ph_us_p = ph_us_p + 1; }
+    if (ld64(phT + PHT_ph_us_p) < ld64(phT + PHT_ph_us_n) && ld8(((uptr) ld64(phT + PHT_ph_us_s)) + ld64(phT + PHT_ph_us_p)) == '-') { neg = 1; st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 1); }
     i64 v = 0;
     loop {
-        if (ph_us_p >= ph_us_n) break;
-        i64 c = ld8(ph_us_s + ph_us_p);
+        if (ld64(phT + PHT_ph_us_p) >= ld64(phT + PHT_ph_us_n)) break;
+        i64 c = ld8(((uptr) ld64(phT + PHT_ph_us_s)) + ld64(phT + PHT_ph_us_p));
         if (c < 48 || c > 57) break;
         v = v * 10 + (c - 48);
-        ph_us_p = ph_us_p + 1;
+        st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 1);
     }
     if (neg) return 0 - v;
     return v;
@@ -10301,72 +10293,72 @@ i64 php_us_int() {
 
 uptr php_us_val();
 
-uptr php_us_str() {
+uptr php_us_str() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 len = php_us_int();
-    if (ph_us_p >= ph_us_n || ld8(ph_us_s + ph_us_p) != ':') { ph_us_bad = 1; return php_str_new("", 0); }
-    ph_us_p = ph_us_p + 2;                                 // `:"`
-    if (ph_us_p + len > ph_us_n) { ph_us_bad = 1; return php_str_new("", 0); }
-    uptr s = php_str_new(ph_us_s + ph_us_p, len);
-    ph_us_p = ph_us_p + len + 2;                           // `";`
+    if (ld64(phT + PHT_ph_us_p) >= ld64(phT + PHT_ph_us_n) || ld8(((uptr) ld64(phT + PHT_ph_us_s)) + ld64(phT + PHT_ph_us_p)) != ':') { st64(phT + PHT_ph_us_bad, 1); return php_str_new("", 0); }
+    st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 2);                                 // `:"`
+    if (ld64(phT + PHT_ph_us_p) + len > ld64(phT + PHT_ph_us_n)) { st64(phT + PHT_ph_us_bad, 1); return php_str_new("", 0); }
+    uptr s = php_str_new(((uptr) ld64(phT + PHT_ph_us_s)) + ld64(phT + PHT_ph_us_p), len);
+    st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + len + 2);                           // `";`
     return s;
 }
 
-uptr php_us_val() {
-    if (ph_us_p >= ph_us_n) { ph_us_bad = 1; return php_znull(); }
-    i64 t = ld8(ph_us_s + ph_us_p);
+uptr php_us_val() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ld64(phT + PHT_ph_us_p) >= ld64(phT + PHT_ph_us_n)) { st64(phT + PHT_ph_us_bad, 1); return php_znull(); }
+    i64 t = ld8(((uptr) ld64(phT + PHT_ph_us_s)) + ld64(phT + PHT_ph_us_p));
     // the type letter is followed by `:` (or `;` for N), and nothing else is
     // a serialization -- php answers false and warns for the rest
     if (t == 'N') {
-        if (ph_us_p + 1 >= ph_us_n || ld8(ph_us_s + ph_us_p + 1) != ';') { ph_us_bad = 1; return php_znull(); }
-        ph_us_p = ph_us_p + 2;
+        if (ld64(phT + PHT_ph_us_p) + 1 >= ld64(phT + PHT_ph_us_n) || ld8(((uptr) ld64(phT + PHT_ph_us_s)) + ld64(phT + PHT_ph_us_p) + 1) != ';') { st64(phT + PHT_ph_us_bad, 1); return php_znull(); }
+        st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 2);
         return php_znull();
     }
-    if (t != 'b' && t != 'i' && t != 'd' && t != 's' && t != 'a') { ph_us_bad = 1; return php_znull(); }
-    if (ph_us_p + 1 >= ph_us_n || ld8(ph_us_s + ph_us_p + 1) != ':') { ph_us_bad = 1; return php_znull(); }
-    if (t == 'b') { ph_us_p = ph_us_p + 2; i64 v = php_us_int(); ph_us_p = ph_us_p + 1; return php_zbool(v); }
-    if (t == 'i') { ph_us_p = ph_us_p + 2; i64 v = php_us_int(); ph_us_p = ph_us_p + 1; return php_zlong(v); }
+    if (t != 'b' && t != 'i' && t != 'd' && t != 's' && t != 'a') { st64(phT + PHT_ph_us_bad, 1); return php_znull(); }
+    if (ld64(phT + PHT_ph_us_p) + 1 >= ld64(phT + PHT_ph_us_n) || ld8(((uptr) ld64(phT + PHT_ph_us_s)) + ld64(phT + PHT_ph_us_p) + 1) != ':') { st64(phT + PHT_ph_us_bad, 1); return php_znull(); }
+    if (t == 'b') { st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 2); i64 v = php_us_int(); st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 1); return php_zbool(v); }
+    if (t == 'i') { st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 2); i64 v = php_us_int(); st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 1); return php_zlong(v); }
     if (t == 'd') {
-        ph_us_p = ph_us_p + 2;
-        i64 st = ph_us_p;
-        loop { if (ph_us_p >= ph_us_n) break; if (ld8(ph_us_s + ph_us_p) == ';') break; ph_us_p = ph_us_p + 1; }
-        uptr txt = php_str_new(ph_us_s + st, ph_us_p - st);
-        ph_us_p = ph_us_p + 1;
+        st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 2);
+        i64 st = ld64(phT + PHT_ph_us_p);
+        loop { if (ld64(phT + PHT_ph_us_p) >= ld64(phT + PHT_ph_us_n)) break; if (ld8(((uptr) ld64(phT + PHT_ph_us_s)) + ld64(phT + PHT_ph_us_p)) == ';') break; st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 1); }
+        uptr txt = php_str_new(((uptr) ld64(phT + PHT_ph_us_s)) + st, ld64(phT + PHT_ph_us_p) - st);
+        st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 1);
         return php_zdouble(php_stof(txt));
     }
-    if (t == 's') { ph_us_p = ph_us_p + 2; return php_zstr(php_us_str()); }
+    if (t == 's') { st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 2); return php_zstr(php_us_str()); }
     if (t == 'a') {
-        ph_us_p = ph_us_p + 2;
+        st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 2);
         i64 cnt = php_us_int();
-        ph_us_p = ph_us_p + 2;                             // `:{`
+        st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 2);                             // `:{`
         uptr a = php_arr_new(8);
         i64 i = 0;
         loop {
             if (i >= cnt) break;
-            if (ph_us_bad) break;
+            if (ld64(phT + PHT_ph_us_bad)) break;
             uptr k = php_us_val();
             uptr v = php_us_val();
             if (php_zv_type(k) == IS_STRING) php_zv_cp(php_arr_sslot(a, ld64(k)), v);
             if (php_zv_type(k) != IS_STRING) php_zv_cp(php_arr_islot(a, php_zv_long(k)), v);
             i = i + 1;
         }
-        ph_us_p = ph_us_p + 1;                             // `}`
+        st64(phT + PHT_ph_us_p, ld64(phT + PHT_ph_us_p) + 1);                             // `}`
         return php_zarr(a);
     }
-    ph_us_bad = 1;
+    st64(phT + PHT_ph_us_bad, 1);
     return php_znull();
 }
 
-uptr php_f_unserialize(uptr sz, uptr oz) {
+uptr php_f_unserialize(uptr sz, uptr oz) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr s = php_zv_str(sz);
-    ph_us_s = s + ZS_HDR;
-    ph_us_n = php_strlen(s);
-    ph_us_p = 0;
-    ph_us_bad = 0;
+    st64(phT + PHT_ph_us_s, s + ZS_HDR);
+    st64(phT + PHT_ph_us_n, php_strlen(s));
+    st64(phT + PHT_ph_us_p, 0);
+    st64(phT + PHT_ph_us_bad, 0);
     uptr v = php_us_val();
-    if (ph_us_bad) {
+    if (ld64(phT + PHT_ph_us_bad)) {
         php_mreset();
         php_mc("unserialize(): Error at offset 0 of ");
-        php_mi(ph_us_n);
+        php_mi(ld64(phT + PHT_ph_us_n));
         php_mc(" bytes");
         php_raise_m(PHE_WARNING);
         return php_zbool(0);
@@ -10612,11 +10604,11 @@ uptr php_str_setoff(uptr s, i64 i, uptr cz) {
 }
 
 // fprintf / vfprintf: the formatted text, written to a stream
-uptr php_f_fput(uptr rz, uptr s) {
+uptr php_f_fput(uptr rz, uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 i = php_res_id(rz);
     if (i < 0) return php_zbool(0);
     php_flush();
-    i64 w = write(ld64(ph_fh_fd + i * 8), s + ZS_HDR, php_strlen(s));
+    i64 w = write(ld64((phT + PHT_ph_fh_fd) + i * 8), s + ZS_HDR, php_strlen(s));
     if (w < 0) return php_zbool(0);
     return php_zlong(w);
 }
@@ -10790,84 +10782,215 @@ uptr php_str_replace_c(uptr search, uptr repl, uptr subj, uptr cz) {
 #define PH_NROOT 23
 u8 ph_rsnap[184];                   // PH_NROOT * 8
 
-void php_roots(i64 save) {
+void php_roots(i64 save) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (save) {
-        st64(ph_rsnap,       ph_ehz);
-        st64(ph_rsnap + 8,   ph_ehprev);
-        st64(ph_rsnap + 16,  ph_ehmask);
-        st64(ph_rsnap + 24,  ph_xhz);
-        st64(ph_rsnap + 32,  ph_xhprev);
+        st64(ph_rsnap,       ((uptr) ld64(phT + PHT_ph_ehz)));
+        st64(ph_rsnap + 8,   ((uptr) ld64(phT + PHT_ph_ehprev)));
+        st64(ph_rsnap + 16,  ld64(phT + PHT_ph_ehmask));
+        st64(ph_rsnap + 24,  ((uptr) ld64(phT + PHT_ph_xhz)));
+        st64(ph_rsnap + 32,  ((uptr) ld64(phT + PHT_ph_xhprev)));
         st64(ph_rsnap + 40,  ph_classes);
         st64(ph_rsnap + 48,  ph_ce_closure);
         st64(ph_rsnap + 56,  ph_globals);
         st64(ph_rsnap + 64,  ph_consts);
-        st64(ph_rsnap + 72,  ph_sdfn);
-        st64(ph_rsnap + 80,  ph_tok_s);
-        st64(ph_rsnap + 88,  ph_tok_i);
-        st64(ph_rsnap + 96,  ph_dt_head);
-        st64(ph_rsnap + 104, ph_nob);
-        st64(ph_rsnap + 112, ph_objid);
-        st64(ph_rsnap + 120, ph_erep);
-        st64(ph_rsnap + 128, ph_disp);
-        st64(ph_rsnap + 136, ph_log);
-        st64(ph_rsnap + 144, ph_exc);
-        st64(ph_rsnap + 152, ph_lsb);
-        st64(ph_rsnap + 160, ph_nfh);
-        st64(ph_rsnap + 168, ph_msgn);
-        st64(ph_rsnap + 176, ph_seed);
+        st64(ph_rsnap + 72,  ((uptr) ld64(phT + PHT_ph_sdfn)));
+        st64(ph_rsnap + 80,  ((uptr) ld64(phT + PHT_ph_tok_s)));
+        st64(ph_rsnap + 88,  ld64(phT + PHT_ph_tok_i));
+        st64(ph_rsnap + 96,  ((uptr) ld64(phT + PHT_ph_dt_head)));
+        st64(ph_rsnap + 104, ld64(phT + PHT_ph_nob));
+        st64(ph_rsnap + 112, ld64(phT + PHT_ph_objid));
+        st64(ph_rsnap + 120, ld64(phT + PHT_ph_erep));
+        st64(ph_rsnap + 128, ld64(phT + PHT_ph_disp));
+        st64(ph_rsnap + 136, ld64(phT + PHT_ph_log));
+        st64(ph_rsnap + 144, ((uptr) ld64(phT + PHT_ph_exc)));
+        st64(ph_rsnap + 152, ((uptr) ld64(phT + PHT_ph_lsb)));
+        st64(ph_rsnap + 160, ld64(phT + PHT_ph_nfh));
+        st64(ph_rsnap + 168, ld64(phT + PHT_ph_msgn));
+        st64(ph_rsnap + 176, ((u64) ld64(phT + PHT_ph_seed)));
         return;
     }
-    ph_ehz        = ld64(ph_rsnap);
-    ph_ehprev     = ld64(ph_rsnap + 8);
-    ph_ehmask     = ld64(ph_rsnap + 16);
-    ph_xhz        = ld64(ph_rsnap + 24);
-    ph_xhprev     = ld64(ph_rsnap + 32);
+    st64(phT + PHT_ph_ehz, ld64(ph_rsnap));
+    st64(phT + PHT_ph_ehprev, ld64(ph_rsnap + 8));
+    st64(phT + PHT_ph_ehmask, ld64(ph_rsnap + 16));
+    st64(phT + PHT_ph_xhz, ld64(ph_rsnap + 24));
+    st64(phT + PHT_ph_xhprev, ld64(ph_rsnap + 32));
     ph_classes    = ld64(ph_rsnap + 40);
     ph_ce_closure = ld64(ph_rsnap + 48);
     ph_globals    = ld64(ph_rsnap + 56);
     ph_consts     = ld64(ph_rsnap + 64);
-    ph_sdfn       = ld64(ph_rsnap + 72);
-    ph_tok_s      = ld64(ph_rsnap + 80);
-    ph_tok_i      = ld64(ph_rsnap + 88);
-    ph_dt_head    = ld64(ph_rsnap + 96);
-    ph_nob        = ld64(ph_rsnap + 104);
-    ph_objid      = ld64(ph_rsnap + 112);
-    ph_erep       = ld64(ph_rsnap + 120);
-    ph_disp       = ld64(ph_rsnap + 128);
-    ph_log        = ld64(ph_rsnap + 136);
-    ph_exc        = ld64(ph_rsnap + 144);
-    ph_lsb        = ld64(ph_rsnap + 152);
-    ph_nfh        = ld64(ph_rsnap + 160);
-    ph_msgn       = ld64(ph_rsnap + 168);
-    ph_seed       = ld64(ph_rsnap + 176);
+    st64(phT + PHT_ph_sdfn, ld64(ph_rsnap + 72));
+    st64(phT + PHT_ph_tok_s, ld64(ph_rsnap + 80));
+    st64(phT + PHT_ph_tok_i, ld64(ph_rsnap + 88));
+    st64(phT + PHT_ph_dt_head, ld64(ph_rsnap + 96));
+    st64(phT + PHT_ph_nob, ld64(ph_rsnap + 104));
+    st64(phT + PHT_ph_objid, ld64(ph_rsnap + 112));
+    st64(phT + PHT_ph_erep, ld64(ph_rsnap + 120));
+    st64(phT + PHT_ph_disp, ld64(ph_rsnap + 128));
+    st64(phT + PHT_ph_log, ld64(ph_rsnap + 136));
+    st64(phT + PHT_ph_exc, ld64(ph_rsnap + 144));
+    st64(phT + PHT_ph_lsb, ld64(ph_rsnap + 152));
+    st64(phT + PHT_ph_nfh, ld64(ph_rsnap + 160));
+    st64(phT + PHT_ph_msgn, ld64(ph_rsnap + 168));
+    st64(phT + PHT_ph_seed, ld64(ph_rsnap + 176));
 }
 
 // What a request left behind that the roots alone do not undo, then the
 // roots: the statics it initialised go back to "never run" (php resets them
 // per request too), the files it opened are closed, and an output buffer it
 // left open is written out, as php flushes one at the end of a request.
-void php_request_reset() {
+void php_request_reset() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     loop {
         if (!ph_rsl) break;
         st64(ld64(ph_rsl), 0);
         ph_rsl = ld64(ph_rsl + 8);
     }
     i64 keep = ld64(ph_rsnap + 160);
-    i64 i = ph_nfh;
+    i64 i = ld64(phT + PHT_ph_nfh);
     loop {
         if (i <= keep) break;
         i = i - 1;
-        if (ld64(ph_fh_own + i * 8) && ld64(ph_fh_fd + i * 8) >= 0) close(ld64(ph_fh_fd + i * 8));
+        if (ld64((phT + PHT_ph_fh_own) + i * 8) && ld64((phT + PHT_ph_fh_fd) + i * 8) >= 0) close(ld64((phT + PHT_ph_fh_fd) + i * 8));
     }
     // top first, each level into the one below it, the last onto the output
     // -- php's own order for the buffers a request leaves open
     i64 lv = ld64(ph_rsnap + 104);
     loop {
-        if (ph_nob <= lv) break;
-        ph_nob = ph_nob - 1;
-        i64 n = ld64(ph_obn + ph_nob * 8);
-        if (n) php_write(ld64(ph_obb + ph_nob * 8), n);
+        if (ld64(phT + PHT_ph_nob) <= lv) break;
+        st64(phT + PHT_ph_nob, ld64(phT + PHT_ph_nob) - 1);
+        i64 n = ld64((phT + PHT_ph_obn) + ld64(phT + PHT_ph_nob) * 8);
+        if (n) php_write(ld64((phT + PHT_ph_obb) + ld64(phT + PHT_ph_nob) * 8), n);
     }
     php_flush();
     php_roots(0);
+}
+
+// ---- other threads ----------------------------------------------------------
+// The runtime runs on several OS threads at once: each has its thread block
+// (§ the thread block) and its own arena, mapped for it and bumped the way
+// the booting thread bumps ph_heap -- so a thread never touches another's
+// temporaries, and never calls Zend (a php without ZTS has one allocator and
+// one executor for the whole process). A string a thread builds is its own
+// arena's and immutable, as every string is on the program road. Module
+// state -- a global, a static, a constant -- refuses it for now
+// (ph_shared_off, interim until the thread API makes it shared), so nothing
+// outside the thread points into its arena: the arena and the block go with
+// the thread, always (tests/c/10-threads-vm measures it).
+//
+// php_thr_run is the internal start the runtime's own gates use
+// (`mcphp_threads('f', $n, $arg)`, src/builtin.mc): n threads, thread i
+// calling the compiled f(arg, i); it answers the sum of what they returned,
+// or -1 for a thread whose f ended on an uncaught throwable. The public API
+// is a later step (docs/threads.md).
+#define PH_TMAX    64
+#define PHR_FN     0                // a thread's record, in the booting thread's arena
+#define PHR_ARG    8
+#define PHR_IDX    16
+#define PHR_RES    24
+#define PHR_BLOCK  32
+#define PHR_H      40               // the host's handle (pthread_t, HANDLE)
+#define PHR_SIZE   48
+
+// the thread's entry: its block becomes its thread-local slot, then f runs
+// The fast path (ph_tcur = ph_tmain) is off from before the first thread
+// starts until after the last one is joined: a thread checks it at both ends.
+void ph_thr_check() {
+    if (ph_tcur || !ph_mt) php_die("mc-php: a thread ran on the booting thread's fast path\n", 55);
+}
+
+uptr php_thr_body(uptr rec) {
+    uptr phT = ld64(rec + PHR_BLOCK);
+    ph_tset(phT);
+    ph_thr_check();
+    i64 r = callp(ld64(rec + PHR_FN), ld64(rec + PHR_ARG), ld64(rec + PHR_IDX));
+    if (ld64(phT + PHT_ph_exc)) { r = 0 - 1; st64(phT + PHT_ph_exc, 0); }
+    php_flush();
+    ph_thr_check();
+    st64(rec + PHR_RES, r);
+    return 0;
+}
+
+// what a new thread starts from: a zeroed block, its own arena, and the
+// settings of the thread that starts it (error_reporting, the handlers, the
+// open files -- the three std streams)
+uptr php_thr_block(uptr from, i64 idx) {
+    uptr b = ph_os_map(PHT_SIZE);
+    uptr a = ph_os_map(ph_os_arena());
+    if (!b || !a) php_die("mc-php: cannot map a thread's memory\n", 37);
+    st64(b + PHT_ph_hbase, a);
+    st64(b + PHT_ph_hlim, ph_os_arena());
+    st64(b + PHT_ph_tidx, idx);
+    st64(b + PHT_ph_erep, ld64(from + PHT_ph_erep));
+    st64(b + PHT_ph_disp, ld64(from + PHT_ph_disp));
+    st64(b + PHT_ph_log, ld64(from + PHT_ph_log));
+    st64(b + PHT_ph_ehz, ld64(from + PHT_ph_ehz));
+    st64(b + PHT_ph_ehprev, ld64(from + PHT_ph_ehprev));
+    st64(b + PHT_ph_ehmask, ld64(from + PHT_ph_ehmask));
+    st64(b + PHT_ph_xhz, ld64(from + PHT_ph_xhz));
+    st64(b + PHT_ph_xhprev, ld64(from + PHT_ph_xhprev));
+    // a sequence of its own, mixed from the starter's
+    st64(b + PHT_ph_seed, ld64(from + PHT_ph_seed) ^ (idx * 0x9E3779B97F4A7C15));
+    i64 i = 0;
+    loop {
+        if (i >= ld64(from + PHT_ph_nfh)) break;
+        st64(b + PHT_ph_fh_fd + i * 8, ld64(from + PHT_ph_fh_fd + i * 8));
+        st64(b + PHT_ph_fh_eof + i * 8, ld64(from + PHT_ph_fh_eof + i * 8));
+        st64(b + PHT_ph_fh_name + i * 8, ld64(from + PHT_ph_fh_name + i * 8));
+        i = i + 1;
+    }
+    st64(b + PHT_ph_nfh, ld64(from + PHT_ph_nfh));
+    return b;
+}
+
+i64 php_thr_run(uptr fn, i64 n, i64 arg) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (n < 1 || n > PH_TMAX) php_die("mc-php: a thread count outside 1..64\n", 37);
+    // Only the booting thread flips the fast path, and only around the whole
+    // run: a thread that starts threads of its own (outer == 0) already runs
+    // with ph_tcur = 0, and joins its threads before it returns -- so when
+    // the booting thread's joins are done, every thread is gone.
+    i64 outer = !ld64(phT + PHT_ph_tidx);
+    // the booting thread's slot is its block, and from now on every function
+    // asks the slot
+    if (outer) {
+        if (!ph_tkeyed) { ph_tinit(); ph_tkeyed = 1; }
+        ph_tset(ph_tmain);
+        ph_mt = 1;
+        ph_tcur = 0;
+    }
+    // the class the first closure makes: the registry is shared, so it is
+    // written here and not by whichever thread closes over something first
+    if (outer && !ph_ce_closure) ph_ce_closure = php_ce_new(php_str_new("Closure", 7));
+    uptr recs = php_alloc(n * PHR_SIZE);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        uptr r = recs + i * PHR_SIZE;
+        st64(r + PHR_FN, fn);
+        st64(r + PHR_ARG, arg);
+        st64(r + PHR_IDX, i);
+        st64(r + PHR_RES, 0);
+        st64(r + PHR_BLOCK, php_thr_block(phT, i + 1));
+        if (ph_thr_create(&php_thr_body, r, r + PHR_H) != 0)
+            php_die("mc-php: cannot start a thread\n", 30);
+        i = i + 1;
+    }
+    i64 sum = 0;
+    i = 0;
+    loop {
+        if (i >= n) break;
+        uptr r = recs + i * PHR_SIZE;
+        ph_thr_join(r + PHR_H);
+        i64 v = ld64(r + PHR_RES);
+        if (v < 0 || sum < 0) sum = 0 - 1;
+        if (sum >= 0) sum = sum + v;
+        uptr b = ld64(r + PHR_BLOCK);
+        ph_os_unmap(ld64(b + PHT_ph_hbase), ld64(b + PHT_ph_hlim));
+        ph_os_unmap(b, PHT_SIZE);
+        i = i + 1;
+    }
+    // no other thread runs: the booting thread's fast path again
+    if (outer) {
+        ph_mt = 0;
+        ph_tcur = ph_tmain;
+    }
+    return sum;
 }

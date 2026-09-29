@@ -30,9 +30,9 @@ void php_str_free(uptr s) {
 
 // the temporaries above mark m die (lib/php_rt.mc § who owns a string); a
 // pool entry is never 0 and never interned, so the release is the count alone
-void php_rc_drain(i64 m) {
-    i64 i = ph_pn;
-    uptr p = ph_pool;
+void php_rc_drain(i64 m) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 i = ld64(phT + PHT_ph_pn);
+    uptr p = ((uptr) ld64(phT + PHT_ph_pool));
     loop {
         if (i <= m) break;
         i = i - 1;
@@ -41,5 +41,5 @@ void php_rc_drain(i64 m) {
         if (rc > 1) st32(s, rc - 1);
         if (rc <= 1) php_str_free(s);
     }
-    if (ph_pn > m) ph_pn = m;
+    if (ld64(phT + PHT_ph_pn) > m) st64(phT + PHT_ph_pn, m);
 }

@@ -1,0 +1,3 @@
+six builtins on 8 threads: each answered
+4 more rounds: 4 answered
+the process grew by under 256 MiB: yes

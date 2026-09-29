@@ -1,0 +1,12 @@
+round 0: the 8 threads agree
+round 1: the 8 threads agree
+round 2: the 8 threads agree
+round 3: the 8 threads agree
+round 4: the 8 threads agree
+and this thread still works: yes
+module state from this thread: 21, from 4 others: 12
+nested round 0: 4 threads of 3 agree
+nested round 1: 4 threads of 3 agree
+nested round 2: 4 threads of 3 agree
+1500 runs one after another: 1500 answered
+and this thread after them: yes

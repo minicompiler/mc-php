@@ -712,5 +712,23 @@ else
 fi
 rm -rf "$tmp/build"
 
+# --- 20. compiled functions on several OS threads at once --------------------
+# tests/ext/threads: the module's threads against php calling the same
+# function one thread at a time (a recording: php has no mcphp_threads)
+cp tests/ext/threads/threads.php "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
+    "$PHP" -d extension="$tmp/build/r.$sx" tests/ext/threads/check.php 2>&1 | tr -d '\r' > "$tmp/t.m"; tm=$?
+    if [ "$tm" = 0 ] && [ "$(grep -c 'the 8 threads agree' "$tmp/t.m")" = 5 ] && [ "$(wc -l < "$tmp/t.m" | tr -d ' ')" = 6 ] \
+       && grep -qx "php's engine from this thread: 1002, from 4 others: 4" "$tmp/t.m"; then
+        say "threads: 8 OS threads running the module's compiled code, 5 rounds, every sum php's; a worker reaching php's engine gets an Error"
+    else
+        bad "threads: exit $tm"; sed -n '1,8p' "$tmp/t.m" | sed 's/^/      /'
+    fi
+else
+    bad "threads: it would not build"; sed 's/^/      /' "$tmp/t.build"
+fi
+rm -rf "$tmp/build"
+
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }
 echo "  ext: the extension road is green"

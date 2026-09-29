@@ -470,6 +470,7 @@ i64 ph_dollar_expr() {
     return 0;
 }
 
+#embed ph_tls "../lib/php_tls.mc"
 #embed ph_rt "../lib/php_rt.mc"
 #embed ph_prog_rt "../lib/php_prog.mc"
 
@@ -572,4 +573,8 @@ void user_init() {
     if (!ph_ext) p_push_source("php program allocator", ph_prog_rt, ph_prog_rt_size);
     p_push_source("php runtime", ph_rt, ph_rt_size);
     ph_push_rt_host();
+    // the thread block's layout: pushed last, so parsed first -- every
+    // PHT_* the runtime names is a #define (src/tls.mc)
+    p_push_source("php thread block", ph_tls, ph_tls_size);
+    pass(&ph_tls_pass);
 }

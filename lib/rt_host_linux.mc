@@ -81,3 +81,68 @@ uptr php_dlsym(uptr name) { return dlsym(0, name); }
 // reads (src/extern.mc): the macro is __errno_location() here
 extern uptr __errno_location();
 i64 php_c_errno() { return ld32(__errno_location()); }
+
+// ---- threads (lib/php_rt.mc § the thread block, § other threads) --------------
+// The thread block of the calling thread, once a second thread runs compiled
+// code: POSIX thread-specific data, one key made the first time.
+extern i64 pthread_key_create(uptr key, uptr dtor);
+extern uptr pthread_getspecific(i64 key);
+extern i64 pthread_setspecific(i64 key, uptr v);
+extern i64 pthread_attr_init(uptr attr);
+extern i64 pthread_attr_setstacksize(uptr attr, i64 n);
+extern i64 pthread_attr_destroy(uptr attr);
+extern i64 pthread_create(uptr tid, uptr attr, uptr fn, uptr arg);
+extern i64 pthread_join(uptr tid, uptr ret);
+extern uptr mmap(uptr addr, i64 n, i64 prot, i64 flags, i64 fd, i64 off);
+extern i64 munmap(uptr addr, i64 n);
+i64 ph_tkey;
+uptr ph_tget() { return pthread_getspecific(ph_tkey); }
+void ph_tset(uptr b) { pthread_setspecific(ph_tkey, b); }
+void ph_tinit() {
+    u8 k[8];
+    st64(k, 0);
+    pthread_key_create(k, 0);
+    ph_tkey = ld64(k);
+}
+// fresh zeroed pages (MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE: a thread's
+// arena is reserved, not committed), 0 when the kernel says no
+uptr ph_os_map(i64 n) {
+    uptr p = mmap(0, n, 3, 0x4022, 0 - 1, 0);
+    if (p + 1 == 0) return 0;
+    return p;
+}
+void ph_os_unmap(uptr p, i64 n) { munmap(p, n); }
+// the size of a thread's arena: reserved (MAP_NORESERVE): pages are touched as used
+i64 ph_os_arena() { return 268435456; }
+// the process's virtual size in bytes, -1 when it cannot be read: the first
+// field of /proc/self/statm, in pages (mcphp_vm(), a test gate)
+extern i64 sysconf(i64 name);
+i64 ph_os_vm() {
+    u8 b[128];
+    i64 fd = open("/proc/self/statm", 0, 0) & 0xffffffff;
+    if (fd == 0xffffffff) return 0 - 1;
+    i64 n = read(fd, b, 127);
+    close(fd);
+    i64 v = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 c = ld8(b + i);
+        if (c < 48 || c > 57) break;
+        v = v * 10 + c - 48;
+        i = i + 1;
+    }
+    if (i == 0) return 0 - 1;
+    return v * sysconf(30);                                  // _SC_PAGESIZE
+}
+// a thread on an 8 MiB stack (a secondary thread's default is smaller than
+// the booting one's, and compiled php recurses as deep); 0 when it started
+i64 ph_thr_create(uptr fn, uptr arg, uptr h) {
+    u8 attr[128];
+    pthread_attr_init(attr);
+    pthread_attr_setstacksize(attr, 8388608);
+    i64 r = pthread_create(h, attr, fn, arg) & 0xffffffff;      // an int: 0 or an error number
+    pthread_attr_destroy(attr);
+    return r;
+}
+void ph_thr_join(uptr h) { pthread_join(ld64(h), 0); }

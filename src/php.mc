@@ -43,4 +43,5 @@
 #include "extern.mc"
 #include "ext.mc"
 #include "mach.mc"
+#include "tls.mc"
 #include "program.mc"

@@ -4,6 +4,7 @@ CloseHandle
 CreateDirectoryA
 CreateFileA
 CreateProcessA
+CreateThread
 DeleteFileA
 ExitProcess
 GetCommandLineA
@@ -19,6 +20,7 @@ GetModuleFileNameA
 GetModuleHandleA
 GetProcAddress
 GetStdHandle
+K32GetProcessMemoryInfo
 MoveFileExA
 ReadFile
 RemoveDirectoryA
@@ -27,6 +29,10 @@ SetEnvironmentVariableA
 SetFileAttributesA
 SetFilePointerEx
 SetLastError
+TlsAlloc
+TlsGetValue
+TlsSetValue
 VirtualAlloc
+VirtualFree
 WaitForSingleObject
 WriteFile

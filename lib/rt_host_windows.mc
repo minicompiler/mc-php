@@ -38,6 +38,14 @@ extern i64  CloseHandle(uptr h);
 extern void ExitProcess(i64 code);
 extern uptr GetCommandLineA();
 extern i64  SetFilePointerEx(uptr h, i64 dist, uptr newpos, i64 method);
+extern i64  TlsAlloc();
+extern uptr TlsGetValue(i64 idx);
+extern i64  TlsSetValue(i64 idx, uptr v);
+extern uptr CreateThread(uptr sa, i64 stack, uptr fn, uptr arg, i64 flags, uptr tid);
+extern i64  WaitForSingleObject(uptr h, i64 ms);
+extern uptr VirtualAlloc(uptr addr, i64 n, i64 type, i64 prot);
+extern i64  VirtualFree(uptr addr, i64 n, i64 type);
+extern i64  K32GetProcessMemoryInfo(uptr h, uptr pmc, i64 cb);
 extern uptr GetModuleHandleA(uptr name);
 extern uptr GetProcAddress(uptr h, uptr name);
 extern i64  GetFileAttributesA(uptr name);
@@ -99,8 +107,6 @@ i64 rtw_int(i64 v) {
     return v;
 }
 
-u8 rtw_nio[8];                           // the DWORD out-parameter of Read/WriteFile
-
 uptr rtw_handle(i64 fd) {
     if (fd == 0) return GetStdHandle(0 - 10);
     if (fd == 1) return GetStdHandle(0 - 11);
@@ -108,21 +114,25 @@ uptr rtw_handle(i64 fd) {
     return fd;
 }
 
+// the DWORD out-parameter of Read/WriteFile is the caller's own: two threads
+// may write at once
 i64 write(i64 fd, uptr buf, i64 n) {
-    st64(rtw_nio, 0);
-    if ((WriteFile(rtw_handle(fd), buf, n, rtw_nio, 0) & RTW_BOOL) == 0) return 0 - 1;
-    return ld32(rtw_nio);
+    u8 nio[8];
+    st64(nio, 0);
+    if ((WriteFile(rtw_handle(fd), buf, n, nio, 0) & RTW_BOOL) == 0) return 0 - 1;
+    return ld32(nio);
 }
 
 // A pipe whose writer has gone answers ERROR_BROKEN_PIPE where a POSIX read
 // answers 0, end of file -- which is what the runtime's reader loops test for.
 i64 read(i64 fd, uptr buf, i64 n) {
-    st64(rtw_nio, 0);
-    if ((ReadFile(rtw_handle(fd), buf, n, rtw_nio, 0) & RTW_BOOL) == 0) {
+    u8 nio[8];
+    st64(nio, 0);
+    if ((ReadFile(rtw_handle(fd), buf, n, nio, 0) & RTW_BOOL) == 0) {
         if (rtw_int(GetLastError()) == RTW_BROKEN_PIPE) return 0;
         return 0 - 1;
     }
-    return ld32(rtw_nio);
+    return ld32(nio);
 }
 
 i64 open(uptr path, i64 flags, i64 mode) {
@@ -369,3 +379,37 @@ uptr php_setlocale(i64 cat, uptr p) {
 // the top: below the `#dylib` they would be imports of ucrtbase.dll, which has
 // neither, and the loader refuses the whole program before it starts.
 uptr php_dlsym(uptr name) { return GetProcAddress(GetModuleHandleA("php8.dll"), name); }
+
+// ---- threads (lib/php_rt.mc § the thread block, § other threads) --------------
+// The thread block of the calling thread, once a second thread runs compiled
+// code: a TLS index, allocated the first time.
+i64 ph_tkey;
+uptr ph_tget() { return TlsGetValue(ph_tkey); }
+void ph_tset(uptr b) { TlsSetValue(ph_tkey, b); }
+void ph_tinit() { ph_tkey = rtw_int(TlsAlloc()); }
+// fresh zeroed pages: reserved and committed (MEM_COMMIT | MEM_RESERVE,
+// PAGE_READWRITE), 0 when the system says no
+uptr ph_os_map(i64 n) { return VirtualAlloc(0, n, 0x3000, 4); }
+void ph_os_unmap(uptr p, i64 n) { VirtualFree(p, 0, 0x8000); }        // MEM_RELEASE
+// the size of a thread's arena: committed up front, which the system charges: kept smaller
+i64 ph_os_arena() { return 67108864; }
+// the process's committed bytes, -1 when they cannot be read:
+// PROCESS_MEMORY_COUNTERS.PagefileUsage, which a committed arena counts in
+// (mcphp_vm(), a test gate)
+i64 ph_os_vm() {
+    u8 m[72];
+    st64(m, 72);
+    if (!rtw_int(K32GetProcessMemoryInfo(0 - 1, m, 72))) return 0 - 1;
+    return ld64(m + 56);
+}
+// a thread on an 8 MiB stack; 0 when it started. The HANDLE is the join's.
+i64 ph_thr_create(uptr fn, uptr arg, uptr h) {
+    uptr t = CreateThread(0, 8388608, fn, arg, 0, 0);
+    st64(h, t);
+    if (!t) return 1;
+    return 0;
+}
+void ph_thr_join(uptr h) {
+    WaitForSingleObject(ld64(h), 0xffffffff);         // INFINITE
+    CloseHandle(ld64(h));
+}
