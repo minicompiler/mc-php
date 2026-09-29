@@ -101,3 +101,8 @@ uptr php_setlocale(i64 cat, uptr name) { return setlocale(cat, name); }
 // every global image" handle is (void *)-2 here.
 extern uptr dlsym(i64 h, uptr name);
 uptr php_dlsym(uptr name) { return dlsym(0 - 2, name); }
+
+// C's errno for the calling thread, which `#[Extern('c')] function errno(): int`
+// reads (src/extern.mc): the macro is __error() here
+extern uptr __error();
+i64 php_c_errno() { return ld32(__error()); }

@@ -137,7 +137,10 @@ the ABI leaves the bits above it unspecified); `Ptr` is a pointer-sized integer 
 NUL-terminated bytes and a `string` return a C string copied into a php one (`""` for null); a
 `bool` parameter is 0 or 1; a `mixed` parameter is decided per call by the value -- an int, a
 string's bytes, a bool, null as 0, anything else php's `TypeError` with no C call. `void` returns
-nothing. A C function may WRITE into a `string` argument's bytes -- `pipe()`'s two descriptors,
+nothing. `errno` is a macro in C and not a symbol: `#[Extern('c')] function errno(): int {}`
+reads the calling thread's error number where the host keeps it (`__error()` on macOS,
+`__errno_location()` on Linux), so the source can ask it right after the call that failed, as
+C does. A C function may WRITE into a `string` argument's bytes -- `pipe()`'s two descriptors,
 `read()`'s buffer, `waitpid()`'s status -- only when the string is one the module made at run time
 for it, of that length (`str_repeat("\0", 8)`), and never a literal, which may live in read-only
 memory; the bytes are read back with `unpack()` or `substr()`. `examples/awaitable` passes its

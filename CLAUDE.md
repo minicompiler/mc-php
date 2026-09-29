@@ -1203,8 +1203,16 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   `SA_RESTART`) lost the child's answer and left it a zombie -- in the C twin too. Reproduced with
   `examples/awaitable/signals.php` (a SIGCHLD handler through `pcntl_signal(..., false)`, a slow
   first child): both printed an empty first answer and `a child left unreaped: true`. Fixed in
-  both: the twin retries on `errno == EINTR`; the source, which has no errno to read, asks again
-  while `kill(pid, 0)` says the child is still there. `tests/examples.sh` runs `signals.php`
-  against the twin and the compiled module when php has pcntl. The counters were checked against
+  both the same way: retried on `errno == EINTR` and on nothing else. The source reads errno
+  through `#[Extern('c')] function errno(): int {}` -- a macro in C, so `src/extern.mc` maps it to
+  the host layer's `php_c_errno` (`__error()` on macOS, `__errno_location()` on Linux; a
+  misdeclared one is refused, `tests/c/08-extern` prints `close(-1)`'s 9). A first version asked
+  `kill(pid, 0)` instead; the second review pass showed a child reaped by someone else (a SIGCHLD
+  handler calling `pcntl_waitpid(-1, ..., WNOHANG)`, php's manual's idiom) makes waitpid answer
+  ECHILD for ever, and kill succeeds again once the pid is reused -- a spin. `signals.php` gained
+  that handler and `SIG_IGN`; both versions pass them here (the handler cannot run inside the
+  module's call, and pid reuse cannot be forced), so the gate for the change is errno's fixture
+  and the EINTR case. `tests/examples.sh` runs `signals.php`, bounded by `tests/lim.sh`, against
+  the twin and the compiled module when php has pcntl. The counters were checked against
   the twin and `awaitable.mc`: they count threads, so `parallel` leaves `completed()`/`peak()` at
   0 -- now a `check.php` line (38 lines; `AW_PROGRESS` 32).

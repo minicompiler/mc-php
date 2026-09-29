@@ -84,7 +84,10 @@ final class Mutex { public function lock(): void {} public function unlock(): vo
 #[Extern('c', name: 'read')] function c_read(int $fd, string $buf, int $n): int {}
 #[Extern('c', name: 'write')] function c_write(int $fd, string $buf, int $n): int {}
 #[Extern('c', name: 'close')] function c_close(int $fd): int {}
-#[Extern('c', name: 'kill')] function c_kill(int $pid, int $sig): int {}
+// errno is a macro in C: the thread's error number, read right after a call
+// that failed (src/extern.mc). EINTR is 4 on every host this runs on.
+#[Extern('c')] function errno(): int {}
+const EINTR = 4;
 
 // since the last reset(): peak and completed count the THREADS (http_get and
 // http_get_many, as the C twin does), errors the parallel children that threw
@@ -120,12 +123,13 @@ function parallel(callable $fn, mixed ...$args): array {
         $tag = '1';
         $body = '';
         if ($pids[$i] !== -1) {
-            $all = _read_all($fds[$i], $pids[$i]);
+            $all = _read_all($fds[$i]);
             c_close($fds[$i]);
             // a signal handler installed without SA_RESTART makes a blocked
-            // waitpid() return -1 (EINTR): it is asked again while the child
-            // is still there -- running, or a zombie waiting for this call
-            while (waitpid($pids[$i], str_repeat("\0", 8), 0) < 0 && c_kill($pids[$i], 0) === 0) {}
+            // waitpid() return -1 with EINTR: asked again, as the C twin does,
+            // and on no other error (ECHILD: someone else reaped the child)
+            $st = str_repeat("\0", 8);
+            while (waitpid($pids[$i], $st, 0) < 0 && errno() === EINTR) {}
             if ($all !== '') { $tag = substr($all, 0, 1); $body = substr($all, 1); }
         }
         if ($tag === '0') {
@@ -159,15 +163,13 @@ function _write_all(int $fd, string $s): void {
     }
 }
 
-// to the end of the pipe: a -1 while the child is still there is a signal
-// (EINTR, as above), and the pipe is ours, so nothing else fails there; the
-// source has no errno to ask, and this asks the question errno would answer
-function _read_all(int $fd, int $pid): string {
+// to the end of the pipe, asking again on EINTR (as above)
+function _read_all(int $fd): string {
     $all = '';
     while (true) {
         $buf = str_repeat("\0", 65536);
         $k = c_read($fd, $buf, 65536);
-        if ($k < 0 && c_kill($pid, 0) === 0) continue;
+        if ($k < 0 && errno() === EINTR) continue;
         if ($k <= 0) return $all;
         $all .= substr($buf, 0, $k);
     }

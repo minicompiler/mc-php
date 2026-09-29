@@ -50,6 +50,7 @@ rootn=$(cygpath -m "$root" 2>/dev/null || echo "$root")
 . "$here/tmp.sh"
 mcphp_tmp_init mcphp-examples
 tmp=$MCPHP_TMP
+. "$here/lim.sh"
 trap 'rm -rf "$tmp"' EXIT
 trap 'exit 130' INT
 
@@ -327,15 +328,20 @@ echo "  -- awaitable"
 EX=examples/awaitable
 # signals.php: parallel() while SIGCHLD arrives with no SA_RESTART, so the
 # parent's blocked read() and waitpid() return EINTR -- every answer home and
-# no child left unreaped (pcntl is what installs such a handler)
+# no child left unreaped -- and under a handler that reaps any child and under
+# SIG_IGN, where parallel()'s own waitpid() answers ECHILD and must stop
+# (pcntl is what installs such handlers)
 aw_signals() {
     if ! "$PHP" -m | tr -d '\r' | grep -qix pcntl; then
         skip "signals.php ($2): this php has no pcntl"; return
     fi
-    "$PHP" -d extension="$1" "$EX/signals.php" > "$tmp/sig.out" 2>&1
+    # bounded: a retry loop that does not stop is a hang, not an answer
+    lim "$PHP" -d extension="$1" "$EX/signals.php" > "$tmp/sig.out" 2>&1
+    [ "$timedout" = yes ] && echo "(timed out after ${LIM_SECS:-30} s)" >> "$tmp/sig.out"
     if printf '%s\n' "slept 400, slept 10, slept 20, slept 30, slept 40, slept 50" \
-        "SIGCHLD seen: true" "a child left unreaped: false" | cmp -s - "$tmp/sig.out"; then
-        say "signals.php ($2): parallel's reads and waitpids survive EINTR, no child left unreaped"
+        "SIGCHLD seen: true" "a child left unreaped: false" \
+        "slept 300, slept 10, slept 20" "slept 200, slept 10" "done" | cmp -s - "$tmp/sig.out"; then
+        say "signals.php ($2): EINTR asked again, ECHILD not; every answer home, no child left unreaped"
     else
         bad "signals.php ($2):"; sed -n '1,6p' "$tmp/sig.out" | sed 's/^/      /'
     fi

@@ -433,7 +433,8 @@ done
 # while compiling: on something that is not a function (a class member, a
 # statement in a body, a namespace, a use, a closure -- refused at the
 # attribute, so it never reaches a later declaration), a runtime function's
-# name, a library the program road does not link, and a body that is not empty
+# name, a library the program road does not link, an errno that is not
+# `errno(): int`, and a body that is not empty
 xr=0
 for c in 'class A { #[Extern("c")] function f(): int {} }|on something that is not a function' \
          'function f() { #[Extern("c")] echo 1; } function g(): int { return 2; }|on something that is not a function' \
@@ -443,6 +444,7 @@ for c in 'class A { #[Extern("c")] function f(): int {} }|on something that is n
          '#[Extern("c")] function php_alloc(Ptr $n): Ptr {}|one of the runtime'"'"'s own functions' \
          '#[Extern("c", name: "1atoi")] function f(string $s): int {}|is not a C identifier: 1atoi' \
          '#[Extern("curl")] function curl_easy_init(): Ptr {}|library the program road does not link' \
+         '#[Extern("c")] function errno(int $e): int {}|errno takes no parameter and returns int' \
          '#[Extern("c")] function abs(int $a): int { return 1; }|body is the library'"'"'s: leave it empty'; do
     src=${c%|*}; want=${c##*|}
     printf '<?php\n%s\necho 1;\n' "$src" > "$tmp/xr.php"
@@ -452,7 +454,7 @@ for c in 'class A { #[Extern("c")] function f(): int {} }|on something that is n
         echo "  FAIL  #[Extern]: [$src] said [$(head -1 "$tmp/xr.err")]"; xr=1; fail=1
     fi
 done
-[ "$xr" = 0 ] && echo "  #[Extern]: on what is not a function, a runtime name, a bad name:, an unlinked library and a body, refused while compiling"
+[ "$xr" = 0 ] && echo "  #[Extern]: on what is not a function, a runtime name, a bad name:, an unlinked library, errno misdeclared and a body, refused while compiling"
 # two aliases of one C symbol (c/08's dec and hex, both `name: 'strtol'`) are
 # ONE C declaration
 nx=$("$MCPHP_BIN" --dump-ast $P/c/08-extern.php 2>/dev/null | grep -c '^EXTERN.* name=strtol$')
