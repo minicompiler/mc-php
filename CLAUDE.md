@@ -1316,3 +1316,12 @@ changed what the compiler does. The hosts branch is that commit and it is delete
       a variable-called php function. A build that never measures fails all 400; the old
       shared-flag race did NOT reproduce in 8 runs (5 with the non-calling probe); the fix
       stands by construction. NTS cmp 27/27 identical.
+- Arrow-function capture (2026-09-29, branch `arrow-capture`, from main 56ffa46): `fn() => ...`
+  captured EVERY enclosing variable, so a variable the body never names -- a catch's `$e` on a
+  path where nothing assigned it -- was copied out of an unset stack slot: SIGSEGV exit 139 on
+  the program road (NTS, main's own compiler). Now php's rule: by value, at creation, only the
+  names the body uses (`ph_names` walks the parsed body; the creation site `ph_cap_site` is
+  built after it, nested arrows capture transitively). Fixture `tests/g/123-arrow-capture.php`
+  (exit 139 before, php's bytes after); the same cases in `tests/ext/callables` for the
+  extension road (it did not crash there before: the slot held a readable value). The
+  FrankenPHP test's arrow fn is back after its try.
