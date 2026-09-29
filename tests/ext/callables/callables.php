@@ -63,3 +63,23 @@ function shadow_wide(): int {
     $g = fn() => $v17 + $v1;
     return $g();
 }
+// A closure written inside a try block is a function of its own
+// (tests/g/127-closure-in-try.php is the program road's copy): its throw
+// does not break out of the try around its definition.
+function try_closure(string $m): string {
+    try {
+        $f = function (string $m): int { if ($m === "ok") return 1; throw new \LogicException($m); };
+        return "ret " . $f($m);
+    } catch (\LogicException $e) {
+        return "caught " . $e->getMessage();
+    }
+}
+function try_finally(): string {
+    try {
+        $c = function (int $m): int { try { throw new \LogicException("through $m"); } finally { echo "closure finally\n"; } };
+        try { $c(3); } catch (\LogicException $e) { return "caught " . $e->getMessage(); }
+        return "none";
+    } finally {
+        echo "outer finally\n";
+    }
+}
