@@ -83,3 +83,10 @@ function try_finally(): string {
         echo "outer finally\n";
     }
 }
+// A top-level read of a name only a function's `global` creates is the
+// global (tests/g/128-global-toplevel.php is the program road's copy).
+function tg_set(int $v): void { global $tg; $tg = $v; }
+tg_set(41);
+$tg_seen = $tg + 1;
+$tg_str = "seen $tg";
+function top_global(): string { global $tg_seen, $tg_str; return $tg_seen . " " . $tg_str; }

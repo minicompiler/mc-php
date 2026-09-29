@@ -915,6 +915,19 @@ i64 ph_destructure(uptr fl, i64 line, i64 br, i64 semi) {
 // holding what php's read of it answers, instead of being refused: `mixed` is
 // a zval (D4 (c)) and null is one of its values.
 void ph_bind_undef(uptr d, uptr fl, i64 line, i64 quiet) {
+    // at the top level, a name some function declares `global` is THE
+    // global: read it (php's warning when no `global` made it yet), then
+    // bind the name to the table's entry, which that read or a later
+    // function's `global` share
+    if (ph_toplevel && ph_gset_has(d)) {
+        ph_var_bind(d, PT_MIXED);
+        ph_set_ref(d);
+        i64 rd = ph_undef_read(d, quiet);
+        i64 bind = ph_set(ph_mangle(d, "v_"), ph_c1("php_gvar", ph_strlit(d + 1, cstrlen(d + 1)), ty_pzv));
+        ph_pending_stmt(ph_expr_stmt_of(rd));
+        ph_pending_stmt(bind);
+        return;
+    }
     ph_var_bind(d, PT_MIXED);
     if (ph_refset_has(d)) ph_set_ref(d);
     i64 v = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);

@@ -6759,6 +6759,19 @@ uptr php_gvar(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     return z;
 }
 
+// A top-level read of a name that only a function's `global` creates: the
+// global table's entry when some `global` made it, else php's read of an
+// undefined variable (quiet: `??`, no warning). Nothing is created -- php
+// does not create the global on a read.
+uptr php_gget(uptr name, i64 quiet) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ph_globals) {
+        uptr b = php_ht_find(ph_globals, php_str_hash(name), name);
+        if (b) return ld64(b);
+    }
+    if (quiet) return php_znull();
+    return php_undef_var(name + ZS_HDR);
+}
+
 // a function `static`: one zval per declaration, initialised on the first call
 // A static set inside an extension call is reset when the request ends, as
 // php does: its slot joins ph_rsl, which php_request_reset clears.

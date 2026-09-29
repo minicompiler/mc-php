@@ -86,7 +86,7 @@ r0=$(rss)
 load "$reqs" "$par" run
 r1=$(rss)
 
-# the formula: n|1|1+n|3|1|1|7|<s>|2n|n|n+1000|b<n>:<strrev(z<n>)>|4n+1|thread|3n
+# the formula: n|1|1+n|3|1|1|77|<s>|2n|n|n+1000|b<n>:<strrev(z<n>)>|4n+1|thread|3n
 check() {
     awk -F'|' '
     function rv(x,   i, o) { o = ""; for (i = length(x); i > 0; i--) o = o substr(x, i, 1); return o }
@@ -94,7 +94,7 @@ check() {
     NF != 15 { bad++; if (shown++ < 3) print "      got  " $0 > "/dev/stderr"; next }
     {
         n = $1
-        want = n "|1|" (1 + n) "|3|1|1|7|" s(n) "|" (2 * n) "|" n "|" (n + 1000) "|b" n ":" rv("z" n) "|" (4 * n + 1) "|" (3 * n)
+        want = n "|1|" (1 + n) "|3|1|1|77|" s(n) "|" (2 * n) "|" n "|" (n + 1000) "|b" n ":" rv("z" n) "|" (4 * n + 1) "|" (3 * n)
         got = $1; for (i = 2; i <= 13; i++) got = got "|" $i; got = got "|" $15
         if (got != want) { bad++; if (shown++ < 3) print "      want " want "\n      got  " got > "/dev/stderr" }
         ok++; t[$14] = 1

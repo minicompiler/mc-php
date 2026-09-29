@@ -551,6 +551,7 @@ php-src/Zend/tests/nullsafe_operator/034.phpt
 php-src/Zend/tests/nullsafe_operator/035.phpt
 php-src/Zend/tests/nullsafe_operator/036.phpt
 php-src/Zend/tests/nullsafe_operator/037.phpt
+php-src/Zend/tests/nullsafe_operator/040.phpt
 php-src/Zend/tests/nullsafe_operator/bug81216_2.phpt
 php-src/Zend/tests/nullsafe_operator/constant_propagation.phpt
 php-src/Zend/tests/numeric_strings/array_offset.phpt
@@ -611,6 +612,7 @@ php-src/Zend/tests/return_types/void_allowed.phpt
 php-src/Zend/tests/static_variables/static_variable.phpt
 php-src/Zend/tests/static_variables/static_variable_in_private_method.phpt
 php-src/Zend/tests/static_variables/static_variables_global.phpt
+php-src/Zend/tests/static_variables/static_variables_global_2.phpt
 php-src/Zend/tests/str_offset_001.phpt
 php-src/Zend/tests/str_offset_003.phpt
 php-src/Zend/tests/string_offset_int_min_max.phpt

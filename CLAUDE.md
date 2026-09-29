@@ -1420,3 +1420,18 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   a function whose body contains `function` or `fn` fails the scan, so today the answer around
   a closure is always empty. `--dump-ast` of 178 fixtures and examples is identical before and
   after.
+- A top-level global only `global` creates (2026-09-29, branch `global-toplevel`, from main
+  bfad1cb): the top level bound a name some function declares `global` to the global table only
+  at its first top-level ASSIGNMENT, so a top-level read before one -- `set(); echo $g;` after
+  `function set() { global $g; $g = 42; }` -- was php's undefined-variable warning and null. Now
+  such a read (`ph_undef_read`: `ph_var_ref`, both string-interpolation sites) asks the table at
+  run time (`php_gget(name, quiet)`: the entry, else php's warning, or nothing under `??`), and a
+  top-level write through the name (`ph_bind_undef`, `$g++`) reads it the same way and binds
+  it through `php_gvar`. The ZTS road reads the request's own table (the name is lowered per
+  thread); the table 3a's threads share is the one read. Fixture `tests/g/128-global-toplevel.php`
+  (main: a warning where php prints 42); `tests/ext/callables` reads one at MINIT (main: the
+  module and the interpreted source differ); `tests/c/11-thread-api` drops its workaround and
+  reads what a thread stored with no top-level initialisation; FrankenPHP's `zts.php` reads one
+  at MINIT, carried into every request's copy (the formula's `7` field is `77`). The grid gains
+  `tests/lang/007`, `Zend/tests/nullsafe_operator/040` and
+  `static_variables/static_variables_global_2`, plain and in check mode.

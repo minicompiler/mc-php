@@ -347,7 +347,7 @@ i64 ph_dq_read2(uptr q, uptr e, uptr pend, i64 term, i64 raw) {
         st8(d2 + 1 + (k4 - nstart), 0);
         i64 vt = PT_MIXED;
         i64 v4 = 0;
-        if (ph_var_find(d2) < 0) v4 = ph_c1("php_undef_var", ph_raw(d2 + 1, cstrlen(d2) - 1), ty_pzv);
+        if (ph_var_find(d2) < 0) v4 = ph_undef_read(d2, 0);
         if (!v4) {
             vt = ph_var_type(d2);
             v4 = node_new(N_IDENT, ph_tline, ph_tfile);

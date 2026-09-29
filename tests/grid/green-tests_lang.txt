@@ -4,6 +4,7 @@ php-src/tests/lang/003.phpt
 php-src/tests/lang/004.phpt
 php-src/tests/lang/005.phpt
 php-src/tests/lang/006.phpt
+php-src/tests/lang/007.phpt
 php-src/tests/lang/008.phpt
 php-src/tests/lang/009.phpt
 php-src/tests/lang/010.phpt

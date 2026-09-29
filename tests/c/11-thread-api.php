@@ -39,11 +39,8 @@ function nested(int $n): int {
     return $sum;
 }
 
-// the globals a thread writes, made here first (a top-level variable only
-// `global` creates is not bound here yet: a separate, pre-existing gap)
-$gs = "";
-$ga = [];
-$go = new Box(0);
+// the globals a thread writes are created by its `global` alone: the top
+// level reads them out of the global table the threads share
 
 echo "hardware concurrency at least 1: ", mcphp_hardware_concurrency() >= 1 ? "yes" : "no", "\n";
 echo "running before any thread: ", mcphp_thread_running(), "\n";
