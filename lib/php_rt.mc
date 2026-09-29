@@ -7424,6 +7424,9 @@ u8 php_f_class_alias(uptr cz, uptr az, uptr autoz) { uptr phT = ph_tcur; if (!ph
 // count comes from the CALL SITE, which is the only place that knows it:
 // ph_call special-cases the name, exactly as it does for array_push.
 u8 php_f_reg_shutdown(uptr f, uptr a1, uptr a2, uptr a3) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    // php_shutdown runs the booting thread's list: one another thread wrote
+    // would be dropped without a word
+    if (ph_shared_off(phT, "register_shutdown_function()", 28)) return 0;
     php_pin();                                // ph_sdfn
     if (!((uptr) ld64(phT + PHT_ph_sdfn))) st64(phT + PHT_ph_sdfn, php_arr_new(8));
     uptr row = php_arr_new(8);

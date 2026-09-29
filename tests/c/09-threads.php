@@ -34,15 +34,17 @@ function work(int $iters, int $id): int {
     return $sum;
 }
 
-// A `global` or a `static` is the program's state, one table for every
-// thread: another thread gets an Error instead of racing it.
+// A `global`, a `static` or a shutdown function is the program's state, one
+// table for every thread: another thread gets an Error instead of racing it
+// (a shutdown function it registered would never run).
 function g_in(): int { global $g; return (int) $g; }
 function s_in(): int { static $c = 0; $c++; return 7; }
+function r_in(): int { register_shutdown_function(function () {}); return 9; }
 function shared(int $x, int $id): int {
     $k = 0;
-    foreach ([1, 2] as $w) {
-        try { $k += $w == 1 ? g_in() : s_in(); }
-        catch (Error $e) { $k += str_contains($e->getMessage(), 'shared by every thread') ? 1 : 1000; }
+    foreach ([1, 2, 3] as $w) {
+        try { $k += $w == 1 ? g_in() : ($w == 2 ? s_in() : r_in()); }
+        catch (Error $e) { $k += str_contains($e->getMessage(), $w == 3 ? 'register_shutdown_function() is shared by every thread' : 'shared by every thread') ? 1 : 1000; }
     }
     return $k;
 }

@@ -129,7 +129,9 @@ a crash, when it reaches module state:
 - a `global`;
 - a `static`;
 - `define()`;
-- `class_alias()`.
+- `class_alias()`;
+- `register_shutdown_function()`. Only the booting thread's shutdown list runs, so a callback
+  that another thread registered would otherwise be dropped with no message.
 
 The message is `mc-php: a global variable is shared by every thread: another thread may not
 reach it`. **This is interim until step 3; module globals become shared.**
