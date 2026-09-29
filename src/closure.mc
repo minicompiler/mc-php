@@ -3,6 +3,60 @@
 // use (&$x) captures the enclosing zval's ADDRESS, carried through the use
 // array as an integer: the array slot is a different cell and could not alias.
 
+// The creation site: a use array holding each captured variable -- a copy,
+// or for `use (&$x)` the zval's address. `used` (one byte per name, or 0 for
+// every name) is which names to put in it.
+i64 ph_cap_site(uptr an, uptr unames, uptr urefs, i64 nu, uptr used, i64 line, uptr fl) {
+    i64 mk = ph_set(an, ph_c1("php_arr_new", ph_int(8), ty_parr));
+    i64 mt = mk;
+    i64 ui = 0;
+    loop {
+        if (ui >= nu) break;
+        if (used && !ld8(used + ui)) { ui = ui + 1; continue; }
+        uptr un2 = ld64(unames + ui * 8);
+        i64 vt = ph_var_type(un2);
+        i64 vr = node_new(N_IDENT, line, fl);
+        set_nd_name(vr, ph_mangle(un2, "v_"));
+        set_nd_type(vr, ph_mcty(vt));
+        if (ld64(urefs + ui * 8)) {
+            if (!ph_is_ref(un2)) ph_todo2(fl, line, "a by-reference use of a php variable of type", ph_tyname(vt));
+            set_nd_type(vr, ty_pzv);
+            vr = ph_c1("php_zlong", ph_cast(TY_I64, vr), ty_pzv);
+            vt = PT_MIXED;
+        }
+        i64 ar = node_new(N_IDENT, line, fl);
+        set_nd_name(ar, an);
+        set_nd_type(ar, ty_parr);
+        // BY VALUE means by value: `php_arr_set` copies the zval header
+        // and an ARRAY's header holds the hash, so the closure and the
+        // outer variable shared it -- `$a = [1,2]; $f = function() use
+        // ($a) { $a[] = 3; ...}` left the OUTER array with three elements
+        // where php leaves it with two. `php_zv_val` is the same deep copy
+        // a by-value parameter already takes (ph_byval), and a
+        // by-reference `use (&$x)` must NOT take it.
+        i64 cap = ph_to_mixed(vr, vt);
+        if (!ld64(urefs + ui * 8)) cap = ph_c1("php_zv_val", cap, ty_pzv);
+        i64 st2 = ph_stmt_of(ph_c3("php_arr_set", ar, ph_to_mixed(ph_strlit(un2 + 1, cstrlen(un2 + 1)), PT_STRING),
+                                   cap, TY_VOID));
+        set_nd_next(mt, st2);
+        mt = st2;
+        ui = ui + 1;
+    }
+    return mk;
+}
+
+// does anything in the tree under n (its siblings too) name `mn`
+i64 ph_names(i64 n, uptr mn) {
+    loop {
+        if (!n) return 0;
+        i64 k = nd_kind(n);
+        if ((k == N_IDENT || k == N_ASSIGN || k == N_ADDR) && str_eq(nd_name(n), mn)) return 1;
+        if (ph_names(nd_a(n), mn) || ph_names(nd_b(n), mn)) return 1;
+        if (ph_names(nd_c(n), mn) || ph_names(nd_d(n), mn)) return 1;
+        n = nd_next(n);
+    }
+}
+
 // ---- closures --------------------------------------------------------------
 // `function (...) use (...) {}` and `fn(...) => expr` lower to
 // `uptr cl_N(uptr use, uptr thisp, uptr a1..a5)` plus a Closure object holding
@@ -90,41 +144,9 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_nonce = ph_nonce + 1;
     uptr an = p_cat("phu_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
     ph_local(an, ty_parr);
-    i64 mk = ph_set(an, ph_c1("php_arr_new", ph_int(8), ty_parr));
-    i64 mt = mk;
-    i64 ui = 0;
-    loop {
-        if (ui >= nu) break;
-        uptr un2 = ld64(unames + ui * 8);
-        i64 vt = ph_var_type(un2);
-        i64 vr = node_new(N_IDENT, line, fl);
-        set_nd_name(vr, ph_mangle(un2, "v_"));
-        set_nd_type(vr, ph_mcty(vt));
-        if (ld64(urefs + ui * 8)) {
-            if (!ph_is_ref(un2)) ph_todo2(fl, line, "a by-reference use of a php variable of type", ph_tyname(vt));
-            set_nd_type(vr, ty_pzv);
-            vr = ph_c1("php_zlong", ph_cast(TY_I64, vr), ty_pzv);
-            vt = PT_MIXED;
-        }
-        i64 ar = node_new(N_IDENT, line, fl);
-        set_nd_name(ar, an);
-        set_nd_type(ar, ty_parr);
-        // BY VALUE means by value: `php_arr_set` copies the zval header
-        // and an ARRAY's header holds the hash, so the closure and the
-        // outer variable shared it -- `$a = [1,2]; $f = function() use
-        // ($a) { $a[] = 3; ...}` left the OUTER array with three elements
-        // where php leaves it with two. `php_zv_val` is the same deep copy
-        // a by-value parameter already takes (ph_byval), and a
-        // by-reference `use (&$x)` must NOT take it.
-        i64 cap = ph_to_mixed(vr, vt);
-        if (!ld64(urefs + ui * 8)) cap = ph_c1("php_zv_val", cap, ty_pzv);
-        i64 st2 = ph_stmt_of(ph_c3("php_arr_set", ar, ph_to_mixed(ph_strlit(un2 + 1, cstrlen(un2 + 1)), PT_STRING),
-                                   cap, TY_VOID));
-        set_nd_next(mt, st2);
-        mt = st2;
-        ui = ui + 1;
-    }
-    ph_pending_stmt(mk);
+    // an arrow function's is built after its body, which says which names it
+    // needs; a `use` list names them itself
+    if (!arrow) ph_pending_stmt(ph_cap_site(an, unames, urefs, nu, 0, line, fl));
     i64 thisp = ph_int(0);
     if (ph_in_method && !ph_in_static) thisp = ph_this(fl, line);
     i64 fp = node_new(N_ADDR, line, fl);
@@ -191,20 +213,46 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         pret = iff;
         i2 = i2 + 1;
     }
-    // the captured variables, read out of the use array
+    // the captured variables: bound here, and read out of the use array
+    // after the body, which for an arrow function says which ones it names
+    i64 ub = 0;
+    loop {
+        if (ub >= nu) break;
+        uptr unb = ld64(unames + ub * 8);
+        ph_var_bind(unb, PT_MIXED);
+        if (ld64(urefs + ub * 8)) ph_set_ref(unb);
+        ub = ub + 1;
+    }
+    i64 body = 0;
+    if (arrow) {
+        ph_want("=>", 2, "expected => in a php arrow function");
+        i64 rv = ph_expr(0);
+        i64 r = node_new(N_RETURN, line, fl);
+        set_nd_a(r, ph_to_mixed(ph_own(rv, ph_ety), ph_ety));
+        body = node_new(N_BLOCK, line, fl);
+        set_nd_a(body, ph_wrap(r));
+    }
+    if (!arrow) body = ph_block();
+    // php's rule for fn(): capture, by value at creation, the variables the
+    // body names and no other -- one it does not name is never read, and may
+    // be a slot nothing assigned on this path (a catch's $e)
+    u8 used[16];
+    i64 uu = 0;
+    loop {
+        if (uu >= 16) break;
+        st8(used + uu, !arrow || (uu < nu && ph_names(nd_a(body), ph_mangle(ld64(unames + uu * 8), "v_"))));
+        uu = uu + 1;
+    }
     i64 ui2 = 0;
     loop {
         if (ui2 >= nu) break;
+        if (!ld8(used + ui2)) { ui2 = ui2 + 1; continue; }
         uptr un3 = ld64(unames + ui2 * 8);
-        ph_var_bind(un3, PT_MIXED);
         i64 ur = node_new(N_IDENT, line, fl);
         set_nd_name(ur, "v_use");
         set_nd_type(ur, ty_parr);
         i64 get = ph_c2("php_arr_zget", ur, ph_to_mixed(ph_strlit(un3 + 1, cstrlen(un3 + 1)), PT_STRING), ty_pzv);
-        if (ld64(urefs + ui2 * 8)) {
-            get = ph_cast(ty_pzv, ph_c1("php_zv_long", get, TY_I64));
-            ph_set_ref(un3);
-        }
+        if (ld64(urefs + ui2 * 8)) get = ph_cast(ty_pzv, ph_c1("php_zv_long", get, TY_I64));
         // and a copy PER CALL, not just per capture: the use array holds
         // ONE zval and the body would otherwise append to it every time --
         // `$f()` twice on a captured `[1,2]` answered 4 then 5 where php
@@ -218,16 +266,6 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         pret = asg;
         ui2 = ui2 + 1;
     }
-    i64 body = 0;
-    if (arrow) {
-        ph_want("=>", 2, "expected => in a php arrow function");
-        i64 rv = ph_expr(0);
-        i64 r = node_new(N_RETURN, line, fl);
-        set_nd_a(r, ph_to_mixed(ph_own(rv, ph_ety), ph_ety));
-        body = node_new(N_BLOCK, line, fl);
-        set_nd_a(body, ph_wrap(r));
-    }
-    if (!arrow) body = ph_block();
     if (pre) {
         i64 t = pre;
         loop { if (!nd_next(t)) break; t = nd_next(t); }
@@ -261,6 +299,8 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_nls = sls;
     ph_pend_head = sph;
     ph_pend_tail = spt;
+    // an arrow function's creation site, now that its body said what it names
+    if (arrow) ph_pending_stmt(ph_cap_site(an, unames, urefs, nu, used, line, fl));
     ph_ety = PT_MIXED;
     return made;
 }

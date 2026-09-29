@@ -25,3 +25,28 @@ function named(string $s): string { $f = 'strrev'; return $f($s) . ('str' . 'tou
 class _Oops extends \RuntimeException {}
 function oops(): \Throwable { return new _Oops("own", 4); }
 function thrown(): int { throw new _Oops("up"); }
+// An arrow function captures, by value at its creation, the variables its
+// body names and no other (tests/g/123-arrow-capture.php is the program
+// road's copy): arrow_odd's $e is never assigned on the even path, and is not
+// read.
+function arrow_odd(int $n): int {
+    try {
+        if ($n % 2) throw new \RuntimeException("odd");
+    } catch (\RuntimeException $e) {
+        return -1;
+    }
+    $f = fn(int $x): int => $x * 2;
+    return $f($n);
+}
+function arrow_spoil(): int { $a = 1; $b = 2; $c = 3; $d = 4; $q = 5; return $a + $b + $c + $d + $q; }
+function arrow_later(): string {
+    $a = 1;
+    $f = fn(): int => $a + 10;
+    $a = 5;
+    return $f() . " " . $a;
+}
+function arrow_nested(): int {
+    $k = 3;
+    $f = fn(int $x): int => (fn(int $y): int => $y + $k)($x) * 2;
+    return $f(4);
+}

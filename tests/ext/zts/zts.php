@@ -32,16 +32,13 @@ function work(int $n, callable $boom): string {
     _Box::$count += 1;
     $k = $zts_box->add($n);
     $s = str_repeat(chr(97 + $n % 26), 3) . ":" . json_encode(['n' => $n]);
-    // the arrow function comes before the try on purpose: mc-php's arrow
-    // function captures every enclosing variable, and a $e the catch never
-    // assigned is an unset slot (reported separately; not a ZTS defect).
-    $f = fn(int $x): int => $x * 2;
     try {
         if ($n % 2) throw new RuntimeException("odd $n");
         $s .= "!even";
     } catch (RuntimeException $e) {
         $s .= "!" . $e->getMessage();
     }
+    $f = fn(int $x): int => $x * 2;
     if (!defined('ZTS_R')) define('ZTS_R', $n);
     $h = zts_helper($n);
     // php's engine called through a callable -- one that throws, and one of

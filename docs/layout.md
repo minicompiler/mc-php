@@ -46,7 +46,7 @@ mc is single pass, so `src/php.mc` includes the parts in order and the order is 
 | `builtin.mc` | 1278 | the names the COMPILER lowers to instructions rather than to a library call |
 | `stmt.mc` | 377 | statements, unwinding (a pending-exception flag, D7), and the line php reports |
 | `lvalue.mc` | 1685 | the lvalue chain, `isset`/`empty`, and `list()` destructuring |
-| `closure.mc` | 263 | closures, arrow functions, `use (&$x)` |
+| `closure.mc` | 307 | closures, arrow functions, `use (&$x)` |
 | `class.mc` | 787 | classes, interfaces, traits, enums; members; a method body |
 | `packed.mc` | 812 | the packed int array: a token scan that proves a local array holds only ints under keys 0..n-1, and its lowering |
 | `rc.mc` | 569 | who owns a string on the extension road: the pool of temporaries, counted slots in a function that loops, borrowing in one that does not |
