@@ -1377,6 +1377,10 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     emulation; both.sh; FrankenPHP aarch64 and x86_64; mcnames 217 against mc 1.1.0 and 1.3.0
     (strict); llvm-mc sweep 2614 arm64 / 2361 x86-64 distinct instructions (only the two known
     `setp`/`setnp` REX-prefix differences), branches 0 bad, mnemonic sets identical to main's.
+    CI found one defect the local gates could not: the three new kernel32 externs sat below
+    `rt_host_windows.mc`'s `#dylib "ucrtbase.dll"`, so windows/x86_64 (mc's direct PE) imported
+    them from ucrtbase.dll and the loader refused every program (exit 127); aarch64 links through
+    kernel32.lib and passed. Moved to the top block; all 8 CI legs green.
   - NTS bytes: every module changes (the runtime carries the API; mc links no dead code):
     `__text` +7428 bytes in `callables.so`; files hello 364856 -> 366504, decimal 418968 ->
     420616, extA/extB +1648, awaitable +1680, values +1680, callables +18176, classes +18192
