@@ -21,6 +21,7 @@ GetModuleFileNameA
 GetModuleHandleA
 GetProcAddress
 GetStdHandle
+GetTickCount64
 K32GetProcessMemoryInfo
 MoveFileExA
 ReadFile

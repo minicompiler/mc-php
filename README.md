@@ -55,6 +55,7 @@ and compared with something php produced on every host, by [`tests/ext.sh`](test
 | [`decimal`](examples/decimal/) | compiled from PHP, **done** | exact fixed-point decimals, half-even; the differential, 1219 results against bcmath, and a bench row -- **2.19x** php interpreting the same source (1.52x to 2.99x on the five CI legs; 0.51x before batch E), with its C twin at 13.8x beside it |
 | [`two-extensions`](examples/two-extensions/) | **hand-written mc** | two extensions calling each other, loaded in both orders; two mc-php extensions in one php; and the refusal of `extB.php`, pinned |
 | [`awaitable`](examples/awaitable/) | **hand-written mc** | `await`, `parallel` over forked children, libcurl on pthreads under a semaphore; and the refusal of `awaitable.src.php`, pinned |
+| [`sync`](examples/sync/) | compiled from PHP | native sync on the program road -- a producer/consumer queue over a mutex, two condition variables, a semaphore, a wait group and atomics, with a C twin (pthreads + C11) it matches and a wall-clock ratio (~1.9x) |
 
 A hand-written example says so on its README's first line, and the PHP source it stands for sits
 beside it with the compiler's refusal pinned by the gate: the day that build succeeds, the gate

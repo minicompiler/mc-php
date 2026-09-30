@@ -754,7 +754,7 @@ Step 3 left every race to the developer. Step 4 gives the developer the tools: a
 atomics, built on the atomic instructions and the operating system's sleep on a word -- `futex`
 on Linux, `__ulock_wait` on macOS, `WaitOnAddress` on Windows. No pthread mutex and no
 `SRWLOCK` is left anywhere in the runtime: the runtime's own lock moved onto the same word
-(4a). A semaphore, a wait group, a condition variable and timeouts are 4b.
+(4a). A semaphore, a wait group and a condition variable, each with a timeout, are 4b.
 
 ### The API (4a)
 
@@ -869,3 +869,61 @@ of 160000 in a measured run.
   an atomic made at MINIT, and three refusals. § 20c (ZTS): a mutex and an atomic shared by four
   php workers and the request, through the module's wrappers.
 - `tests/sweep_sync.py`: the llvm-mc sweep over the atomic words.
+
+### The API (4b)
+
+Eleven more builtins, over the same table and the same host sleep on a word, with a relative
+timeout in milliseconds on the three that block (`-1` waits for ever):
+
+```php
+$s = mcphp_semaphore(int $permits = 0): int;
+$ok = mcphp_semaphore_acquire(int $s, int $timeout_ms = -1): bool;   // false on timeout
+mcphp_semaphore_release(int $s): void;
+
+$w = mcphp_waitgroup(): int;
+mcphp_waitgroup_add(int $w, int $n): void;
+mcphp_waitgroup_done(int $w): void;                                  // add(-1)
+$ok = mcphp_waitgroup_wait(int $w, int $timeout_ms = -1): bool;      // false on timeout
+
+$c = mcphp_cond(): int;
+$ok = mcphp_cond_wait(int $c, int $m, int $timeout_ms = -1): bool;   // hold $m; false on timeout
+mcphp_cond_signal(int $c): void;
+mcphp_cond_broadcast(int $c): void;
+```
+
+- **The semaphore** is a counting semaphore: `acquire` waits while the permits are 0 and takes
+  one, `release` adds one and wakes a waiter. `acquire($s, 0)` never sleeps, so it is a try.
+- **The wait group** is Go's: `add` changes the counter, `done` is `add(-1)`, `wait` blocks
+  until it is 0. A decrement below 0 is refused by name (`mc-php: waitgroup N counter went
+  negative`), the counter put back first -- but that put-back is ordered before the refusal,
+  not before visibility, so a concurrent `wait` polling the counter can briefly see the negative
+  value and return early, stranding a still-pending, legitimate `add`. This is a consequence of
+  the refused misuse (a program that never over-decrements never observes it), not a separate
+  bug.
+- **The condition variable** is called holding a mutex: `wait` releases it, sleeps until a
+  signal, and reacquires it before returning. `wait` of a mutex the calling thread does not hold
+  is refused by name. The caller loops on its own predicate, as with `pthread_cond_wait`, so a
+  spurious wake and a `broadcast` that wakes several waiters are both handled by the loop.
+- **The timeouts** answer `false` when the deadline is reached. The deadline is computed once
+  from a monotonic clock (`clock_gettime(CLOCK_MONOTONIC)` on Linux, `clock_gettime_nsec_np` on
+  macOS, `GetTickCount64` on Windows) and the remainder is recomputed after every wake, so a
+  spurious wake never shortens or lengthens the wait. The wakeup primitive's own relative
+  timeout is used each time (`FUTEX_WAIT`, `__ulock_wait`, `WaitOnAddress`).
+
+The five kinds share one 32-byte slot layout: the primary word is the mutex's state, the
+atomic's value, the semaphore's count, the wait group's counter or the condition's sequence
+number; a wrong handle names its actual kind against the wanted one.
+
+### The gates (4b)
+
+- `tests/c/17-sync-blocking.php`: a wait group barrier, a semaphore handoff and its bound, a
+  bounded producer/consumer queue over two condition variables, a broadcast to eight waiters,
+  and the three timeouts (each returns false; the semaphore and condition waits take at least
+  the timeout, measured with `mcphp_now_ms`, an internal clock gate).
+- `tests/ext.sh` § 20b: a wait group and a broadcast across eight compiled threads. § 20c (ZTS):
+  a wait group across three php workers, each a request of its own sharing the handle.
+- `examples/sync`: the producer/consumer workload on the program road, with a C twin
+  (`c/sync.c`, pthreads and C11) it must match byte for byte and a wall-clock ratio.
+- `tests/run.sh`: a dump-machine check -- `--dump-asm --machine=x86_64` on an arm64 host must
+  dump the x86-64 atomic words, not the arm64 ones (the atomics file follows the selected
+  machine in a dump mode).

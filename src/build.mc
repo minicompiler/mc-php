@@ -191,6 +191,10 @@ void ph_build_init() {
 
 i64 main(i64 argc, uptr argv, uptr envp) {
     host_init(envp);
+    // argv, for ph_dump_machine (src/program.mc): the atomics file follows
+    // --machine= in a dump mode
+    ph_argc = argc;
+    ph_argv = argv;
     mc_machines_init();
     mc_writers_init();
     mc_bundle_init();

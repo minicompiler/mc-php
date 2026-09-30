@@ -151,6 +151,18 @@ function sy_atomic(int $v): int { return mcphp_atomic($v); }
 function sy_add(int $a, int $d): int { return mcphp_atomic_add($a, $d); }
 function sy_load(int $a): int { return mcphp_atomic_load($a); }
 function sy_store(int $a, int $v): void { mcphp_atomic_store($a, $v); }
+// 4b: the blocking objects
+function sy_semaphore(int $n): int { return mcphp_semaphore($n); }
+function sy_acquire(int $s, int $ms = -1): bool { return mcphp_semaphore_acquire($s, $ms); }
+function sy_release(int $s): void { mcphp_semaphore_release($s); }
+function sy_waitgroup(): int { return mcphp_waitgroup(); }
+function sy_wg_add(int $w, int $n): void { mcphp_waitgroup_add($w, $n); }
+function sy_wg_done(int $w): void { mcphp_waitgroup_done($w); }
+function sy_wg_wait(int $w, int $ms = -1): bool { return mcphp_waitgroup_wait($w, $ms); }
+function sy_cond(): int { return mcphp_cond(); }
+function sy_cond_wait(int $c, int $m, int $ms = -1): bool { return mcphp_cond_wait($c, $m, $ms); }
+function sy_cond_signal(int $c): void { mcphp_cond_signal($c); }
+function sy_cond_broadcast(int $c): void { mcphp_cond_broadcast($c); }
 // made at MINIT: the process's, never freed; every request adds 1 to it
 $sy_proc = mcphp_atomic(0);
 function sy_hit(): int { global $sy_proc; return mcphp_atomic_add($sy_proc, 1) + 1; }
@@ -176,4 +188,33 @@ function sy_count(int $t, int $n): string {
     for ($i = 0; $i < $t; $i++) $hs[] = mcphp_thread_start(fn(int $m, int $a, int $n): int => sy_bump($m, $a, $n), $m, $a, $n);
     foreach ($hs as $h) mcphp_thread_join($h);
     return ($sy_n === $t * $n ? "exact" : "LOST") . " " . (mcphp_atomic_load($a) === $t * $n ? "exact" : "LOST");
+}
+// the blocking objects across compiled threads on the extension road: a wait
+// group barrier and a condition-variable broadcast, both exact
+function sy_block(int $t): string {
+    $w = mcphp_waitgroup();
+    $a = mcphp_atomic(0);
+    mcphp_waitgroup_add($w, $t);
+    $hs = [];
+    for ($i = 0; $i < $t; $i++) $hs[] = mcphp_thread_start(function () use ($w, $a): int { mcphp_atomic_add($a, 1); mcphp_waitgroup_done($w); return 0; });
+    mcphp_waitgroup_wait($w);
+    foreach ($hs as $h) mcphp_thread_join($h);
+    $gm = mcphp_mutex();
+    $gc = mcphp_cond();
+    $gate = mcphp_atomic(0);
+    $woke = mcphp_atomic(0);
+    $hs = [];
+    for ($i = 0; $i < $t; $i++) $hs[] = mcphp_thread_start(function () use ($gm, $gc, $gate, $woke): int {
+        mcphp_mutex_lock($gm);
+        while (mcphp_atomic_load($gate) === 0) mcphp_cond_wait($gc, $gm);
+        mcphp_mutex_unlock($gm);
+        mcphp_atomic_add($woke, 1);
+        return 0;
+    });
+    mcphp_mutex_lock($gm);
+    mcphp_atomic_store($gate, 1);
+    mcphp_cond_broadcast($gc);
+    mcphp_mutex_unlock($gm);
+    foreach ($hs as $h) mcphp_thread_join($h);
+    return (mcphp_atomic_load($a) === $t ? "wg" : "WG") . " " . (mcphp_atomic_load($woke) === $t ? "bc" : "BC");
 }

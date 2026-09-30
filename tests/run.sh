@@ -71,6 +71,20 @@ else
     echo "  BIN was given: $BIN (not rebuilding)"
 fi
 [ -x "$BIN" ] || { echo "  no $BIN"; exit 1; }
+# The atomics file follows --machine= in a dump mode (src/program.mc): the
+# raw words in _ph_at_load must be the SELECTED machine's, not the host's.
+# arm64 host: plain is arm64, --machine=x86_64 is x86-64 System V,
+# --machine=x86_64-win is Windows x64. Cosmetic (dump only), but a regression
+# would mean a dump shows the wrong bytes.
+dm() { echo "<?php echo 1;" | "$BIN" --dump-asm ${1:+--machine=$1} /dev/stdin 2>&1 | awk '/_ph_at_load:/{f=1} f&&/\.word/{print $2; exit}'; }
+dm_plain=$(dm)
+dm_x64=$(dm x86_64)
+dm_win=$(dm x86_64-win)
+if [ "$dm_plain" = 0xc8dffc00 ] && [ "$dm_x64" = 0x90078b48 ] && [ "$dm_win" = 0x90018b48 ]; then
+    echo "  dump machine: --machine= selects the atomics words in a dump (arm64 / x86-64 / Win64)"
+else
+    echo "  FAIL dump machine: plain $dm_plain, x86_64 $dm_x64, x86_64-win $dm_win"; fail=1
+fi
 ls -l "$BIN" | awk '{ printf "  %s  %s bytes\n", "'"$BIN"'", $5 }'
 
 echo ""

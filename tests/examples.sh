@@ -366,6 +366,42 @@ else
     skip "the C twin: no $CC here, or it would not build -- no C column"
 fi
 
+# --- sync: native sync on the program road --------------------------------------
+# examples/sync/sync.php runs a bounded producer/consumer queue on eight
+# threads -- a mutex, two condition variables, a semaphore, a wait group and
+# atomics (docs/threads.md § Step 4) -- and prints a checksum both it and its C
+# twin (pthreads + C11, c/sync.c) must reach exactly. The bench row is the two
+# programs' wall clock, best of three, not gated.
+echo "  -- sync"
+EX=examples/sync
+sb=$tmp/sync
+sw="checksum 80000200000 expected 80000200000 ok"
+sr=$(MCPHP_BIN=$BIN MCPHP_OUT=$sb sh "$here/mcphp.sh" "$EX/sync.php" 2>&1 | tr -d '\r')
+if [ "$sr" = "$sw" ]; then
+    say "sync.php: the checksum is exact on 4 producers and 4 consumers"
+else
+    bad "sync.php: want '$sw', got '$sr'"
+fi
+sx_bin=$sb; [ -f "$sb.exe" ] && sx_bin=$sb.exe
+if [ "$host" = windows ]; then
+    skip "the C twin of sync on Windows: pthreads and C11 threads are POSIX (README.md)"
+elif command -v "$CC" >/dev/null 2>&1 && "$CC" -O2 -pthread -o "$tmp/sync-c" "$EX/c/sync.c" 2>"$tmp/c.err"; then
+    cr=$("$tmp/sync-c" | tr -d '\r')
+    [ "$cr" = "$sw" ] && say "the C twin: $cr" || bad "the C twin: want '$sw', got '$cr'"
+    row=$("$PHP" -r '
+        $b = [INF, INF];
+        foreach ([$argv[1], $argv[2]] as $k => $x) {
+            for ($r = 0; $r < 3; $r++) {
+                $t = hrtime(true); exec(escapeshellarg($x)); $d = (hrtime(true) - $t) / 1e6;
+                if ($d < $b[$k]) $b[$k] = $d;
+            }
+        }
+        printf("mc-php %.0f ms, C %.0f ms (%.2fx)", $b[0], $b[1], $b[0] / $b[1]);' "$sx_bin" "$tmp/sync-c")
+    say "bench: $row -- best of three; not gated"
+else
+    skip "the C twin of sync: no $CC here, or it would not build -- no C column"
+fi
+
 # --- awaitable -----------------------------------------------------------------
 echo "  -- awaitable"
 EX=examples/awaitable

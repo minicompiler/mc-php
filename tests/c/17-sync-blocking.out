@@ -1,0 +1,9 @@
+waitgroup: returned true, all ran
+semaphore handoff: worker ran after the release
+semaphore bound: true true false
+condvar: delivered all 500, queue empty yes
+broadcast: all 8 woke
+semaphore timeout: false false, waited >= 40ms yes
+cond timeout: false, mutex reacquired, waited >= 40ms yes
+waitgroup timeout: false
+done

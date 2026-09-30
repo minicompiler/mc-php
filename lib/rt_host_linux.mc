@@ -107,6 +107,20 @@ void ph_os_wake(uptr a, i64 all) {
     if (all) n = 0x7fffffff;
     syscall(ph_sys_futex(), a, 129, n, 0, 0, 0);
 }
+// a timed sleep on a word (lib/php_rt.mc § the blocking objects): sleep while
+// the low 32 bits at `a` equal `v`, at most `ms` milliseconds (ms < 0: for
+// ever). FUTEX_WAIT's timeout is a relative timespec against CLOCK_MONOTONIC,
+// which is what ph_os_now_ms reads, so a spurious wake recomputes the
+// remainder correctly. CLOCK_MONOTONIC is 1.
+extern i64 clock_gettime(i64 clk, uptr ts);
+i64 ph_os_now_ms() { u8 ts[16]; clock_gettime(1, ts); return ld64(ts) * 1000 + ld64(ts + 8) / 1000000; }
+void ph_os_wait_ms(uptr a, i64 v, i64 ms) {
+    if (ms < 0) { syscall(ph_sys_futex(), a, 128, v, 0, 0, 0); return; }
+    u8 ts[16];
+    st64(ts, ms / 1000);
+    st64(ts + 8, (ms % 1000) * 1000000);
+    syscall(ph_sys_futex(), a, 128, v, ts, 0, 0);
+}
 i64 ph_tkey;
 uptr ph_tget() { return pthread_getspecific(ph_tkey); }
 void ph_tset(uptr b) { pthread_setspecific(ph_tkey, b); }

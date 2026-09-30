@@ -137,6 +137,17 @@ void ph_os_wake(uptr a, i64 all) {
     if (all) op = op | 0x100;
     __ulock_wake(op, a, 0);
 }
+// a timed sleep on a word (lib/php_rt.mc § the blocking objects): __ulock_wait
+// takes a relative timeout in microseconds (0 = for ever), so ms < 0 passes 0
+// and the caller never passes 0 (its deadline check returns first).
+// clock_gettime_nsec_np is libSystem's; CLOCK_MONOTONIC is 6.
+extern u64 clock_gettime_nsec_np(i64 clk);
+i64 ph_os_now_ms() { return clock_gettime_nsec_np(6) / 1000000; }
+void ph_os_wait_ms(uptr a, i64 v, i64 ms) {
+    if (ms < 0) { __ulock_wait(0x01000001, a, v, 0); return; }
+    if (ms == 0) return;
+    __ulock_wait(0x01000001, a, v, ms * 1000);
+}
 i64 ph_tkey;
 uptr ph_tget() { return pthread_getspecific(ph_tkey); }
 void ph_tset(uptr b) { pthread_setspecific(ph_tkey, b); }
