@@ -1455,14 +1455,11 @@ i64 ph_stmt_1() {
                 one = node_new(N_EXPRSTMT, line, fl);
                 set_nd_a(one, ph_c2("php_arr_unset", cur, k, TY_VOID));
             }
-            // a top-level name bound to the global table: the ENTRY goes back
-            // to "does not exist", which is what php's unset of a global does
-            if (!one && ph_toplevel && ph_gtop_has(d)) {
-                i64 gz = node_new(N_IDENT, line, fl);
-                set_nd_name(gz, ph_mangle(d, "v_"));
-                set_nd_type(gz, ty_pzv);
-                one = ph_expr_stmt_of(ph_c1("php_gunset", gz, TY_VOID));
-            }
+            // a top-level name bound to the global table: the entry, and this
+            // slot, become a new undefined zval -- the binding goes, the value
+            // stays for a reference that still holds it (php_gunset)
+            if (!one && ph_toplevel && ph_gtop_has(d))
+                one = ph_set(ph_mangle(d, "v_"), ph_c1("php_gunset", ph_strlit(d + 1, cstrlen(d + 1)), ty_pzv));
             if (!one) {
                 i64 t = ph_var_type(d);
                 if (t != PT_MIXED)

@@ -1452,3 +1452,13 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   `tests/lang/this_assignment` and `Zend/tests/bug40509`, and loses 11 tests that name
   `$GLOBALS` and passed only because their output did not depend on it (78 more grid tests are
   refused, all by the `$GLOBALS` rule), plain and in check mode.
+  Second review: `unset()` at the top level set the SHARED zval undefined, so a live reference
+  (`$r = &$g; unset($g);`) saw NULL where php keeps 5 -- php's unset removes the binding, so
+  `php_gunset(name)` now puts a NEW undefined zval in the entry and answers it for the slot;
+  `unset` in a function after `global` drops only the local, and foreach by reference over a
+  global array writes the global's elements (fixture `tests/g/130-global-unset-ref.php`; the
+  first head printed NULL and let the reference reach the new entry). `ph_scan_hop` now skips a
+  heredoc or nowdoc body (`ph_heredoc_end`, the flexible closing identifier), so the source scans
+  no longer read heredoc text as code, and `ph_scan_globals` skips a nowdoc and searches a
+  heredoc's interpolations: `tests/g/131-nowdoc-text.php` (the first head refused its prose) and
+  `tests/r/d6-globals-heredoc.php`.

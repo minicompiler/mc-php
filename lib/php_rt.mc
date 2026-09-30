@@ -6785,7 +6785,16 @@ uptr php_gread(uptr z, uptr name) {
     if (php_zv_type(z) == IS_UNDEF) return php_undef_var(name);
     return z;
 }
-void php_gunset(uptr z) { php_zv_settype(z, IS_UNDEF); }
+// unset() at the top level removes the BINDING, not the value: the entry
+// becomes a NEW undefined zval, answered for the top level's slot, and the
+// old one lives on for any reference still holding it (`$r = &$g`)
+uptr php_gunset(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    php_pin();
+    if (!ph_globals) ph_globals = php_arr_new(16);
+    uptr z = php_zundef();
+    php_zv_cp(php_arr_sslot(ph_globals, name), php_zlong(z));
+    return z;
+}
 // the same read without the warning (an arrow function's implicit capture)
 uptr php_gq(uptr z) {
     if (php_zv_type(z) == IS_UNDEF) return php_znull();
