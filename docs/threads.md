@@ -404,6 +404,18 @@ $c = mcphp_hardware_concurrency(): int;     // logical CPUs, as std::thread's
   module and are not published: two mc-php modules loaded together would both declare them. A
   module offers threads to its scripts through its own published functions, for example
   `function run_all(callable ...$jobs): array`.
+- **`mcphp_thread_*` are mc-php intrinsics: they exist only in compiled code.** Interpreted php
+  never sees them. It calls a wrapper that the module publishes, such as the one
+  `tests/ext/threads/threads.php` publishes:
+
+  ```php
+  namespace th;
+  function prun1(callable $f, mixed $a): mixed { return mcphp_thread_join(mcphp_thread_start($f, $a)); }
+  function pstart1(callable $f, mixed $a): int { return mcphp_thread_start($f, $a); }
+  function pjoin(int $t): mixed { return mcphp_thread_join($t); }
+  ```
+
+  A script then writes `th\prun1(fn($x) => $x * 2, 21)`.
 
 Two more builtins are test hooks, not API: `mcphp_shared_mode()` answers the calling thread's
 shared-mode flag, and `mcphp_str_mine($s)` answers whether the runtime would write `$s` in place.
@@ -558,6 +570,9 @@ included; the NTS inertness `cmp` does not apply to this step.
   reference and speed.
 
 ### 3b: php callables on a thread of their own (ZTS)
+
+The php callable reaches `mcphp_thread_start` through a function the module publishes, because
+the builtins exist only in compiled code (§ The API shows the wrapper).
 
 In a ZTS module, `mcphp_thread_start` also takes a **php** callable: a php closure, a function's
 name, an array callable, an invokable object. The worker is a new OS thread that becomes a php
