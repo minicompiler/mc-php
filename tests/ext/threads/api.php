@@ -19,5 +19,6 @@ try { th\sy_lock($m); } catch (Error $e) { echo "sync refused: ", $e->getMessage
 th\sy_unlock($m);
 try { th\sy_unlock($m); } catch (Error $e) { echo "sync refused: ", $e->getMessage(), "\n"; }
 try { th\sy_load($m); } catch (Error $e) { echo "sync refused: ", $e->getMessage(), "\n"; }
+echo "sync blocking, 8 compiled threads: ", th\sy_block(8), "\n";
 // last, and echoing nothing after it: the thread's line is the output's last
 th\detach_late(100);

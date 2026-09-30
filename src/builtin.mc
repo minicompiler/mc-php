@@ -527,16 +527,31 @@ i64 ph_bi_sync(uptr name, i64 line, uptr fl) {
     i64 lo = 1;
     i64 hi = 1;
     i64 ety = PT_INT;
+    i64 defd = 0;                            // the last argument has a default
+    i64 defval = 0;                          // its value (0 or -1)
     if (str_eq(name, "mcphp_mutex"))         { rt = "php_sy_mutex"; lo = 0; hi = 0; }
     if (str_eq(name, "mcphp_mutex_lock"))    { rt = "php_sy_lock"; ety = PT_NULL; }
     if (str_eq(name, "mcphp_mutex_trylock")) { rt = "php_sy_trylock"; ety = PT_BOOL; }
     if (str_eq(name, "mcphp_mutex_unlock"))  { rt = "php_sy_unlock"; ety = PT_NULL; }
-    if (str_eq(name, "mcphp_atomic"))        { rt = "php_sy_atomic"; lo = 0; }
+    if (str_eq(name, "mcphp_atomic"))        { rt = "php_sy_atomic"; lo = 0; defd = 1; }
     if (str_eq(name, "mcphp_atomic_load"))   rt = "php_sy_load";
     if (str_eq(name, "mcphp_atomic_store"))  { rt = "php_sy_store"; lo = 2; hi = 2; ety = PT_NULL; }
     if (str_eq(name, "mcphp_atomic_add"))    { rt = "php_sy_add"; lo = 2; hi = 2; }
     if (str_eq(name, "mcphp_atomic_cas"))    { rt = "php_sy_cas"; lo = 3; hi = 3; ety = PT_BOOL; }
     if (str_eq(name, "mcphp_atomic_xchg"))   { rt = "php_sy_xchg"; lo = 2; hi = 2; }
+    // 4b: semaphore, waitgroup, condition variable, with the timeout on the
+    // three blocking waits (int $timeout_ms = -1; false on timeout)
+    if (str_eq(name, "mcphp_semaphore"))         { rt = "php_sy_sem"; lo = 0; defd = 1; }
+    if (str_eq(name, "mcphp_semaphore_acquire")) { rt = "php_sy_acquire"; lo = 1; hi = 2; defd = 1; defval = 0 - 1; ety = PT_BOOL; }
+    if (str_eq(name, "mcphp_semaphore_release")) { rt = "php_sy_release"; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_waitgroup"))         { rt = "php_sy_wg"; lo = 0; hi = 0; }
+    if (str_eq(name, "mcphp_waitgroup_add"))     { rt = "php_sy_wg_add"; lo = 2; hi = 2; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_waitgroup_done"))    { rt = "php_sy_wg_done"; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_waitgroup_wait"))    { rt = "php_sy_wg_wait"; lo = 1; hi = 2; defd = 1; defval = 0 - 1; ety = PT_BOOL; }
+    if (str_eq(name, "mcphp_cond"))              { rt = "php_sy_cond"; lo = 0; hi = 0; }
+    if (str_eq(name, "mcphp_cond_wait"))         { rt = "php_sy_cond_wait"; lo = 2; hi = 3; defd = 1; defval = 0 - 1; ety = PT_BOOL; }
+    if (str_eq(name, "mcphp_cond_signal"))       { rt = "php_sy_cond_signal"; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_cond_broadcast"))    { rt = "php_sy_cond_broadcast"; ety = PT_NULL; }
     if (!rt) return 0;
     u8 np[8];
     uptr av = ph_read_args(3, fl, line, np);
@@ -548,8 +563,14 @@ i64 ph_bi_sync(uptr name, i64 line, uptr fl) {
     if (n > 0) a0 = ph_to_int(ph_a(av, 0), ph_aty(av, 0));
     if (n > 1) a1 = ph_to_int(ph_a(av, 1), ph_aty(av, 1));
     if (n > 2) a2 = ph_to_int(ph_a(av, 2), ph_aty(av, 2));
-    // mcphp_atomic() starts at 0
-    if (str_eq(name, "mcphp_atomic") && n == 0) { a0 = ph_int(0); n = 1; }
+    // the omitted default -- mcphp_atomic()/mcphp_semaphore() at 0, a missing
+    // timeout at -1 -- is the last argument, so it fills the first free slot
+    if (defd && n == hi - 1) {
+        if (n == 0) a0 = ph_int(defval);
+        if (n == 1) a1 = ph_int(defval);
+        if (n == 2) a2 = ph_int(defval);
+        n = hi;
+    }
     i64 ty = TY_I64;
     if (ety == PT_NULL) ty = ty_pzv;
     i64 c = ph_call(rt, n, a0, a1, a2, 0, ty);
@@ -948,6 +969,15 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (ld64(vnp) != 0) ph_todo2(fl, line, "the wrong number of arguments for", name);
         ph_ety = PT_INT;
         return ph_call("ph_os_vm", 0, 0, 0, 0, 0, TY_I64);
+    }
+    // mcphp_now_ms(): the host's monotonic clock in milliseconds -- the gate
+    // that a timeout actually waited (tests/c/17-sync-blocking.php). Internal.
+    if (str_eq(name, "mcphp_now_ms")) {
+        u8 nnp[8];
+        ph_read_args(1, fl, line, nnp);
+        if (ld64(nnp) != 0) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        ph_ety = PT_INT;
+        return ph_call("ph_os_now_ms", 0, 0, 0, 0, 0, TY_I64);
     }
     // func_num_args() / func_get_arg(k): answered from the callee's OWN
     // parameters, which need no run-time table -- D6 refuses `func_get_args`

@@ -632,11 +632,63 @@ uptr ph_target_arch() {
     return a;
 }
 
+// argv, captured by main(): the atomics file follows --machine= in a dump
+// mode (below), and mc's cli.mc applies --machine= only after user_init, so
+// mach_tab is still the host's when the runtime is pushed. Dump-only.
+i64  ph_argc;
+uptr ph_argv;
+
+// the value after an argument's `PREFIX`, e.g. "--machine=", or 0
+uptr ph_arg_val(uptr prefix) {
+    i64 pl = cstrlen(prefix);
+    i64 i = 1;
+    loop {
+        if (i >= ph_argc) return 0;
+        uptr a = ld64(ph_argv + i * 8);
+        if (mem_eq(a, prefix, pl)) return a + pl;
+        i = i + 1;
+    }
+}
+
+// the machine a dump mode selected with --machine=, else 0. A dump mode is the
+// only place --machine= is honoured (mc's cli.mc), so the atomics FILE follows
+// it there: `--dump-asm --machine=x86_64` on an arm64 host dumps the x86-64
+// words, not the arm64 ones. In every other mode a backend picks the machine
+// and the file follows the target (ph_target_arch).
+uptr ph_dump_machine() {
+    i64 i = 1;
+    i64 dump = 0;
+    loop {
+        if (i >= ph_argc) break;
+        if (mem_eq(ld64(ph_argv + i * 8), "--dump-", 7)) { dump = 1; break; }
+        i = i + 1;
+    }
+    if (!dump) return 0;
+    return ph_arg_val("--machine=");
+}
+
+// which atomics file: 0 arm64, 1 x86-64 System V, 2 x86-64 Windows, -1 unknown.
+// A --machine= in a dump mode wins (the dump reads that machine); else the
+// target's os and arch.
+i64 ph_atomic_kind(uptr os, uptr a) {
+    uptr m = ph_dump_machine();
+    if (m) {
+        if (str_eq(m, "x86_64-win")) return 2;
+        if (str_eq(m, "x86_64")) return 1;
+        return 0;
+    }
+    if (str_eq(a, "aarch64")) return 0;
+    if (str_eq(a, "x86_64") && str_eq(os, "windows")) return 2;
+    if (str_eq(a, "x86_64")) return 1;
+    return 0 - 1;
+}
+
 // the atomic words for it
 void ph_push_rt_atomic(uptr os, uptr a) {
-    if (str_eq(a, "aarch64")) { p_push_source("php runtime atomics", ph_rt_at_a64, ph_rt_at_a64_size); return; }
-    if (str_eq(a, "x86_64") && str_eq(os, "windows")) { p_push_source("php runtime atomics", ph_rt_at_win, ph_rt_at_win_size); return; }
-    if (str_eq(a, "x86_64")) { p_push_source("php runtime atomics", ph_rt_at_x64, ph_rt_at_x64_size); return; }
+    i64 k = ph_atomic_kind(os, a);
+    if (k == 0) { p_push_source("php runtime atomics", ph_rt_at_a64, ph_rt_at_a64_size); return; }
+    if (k == 1) { p_push_source("php runtime atomics", ph_rt_at_x64, ph_rt_at_x64_size); return; }
+    if (k == 2) { p_push_source("php runtime atomics", ph_rt_at_win, ph_rt_at_win_size); return; }
     err_at2("mc-php", 1, "mc-php: no atomic words for this architecture", a);
 }
 

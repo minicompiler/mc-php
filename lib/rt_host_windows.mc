@@ -63,6 +63,7 @@ extern i64  SetCurrentDirectoryA(uptr name);
 extern i64  GetLastError();
 extern void SetLastError(i64 code);
 extern i64  GetActiveProcessorCount(i64 group);
+extern u64  GetTickCount64();
 
 // The flags the runtime writes and only this file reads. They are the
 // Microsoft C runtime's values (_O_*, and O_CREAT is mc's lib/sys_windows.mc
@@ -409,6 +410,18 @@ void ph_os_wait(uptr a, i64 v) {
 void ph_os_wake(uptr a, i64 all) {
     if (all) WakeByAddressAll(a);
     else WakeByAddressSingle(a);
+}
+// a timed sleep on a word (lib/php_rt.mc § the blocking objects): WaitOnAddress
+// takes a relative timeout in milliseconds (INFINITE 0xFFFFFFFF), and
+// GetTickCount64 is a monotonic millisecond clock. Both are kernel32's, added
+// with the others at the top.
+i64 ph_os_now_ms() { return GetTickCount64(); }
+void ph_os_wait_ms(uptr a, i64 v, i64 ms) {
+    u8 c[8];
+    st64(c, v);
+    i64 t = 0xFFFFFFFF;
+    if (ms >= 0) t = ms;
+    WaitOnAddress(a, c, 4, t);
 }
 // the logical processors of every group (mcphp_hardware_concurrency)
 i64 ph_os_ncpu() { i64 n = rtw_int(GetActiveProcessorCount(0xffff)); if (n < 1) return 1; return n; }

@@ -74,6 +74,16 @@ for ($i = 0; $i < 4; $i++) $ws[] = th\pstart3($sw, $sm, $sa, $sb);
 $sw($sm, $sa, $sb);
 foreach ($ws as $w) th\pjoin($w);
 echo "sync with 4 php workers: ", th\sy_load($sa), " ", th\sy_load($sb), "\n";
+// 4b: a wait group across php workers -- main adds 3, three php workers each
+// call done, main's wait returns true. Each worker is a php request of its
+// own; the handle is an int shared through the process's table.
+$wg = th\sy_waitgroup();
+th\sy_wg_add($wg, 3);
+$ws = [];
+for ($i = 0; $i < 3; $i++) $ws[] = th\pstart1(fn(int $w) => th\sy_wg_done($w), $wg);
+$wgok = th\sy_wg_wait($wg);
+foreach ($ws as $w) th\pjoin($w);
+echo "sync waitgroup, 3 php workers: ", var_export($wgok, true), "\n";
 // a fatal error unwinds to php's zend_try; on Windows that unwind is SEH's and
 // cannot cross the module's frames (docs/threads.md § 3b), so it is not made
 if (PHP_OS_FAMILY === "Windows") echo "a fatal error: not on Windows\n";

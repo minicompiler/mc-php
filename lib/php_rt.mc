@@ -11468,6 +11468,9 @@ void ph_unlock() { ph_mx_unlock(&ph_lkw); }
 #define SY_FREE    0
 #define SY_MUTEX   1
 #define SY_ATOMIC  2
+#define SY_SEM     3
+#define SY_WG      4
+#define SY_COND    5
 #define SY_HDR     0                // (generation << 8) | kind
 #define SY_W0      8                // the mutex's word, the atomic's value; a free slot's next
 #define SY_W1      16               // the mutex's holder, its thread block; 0 when free
@@ -11517,6 +11520,16 @@ i64 ph_sy_new(i64 kind, i64 v) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 
 uptr ph_sy_s(uptr c) { return php_str_new(c, php_cstrlen(c)); }
 
+// a kind's name, and the article before it ("an atomic", "a mutex")
+uptr ph_sy_kname(i64 k) {
+    if (k == SY_MUTEX) return "mutex";
+    if (k == SY_ATOMIC) return "atomic";
+    if (k == SY_SEM) return "semaphore";
+    if (k == SY_WG) return "waitgroup";
+    return "condition variable";
+}
+uptr ph_sy_art(i64 k) { if (k == SY_ATOMIC) return "an "; return "a "; }
+
 // the slot a handle names when it is a live object of this kind; otherwise
 // the named Error, and 0
 uptr ph_sy_slot(i64 h, i64 kind) {
@@ -11529,13 +11542,12 @@ uptr ph_sy_slot(i64 h, i64 kind) {
     }
     i64 live = hd >= 0 && (hd >> 8) == ((h >> 22) & SY_GMASK) && (hd & 255) != SY_FREE;
     if (live && (hd & 255) == kind) return s;
-    uptr want = "mutex";
-    if (kind == SY_ATOMIC) want = "atomic";
     uptr m = php_str_concat(ph_sy_s("mc-php: handle "), php_itos(h));
-    if (!live) m = php_str_concat(m, ph_sy_s(" is not a live "));
-    if (live && (hd & 255) == SY_MUTEX) m = php_str_concat(m, ph_sy_s(" is a mutex, not an "));
-    if (live && (hd & 255) == SY_ATOMIC) m = php_str_concat(m, ph_sy_s(" is an atomic, not a "));
-    php_throw_str(ph_sy_s("Error"), php_str_concat(m, ph_sy_s(want)));
+    if (!live) m = php_str_concat(php_str_concat(m, ph_sy_s(" is not a live ")), ph_sy_s(ph_sy_kname(kind)));
+    else m = php_str_concat(php_str_concat(php_str_concat(php_str_concat(php_str_concat(m,
+             ph_sy_s(" is ")), ph_sy_s(ph_sy_art(hd & 255))), ph_sy_s(ph_sy_kname(hd & 255))),
+             ph_sy_s(", not ")), php_str_concat(ph_sy_s(ph_sy_art(kind)), ph_sy_s(ph_sy_kname(kind))));
+    php_throw_str(ph_sy_s("Error"), m);
     return 0;
 }
 
@@ -11587,6 +11599,101 @@ uptr php_sy_store(i64 h, i64 v) { uptr s = ph_sy_slot(h, SY_ATOMIC); if (s) ph_a
 i64 php_sy_add(i64 h, i64 d) { uptr s = ph_sy_slot(h, SY_ATOMIC); if (!s) return 0; return ph_at_add(s + SY_W0, d); }
 i64 php_sy_cas(i64 h, i64 e, i64 n) { uptr s = ph_sy_slot(h, SY_ATOMIC); if (!s) return 0; return ph_at_cas(s + SY_W0, e, n); }
 i64 php_sy_xchg(i64 h, i64 v) { uptr s = ph_sy_slot(h, SY_ATOMIC); if (!s) return 0; return ph_at_xchg(s + SY_W0, v); }
+
+// The blocking objects: a semaphore, a wait group and a condition variable,
+// on the atomic words and the host's timed sleep on a word (ph_os_wait_ms:
+// futex, __ulock, WaitOnAddress, all with a relative timeout; ph_os_now_ms is
+// a monotonic clock). Each of the three waits takes a timeout in milliseconds
+// (-1 = wait for ever) and answers 1 when it succeeded, 0 when it timed out;
+// a spurious wake is retried against the deadline, so the loop is the caller's
+// safety as well as the OS's. src/builtin.mc maps them; a php script reads a 0
+// as false.
+
+// A counting semaphore: SY_W0 is the count. acquire waits while it is 0 and
+// takes one; release adds one and wakes a sleeper. A timeout of 0 (a deadline
+// already reached) never sleeps, so acquire(h, 0) is a try.
+i64 php_sy_sem(i64 n) { if (n < 0) n = 0; return ph_sy_new(SY_SEM, n); }
+i64 php_sy_acquire(i64 h, i64 ms) {
+    uptr s = ph_sy_slot(h, SY_SEM);
+    if (!s) return 0;
+    i64 dl = 0;
+    if (ms >= 0) dl = ph_os_now_ms() + ms;
+    loop {
+        i64 v = ph_at_load(s + SY_W0);
+        if (v > 0) { if (ph_at_cas(s + SY_W0, v, v - 1)) return 1; continue; }
+        i64 rem = 0 - 1;
+        if (ms >= 0) { rem = dl - ph_os_now_ms(); if (rem <= 0) return 0; }
+        ph_os_wait_ms(s + SY_W0, 0, rem);
+    }
+}
+uptr php_sy_release(i64 h) {
+    uptr s = ph_sy_slot(h, SY_SEM);
+    if (s) { ph_at_add(s + SY_W0, 1); ph_os_wake(s + SY_W0, 0); }
+    return php_znull();
+}
+
+// A wait group, as Go's: SY_W0 is the counter. add changes it, done is
+// add(-1), wait blocks until it is 0. A decrement to 0 wakes every waiter; a
+// decrement below 0 is a bug, refused by name (Go panics), the counter put
+// back first.
+i64 php_sy_wg() { return ph_sy_new(SY_WG, 0); }
+uptr php_sy_wg_add(i64 h, i64 n) {
+    uptr s = ph_sy_slot(h, SY_WG);
+    if (!s) return php_znull();
+    i64 nv = ph_at_add(s + SY_W0, n) + n;
+    if (nv < 0) { ph_at_add(s + SY_W0, 0 - n); ph_sy_refuse("mc-php: waitgroup ", h, " counter went negative"); return php_znull(); }
+    if (nv == 0) ph_os_wake(s + SY_W0, 1);
+    return php_znull();
+}
+uptr php_sy_wg_done(i64 h) { return php_sy_wg_add(h, 0 - 1); }
+i64 php_sy_wg_wait(i64 h, i64 ms) {
+    uptr s = ph_sy_slot(h, SY_WG);
+    if (!s) return 0;
+    i64 dl = 0;
+    if (ms >= 0) dl = ph_os_now_ms() + ms;
+    loop {
+        i64 v = ph_at_load(s + SY_W0);
+        if (v <= 0) return 1;
+        i64 rem = 0 - 1;
+        if (ms >= 0) { rem = dl - ph_os_now_ms(); if (rem <= 0) return 0; }
+        ph_os_wait_ms(s + SY_W0, v, rem);
+    }
+}
+
+// A condition variable: SY_W0 is a sequence counter (musl's simple condvar).
+// wait is called holding a mutex, releases it, sleeps while the sequence is
+// unchanged, and reacquires it; signal and broadcast bump the sequence and
+// wake one or all. The sequence is read under the mutex before it is dropped,
+// so a signal between the drop and the sleep is not lost -- the next load sees
+// a changed sequence and returns at once. The caller loops on its own
+// predicate, as with pthread_cond_wait.
+// ponytail: no requeue, so a broadcast wakes every waiter to contend for the
+// mutex (a thundering herd); FUTEX_REQUEUE / __ulock requeue is the upgrade.
+i64 php_sy_cond() { return ph_sy_new(SY_COND, 0); }
+i64 php_sy_cond_wait(i64 c, i64 m, i64 ms) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr sc = ph_sy_slot(c, SY_COND);
+    if (!sc) return 0;
+    uptr sm = ph_sy_slot(m, SY_MUTEX);
+    if (!sm) return 0;
+    if (ld64(sm + SY_W1) != phT) { ph_sy_refuse("mc-php: mutex ", m, " must be held to wait on a condition variable"); return 0; }
+    i64 seq0 = ph_at_load(sc + SY_W0);
+    st64(sm + SY_W1, 0);
+    ph_mx_unlock(sm + SY_W0);
+    i64 dl = 0;
+    if (ms >= 0) dl = ph_os_now_ms() + ms;
+    i64 woken = 1;
+    loop {
+        if (ph_at_load(sc + SY_W0) != seq0) break;
+        i64 rem = 0 - 1;
+        if (ms >= 0) { rem = dl - ph_os_now_ms(); if (rem <= 0) { woken = 0; break; } }
+        ph_os_wait_ms(sc + SY_W0, seq0, rem);
+    }
+    ph_mx_lock(sm + SY_W0);
+    st64(sm + SY_W1, phT);
+    return woken;
+}
+uptr php_sy_cond_signal(i64 c) { uptr s = ph_sy_slot(c, SY_COND); if (s) { ph_at_add(s + SY_W0, 1); ph_os_wake(s + SY_W0, 0); } return php_znull(); }
+uptr php_sy_cond_broadcast(i64 c) { uptr s = ph_sy_slot(c, SY_COND); if (s) { ph_at_add(s + SY_W0, 1); ph_os_wake(s + SY_W0, 1); } return php_znull(); }
 
 // The end of a request (php_thr_endall, free): what it made is freed, its
 // generation bumped. Every thread of it has been waited for.

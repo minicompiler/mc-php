@@ -1601,3 +1601,47 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     0.226 -> 0.227 ms, two-extensions b_use 1.959 -> 1.984, a_add 0.638 -> 0.645 (+1.3% worst;
     a_add's own round-to-round spread is 0.638-0.798). Grid plain and check = the recording
     minus the 3 expected differences.
+- Threads step 4b (2026-09-30, branch `sync-4b`, from main b2e4f64; docs/threads.md § Step 4):
+  **the blocking objects -- a semaphore, a wait group and a condition variable, each with a
+  timeout.**
+  - Eleven builtins, int handles into the 4a table: `mcphp_semaphore(int $permits = 0)`,
+    `_acquire(int $s, int $timeout_ms = -1): bool`, `_release`; `mcphp_waitgroup`, `_add`,
+    `_done`, `_wait(int $w, int $timeout_ms = -1): bool`; `mcphp_cond`,
+    `_wait(int $c, int $m, int $timeout_ms = -1): bool` (holds $m), `_signal`, `_broadcast`. The
+    three blocking waits answer false on timeout. `_acquire($s, 0)` is a try. A wait group's
+    decrement below 0 is `mc-php: waitgroup N counter went negative`; a cond_wait of a mutex the
+    thread does not hold is refused by name. `mcphp_now_ms()` is an internal clock gate.
+  - Semaphore = a count word (acquire waits while 0, cas-takes one; release adds and wakes).
+    Wait group = Go's counter (done wakes all at 0). Cond = musl's sequence-counter condvar (wait
+    reads the seq under the mutex, drops it, sleeps while unchanged, reacquires; signal/broadcast
+    bump and wake). All five kinds share the 32-byte slot; the primary word is the state.
+    `ponytail:` cond has no requeue (a broadcast is a thundering herd).
+  - Timeouts: a monotonic deadline (clock_gettime CLOCK_MONOTONIC / clock_gettime_nsec_np /
+    GetTickCount64), the remainder recomputed after each wake, so a spurious wake never shifts it;
+    the OS primitive's own relative timeout each iteration (ph_os_wait_ms: FUTEX_WAIT with a
+    timespec, __ulock_wait microseconds, WaitOnAddress milliseconds). GetTickCount64 added to
+    kernel32; no new atomic words, so the sweep is unchanged.
+  - Carry-over from the 4a review: `ph_push_rt_atomic` chose the atomics file from the target's
+    arch and ignored `--machine=` in a dump mode. Fixed: main() captures argv, and in a dump mode
+    the file follows `--machine=` (ph_dump_machine): `--dump-asm --machine=x86_64` on the arm64
+    host dumps the x86-64 words. run.sh gains a dump-machine check
+    (plain 0xc8dffc00 / x86_64 0x90078b48 / x86_64-win 0x90018b48).
+  - examples/sync: a bounded producer/consumer queue on 8 threads (mutex, 2 condvars, semaphore,
+    wait group, atomics), a program built with --exe, with a C twin (c/sync.c, pthreads + C11)
+    that must reach the same checksum; tests/examples.sh times both and prints the ratio (~1.9x
+    on macOS). Windows skips the C twin (POSIX); Linux runs the program, skips the twin where cc
+    is absent.
+  - Cost: lib/php_rt.mc +~130, src/builtin.mc +~40, three host files +~10 each, src/program.mc
+    +~40 (the dump-machine helpers). decimal.so 422072 -> 439384 bytes (mc keeps the unreferenced
+    sem/wg/cond functions).
+  - Gates (local, mc 1.3.1): run.sh green (sweep ok; dump machine ok; fixtures 131/131 plain and
+    check; C behaviour 17/17 with `17-sync-blocking` -- a wait group barrier, a semaphore handoff
+    and bound, a producer/consumer queue over two condvars, a broadcast to 8, and the three
+    timeouts, deterministic over 60 runs); grid plain and check = recording minus the 3 expected
+    differences; linux.sh aarch64 green; linux.sh x86_64 (qemu) green but for ext § 10 `requests`
+    (the same `php -S` under emulation, environmental; native CI leg passes); ZTS=1 linux.sh
+    aarch64 green with § 20b (a wait group and broadcast across 8 compiled threads) and § 20c (a
+    wait group across 3 php workers); leaks NTS and ZTS=1, 0 blocks (sy_count in every round);
+    FrankenPHP aarch64 green. The 2% bar, 25 interleaved rounds idle, minima main -> branch:
+    decimal 0.435 -> 0.431 ms, two-extensions b_use 3.644 -> 3.696 (+1.4% worst), a_add 1.511 ->
+    1.495.
