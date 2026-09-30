@@ -1511,3 +1511,12 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     struct). php's names are looked up with `php_dlsym` (26, several ZTS-only). A start costs the
     probe's ~400 us, mostly TSRM. The worker-context pool is documented as the known cost and is
     not built.
+  - Gates (local): run.sh green (fixtures 131/131 plain and check, C behaviour 14/14, ext,
+    examples); grid plain and check = recording minus the 3 expected differences; ZTS=1 linux.sh
+    aarch64 green with § 20c (opcache on and off); leaks 0 on aarch64, NTS and ZTS=1 (php.php
+    plus 10 rounds of string/array/object results); FrankenPHP aarch64 (4000 requests x 2 php
+    workers, memory +4 MiB; opcache off refused by name); NTS inertness: 9 modules (5 examples,
+    callables, classes, values, threads) byte-identical to main's compiler; llvm-mc sweep on the
+    ZTS module: 4602 arm64 / 2808 x86-64 distinct instructions (only the two known setp/setnp),
+    branches 0 bad, mnemonic sets identical to main's. The 2% bar: NTS output is byte-identical,
+    so decimal and two-extensions run the same bytes.
