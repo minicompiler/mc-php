@@ -1551,3 +1551,8 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     interpreted php calls a wrapper the module publishes (shown, in the API section and § 3b).
   - Fixture: a class autoloaded after a php worker started (`tests/ext/threads/late.php`). The
     worker gets php's `Class "LateAuto" not found` Error from the join, not a crash.
+  - Gates, all with mc 1.3.1:
+    - local: run.sh green; grid plain and check = recording minus the 3 expected differences;
+      `ZTS=1 tests/linux.sh aarch64` green; leaks NTS and ZTS=1, 0 blocks; FrankenPHP aarch64
+      green;
+    - CI: 8/8 green, the Windows ZTS legs included.
