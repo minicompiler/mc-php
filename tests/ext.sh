@@ -886,7 +886,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
             for cdb in "/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe" "/c/Program Files (x86)/Windows Kits/10/Debuggers/arm64/cdb.exe"; do
                 [ -x "$cdb" ] || continue
                 echo "      -- cdb $cdb"
-                MCPHP_T3B_BARE2=1 MCPHP_T3B_TRACE=1 "$cdb" -g -G -lines -c ".lastevent;r;kb 40;q" "$(command -v "$PHP" || echo "$PHP")" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | grep -v '^ModLoad' | tail -60 | sed 's/^/      /'
+                MCPHP_T3B_BARE2=1 MCPHP_T3B_TRACE=1 "$cdb" -g -G -lines -c ".lastevent;r;kb 40;q" "$(cygpath -w "$(command -v "$PHP")")" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | grep -v '^ModLoad' | tail -60 | sed 's/^/      /'
                 break
             done
             echo "      -- UNSHARE"; MCPHP_T3B_UNSHARE=1 MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
