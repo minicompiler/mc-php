@@ -881,6 +881,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
                 '$f = realpath("tests/ext/threads/php.php"); echo "php.php: compiled ", var_export(opcache_compile_file($f), true), ", cached ", var_export(opcache_is_script_cached($f), true), "\n";' > "$tmp/t.d.php"
             MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
             echo "      -- BARE"; MCPHP_T3B_BARE=1 MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
+            echo "      -- BARE2"; MCPHP_T3B_BARE2=1 MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
             echo "      -- UNSHARE"; MCPHP_T3B_UNSHARE=1 MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
             echo "      -- NOSG"; MCPHP_T3B_NOSG=1 MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
             echo "      -- both"; MCPHP_T3B_NOSG=1 MCPHP_T3B_UNSHARE=1 MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'

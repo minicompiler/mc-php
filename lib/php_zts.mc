@@ -301,7 +301,9 @@ void phz_privatize() {
 // php_ext.mc names it before it declares it
 i64 phx_egx_ok() { return phx_egx_done; }
 
+i64 phz_bare2;
 i64 phx_ts_rinit(i64 mtype, i64 mnum) {
+    if (phz_bare2 && callp(phx_ts_get) != phx_ts_ls0) return 0;
     uptr b = phz_thread();
     i64 egx = ld64(b + PHT_phx_egx_done);
     st64(b + PHT_phx_egx_done, 1);
@@ -317,6 +319,7 @@ i64 phz_postdeact() { if (phz_trg) write(2, "P\n", 2); return 0; }
 void phz_t0(uptr m) { if (phz_trg) write(2, m, php_cstrlen(m)); }
 i64 phx_ts_rshutdown(i64 mtype, i64 mnum) {
     phz_t0("R1\n");
+    if (phz_bare2 && callp(phx_ts_get) != phx_ts_ls0) return 0;
     phz_thread();
     phz_t0("R2\n");
     i64 r = phx_rshutdown(mtype, mnum);
@@ -1099,6 +1102,7 @@ i64 php_thr_eng_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a
     if (getenv("MCPHP_T3B_UNSHARE")) st64(job + JB_UNSH, 1);
     if (getenv("MCPHP_T3B_NOSG")) st64(job + JB_NOSG, 1);
     if (getenv("MCPHP_T3B_BARE")) st64(job + JB_BARE, 1);
+    if (getenv("MCPHP_T3B_BARE2")) { st64(job + JB_BARE, 1); phz_bare2 = 1; }
     if (ph_thr_create(&phz_eng_body, job, rec + PHA_H) != 0) php_die("mc-php: cannot start a thread\n", 30);
     ph_lock();
     st64(ph_ttab + id * 8, rec);
