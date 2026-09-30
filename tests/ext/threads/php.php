@@ -42,6 +42,12 @@ catch (DomainException $e) { echo "rethrown: ", get_class($e), " ", $e->getMessa
 $t = th\pstart1(fn(int $x) => declared_late($x), 2);
 if (true) { function declared_late(int $x): int { return $x * 10; } }
 echo "declared after the start: here ", declared_late(3), ", there ", err(fn() => th\pjoin($t)), "\n";
+// a class autoloaded after the start: the worker's request registers no
+// autoloader and has only the tables as they were at the start, so php's own
+// "Class not found" Error comes back from the join -- not a crash
+spl_autoload_register(function (string $c): void { if ($c === "LateAuto") require __DIR__ . "/late.php"; });
+$t = th\pstart1(fn(int $x) => (new LateAuto($x))->v, 4);
+echo "autoloaded after the start: here ", (new LateAuto(5))->v, ", there ", err(fn() => th\pjoin($t)), "\n";
 counter();
 counter();
 echo "statics: here ", counter(), ", there ", th\prun0(fn() => counter() . counter()), ", here ", counter(), "\n";
@@ -70,6 +76,10 @@ $s = 0;
 foreach (array_reverse($ts) as $t) $s += th\pjoin($t);
 echo "their sum: $s\n";
 th\pdetach(th\pstart1(function (string $x) { echo "the detached php thread says $x\n"; }, "goodbye"));
+// and one neither joined nor detached, which ends on a throwable: the end of
+// the request waits for it and reports it as a warning (php_thr_endall's
+// php-thread branch, which mc before 1.3.1 miscompiled with opt = 1)
+th\pstart1(function (string $m): int { throw new LogicException($m); }, "never joined");
 // last of the starts: once a class that extends one of php's own is declared,
 // a Windows php refuses every start (docs/threads.md § 3b, opcache links
 // such a class at run time, in the request's memory)

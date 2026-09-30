@@ -852,7 +852,12 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
         "$PHP" $opc -r 'exit(function_exists("opcache_get_status") ? 0 : 1);' 2>/dev/null \
             || bad "php callables on threads: this php has no opcache (asked with $opc), which step 3b requires"
         say "php callables on threads: opcache with $opc"
-        "$PHP" $opc -d extension="$tmp/build/r.$sx" tests/ext/threads/php.php 2>&1 | tr -d '\r' > "$tmp/t.p"; tp=$?
+        # the unjoined thread's warning names the module's file: its path is
+        # this run's, so it is cut. The two streams are graded apart: which of
+        # php's two writes of a warning lands first is not php's promise
+        "$PHP" $opc -d extension="$tmp/build/r.$sx" tests/ext/threads/php.php 2> "$tmp/t.pe" | tr -d '\r' \
+            | sed 's/ in [^ ]*r\.php on line [0-9]*$/ in r.php on line N/' > "$tmp/t.p"; tp=$?
+        tr -d '\r' < "$tmp/t.pe" | sed 's/ in [^ ]*r\.php on line [0-9]*$/ in r.php on line N/' > "$tmp/t.pe2"
         {
             printf '%s\n' "a closure: 42" "arguments: left7" "the request's code: 15" "a capture: 21" \
                 '$this, copied: 106, here still 0' \
@@ -863,6 +868,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
                 "a result refused: Error: mc-php: cannot copy into or out of a php thread: an object of class ArrayObject, which is php's own" \
                 "rethrown: DomainException boom 7" \
                 "declared after the start: here 30, there Error: Call to undefined function declared_late()" \
+                'autoloaded after the start: here 5, there Error: Class "LateAuto" not found' \
                 "statics: here 3, there 12, here 4" \
                 "a module global, a compiled worker: compiled" "a module global, a php worker: unset, then php" \
                 "a module global afterwards: compiled"
@@ -879,8 +885,13 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
             else
                 printf '%s\n' "\$this of a class extending php's own: Error: mc-php: cannot copy into or out of a php thread: an object of class Ao, which extends php's own ArrayObject"
             fi
-            printf '%s\n' "the script's last line" "the detached php thread says goodbye"
+            printf '%s\n' "the script's last line" "the detached php thread says goodbye" "" \
+                "Warning: mc-php: a thread neither joined nor detached ended on an uncaught LogicException: never joined in r.php on line N"
         } > "$tmp/t.pw"
+        printf '%s\n' "PHP Warning:  mc-php: a thread neither joined nor detached ended on an uncaught LogicException: never joined in r.php on line N" > "$tmp/t.pew"
+        if ! cmp -s "$tmp/t.pew" "$tmp/t.pe2"; then
+            bad "php callables on threads: stderr"; diff "$tmp/t.pew" "$tmp/t.pe2" | sed -n '1,8p' | sed 's/^/      /'
+        fi
         if [ "$tp" = 0 ] && cmp -s "$tmp/t.pw" "$tmp/t.p"; then
             say "php callables on threads (opcache on): the request's code shared, values copied and refused by name, output in join order, a module global per kind of worker, a fatal error and exit() in a worker"
         else

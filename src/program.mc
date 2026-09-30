@@ -712,14 +712,8 @@ void user_init() {
         r = ph_swap(r, cstrlen(r), "    if (!rec) { ph_tnotjoinable(id); return php_znull(); }\n",
                     "    if (!rec) { ph_tnotjoinable(id); return php_znull(); }\n    if (ld64(rec + PHA_N) < 0) return phz_eng_join(rec);\n");
         r = ph_swap(r, cstrlen(r), "    uptr exc = 0;\n", "    uptr exc = 0;\n    i64 rep = 0;\n");
-        // The report flag is computed into a local BEFORE the call, and on
-        // purpose: `phz_eng_end(rec, !exc && ...)` is miscompiled by mc -O on
-        // arm64 (mc 1dfa825) -- the && emits a label, a label drops every
-        // register alias, and `rec`'s (an argument already loaded, still
-        // live) is never materialised, so the call got -1. Remove the local
-        // once mc's allocator is fixed.
         r = ph_swap(r, cstrlen(r), "        if (!rec) break;\n",
-                    "        if (!rec) break;\n        if (ld64(rec + PHA_N) < 0) { i64 rp = !exc && !rep && !ld64(rec + PHA_DET); if (phz_eng_end(rec, rp)) rep = 1; continue; }\n");
+                    "        if (!rec) break;\n        if (ld64(rec + PHA_N) < 0) { if (phz_eng_end(rec, !exc && !rep && !ld64(rec + PHA_DET))) rep = 1; continue; }\n");
         r = ph_swap(r, cstrlen(r), "if (!exc && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC))", "if (!exc && !rep && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC))");
         p_push_source("php runtime", r, cstrlen(r));
         ph_push_rt_host();

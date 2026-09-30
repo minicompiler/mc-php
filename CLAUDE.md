@@ -1536,3 +1536,23 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     ZTS module: 4602 arm64 / 2808 x86-64 distinct instructions (only the two known setp/setnp),
     branches 0 bad, mnemonic sets identical to main's. The 2% bar: NTS output is byte-identical,
     so decimal and two-extensions run the same bytes.
+- mc 1.3.1 (2026-09-30, branch `mc-1.3.1`, from main 05a859a): mc 1.3.1 fixes the -O alias drop
+  that 3b hit (mc PR #109: a label no longer drops the alias of a live depth, on arm64 and x86-64).
+  The pins move to 1.3.1: CI and release `MC_VERSION`, `tests/mcnames.mc`, and `mc.toml`'s
+  `[package].mc` floor. The floor moves too, because without the workaround a module built by an
+  older mc with opt = 1 is miscompiled. `tests/mcnames.sh --strict`: all 217 names unchanged. 3b's
+  endall workaround is removed (`src/program.mc` passes `!exc && !rep && ...` again).
+  - Fixture that reaches that path with opt = 1: `tests/ext/threads/php.php` leaves one php
+    worker neither joined nor detached, ending on a throwable. The end of the request waits for
+    it and reports the warning, which ext.sh § 20c records with the module's path cut. With the
+    workaround removed and mc-php built by mc 1.1.0, that run is SIGSEGV (exit 139) at
+    RSHUTDOWN; built by 1.3.1 it passes.
+  - `docs/threads.md`: `mcphp_thread_*` are intrinsics that exist only in compiled code;
+    interpreted php calls a wrapper the module publishes (shown, in the API section and § 3b).
+  - Fixture: a class autoloaded after a php worker started (`tests/ext/threads/late.php`). The
+    worker gets php's `Class "LateAuto" not found` Error from the join, not a crash.
+  - Gates, all with mc 1.3.1:
+    - local: run.sh green; grid plain and check = recording minus the 3 expected differences;
+      `ZTS=1 tests/linux.sh aarch64` green; leaks NTS and ZTS=1, 0 blocks; FrankenPHP aarch64
+      green;
+    - CI: 8/8 green, the Windows ZTS legs included.

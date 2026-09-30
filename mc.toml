@@ -29,8 +29,11 @@
 name = "mc-php"
 version = "0.1.0"
 # p_skip_to and syntax_expr("$") -- probes/t4 measured that PHP's byte stream
-# cannot be owned without them, and they landed in 1.1.0.
-mc = "1.1.0"
+# cannot be owned without them, and they landed in 1.1.0. 1.3.1 because it
+# fixes -O dropping a live register alias at a label (mc PR #109), which the
+# runtime relies on: a ZTS module's php_thr_endall (a swap in src/program.mc)
+# got a wrong first argument from 1.3.0 and older with opt = 1.
+mc = "1.3.1"
 
 # An SPDX identifier, for anyone reading the manifest. There are no
 # [package].files and no [[permission]] rows: those exist for mc's package

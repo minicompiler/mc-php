@@ -35,12 +35,12 @@ concurrency:
 env:
   # The toolchain is a PUBLISHED mc release, never mc built from source: this
   # repository is a CONSUMER of mc's 1.0 frozen surface and it should break the
-  # way a consumer breaks. mc.toml's [package].mc says 1.1.0 is the floor;
+  # way a consumer breaks. mc.toml's [package].mc says 1.3.1 is the floor;
   # this is what is actually installed, and the Windows legs were measured on
   # it (docs/plan.md § 5). It is also the exact mc mc-php is verified
   # against: tests/mcnames.mc pins the same value, and `tests/mcnames.sh
   # --strict` fails when the two differ (docs/mc-internals.md).
-  MC_VERSION: "1.3.0"
+  MC_VERSION: "1.3.1"
   # 8.5 because the oracle is php-src at tag php-8.5.10 and every fixture is
   # BYTE FOR BYTE what php prints. The minor is pinned; the patch is not, so a
   # diagnostic reworded in an 8.5.x can fail a fixture -- that is the gate

@@ -9,7 +9,7 @@
 //
 // mc-php is verified against exactly this mc, and the CI installs exactly it:
 //
-// mc-version: 1.3.0
+// mc-version: 1.3.1
 //
 // tests/mcnames.sh compiles this file against the installed mc. It is never
 // run: each line names one of the names -- a call with the parameter count
