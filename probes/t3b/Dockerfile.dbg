@@ -1,0 +1,5 @@
+FROM php:8.5-zts-alpine
+RUN apk add --no-cache $PHPIZE_DEPS bison re2c linux-headers \
+ && docker-php-source extract && cd /usr/src/php \
+ && ./configure --prefix=/opt/phpdbg --enable-debug --enable-zts --disable-all --disable-cgi --disable-phpdbg --without-pear > /dev/null \
+ && make -j4 > /dev/null && make install > /dev/null && /opt/phpdbg/bin/php -v
