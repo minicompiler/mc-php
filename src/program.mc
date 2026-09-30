@@ -696,6 +696,10 @@ void user_init() {
         // Windows the measured offset is not the headers' 960, so the fast
         // path waits for it.
         e = ph_swap(e, cstrlen(e), "if (ph_boot_done && !ld64(phT + PHT_phx_depth)", "if (ph_boot_done && phx_egx_ok() && !ld64(phT + PHT_phx_depth)");
+        e = ph_swap(e, cstrlen(e), "    if (te) php_thr_report(te);\n    php_flush();\n    php_request_reset();\n", "    phz_t0(\"S1\\n\");\n    if (te) php_thr_report(te);\n    php_flush();\n    phz_t0(\"S2\\n\");\n    php_request_reset();\n    phz_t0(\"S3\\n\");\n");
+        e = ph_swap(e, cstrlen(e), "    phx_stat_line();\n", "    phz_t0(\"S4\\n\");\n    phx_stat_line();\n    phz_t0(\"S5\\n\");\n");
+        e = ph_swap(e, cstrlen(e), "    phx_free_from(0);\n", "    phz_t0(\"S6\\n\");\n    phx_free_from(0);\n    phz_t0(\"S7\\n\");\n");
+        e = ph_swap(e, cstrlen(e), "    if (ld64(phT + PHT_ph_shared)) php_str_undefer(phT);\n", "    phz_t0(\"S8\\n\");\n    if (ld64(phT + PHT_ph_shared)) php_str_undefer(phT);\n    phz_t0(\"S9\\n\");\n");
         p_push_source("php extension runtime", e, cstrlen(e));
         // the booting thread's fast path never comes back (several php threads
         // run the module at once), a thread's block carries the ZTS words, and

@@ -312,9 +312,15 @@ i64 phx_ts_rinit(i64 mtype, i64 mnum) {
     st64(b + PHT_phx_egx_done, egx);
     return 0;
 }
+i64 phz_trg;
+void phz_t0(uptr m) { if (phz_trg) write(2, m, php_cstrlen(m)); }
 i64 phx_ts_rshutdown(i64 mtype, i64 mnum) {
+    phz_t0("R1\n");
     phz_thread();
-    return phx_rshutdown(mtype, mnum);
+    phz_t0("R2\n");
+    i64 r = phx_rshutdown(mtype, mnum);
+    phz_t0("R3\n");
+    return r;
 }
 
 // MINIT's arena made read-only (MCPHP_ZTS_READONLY=1, a test's switch): any
@@ -1086,7 +1092,7 @@ i64 php_thr_eng_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a
     st64(rec + PHA_N, 0 - 1);
     st64(rec + PHA_ARG, job);
     st64(job + JB_REC, rec);
-    if (getenv("MCPHP_T3B_TRACE")) st64(job + JB_TRACE, 1);
+    if (getenv("MCPHP_T3B_TRACE")) { st64(job + JB_TRACE, 1); phz_trg = 1; }
     if (getenv("MCPHP_T3B_UNSHARE")) st64(job + JB_UNSH, 1);
     if (getenv("MCPHP_T3B_NOSG")) st64(job + JB_NOSG, 1);
     if (ph_thr_create(&phz_eng_body, job, rec + PHA_H) != 0) php_die("mc-php: cannot start a thread\n", 30);
