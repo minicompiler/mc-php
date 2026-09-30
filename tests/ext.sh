@@ -842,7 +842,15 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
     # join order, a module global written by a worker of each kind -- and the
     # same script with opcache off, whose first start is refused by name
     if [ "$TSV" = zts ]; then
-        "$PHP" -d opcache.enable_cli=1 -d extension="$tmp/build/r.$sx" tests/ext/threads/php.php 2>&1 | tr -d '\r' > "$tmp/t.p"; tp=$?
+        # opcache: built into php on Linux and macOS; a Windows php may carry
+        # it as php_opcache.dll, loaded only when asked for
+        opc="-d opcache.enable_cli=1"
+        "$PHP" $opc -r 'exit(function_exists("opcache_get_status") ? 0 : 1);' 2>/dev/null \
+            || opc="$opc -d zend_extension=opcache"
+        "$PHP" $opc -r 'exit(function_exists("opcache_get_status") ? 0 : 1);' 2>/dev/null \
+            || bad "php callables on threads: this php has no opcache (asked with $opc), which step 3b requires"
+        say "php callables on threads: opcache with $opc"
+        "$PHP" $opc -d extension="$tmp/build/r.$sx" tests/ext/threads/php.php 2>&1 | tr -d '\r' > "$tmp/t.p"; tp=$?
         {
             printf '%s\n' "a closure: 42" "arguments: left7" "the request's code: 15" "a capture: 21" \
                 '$this, copied: 106, here still 0' \
@@ -864,7 +872,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
         if [ "$tp" = 0 ] && cmp -s "$tmp/t.pw" "$tmp/t.p"; then
             say "php callables on threads (opcache on): the request's code shared, values copied and refused by name, output in join order, a module global per kind of worker, a fatal error and exit() in a worker"
         else
-            bad "php callables on threads (exit $tp)"; diff "$tmp/t.pw" "$tmp/t.p" | sed -n '1,12p' | sed 's/^/      /'
+            bad "php callables on threads (exit $tp)"; diff "$tmp/t.pw" "$tmp/t.p" | grep '^>' | sed -n '1,12p' | sed 's/^/      /'
         fi
         "$PHP" -d opcache.enable_cli=0 -d extension="$tmp/build/r.$sx" tests/ext/threads/php.php 2>&1 | tr -d '\r' > "$tmp/t.q"; tq=$?
         printf '%s\n' "a closure: mc-php: a php callable runs on another thread only when opcache caches the code it can reach: enable opcache (opcache.enable=1, and opcache.enable_cli=1 on the command line)" > "$tmp/t.qw"
