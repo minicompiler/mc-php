@@ -4,15 +4,15 @@ mc freezes a public surface: every name in its `tests/golden/surface.txt` keeps 
 
 The same list is [`tests/mcnames.mc`](../tests/mcnames.mc), a probe that names each one the way mc-php uses it -- a function called with the parameter count mc-php relies on, a global's address, a `#define`'s value. [`tests/mcnames.sh`](../tests/mcnames.sh) compiles it against the installed mc: a name that mc lacks, or a function whose parameter count changed, is refused on its own line, and the script prints the name, what it is and the mc version. It runs in CI with `--strict`, which also fails when the installed mc is not the version the probe pins.
 
-**Pinned: mc 1.3.0.** The probe's `// mc-version:` line and `MC_VERSION` in `.github/workflows/ci.yml` are the same value; `--strict` is what keeps them so.
+**Pinned: mc 1.3.1.** The probe's `// mc-version:` line and `MC_VERSION` in `.github/workflows/ci.yml` are the same value; `--strict` is what keeps them so.
 
 `[package].mc` in `mc.toml` is a different thing: the MINIMUM mc that can build mc-php. The pin is the exact version mc-php was verified against.
 
 ## The driver and mc's own main
 
-src/build.mc is mc-php's main: mc's `<mc/core>` is the seven parts plus a main, and mc-php's main calls the parts' inits and mc_main after registering its own `build`, which for thread_safety = "both" runs mc's build (drv_build) in this process and itself again (drv_spawn) for the ZTS half. lex_readable is how that `build` decides whether the project file is one it can read before handing it to mc.
+src/build.mc is mc-php's main: mc's `<mc/core>` is the seven parts plus a main, and mc-php's main calls the parts' inits and mc_main after registering its own `build`, which for thread_safety = "both" runs mc's build (drv_build) in this process and itself again (drv_spawn) for the ZTS half. lex_readable is how that `build` decides whether the project file is one it can read before handing it to mc. drv_arch is `[target].arch` as mc's driver read it, before user_init: the runtime's atomic words are pushed for the TARGET's architecture (src/program.mc ph_push_rt_atomic), because a Windows-on-ARM mc-php builds the x64 extension php loads there.
 
-Functions (10): `drv_build`/2, `drv_spawn`/3, `lex_readable`/1, `mc_build_init`/0, `mc_bundle_init`/0, `mc_machines_init`/0, `mc_main`/3, `mc_pkg_init`/0, `mc_sandbox_init`/0, `mc_writers_init`/0.
+Functions (11): `drv_arch`/0, `drv_build`/2, `drv_spawn`/3, `lex_readable`/1, `mc_build_init`/0, `mc_bundle_init`/0, `mc_machines_init`/0, `mc_main`/3, `mc_pkg_init`/0, `mc_sandbox_init`/0, `mc_writers_init`/0.
 
 ## C functions mc declares
 

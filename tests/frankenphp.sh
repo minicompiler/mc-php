@@ -26,6 +26,9 @@
 #     their own per request (opcache on, FrankenPHP's default), from every
 #     php thread at once -- every answer the formula's, memory bounded -- and
 #     with opcache off the same page is refused, by name.
+#   * threads step 4: sync.php makes a mutex and an atomic per request, from
+#     every php thread at once -- every count exact, the table's slots reused
+#     across requests, and an atomic made at MINIT counting all of them.
 #
 # Needs docker; on a macOS host run it inside the Linux VM, as tests/linux.sh.
 set -u
@@ -147,6 +150,20 @@ else
     bad "php callables on threads: $tl answers of $reqs, $2 wrong"
     docker logs "$name" 2>&1 | tail -10 | sed 's/^/      /'
 fi
+# threads step 4: native sync under the same load -- every answer n|n+2 (two
+# adds under a request's mutex, one from a compiled thread), the handles'
+# slots reused (a request's objects are freed at its end, so the largest
+# index stays small), and the atomic made at MINIT counting every request
+docker exec "$name" sh -c "seq 1 $reqs | awk '{print \$1 % 50}' | xargs -P $par -I{} curl -fs --max-time 30 'http://127.0.0.1:8080/sync.php?n={}'" > "/tmp/fp.sy.$$" 2>/dev/null
+set -- $(awk -F'|' '{ if (NF != 3 || $2 != $1 + 2) { bad++; if (shown++ < 3) print "      got  " $0 > "/dev/stderr" } if ($3 + 0 > mx) mx = $3 + 0; ok++ }
+    END { print ok + 0, bad + 0, mx + 0 }' "/tmp/fp.sy.$$")
+hits=$(docker exec "$name" curl -fs --max-time 10 "http://127.0.0.1:8080/sync.php?hits=1" 2>/dev/null)
+if [ "$1" = "$reqs" ] && [ "$2" = 0 ] && [ "$3" -lt 40 ] && [ "$hits" = "$reqs" ]; then
+    say "native sync: $reqs requests, $par at a time, a mutex and an atomic each, every answer exact; largest handle index $3 (slots reused), the MINIT atomic counted $hits"
+else
+    bad "native sync: $1 answers of $reqs, $2 wrong, largest index $3, the MINIT atomic counted '$hits'"
+fi
+rm -f "/tmp/fp.sy.$$"
 r2=$(rss)
 grow2=$(( (r2 - r1) / 1024 ))
 if [ "$grow2" -lt 64 ]; then say "resident memory after them: ${r2} KiB (+${grow2} MiB)"

@@ -47,6 +47,7 @@ void user_init() { }
 void mcnames_main() {
     i64 v = 0;
     uptr p = 0;
+    drv_arch();                              // mcname drv_arch 0
     drv_build(0, 0);                         // mcname drv_build 2
     drv_spawn(0, 0, 0);                      // mcname drv_spawn 3
     lex_readable(0);                         // mcname lex_readable 1

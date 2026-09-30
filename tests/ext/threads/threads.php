@@ -128,6 +128,7 @@ function prun0(callable $f): mixed { return mcphp_thread_join(mcphp_thread_start
 function prun1(callable $f, mixed $a): mixed { return mcphp_thread_join(mcphp_thread_start($f, $a)); }
 function prun2(callable $f, mixed $a, mixed $b): mixed { return mcphp_thread_join(mcphp_thread_start($f, $a, $b)); }
 function pstart1(callable $f, mixed $a): int { return mcphp_thread_start($f, $a); }
+function pstart3(callable $f, mixed $a, mixed $b, mixed $c): int { return mcphp_thread_start($f, $a, $b, $c); }
 function pjoin(int $t): mixed { return mcphp_thread_join($t); }
 function pdetach(int $t): void { mcphp_thread_detach($t); }
 // one module global, written by a worker of each kind: a compiled worker
@@ -138,4 +139,41 @@ function gget(): string { global $g3b; return $g3b ?? "unset"; }
 function gcompiled(string $v): string {
     mcphp_thread_join(mcphp_thread_start(fn(string $x): string => gset($x), $v));
     return gget();
+}
+
+// Native sync (docs/threads.md § Step 4). The builtins exist in compiled code
+// only, so the module publishes what php calls: a wrapper per operation.
+// api.php and php.php use them, graded by tests/ext.sh steps 20b and 20c.
+function sy_mutex(): int { return mcphp_mutex(); }
+function sy_lock(int $m): void { mcphp_mutex_lock($m); }
+function sy_unlock(int $m): void { mcphp_mutex_unlock($m); }
+function sy_atomic(int $v): int { return mcphp_atomic($v); }
+function sy_add(int $a, int $d): int { return mcphp_atomic_add($a, $d); }
+function sy_load(int $a): int { return mcphp_atomic_load($a); }
+function sy_store(int $a, int $v): void { mcphp_atomic_store($a, $v); }
+// made at MINIT: the process's, never freed; every request adds 1 to it
+$sy_proc = mcphp_atomic(0);
+function sy_hit(): int { global $sy_proc; return mcphp_atomic_add($sy_proc, 1) + 1; }
+// four compiled threads, each adding 1 $n times to a module global under a
+// mutex and to an atomic: both exact
+$sy_n = 0;
+function sy_bump(int $m, int $a, int $n): int {
+    global $sy_n;
+    for ($i = 0; $i < $n; $i++) {
+        mcphp_mutex_lock($m);
+        $sy_n = $sy_n + 1;
+        mcphp_mutex_unlock($m);
+        mcphp_atomic_add($a, 1);
+    }
+    return $n;
+}
+function sy_count(int $t, int $n): string {
+    global $sy_n;
+    $sy_n = 0;
+    $m = mcphp_mutex();
+    $a = mcphp_atomic(0);
+    $hs = [];
+    for ($i = 0; $i < $t; $i++) $hs[] = mcphp_thread_start(fn(int $m, int $a, int $n): int => sy_bump($m, $a, $n), $m, $a, $n);
+    foreach ($hs as $h) mcphp_thread_join($h);
+    return ($sy_n === $t * $n ? "exact" : "LOST") . " " . (mcphp_atomic_load($a) === $t * $n ? "exact" : "LOST");
 }

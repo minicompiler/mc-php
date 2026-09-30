@@ -11,5 +11,13 @@ echo "a detached thread's values: ", th\keep_detached(5), "\n";
 echo "rethrown: ", th\rethrow(), "\n";
 echo "a php callable: ", th\refuse(fn() => 1), "\n";
 echo "destructors: ", th\dtors(), "\n";
+echo "sync from 4 compiled threads: ", th\sy_count(4, 5000), "\n";
+echo "the process's atomic, made at MINIT: ", th\sy_hit(), "\n";
+$m = th\sy_mutex();
+th\sy_lock($m);
+try { th\sy_lock($m); } catch (Error $e) { echo "sync refused: ", $e->getMessage(), "\n"; }
+th\sy_unlock($m);
+try { th\sy_unlock($m); } catch (Error $e) { echo "sync refused: ", $e->getMessage(), "\n"; }
+try { th\sy_load($m); } catch (Error $e) { echo "sync refused: ", $e->getMessage(), "\n"; }
 // last, and echoing nothing after it: the thread's line is the output's last
 th\detach_late(100);

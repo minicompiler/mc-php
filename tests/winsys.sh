@@ -10,7 +10,8 @@
 #   kernel32.lib  ucrtbase.lib  php8.lib  php8ts.lib
 #       IMPORT libraries: a list of names, nothing from the DLL. `lld-link
 #       -lib -def:` writes one from src/win/*.def, so no Windows SDK, no php
-#       development pack and no llvm-dlltool.
+#       development pack and no llvm-dlltool. kernel32.lib also carries
+#       src/win/synch.def's names (api-ms-win-core-synch-l1-2-0.dll).
 #   mcrt.obj      mc's POSIX shims over kernel32 (<sys_windows_host>), which
 #                 the COMPILER links next to itself: mc's core declares
 #                 open/write/... `extern` and this object defines them.
@@ -36,9 +37,16 @@ case "$arch" in
 esac
 d=build/win-$arch
 mkdir -p "$d"
-for lib in kernel32 ucrtbase php8 php8ts; do
+for lib in kernel32 ucrtbase php8 php8ts synch; do
     lld-link -lib -machine:$m -def:src/win/$lib.def -out:$d/$lib.lib
 done
+# kernel32.lib carries synch.lib's three names too -- WaitOnAddress and the
+# wakes, which the synchronization API set exports and kernel32.dll does not --
+# so every link line that names kernel32.lib needs nothing added. Each name
+# still binds to its own DLL: an import library is a list of (name, DLL).
+lld-link -lib -machine:$m -out:$d/kernel32+synch.lib $d/kernel32.lib $d/synch.lib
+mv $d/kernel32+synch.lib $d/kernel32.lib
+rm -f $d/synch.lib
 "$MC" --backend=$be src/win/mcrt.mc -o $d/mcrt.obj
 "$MC" --backend=$be src/win/winstart.mc -o $d/winstart.obj
 ls -l "$d"

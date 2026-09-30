@@ -239,9 +239,10 @@ sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.so\"|" exampl
 if "$BIN" build "$t/thr" --config "$t/thr/r.toml" > "$t/th.out" 2>&1; then
     leakfree "compiled functions on OS threads (tests/ext/threads), 30 rounds of 4" -d extension="$t/thr/build/r.so" "$t/thr/run.php"
     # the thread API (tests/ext.sh step 20b): shared mode defers every free of
-    # a string to the end of the request, which must still leave nothing
+    # a string to the end of the request, which must still leave nothing;
+    # native sync (step 4) in every round, its refusals once
     { cat tests/ext/threads/api.php
-      printf "%s\n" "for (\$k = 0; \$k < 30; \$k++) { th\\api(4, 50); th\\keep(4); th\\rethrow(); }"
+      printf "%s\n" "for (\$k = 0; \$k < 30; \$k++) { th\\api(4, 50); th\\keep(4); th\\rethrow(); th\\sy_count(4, 100); }"
     } > "$t/thr/api.php"
     leakfree "the thread API (tests/ext/threads/api.php), 30 rounds" -d extension="$t/thr/build/r.so" "$t/thr/api.php"
     # php callables on threads of their own (tests/ext.sh step 20c): results

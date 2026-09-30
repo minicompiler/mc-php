@@ -1,7 +1,7 @@
 // rt_host_linux_x86_64.mc -- the ARCHITECTURE half of the Linux runtime host
 // layer. The operating-system half is lib/rt_host_linux.mc, which declares
-// stat() and everything else; this file is only the two answers that depend on
-// the architecture, and they are both `struct stat`'s.
+// stat() and everything else; this file is only the answers that depend on
+// the architecture: the two of `struct stat` and futex(2)'s syscall number.
 //
 // linux/arch/x86: st_dev 0, st_ino 8, st_nlink 16, st_mode 24 (u32),
 // st_uid 28, st_gid 32, __pad0 36, st_rdev 40, st_size 48 (i64).
@@ -20,3 +20,6 @@ i64 php_stat_size(uptr p) {
     if (stat(p, sb) != 0) return 0 - 1;
     return ld64(sb + 48);
 }
+
+// futex(2)'s number: x86-64's own table (the generic one, AArch64's, says 98)
+i64 ph_sys_futex() { return 202; }

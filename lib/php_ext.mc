@@ -718,6 +718,8 @@ void phx_snapshot() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     phx_snap = php_alloc(phx_mark + 8);
     phx_copy(phx_snap, ph_heap, phx_mark);
     php_roots(1);
+    // a sync object made from here on belongs to the request that makes it
+    ph_syown = 1;
 }
 
 // MCPHP_STATS=1 in php's environment: at the end of each request, what the

@@ -1556,3 +1556,48 @@ changed what the compiler does. The hosts branch is that commit and it is delete
       `ZTS=1 tests/linux.sh aarch64` green; leaks NTS and ZTS=1, 0 blocks; FrankenPHP aarch64
       green;
     - CI: 8/8 green, the Windows ZTS legs included.
+- Threads step 4a (2026-09-30, branch `sync-4a`, from main 4abc2e8; docs/threads.md § Step 4):
+  **native sync -- a mutex and atomics, no pthread mutex and no SRWLOCK left in the runtime.**
+  - Ten builtins, int handles for both: `mcphp_mutex`, `_lock`, `_trylock`, `_unlock`;
+    `mcphp_atomic(int $v = 0)`, `_load`, `_store`, `_add` (the value before), `_cas` (bool),
+    `_xchg` (the value before). Intrinsics like `mcphp_thread_*`: interpreted php calls a wrapper
+    the module publishes (shown in the docs, `tests/ext/threads/threads.php` has them).
+  - The atomic words: `lib/rt_atomic_arm64.mc` (ldar/stlr and ldaxr/stlxr loops, each loop in
+    one function, no LSE), `rt_atomic_x86_64.mc` (System V) and `rt_atomic_win64.mc` (Windows
+    x64): mov/xchg/lock xadd/lock cmpxchg. Pushed by the TARGET's architecture
+    (`ph_target_arch`: mc's `drv_arch()`, else `host_arch()`), because the Windows-on-ARM leg
+    builds the x64 extension -- `drv_arch` joins tests/mcnames.mc (218 names, all unchanged
+    under 1.3.1). `tests/sweep_sync.py` (in run.sh): every word re-assembled by llvm-mc (20
+    arm64, 10 + 10 x86-64 words; branch offsets included) and found in mc's own object; a
+    one-word change fails it on each file.
+  - Sleep on a word per host: futex (98 on aarch64, 202 on x86_64, via libc `syscall`),
+    `__ulock_wait`/`__ulock_wake` (private SPI; `ponytail:` naming os_sync_wait_on_address,
+    macOS 14.4), `WaitOnAddress`/`WakeByAddress*` imported from
+    api-ms-win-core-synch-l1-2-0.dll (`#dylib` on the one-step PE road; on the object road
+    `tests/winsys.sh` merges `src/win/synch.def` into `kernel32.lib`, so no link line changed).
+  - The mutex is Drepper's three-state word; `ph_lock`/`ph_unlock` are it over the global
+    `ph_lkw` (no initialisation). The table: 32-byte slots (generation|kind, word, holder =
+    thread block, owner request), 1024 per chunk, fixed 4096-chunk directory (`ponytail:`, 4M
+    ceiling); handle = (generation << 22) | index; creation under ph_lock, operations lock-free.
+    On the extension road an object made after MINIT (`ph_syown`, set by phx_snapshot) belongs
+    to its request's root and is freed by `php_sy_endreq` in php_thr_endall(free), generation
+    bumped; the scan runs only while a request owns one (`ponytail:`). Refusals, as Error:
+    `handle N is not a live mutex`, `handle N is an atomic, not a mutex`, `mutex N is already
+    held by this thread` (self-deadlock; recursive mutexes out of scope), `mutex N is held by
+    another thread`, `mutex N is not locked`.
+  - Also fixed: docs/mc-internals.md still said "Pinned: mc 1.3.0" after #46.
+  - Cost: +330/-42 lines in src/ and lib/ (php_rt.mc +184, builtin.mc +49), plus the three
+    atomic files; decimal.so 420904 -> 422072 bytes (mc keeps unreferenced functions).
+  - Gates (local, mc 1.3.1): run.sh green (sweep ok; fixtures 131/131 plain and check; C
+    behaviour 16/16 with `15-sync` -- four exact counts from 8 threads x 20000, 18201 of 160000
+    lost with the two lock lines removed -- and `16-thread-churn`, 10^4 short threads from 8
+    starters at once, 0.4 s, 180 MB RSS); linux.sh aarch64 green; linux.sh x86_64 (qemu) green
+    but for ext § 10 `requests`, whose php -S never comes up under emulation for the
+    INTERPRETED run too (environment); `ZTS=1 linux.sh aarch64` green with § 20c's four php
+    workers sharing a mutex and an atomic (10000 10000); leaks NTS and ZTS=1, 0 blocks
+    (sy_count in every round); FrankenPHP aarch64 green with sync.php: 4000 requests, 32 at a
+    time, every count exact, largest handle index 17 (slots reused), the MINIT atomic counted
+    4000, memory +3 MiB. The 2% bar, 49 interleaved rounds, minima main -> branch: decimal
+    0.226 -> 0.227 ms, two-extensions b_use 1.959 -> 1.984, a_add 0.638 -> 0.645 (+1.3% worst;
+    a_add's own round-to-round spread is 0.638-0.798). Grid plain and check = the recording
+    minus the 3 expected differences.
