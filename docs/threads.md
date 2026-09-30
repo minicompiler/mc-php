@@ -32,7 +32,8 @@ tree at `bac2dcf`.
 Scalars come first, so that each one is within a load's immediate offset of the block's base.
 The buffers follow the scalars. Step 3 appends three words for the thread API: `ph_shared`
 (shared mode), `ph_troot` (the block of the program or request a thread belongs to) and `ph_tret`
-(that root's list of kept arenas). The block is 12344 bytes, 12464 in a ZTS build.
+(that root's list of kept arenas). The block is 12344 bytes, 12472 in a ZTS build (step 3b adds
+`phz_job`, the job a php thread's call runs).
 
 ### Shared, and why
 
@@ -349,9 +350,9 @@ ms, the ZTS module under `php:8.5-zts-alpine` 0.269 ms, +18%. The same script in
 
 ## Step 3: the thread API
 
-Step 3 is two pull requests. **3a is built**: the API, the program road, compiled callables on
-the extension road (NTS and ZTS), and shared module state. **3b is not built**: php callables on a
-ZTS worker, in a php context of their own. The owner's model is `std::thread`: real OS threads,
+Step 3 is two pull requests, both built. **3a**: the API, the program road, compiled callables on
+the extension road (NTS and ZTS), and shared module state. **3b**: php callables on a ZTS worker,
+each in a php request of its own (§ 3b below). The owner's model is `std::thread`: real OS threads,
 memory shared as in C, and races are the developer's. Threads are a goal of their own: they do not
 depend on `await` or on http.
 
@@ -379,6 +380,9 @@ $c = mcphp_hardware_concurrency(): int;     // logical CPUs, as std::thread's
 - **The callable** is a compiled closure or an invokable object. A string callable is refused
   (D6), and so is the first-class callable syntax `f(...)`, which the compiler does not support
   yet: write `fn($x) => f($x)`. At most **five** arguments are passed; they go by value.
+  On the extension road a module may also be handed a PHP callable (a php closure, a function's
+  name, an array callable, an invokable object). A ZTS php runs it as § 3b says, and an NTS php
+  refuses it.
 - **An exception** that `$fn` does not catch ends the thread. `join` throws a copy of it on the
   joining thread.
 - **A thread neither joined nor detached** when the program ends (exe) or the request ends
@@ -463,8 +467,9 @@ responsibility, as in C). Each of these is undefined behaviour, not merely nonde
 - `define()` of the same name from two threads at once.
 
 What else to know:
-- Output a worker writes goes to fd 1 directly, as in step 1. On the extension road this
-  bypasses php's output layer, which is part of php's engine.
+- Output a compiled worker writes goes to fd 1 directly, as in step 1. On the extension road this
+  bypasses php's output layer, which is part of php's engine. A php callable's worker (§ 3b)
+  has an output buffer of its own, written at its join.
 - **Destructors, as ext/parallel's copies.** Every copy is a distinct object, and each object is
   destructed once, by the thread that owns it. A worker destructs the objects it created -- its
   copies of the arguments included -- when it ends. The joiner owns its copy of the result and
@@ -517,9 +522,10 @@ forking a php worker mid-request duplicates a threaded SAPI's sockets and locks.
 `mc-php: a php callable cannot run on another thread in a php without thread safety; build the
 module with thread_safety = "zts", or pass a compiled function`.
 
-**Extension road, php callables, ZTS: refused until 3b**, with `mc-php: a php callable cannot run
-on another thread yet: its own php context on the worker is threads step 3b; pass a compiled
-function`.
+**Extension road, php callables, ZTS: a php request of their own** (§ 3b). Without opcache the
+start is refused with `mc-php: a php callable runs on another thread only when opcache caches the
+code it can reach: ...`. The message names the first function, class or closure that opcache
+does not cache.
 
 ### What changed for code that does not use threads
 
@@ -551,26 +557,177 @@ included; the NTS inertness `cmp` does not apply to this step.
 - `examples/threads`: a prime count split over threads, with a C twin (pthreads and Win32) for
   reference and speed.
 
-### 3b: php callables on a ZTS worker (not built)
+### 3b: php callables on a thread of their own (ZTS)
 
-- The worker thread becomes a php thread. `ts_resource_ex(0, NULL)` gives it its TSRM storage.
-  `php_request_startup()` gives it a request, with its own EG, CG, PG, SG and Zend allocator.
-  `php_request_shutdown()` and `ts_free_thread()` end both when the callable returns.
-  All four are exported by php 8.5 ZTS (measured, `nm -D` of `php:8.5-zts-alpine`).
-- The step-1 engine guards (`phx_offthread`) are lifted in that context: it IS a php thread, so
-  the engine is its own.
-- **INI:** the starting request's current values, re-applied with `zend_alter_ini_entry`.
-- **Includes:** none are run again.
-- **Functions and classes:** the callable and everything it names must be reachable. A probe
-  decides between two options before 3b is built, and its result is reported first:
-  - (a) Share the starting request's user functions and classes. php 8 keeps each op_array's
-    run-time cache behind `ZEND_MAP_PTR`, per thread, which is how opcache shares op_arrays
-    between threads. The starting request outlives the worker, because RSHUTDOWN waits.
-  - (b) Copy the callable alone, as ext/parallel does. A callable that names a function or class
-    of the script then fails in the worker with php's own "undefined" Error.
+In a ZTS module, `mcphp_thread_start` also takes a **php** callable: a php closure, a function's
+name, an array callable, an invokable object. The worker is a new OS thread that becomes a php
+thread. `ts_resource_ex` gives it TSRM storage, and `php_request_startup` gives it a **php
+request of its own**, with its own EG, CG, PG, SG, Zend heap and output layer. The call runs in
+that request. `php_request_shutdown` and `ts_free_thread` end both when it returns. The code of
+the starting request is shared with it; everything else crosses as a copy. `lib/php_zts.mc` § 3b
+is the implementation; `probes/t3b` (branch `threads-3b-probe`) chose it over a copy of the
+callable alone, which can crash the engine (an `INIT_FCALL` to a function the worker does not
+have).
 
-  (a) keeps php's meaning and is preferred; (b) is the fallback if op_arrays cannot be shared
-  safely.
-- **Arguments and results:** copied across the two contexts, engine values with `zval_copy`
-  semantics and the same deep-copy rule.
-- Gates: a FrankenPHP gate with php closures on threads (Linux), and the Windows ZTS legs.
+An NTS php still refuses a php callable (§ Each road): it has one executor for the process.
+
+#### The two kinds of worker
+
+They look the same from php and they are not. The difference is on purpose, and
+`tests/ext/threads/php.php` shows it: the same module global is written by one worker of each
+kind and read after the join.
+
+| | a compiled callable (3a, NTS and ZTS) | a php callable (3b, ZTS only) |
+|---|---|---|
+| what runs | the module's native code, no php engine | a php request of its own, on the worker's php thread |
+| module state (the module's globals, statics, constants) | the starting request's, one copy every thread reads and writes; races are the developer's | a **fresh copy of what MINIT left**, made by the worker request's own RINIT. What the worker writes, the starting request never sees, and the worker sees nothing the request wrote |
+| php globals and statics | none: there is no php engine on the thread | the worker request's own: its own `$GLOBALS` and superglobals, and a function's `static` starts from its initial value |
+| code | the module's compiled functions | the starting request's user functions and classes **as they were at the start**, shared by pointer (opcache required) |
+| arguments and results | deep-copied between the two arenas (§ The memory model) | copied through memory neither Zend heap owns: plain values only (below) |
+| an uncaught exception | a copy rethrown at the join | its class, message and code, rethrown at the join; a fatal error becomes an `Error` |
+| output | written to fd 1 directly, in no order | a buffer of its own, written into the request's output at the join, in join order; for a thread nobody joins, when the request ends |
+
+In `php.php`, a compiled worker's `gset("compiled")` is read back as `compiled` after the join. A
+php worker then reads the same global as `unset` and writes `php`. After that join the request
+still reads `compiled`.
+
+#### Opcache is required
+
+The code is shared by pointer, and that is safe only for opcache's immutable op_arrays. They keep
+their run-time cache and their statics in a per-thread `ZEND_MAP_PTR` slot. The worker extends
+its slot table to the starting thread's (`zend_map_ptr_extend`), and the closure gets a
+run-time cache of its own (`ZEND_ACC_HEAP_RT_CACHE`). Without opcache, a function's run-time
+cache is one pointer into the memory of whichever thread called it first. `probes/t3b` crashed
+18 to 20 runs in 20 on that, and FrankenPHP died.
+
+So the start checks the code before anything else. The closure must come from opcache, and so
+must every user function and class in the request's tables. If one does not, the start throws
+`Error`, naming it:
+`mc-php: a php callable runs on another thread only when opcache caches the code it can reach:
+enable opcache (opcache.enable=1, and opcache.enable_cli=1 on the command line); not cached:
+function f`. The name is a function, a class, or `the callable {closure:FILE:LINE}`.
+With opcache off, this is the first thing the first start says. A function from `eval()` is
+refused with opcache on too, because opcache does not cache it. There is no fallback to a copy
+of the callable.
+
+**On Windows, a class that extends one of php's own classes is not cached immutable.** A
+Windows opcache links such a class at run time, in the request's memory, because php's own
+classes are not at the same address in every process. Once a request declares one (an
+exception class included), every later start is refused, naming it: `not cached: class Ao`.
+Linux and macOS cache such a class and are not affected. `php.php` declares one after its last
+start, and the gate expects each platform's answer.
+
+#### The code the worker sees: the tables at the start
+
+The starting request's user functions and classes are listed when the thread starts, and added
+to the worker's tables. A function or class the request declares **after** the start is not in
+the worker. Calling it there is php's own `Error`, `Call to undefined function
+declared_late()`, rethrown at the join. `php.php` declares one right after a start.
+
+The worker's tables keep those entries until its request ends. Shutdown leaves an immutable
+function and class alone: `destroy_op_array` returns on a NULL refcount, and
+`destroy_zend_class` returns on `ZEND_ACC_IMMUTABLE`. Shutdown then frees the worker's own
+per-thread statics of them. Taking the entries out before shutdown would leak those statics: a
+debug ZTS php reports three blocks for one `static $n` and one static property.
+
+What is not shared:
+- **User constants** (`define()`, a top-level `const`): the worker does not have them. A class
+  constant is part of its class, and the class is shared.
+- **INI**: the worker's values are php's startup values (`php.ini`, `-d`). The request's
+  `ini_set()` changes are not re-applied.
+- **Autoloaders**: the worker request registers none.
+
+#### What crosses: copied, or refused by name
+
+Arguments, the closure's captured variables (`use`, by value, a reference included) and its
+bound `$this`, and the result are copied. The copy is serialized out of one Zend heap into pages
+neither heap owns, and rebuilt in the other. The result is copied out of the worker's heap
+before its request ends. What can be copied:
+- `null`, `bool`, `int`, `float`, `string`;
+- an array, with integer and string keys, nested;
+- an object of the script's own classes, or a `stdClass`: its class by name, and every property
+  (declared, dynamic, private and protected). One object two places share is one object in the
+  copy, and a cycle ends.
+
+What cannot be copied is refused with an `Error` naming it, as ext/parallel refuses it:
+`mc-php: cannot copy into or out of a php thread: ...`. That is:
+- an object of php's own classes (a `Closure`, a `DateTime`, an `ArrayObject`, an exception,
+  a generator), which keep state outside their properties;
+- an object of a class that extends one of them;
+- an enum case, which is one object per request;
+- a value nested more than 256 levels deep (a recursive array through a reference).
+
+A resource never reaches `mcphp_thread_start`: the module's own boundary refuses it
+(`mc-php: a php resource cannot cross into the module`).
+
+The refusal comes from the start for an argument, a capture or `$this`. It comes from the join,
+as that `Error`, for a result.
+
+#### Exceptions, fatal errors, `exit()`
+
+- **An uncaught throwable** ends the call. Its class, message and code are rethrown at the join,
+  as an object of the same class made there. Its trace and `previous` do not cross.
+- **A fatal error** (a memory limit, for example) ends the worker's call, not the process, and
+  php prints it into the worker's output. The join then throws `Error`:
+  `mc-php: a php thread ended on a fatal error: <php's message>`. **Not on Windows:** there,
+  php's bailout is a `longjmp` that unwinds with SEH, and the module's frames between the
+  bailout point and the callable carry no unwind data (mc emits no `.pdata`), so a fatal error
+  in a worker ends the process. The same probably holds for a fatal error in any php code the
+  module calls on Windows (not measured).
+- **`exit()`** ends the call with a `null` result.
+
+**The SAPI on Windows.** php-cli (`php.exe`) and a web server's php module are modules apart
+from `php8ts.dll`, each with its own copy of php's per-thread cache. Only threads the SAPI started
+ever set that copy. `php_request_shutdown` calls the SAPI's deactivate on every thread, and on a
+worker's thread php-cli's reads the unset cache and faults (measured under `cdb` on both Windows
+legs). A worker's request never belonged to the SAPI. So on a Windows php the module wraps
+`sapi_module.deactivate` once, before the first worker, and skips the SAPI's deactivate on a
+worker's thread. Linux and macOS link the SAPI into the same image as the engine, and there the
+wrapper is not installed.
+
+The call runs as the worker request's one **shutdown function**, because
+`php_call_shutdown_functions` is php's own call site with a bailout point (`zend_try`). An
+extension can reach it without `setjmp`, which this runtime does not have (docs/plan.md D7).
+What php calls there is a trampoline: an internal function whose handler is the runtime's. So
+the callable runs under an internal frame, and an uncaught exception stays in `EG(exception)`
+for the trampoline to copy.
+
+#### Output
+
+The worker starts an output buffer of its own before the call. After the call it takes what
+the buffer holds. A buffer the callable opened and left open is ended into it first. At the
+join, the runtime writes those bytes into the request's output, through the module's own write,
+so they keep their place among the joiner's lines. Eight workers that echo at once are
+therefore eight blocks in join order, never interleaved (`php.php` joins them in reverse). A
+thread nobody joins, detached or forgotten, is waited for when the request ends, and its output
+is written then. Its uncaught throwable is reported as a compiled thread's is.
+
+#### The cost, and what is not built
+
+A start costs about 400 us, measured by `probes/t3b` with an empty closure. Most of it is TSRM:
+`ts_resource_ex` is about 265 us (every module's globals, copied for a new thread) and
+`ts_free_thread` about 57 us. The request itself is about 15 us. **A pool of worker contexts**,
+php threads kept between starts, would save the two TSRM costs and is not built. Until then, a
+php callable on a thread is worth it for work that takes much longer than a millisecond.
+
+#### The gates (3b)
+
+- `tests/ext.sh` § 20c, ZTS only: `tests/ext/threads/php.php` with opcache on, against its
+  recording. It covers:
+  - the request's code, a capture, `$this` copied and refused;
+  - a string, an array and objects (shared, a cycle) as results;
+  - an argument and a result refused;
+  - a rethrow, and a function declared after the start;
+  - statics per request, and the module global written by a worker of each kind;
+  - a fatal error and `exit()` in a worker;
+  - eight workers that echo, joined in reverse, and a detached one.
+
+  The same script with opcache off must answer the refusal. § 20b's php-callable line is that
+  refusal on a ZTS php.
+- `tests/leaks.sh` with `ZTS=1`: the thread modules in a thread-safe debug php, `php.php` and ten
+  more rounds of string, array and object results with opcache on, 0 blocks left.
+- `tests/frankenphp.sh`: `threads.php` starts two php workers per request from eight php
+  threads, and every answer must follow the formula. Memory stays bounded. With
+  `opcache.enable=0` the same page answers the refusal.
+- The Windows ZTS legs (arm64 and x64) run `tests/ext.sh`, so § 20c runs there too, with
+  opcache loaded as a `zend_extension` where the php does not load it by itself.

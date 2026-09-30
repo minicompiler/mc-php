@@ -16,6 +16,18 @@
 #include "php.h"
 #include "zend_API.h"
 #include "zend_modules.h"
+#include "SAPI.h"
+
+/* Zend/zend_closures.c's zend_closure: no header declares it, and
+   lib/php_zts.mc reads a Closure's function, $this, called scope and
+   wrapped handler out of it (the copy below is the struct, field for field) */
+typedef struct {
+    zend_object std;
+    zend_function func;
+    zval this_ptr;
+    zend_class_entry *called_scope;
+    zif_handler orig_internal_handler;
+} abi_closure;
 
 #define P(n, v) printf("%-24s %ld\n", n, (long)(v))
 
@@ -141,5 +153,40 @@ int main(void) {
     P("EXX_THIS",            offsetof(zend_execute_data, This));
     P("ACC_FINAL",           ZEND_ACC_FINAL);
     P("ACC_EXPLICIT_ABSTRACT", ZEND_ACC_EXPLICIT_ABSTRACT_CLASS);
+
+    /* a php callable on a thread of its own (lib/php_zts.mc § 3b) */
+    P("EGX_FUNCTION_TABLE",  offsetof(zend_executor_globals, function_table));
+    P("EGX_CLASS_TABLE",     offsetof(zend_executor_globals, class_table));
+    P("CGX_MAP_PTR_LAST",    offsetof(zend_compiler_globals, map_ptr_last));
+    P("SGX_HEADERS_SENT",    offsetof(sapi_globals_struct, headers_sent));
+    P("SGX_NO_HEADERS",      offsetof(sapi_globals_struct, request_info)
+                             + offsetof(sapi_request_info, no_headers));
+    P("PGX_EXPOSE_PHP",      offsetof(php_core_globals, expose_php));
+    P("PGX_AUTO_GLOBALS_JIT", offsetof(php_core_globals, auto_globals_jit));
+    P("PGX_DURING_STARTUP",  offsetof(php_core_globals, during_request_startup));
+    P("PGX_LAST_ERROR_MESSAGE", offsetof(php_core_globals, last_error_message));
+    P("ZFX_TYPE",            offsetof(zend_function, type));
+    P("ZFX_FN_FLAGS",        offsetof(zend_function, common.fn_flags));
+    P("ZFX_NAME",            offsetof(zend_function, common.function_name));
+    P("ZFX_SCOPE",           offsetof(zend_function, common.scope));
+    P("ZFX_SIZE",            sizeof(zend_function));
+    P("OPX_STATIC_VARS_PTR", offsetof(zend_op_array, static_variables_ptr__ptr));
+    P("OPX_REFCOUNT",        offsetof(zend_op_array, refcount));
+    P("IFX_HANDLER",         offsetof(zend_internal_function, handler));
+    P("CEX_TYPE",            offsetof(zend_class_entry, type));
+    P("ACC_IMMUTABLE",       ZEND_ACC_IMMUTABLE);
+    P("ACC_HEAP_RT_CACHE",   ZEND_ACC_HEAP_RT_CACHE);
+    P("ACC_ENUM",            ZEND_ACC_ENUM);
+    P("ACC_FAKE_CLOSURE",    ZEND_ACC_FAKE_CLOSURE);
+    P("IZ_INDIRECT",         IS_INDIRECT);
+    P("IZ_PTR",              IS_PTR);
+    P("ZFN_USER",            ZEND_USER_FUNCTION);
+    P("ZFN_INTERNAL",        ZEND_INTERNAL_FUNCTION);
+    P("ZCE_USER",            ZEND_USER_CLASS);
+    P("ZCLX_FUNC",           offsetof(abi_closure, func));
+    P("ZCLX_THIS",           offsetof(abi_closure, this_ptr));
+    P("ZCLX_CALLED",         offsetof(abi_closure, called_scope));
+    P("ZCLX_ORIG",           offsetof(abi_closure, orig_internal_handler));
+    P("SMX_DEACTIVATE",      offsetof(sapi_module_struct, deactivate));
     return 0;
 }

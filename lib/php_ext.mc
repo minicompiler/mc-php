@@ -1351,6 +1351,43 @@ i64 phx_fcall_l2(uptr c, i64 v1, i64 v2, i64 lazy) { uptr phT = ph_tcur; if (!ph
 // and given back where those are: when the call's memory goes, or at
 // RSHUTDOWN for a call that pinned (phx_esc_from).
 #define EGX_EXCEPTION       960     // zend_executor_globals.exception
+// a php callable on a thread of its own (lib/php_zts.mc § 3b): the
+// engine's tables and the few php, SAPI and compiler globals a worker
+// request sets, a function and a class entry as the share and the copy read
+// them, and a Closure's own layout (Zend/zend_closures.c's zend_closure,
+// which no header declares; tests/ext/abi.c spells it out to grade it)
+#define EGX_FUNCTION_TABLE  456
+#define EGX_CLASS_TABLE     464
+#define CGX_MAP_PTR_LAST    528
+#define SGX_HEADERS_SENT    249
+#define SGX_NO_HEADERS      73
+#define PGX_EXPOSE_PHP      448
+#define PGX_AUTO_GLOBALS_JIT 450
+#define PGX_DURING_STARTUP  490
+#define PGX_LAST_ERROR_MESSAGE 504
+#define ZFX_TYPE            0
+#define ZFX_FN_FLAGS        4
+#define ZFX_NAME            8
+#define ZFX_SCOPE           16
+#define ZFX_SIZE            256
+#define OPX_STATIC_VARS_PTR 112
+#define OPX_REFCOUNT        136
+#define IFX_HANDLER         88
+#define CEX_TYPE            0
+#define ACC_IMMUTABLE       128
+#define ACC_HEAP_RT_CACHE   67108864
+#define ACC_ENUM            268435456
+#define ACC_FAKE_CLOSURE    8388608
+#define IZ_INDIRECT         12
+#define IZ_PTR              13
+#define ZFN_USER            2
+#define ZFN_INTERNAL        1
+#define ZCE_USER            2
+#define ZCLX_FUNC           56
+#define ZCLX_THIS           312
+#define ZCLX_CALLED         328
+#define ZCLX_ORIG           336
+#define SMX_DEACTIVATE      40
 #define IZ_ARRAY_EX         775     // IS_ARRAY | (REFCOUNTED | COLLECTABLE) << 8
 #define GCX_IMMUTABLE       64      // GC_IMMUTABLE: never counted
 #define HASH_KEY_IS_STRING  1

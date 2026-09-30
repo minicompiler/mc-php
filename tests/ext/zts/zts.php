@@ -62,3 +62,7 @@ function work(int $n, callable $boom): string {
     return $n . "|" . $calls . "|" . $zts_g['a'] . "|" . count($zts_g['list']) . "|" . _Box::$count
         . "|" . $k . "|" . ZTS_K . $zts_top . "|" . $s . "|" . $f($n) . "|" . ZTS_R . "|" . $h . "|" . $b . "|" . $tv . "|" . mcphp_thread();
 }
+// threads step 3b under a threaded SAPI: a php callable on a thread of its
+// own, started and joined by the module (tests/frankenphp.sh, threads.php)
+function zts_pstart(callable $f, int $n): int { return mcphp_thread_start($f, $n); }
+function zts_pjoin(int $t): mixed { return mcphp_thread_join($t); }
