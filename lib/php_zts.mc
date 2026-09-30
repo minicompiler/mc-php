@@ -570,6 +570,7 @@ i64 phz_eng_syms() {
 #define JB_TRACE    680
 #define JB_UNSH     688
 #define JB_NOSG     696
+#define JB_BARE     704
 #define JB_MAP      4096
 
 void phz_bput(uptr bf, uptr p, i64 n) {
@@ -1097,6 +1098,7 @@ i64 php_thr_eng_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a
     if (getenv("MCPHP_T3B_TRACE")) { st64(job + JB_TRACE, 1); phz_trg = 1; }
     if (getenv("MCPHP_T3B_UNSHARE")) st64(job + JB_UNSH, 1);
     if (getenv("MCPHP_T3B_NOSG")) st64(job + JB_NOSG, 1);
+    if (getenv("MCPHP_T3B_BARE")) st64(job + JB_BARE, 1);
     if (ph_thr_create(&phz_eng_body, job, rec + PHA_H) != 0) php_die("mc-php: cannot start a thread\n", 30);
     ph_lock();
     st64(ph_ttab + id * 8, rec);
@@ -1337,7 +1339,8 @@ uptr phz_eng_body(uptr job) {
     phz_tr(job, "T pg\n");
     i64 okr = (callp(phz_f(PHZ_RSTART)) & 0xffffffff) == 0;
     phz_tr(job, "T rstart\n");
-    if (okr) phz_eng_run(job);
+    if (okr && !ld64(job + JB_BARE)) phz_eng_run(job);
+    if (ld64(job + JB_BARE)) st64(job + JB_EXC, 3);
     else st64(job + JB_EXC, 3);
     callp(phz_f(PHZ_RSTOP), 0);
     phz_tr(job, "T rstop\n");
