@@ -1,10 +1,16 @@
-# awaitable -- awaitable.src.php, the PHP form of awaitable.mc. The LINUX linker line.
+# awaitable -- awaitable.src.php, a ZTS PHP extension. The LINUX linker line.
 #
 # Everything but [linker] is examples/awaitable/mcphp.toml's: mc's [linker] is
 # flat, so the second host is a second file (examples/decimal/mcphp.linux.toml
 # says why).
 #
 #     mc-php build examples/awaitable --config examples/awaitable/mcphp.linux.toml
+#
+# This is a ZTS module: parallel() runs php callables on threads, which a
+# thread-safe php runs as php requests of their own (docs/threads.md, step 3b),
+# so it needs a thread-safe php to load it. tests/examples.sh builds it and runs
+# check.php in Docker (php:8.5-zts-alpine, the tests/frankenphp.sh road), byte
+# for byte against check.expect.
 
 [project]
 entry = "awaitable.src.php"
@@ -32,19 +38,17 @@ name = "awaitable"
 version = "0.1.0"
 
 # Read off the target php with `php -i`, and nothing else about it is
-# consulted. Stating them rather than pointing at a binary is what makes a
-# cross-build need no php on the machine; it is also what makes this file go
-# stale when the target php's minor moves, which tests/ext.sh checks on every
-# run and names.
+# consulted. The stated NTS build id becomes ,TS for this ZTS output (the
+# compiler swaps the word, src/ext.mc); a ZTS php's own build id says ,TS.
 #
 #     PHP API             => 20250925        api
-#     PHP Extension Build => API20250925,NTS build_id
-#     Thread Safety       => disabled        thread_safety = "nts"
+#     PHP Extension Build => API20250925,TS  build_id (ZTS php)
+#     Thread Safety       => enabled         thread_safety = "zts"
 #     Debug Build         => no              debug = false
 [php]
 api = 20250925
 build_id = "API20250925,NTS"
-thread_safety = "nts"
+thread_safety = "zts"
 debug = false
 # unchecked reads, as C (docs/semantics.md): see mcphp.toml
 checked_reads = false

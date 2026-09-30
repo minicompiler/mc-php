@@ -1,42 +1,46 @@
 /* awaitable.c -- the C TWIN of awaitable.src.php: the same extension written
- * as an ordinary C extension, the way php-src's own are. It is the
- * SPECIFICATION the compiled module is measured against, and the algorithm is
- * awaitable.mc's (the hand-written oracle) function by function:
+ * as an ordinary C extension, the way php-src's own are. It is a hand-written
+ * mirror of THIS example's workload and concurrency STRUCTURE, on native OS
+ * threads and native sync -- no fork, no pipe, no dlsym, no libcurl:
  *
- *   await($fn, ...$args)       zend_fcall_info over the callable, the answer
- *                              or the pending exception put in an Intent
- *   parallel($fn, ...$args)    one fork() per argument; the child calls $fn,
- *                              serialize()s the answer and writes it down a
- *                              pipe (a tag byte, a length, the bytes); the
- *                              parent reads each pipe in order, waitpid()s
- *                              and unserialize()s. A child that threw sends
- *                              the message, and the parent counts an error.
- *   http_get / http_get_many   one pthread per url, libcurl's easy interface,
- *                              the body grown with realloc by the write
- *                              callback; every thread passes through the bound
- *                              Semaphore, if any, and counts live/peak/done
+ *   await($fn, ...$args)       zend_fcall_info over the callable, run on the
+ *                              calling thread, the answer or the pending
+ *                              exception put in an Intent
+ *   parallel($which, ...$args) one pthread per argument, each running the C
+ *                              EQUIVALENT of this example's workload named by
+ *                              $which (heavy/bracket/shout/strrev/throw); the
+ *                              threads share this process, joined in order.
+ *                              The mc-php module runs a php callable on each
+ *                              thread instead (docs/threads.md § 3b); the twin
+ *                              mirrors the fan-out with plain C functions, so
+ *                              it needs no php interpreter per thread. c/twin.php
+ *                              drives it and prints check.expect's bytes.
+ *   http_get / http_get_many   one pthread per url, the file the url names read
+ *                              with C stdio; every thread passes through the
+ *                              bound Semaphore, if any, and counts live/peak
  *   Semaphore / WaitGroup      a mutex and a condition variable each
  *   Mutex                      a mutex
  *
- * The native handle of each sync object lives in a PRIVATE property, as
- * awaitable.mc keeps it (the caller must not be able to hand pthread a pointer
- * of its choosing).
+ * The native handle of each sync object lives in a PRIVATE property (the caller
+ * must not hand a pointer of its choosing to a thread). A sync object frees its
+ * handle with itself and cannot be cloned.
  *
- *     cc -O2 -bundle -undefined dynamic_lookup -o awaitable.so awaitable.c $(php-config --includes) -lcurl   # macOS
- *     cc -O2 -shared -fPIC -o awaitable.so awaitable.c $(php-config --includes) -lcurl -lpthread         # Linux
+ * It is a ZTS extension (a thread-safe php loads it), built and graded in
+ * Docker php:8.5-zts-alpine by tests/examples.sh:
  *
- * POSIX: fork, pipe and pthreads. On Windows the twin is not built, and the
- * compiled module says what each function does there (README.md).
+ *     cc -O2 -shared -fPIC -o awaitable.so awaitable.c $(php-config --includes) -lpthread
+ *
+ * POSIX pthreads; on Windows the twin is not built and CI's ZTS legs cover the
+ * compiled module there (README.md).
  */
 #include "php.h"
-#include "ext/standard/php_var.h"
 #include "zend_exceptions.h"
-#include "zend_interfaces.h"
 #include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdio.h>
 #include <unistd.h>
-#include <errno.h>
-#include <sys/wait.h>
-#include <curl/curl.h>
 
 /* --- sync: mutex + condvar ------------------------------------------------ */
 typedef struct { pthread_mutex_t m; pthread_cond_t c; zend_long n; } sync_t;
@@ -63,44 +67,36 @@ static void wg_wait(sync_t *w) {
     pthread_mutex_unlock(&w->m);
 }
 
-/* --- the counters, the bound semaphore, the wait group of every thread ---- */
+/* --- the counters and the bound semaphore --------------------------------- */
+/* Shared by parallel and http_get_many, as the module's atomics are: since
+ * reset(), peak is the greatest number of tasks that ran at once, completed
+ * the tasks that returned, errors the ones that threw. */
 static pthread_mutex_t statm = PTHREAD_MUTEX_INITIALIZER;
 static zend_long live, peak, done_n, errn;
 static sync_t *gsem;
-static sync_t gwg;
 
-/* --- one fetch on a thread: native only, it never touches a php value ----- */
-typedef struct { pthread_t tid; char *url; char *buf; size_t len; long code; int err; int joined; } job_t;
+/* --- one fetch on a thread: pure C, it never touches a php value ----------- */
+typedef struct { pthread_t tid; char *path; char *buf; size_t len; int err; int joined; } job_t;
 
-static size_t sink(char *p, size_t size, size_t n, void *data) {
-    job_t *job = data;
-    size_t got = size * n;
-    char *b = realloc(job->buf, job->len + got + 1);
-    if (!b) return 0;
-    memcpy(b + job->len, p, got);
-    b[job->len + got] = 0;
-    job->buf = b;
-    job->len += got;
-    return got;
+/* a file:// url is a path; read it whole with C stdio */
+static char *read_file(const char *path, size_t *out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    size_t cap = 4096, n = 0;
+    char *b = malloc(cap);
+    if (!b) { fclose(f); return NULL; }
+    for (;;) {
+        if (n == cap) { cap *= 2; char *nb = realloc(b, cap); if (!nb) { free(b); fclose(f); return NULL; } b = nb; }
+        size_t k = fread(b + n, 1, cap - n, f);
+        n += k;
+        if (k == 0) break;
+    }
+    fclose(f);
+    *out = n;
+    return b;
 }
 
-static void http_do(job_t *job) {
-    CURL *h = curl_easy_init();
-    if (!h) { job->err = 2; return; }
-    curl_easy_setopt(h, CURLOPT_URL, job->url);
-    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, sink);
-    curl_easy_setopt(h, CURLOPT_WRITEDATA, job);
-    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L);
-    curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
-    job->err = curl_easy_perform(h);
-    long code = 0;
-    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
-    job->code = code;
-    curl_easy_cleanup(h);
-}
-
-static void *worker(void *arg) {
+static void *fetch_worker(void *arg) {
     job_t *job = arg;
     sync_t *s = gsem;
     if (s) sem_acquire(s);
@@ -108,36 +104,35 @@ static void *worker(void *arg) {
     live++;
     if (live > peak) peak = live;
     pthread_mutex_unlock(&statm);
-    http_do(job);
+    job->buf = read_file(job->path, &job->len);
+    if (!job->buf) job->err = 1;
     pthread_mutex_lock(&statm);
     live--; done_n++;
     pthread_mutex_unlock(&statm);
     if (s) sem_release(s);
-    wg_done(&gwg);
     return NULL;
 }
 
-static job_t *run_job(zend_string *url) {
+static const char *url_path(const char *u) { return strncmp(u, "file://", 7) == 0 ? u + 7 : u; }
+
+static job_t *run_fetch(zend_string *url) {
     job_t *job = calloc(1, sizeof *job);
-    job->url = strndup(ZSTR_VAL(url), ZSTR_LEN(url));
-    wg_add(&gwg, 1);
-    if (pthread_create(&job->tid, NULL, worker, job) != 0) {
-        wg_done(&gwg); job->err = 2; job->joined = 1;
-    }
+    job->path = strdup(url_path(ZSTR_VAL(url)));
+    if (pthread_create(&job->tid, NULL, fetch_worker, job) != 0) { job->err = 1; job->joined = 1; }
     return job;
 }
 static void join_job(job_t *job) { if (!job->joined) { pthread_join(job->tid, NULL); job->joined = 1; } }
-static void free_job(job_t *job) { free(job->buf); free(job->url); free(job); }
+static void free_job(job_t *job) { free(job->buf); free(job->path); free(job); }
 
 PHP_FUNCTION(http_get) {
     zend_string *url;
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(url)
     ZEND_PARSE_PARAMETERS_END();
-    job_t *job = run_job(url);
+    job_t *job = run_fetch(url);
     join_job(job);
-    if (job->err) zend_throw_exception(zend_ce_exception, curl_easy_strerror(job->err), 0);
-    else RETVAL_STRINGL(job->buf ? job->buf : "", job->len);
+    if (job->err || !job->buf) zend_throw_exception_ex(zend_ce_exception, 0, "awaitable\\http_get: cannot read %s", ZSTR_VAL(url));
+    else RETVAL_STRINGL(job->buf, job->len);
     free_job(job);
 }
 
@@ -148,120 +143,112 @@ PHP_FUNCTION(http_get_many) {
         Z_PARAM_VARIADIC('+', urls, n)
     ZEND_PARSE_PARAMETERS_END();
     if (n > 64) { zend_type_error("awaitable\\http_get_many(): at most 64 urls"); RETURN_THROWS(); }
-    /* every argument checked BEFORE any thread starts */
     for (uint32_t i = 0; i < n; i++)
         if (Z_TYPE(urls[i]) != IS_STRING) { zend_type_error("awaitable\\http_get_many(): every argument must be a string"); RETURN_THROWS(); }
     job_t *jobs[64];
-    for (uint32_t i = 0; i < n; i++) jobs[i] = run_job(Z_STR(urls[i]));
+    for (uint32_t i = 0; i < n; i++) jobs[i] = run_fetch(Z_STR(urls[i]));
     array_init_size(return_value, n);
     for (uint32_t i = 0; i < n; i++) {
         join_job(jobs[i]);
-        if (jobs[i]->err) add_next_index_null(return_value);
-        else add_next_index_stringl(return_value, jobs[i]->buf ? jobs[i]->buf : "", jobs[i]->len);
+        if (jobs[i]->err || !jobs[i]->buf) add_next_index_stringl(return_value, "", 0);
+        else add_next_index_stringl(return_value, jobs[i]->buf, jobs[i]->len);
         free_job(jobs[i]);
     }
 }
 
-/* --- any php callable, one forked child per argument ---------------------- */
-/* a signal handler installed without SA_RESTART makes a blocked read, write
-   or waitpid return -1 with EINTR: asked again, every one (signals.php) */
-static void write_all(int fd, const char *p, size_t n) {
-    size_t off = 0;
-    while (off < n) {
-        ssize_t k = write(fd, p + off, n - off);
-        if (k < 0 && errno == EINTR) continue;
-        if (k <= 0) return;
-        off += k;
-    }
-}
-static size_t read_all(int fd, char *p, size_t n) {
-    size_t off = 0;
-    while (off < n) {
-        ssize_t k = read(fd, p + off, n - off);
-        if (k < 0 && errno == EINTR) continue;
-        if (k <= 0) return off;
-        off += k;
-    }
-    return off;
+/* --- parallel: the C EQUIVALENT of this example's workload, one per thread -- */
+enum { W_HEAVY, W_BRACKET, W_SHOUT, W_STRREV, W_THROW, W_UNKNOWN };
+
+static int which_of(const char *s) {
+    if (!strcmp(s, "heavy"))   return W_HEAVY;
+    if (!strcmp(s, "bracket")) return W_BRACKET;
+    if (!strcmp(s, "shout"))   return W_SHOUT;
+    if (!strcmp(s, "strrev"))  return W_STRREV;
+    if (!strcmp(s, "throw"))   return W_THROW;
+    return W_UNKNOWN;
 }
 
-/* the child: call, serialize, write (tag 0, length, bytes) or the message of
-   what it threw (tag 1), and exit without running php's shutdown */
-static void child(int wfd, zend_fcall_info *fci, zend_fcall_info_cache *fcc, zval *arg) {
-    zval out;
-    char tag;
-    ZVAL_UNDEF(&out);
-    fci->retval = &out; fci->params = arg; fci->param_count = 1;
-    zend_call_function(fci, fcc);
-    if (!EG(exception)) {
-        smart_str buf = {0};
-        php_serialize_data_t vh;
-        PHP_VAR_SERIALIZE_INIT(vh);
-        php_var_serialize(&buf, &out, &vh);
-        PHP_VAR_SERIALIZE_DESTROY(vh);
-        tag = 0; write_all(wfd, &tag, 1);
-        uint64_t len = buf.s ? ZSTR_LEN(buf.s) : 0;
-        write_all(wfd, (char *)&len, 8);
-        if (len) write_all(wfd, ZSTR_VAL(buf.s), len);
-        _exit(0);
+/* the heavy workload, byte for byte awaitable.src.php's heavy(): the sum over
+ * i in 1..200000 of (i * (int) $n) % 7 */
+static zend_long heavy_sum(zend_long k) {
+    zend_long s = 0;
+    for (zend_long i = 1; i <= 200000; i++) s += (i * k) % 7;
+    return s;
+}
+
+typedef struct {
+    pthread_t tid;
+    int kind;
+    char *arg;
+    /* the result the main thread turns into a zval after the join */
+    zend_long sum;
+    char *sval;
+    int is_err;
+} ptask_t;
+
+static char *dup_bracket(const char *s) { size_t n = strlen(s); char *r = malloc(n + 3); r[0] = '['; memcpy(r + 1, s, n); r[n + 1] = ']'; r[n + 2] = 0; return r; }
+static char *dup_shout(const char *s) { size_t n = strlen(s); char *r = malloc(n + 2); for (size_t i = 0; i < n; i++) r[i] = (char) toupper((unsigned char) s[i]); r[n] = '!'; r[n + 1] = 0; return r; }
+static char *dup_strrev(const char *s) { size_t n = strlen(s); char *r = malloc(n + 1); for (size_t i = 0; i < n; i++) r[i] = s[n - 1 - i]; r[n] = 0; return r; }
+static char *dup_throw(const char *s) { size_t n = strlen(s); const char *p = "failed on "; size_t pn = strlen(p); char *r = malloc(pn + n + 1); memcpy(r, p, pn); memcpy(r + pn, s, n); r[pn + n] = 0; return r; }
+
+static void *ptask_worker(void *a) {
+    ptask_t *t = a;
+    switch (t->kind) {
+        case W_HEAVY:   t->sum = heavy_sum(strtol(t->arg, NULL, 10)); break;
+        case W_BRACKET: t->sval = dup_bracket(t->arg); break;
+        case W_SHOUT:   t->sval = dup_shout(t->arg); break;
+        case W_STRREV:  t->sval = dup_strrev(t->arg); break;
+        case W_THROW:   t->sval = dup_throw(t->arg); t->is_err = 1; break;
+        default:        t->sval = strdup(""); t->is_err = 1; break;
     }
-    zend_object *e = EG(exception);
-    zval rv, *m = zend_read_property(zend_get_exception_base(e), e, "message", 7, 1, &rv);
-    tag = 1; write_all(wfd, &tag, 1);
-    uint64_t len = Z_TYPE_P(m) == IS_STRING ? Z_STRLEN_P(m) : 0;
-    write_all(wfd, (char *)&len, 8);
-    if (len) write_all(wfd, Z_STRVAL_P(m), len);
-    _exit(0);
+    return NULL;
 }
 
 PHP_FUNCTION(parallel) {
-    zend_fcall_info fci; zend_fcall_info_cache fcc;
+    zend_string *which;
     zval *args; uint32_t n;
     ZEND_PARSE_PARAMETERS_START(2, -1)
-        Z_PARAM_FUNC(fci, fcc)
+        Z_PARAM_STR(which)
         Z_PARAM_VARIADIC('+', args, n)
     ZEND_PARSE_PARAMETERS_END();
     if (n > 64) { zend_type_error("awaitable\\parallel(): at most 64 jobs"); RETURN_THROWS(); }
-    pid_t pid[64]; int fd[64];
+    int kind = which_of(ZSTR_VAL(which));
+    ptask_t task[64];
     for (uint32_t i = 0; i < n; i++) {
-        /* a job that cannot start is -1 in ITS slot, answered as failed */
-        pid[i] = -1;
-        int p[2];
-        if (pipe(p) != 0) continue;
-        pid_t k = fork();
-        if (k == 0) { close(p[0]); child(p[1], &fci, &fcc, &args[i]); }
-        close(p[1]);
-        if (k < 0) { close(p[0]); continue; }
-        pid[i] = k; fd[i] = p[0];
+        convert_to_string(&args[i]);
+        task[i].kind = kind;
+        task[i].arg = strndup(Z_STRVAL(args[i]), Z_STRLEN(args[i]));
+        task[i].sum = 0; task[i].sval = NULL; task[i].is_err = 0;
+        if (pthread_create(&task[i].tid, NULL, ptask_worker, &task[i]) != 0) { task[i].is_err = 1; task[i].sval = strdup(""); }
     }
+    /* every task is outstanding until the joins begin */
+    pthread_mutex_lock(&statm);
+    if ((zend_long) n > peak) peak = n;
+    pthread_mutex_unlock(&statm);
     array_init_size(return_value, n);
     for (uint32_t i = 0; i < n; i++) {
-        char tag = 1; uint64_t len = 0; char *buf = NULL;
-        if (pid[i] != -1) {
-            if (read_all(fd[i], &tag, 1) == 1 && read_all(fd[i], (char *)&len, 8) != 8) len = 0;
-            if (len) { buf = malloc(len + 1); if (read_all(fd[i], buf, len) != len) len = 0; }
-            close(fd[i]);
-            int st; while (waitpid(pid[i], &st, 0) < 0 && errno == EINTR) {}
-        }
-        zval z;
-        ZVAL_NULL(&z);
-        if (tag == 0 && len) {
-            const unsigned char *p = (unsigned char *)buf;
-            php_unserialize_data_t vh;
-            PHP_VAR_UNSERIALIZE_INIT(vh);
-            if (!php_var_unserialize(&z, &p, p + len, &vh)) { zval_ptr_dtor(&z); ZVAL_NULL(&z); }
-            PHP_VAR_UNSERIALIZE_DESTROY(vh);
-        }
-        if (tag != 0) {
+        pthread_join(task[i].tid, NULL);
+        if (task[i].kind == W_HEAVY) {
+            zval row;
+            array_init(&row);
+            add_assoc_stringl(&row, "arg", task[i].arg, strlen(task[i].arg));
+            add_assoc_long(&row, "sum", task[i].sum);
+            add_assoc_long(&row, "pid", (zend_long) getpid());
+            add_next_index_zval(return_value, &row);
+            done_n++;
+        } else if (task[i].is_err && task[i].kind == W_THROW) {
             errn++;
-            if (len) ZVAL_STRINGL(&z, buf, len);
+            add_next_index_string(return_value, task[i].sval);
+        } else {
+            add_next_index_string(return_value, task[i].sval);
+            done_n++;
         }
-        free(buf);
-        add_next_index_zval(return_value, &z);
+        free(task[i].arg);
+        free(task[i].sval);
     }
 }
 
-/* --- await: suspends, runs, hands back the Intent ------------------------- */
+/* --- await: suspends, runs on the calling thread, hands back the Intent ---- */
 static zend_class_entry *ce_intent, *ce_sem, *ce_wg, *ce_mx;
 
 PHP_FUNCTION(await) {
@@ -295,8 +282,7 @@ PHP_FUNCTION(await) {
 PHP_FUNCTION(peak)      { ZEND_PARSE_PARAMETERS_NONE(); RETURN_LONG(peak); }
 PHP_FUNCTION(completed) { ZEND_PARSE_PARAMETERS_NONE(); RETURN_LONG(done_n); }
 PHP_FUNCTION(errors)    { ZEND_PARSE_PARAMETERS_NONE(); RETURN_LONG(errn); }
-PHP_FUNCTION(reset)     { ZEND_PARSE_PARAMETERS_NONE(); peak = 0; done_n = 0; errn = 0; }
-PHP_FUNCTION(wait_all)  { ZEND_PARSE_PARAMETERS_NONE(); wg_wait(&gwg); }
+PHP_FUNCTION(reset)     { ZEND_PARSE_PARAMETERS_NONE(); pthread_mutex_lock(&statm); live = 0; peak = 0; done_n = 0; errn = 0; pthread_mutex_unlock(&statm); }
 
 /* --- the sync classes: the handle in a private property ------------------- */
 static void *handle(zend_class_entry *ce, zval *self) {
@@ -354,7 +340,7 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(ai_await, 0, 1, awaitable\\Intent, 0)
     ZEND_ARG_VARIADIC_TYPE_INFO(0, args, IS_MIXED, 0)
 ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_parallel, 0, 2, IS_ARRAY, 0)
-    ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
+    ZEND_ARG_TYPE_INFO(0, which, IS_STRING, 0)
     ZEND_ARG_VARIADIC_TYPE_INFO(0, args, IS_MIXED, 0)
 ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(ai_http_get, 0, 1, IS_STRING, 0)
@@ -382,7 +368,6 @@ static const zend_function_entry awaitable_functions[] = {
     ZEND_NS_FE("awaitable", completed, ai_int)
     ZEND_NS_FE("awaitable", errors, ai_int)
     ZEND_NS_FE("awaitable", reset, ai_void)
-    ZEND_NS_FE("awaitable", wait_all, ai_void)
     PHP_FE_END
 };
 static const zend_function_entry sem_methods[] = {
@@ -440,8 +425,6 @@ static zend_class_entry *reg(const char *name, const zend_function_entry *m) {
 }
 
 static PHP_MINIT_FUNCTION(awaitable) {
-    curl_global_init(CURL_GLOBAL_ALL);
-    sync_init(&gwg, 0);
     memcpy(&sync_handlers, zend_get_std_object_handlers(), sizeof sync_handlers);
     sync_handlers.free_obj = sync_free;
     sync_handlers.clone_obj = NULL;
@@ -464,7 +447,7 @@ static PHP_MINIT_FUNCTION(awaitable) {
 
 zend_module_entry awaitable_module_entry = {
     STANDARD_MODULE_HEADER, "awaitable", awaitable_functions,
-    PHP_MINIT(awaitable), NULL, NULL, NULL, NULL, "0.3.0", STANDARD_MODULE_PROPERTIES
+    PHP_MINIT(awaitable), NULL, NULL, NULL, NULL, "0.4.0", STANDARD_MODULE_PROPERTIES
 };
 
 ZEND_GET_MODULE(awaitable)

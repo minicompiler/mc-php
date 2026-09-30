@@ -1,0 +1,62 @@
+# awaitable -- awaitable.src.php, a ZTS PHP extension. The WINDOWS linker line.
+#
+# Everything but [target], [sysroot], [linker] and build_id is
+# examples/awaitable/mcphp.toml. mc's [linker] is flat, so the third host is a
+# third file (examples/decimal/mcphp.windows.toml says why).
+#
+#     sh tests/winsys.sh x86_64
+#     mc-php build examples/awaitable --config examples/awaitable/mcphp.windows.toml
+#
+# and build/awaitable.dll is what a thread-safe `php -d extension=...` loads. It
+# is a ZTS module -- parallel() runs php callables on threads (docs/threads.md,
+# step 3b) -- so it links php8ts.lib (the php8ts.dll a thread-safe php is) and
+# the build id says ,TS. The ARCHITECTURE is the target php's, x86_64 on both
+# Windows hosts (windows.php.net publishes no arm64 build); the arm64 mc-php
+# cross-compiles across architectures, never across operating systems.
+#
+# The link, and why each word is there:
+#   -dll -noentry     a DLL with no DllMain: php calls get_module, not an entry
+#   -export:get_module  the one name php looks up; nothing else is exported
+#   php8ts.lib        the thread-safe php8ts.dll names lib/php_ext.mc calls
+#   kernel32.lib, ucrtbase.lib   the runtime's own (lib/rt_host_windows.mc);
+#                     kernel32.lib also carries WaitOnAddress and the two wakes
+#                     for the native sync core (tests/winsys.sh folds them in)
+# Each is an import library tests/winsys.sh writes from a name list: no php
+# development pack and no Windows SDK.
+
+[project]
+entry = "awaitable.src.php"
+out = "build/awaitable.dll"
+kind = "exe"
+opt = 1
+
+[target]
+os   = "windows"
+arch = "x86_64"
+
+[sysroot]
+path = "../../build/win-x86_64"
+
+[linker]
+cmd = "lld-link"
+args = ["-dll", "-noentry", "-machine:x64", "-nodefaultlib", "-export:get_module",
+        "-out:{out}", "{obj}",
+        "{sysroot}/php8ts.lib", "{sysroot}/kernel32.lib", "{sysroot}/ucrtbase.lib"]
+
+[extension]
+name = "awaitable"
+version = "0.1.0"
+
+# Read off the target thread-safe php with `php -i`.
+#
+#     PHP API             => 20250925             api
+#     PHP Extension Build => API20250925,TS,VS17  build_id
+#     Thread Safety       => enabled              thread_safety = "zts"
+#     Debug Build         => no                   debug = false
+[php]
+api = 20250925
+build_id = "API20250925,TS,VS17"
+thread_safety = "zts"
+debug = false
+# unchecked reads, as C (docs/semantics.md): see mcphp.toml
+checked_reads = false

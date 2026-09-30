@@ -280,7 +280,11 @@ def project_sweep():
             top = rp.split('/')
             if top[0] == 'tests':
                 continue
-            if top[0] == 'examples' and len(top) == 3 and top[1] in ext:
+            # a .php anywhere under a built example directory is that example's
+            # source, gated by the script that builds it -- the top level
+            # (check.php, demo.php) and a subdirectory alike (c/twin.php drives
+            # the C twin, run by tests/examples.sh).
+            if top[0] == 'examples' and len(top) >= 3 and top[1] in ext:
                 continue
             if top[0] == 'examples':
                 bad.append(f'{rp}: under examples/ but neither tests/ext.sh nor '

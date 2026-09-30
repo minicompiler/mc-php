@@ -1,17 +1,17 @@
 <?php
-// What awaitable.so does, printed so that a run can be compared with
-// check.expect byte for byte. Nothing here depends on the clock, a pid's
-// value or the network: parallelism is measured by what it CAN be seen to do
-// (every task on a thread of this process, a concurrency peak under a
-// semaphore), and the threads fetch file:// urls the script writes itself.
+// The C twin's driver. It mirrors ../check.php line for line and prints the
+// SAME bytes (graded against ../check.expect), with one difference: the twin
+// runs the C EQUIVALENT of this example's workload on each thread, not a php
+// callable (a C extension has no php interpreter per thread, docs/threads.md
+// § 3b), so where check.php hands parallel() a closure or a method it hands the
+// twin a NAME the twin dispatches -- 'bracket', 'shout', 'throw' -- and 'heavy'
+// and 'strrev' are the names check.php already uses. await() still takes a real
+// callable: the twin runs it on the calling thread, which has the interpreter.
 //
-//     php -d extension=build/awaitable.so -d opcache.enable_cli=1 check.php
+//     php -d extension=build/awaitable.so twin.php   # a thread-safe php
 //
-// It runs on a thread-safe (ZTS) php: parallel() runs each php callable on an
-// OS thread of its own, which a ZTS php gives a php request (docs/threads.md
-// § 3b, opcache required). It is graded against a recorded expectation and not
-// differentially: there is no interpreted awaitable to compare with --
-// awaitable.src.php is the compiler's input, not something php runs.
+// Its checksum is the module's: c_heavy computes heavy()'s sum, so the sums
+// match; the pthread semaphore caps concurrency, so peak stays within 2.
 declare(strict_types=1);
 
 use awaitable\Intent;
@@ -24,7 +24,7 @@ foreach (['awaitable\Intent', 'awaitable\Semaphore', 'awaitable\WaitGroup', 'awa
     echo $c, ": ", var_export(class_exists($c), true), "\n";
 }
 
-// --- await: suspends, runs, and ALWAYS hands back an Intent ------------------
+// --- await: suspends, runs on the calling thread, ALWAYS hands back an Intent
 $w = \awaitable\await(fn(int $a, int $b) => $a + $b, 2, 40);
 echo get_class($w), " done=", var_export($w->done, true), " failed=", var_export($w->failed, true),
      " data=", var_export($w->data, true), " exception=", var_export($w->exception, true), "\n";
@@ -36,13 +36,10 @@ echo "a callable that throws: failed=", var_export($w->failed, true), " ",
 try {
     \awaitable\await('no_such_function');
 } catch (TypeError $e) {
-    // the clause before the comma: php's own parameter parsing (the C twin)
-    // goes on with the reason, `function "no_such_function" not found or
-    // invalid function name`, which the hand-written module does not say
     echo "TypeError: ", explode(', ', $e->getMessage())[0], "\n";
 }
 
-// --- parallel: any php callable, one forked child per argument ---------------
+// --- parallel: the C workload on one thread per argument ---------------------
 function heavy(string $n): array {
     $k = (int) $n;
     $s = 0;
@@ -53,10 +50,6 @@ $args = ['1', '2', '3', '4', '5', '6'];
 \awaitable\reset();
 $par = \awaitable\parallel('heavy', ...$args);
 $seq = array_map('heavy', $args);
-// parallel runs on OS THREADS now, not forked processes, so every task shares
-// this process's pid -- the evidence that they are threads, not children. The
-// peak counter says how many ran at once (all six were outstanding until the
-// joins began).
 $pids = array_unique(array_column($par, 'pid'));
 echo "parallel: ", count($par), " results, the same sums as sequential: ",
      var_export(array_column($par, 'sum') === array_column($seq, 'sum'), true),
@@ -64,23 +57,20 @@ echo "parallel: ", count($par), " results, the same sums as sequential: ",
      var_export(count($pids) === 1 && $pids[0] === getmypid(), true),
      ", peak concurrency: ", \awaitable\peak(), "\n";
 echo "sums: ", implode(',', array_column($par, 'sum')), "\n";
-// the counters count the TASKS: parallel's threads are threads too, so its six
-// count toward completed() and peak(), and a task that returned is no error
 echo "after parallel: completed() = ", \awaitable\completed(), ", peak() = ", \awaitable\peak(),
      ", errors() = ", \awaitable\errors(), "\n";
 
-class Service { public function shout(string $x): string { return strtoupper($x) . "!"; } }
-var_dump(\awaitable\parallel(fn(string $s) => "[$s]", 'a', 'b'));
-var_dump(\awaitable\parallel([new Service, 'shout'], 'hi', 'bye'));
+var_dump(\awaitable\parallel('bracket', 'a', 'b'));
+var_dump(\awaitable\parallel('shout', 'hi', 'bye'));
 var_dump(\awaitable\parallel('strrev', 'abc', 'xyz'));
-$e = \awaitable\parallel(function (string $x): string { throw new RuntimeException("failed on $x"); }, 'q');
+$e = \awaitable\parallel('throw', 'q');
 echo "a child that throws: ", var_export($e[0], true), ", errors() = ", \awaitable\errors(), "\n";
 $w = \awaitable\await('awaitable\parallel', 'heavy', '1', '2');
 echo "await(parallel): failed=", var_export($w->failed, true), " sums=",
      implode(',', array_column($w->data, 'sum')), "\n";
 
-// --- threads: native work on OS threads, capped by a semaphore ---------------
-$dir = sys_get_temp_dir() . '/mcphp-awaitable-' . getmypid();
+// --- threads: file reads on OS threads, capped by a semaphore ----------------
+$dir = sys_get_temp_dir() . '/mcphp-awaitable-c-' . getmypid();
 @mkdir($dir);
 $urls = [];
 $want = [];
@@ -120,7 +110,6 @@ $s = new Semaphore(1);
 $s->acquire();
 $s->release();
 echo "WaitGroup, Mutex and Semaphore: every call returned\n";
-// the native handle is not the caller's to write
 try {
     $s->__h = 0;
 } catch (Error $e) {
