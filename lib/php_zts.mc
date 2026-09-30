@@ -560,6 +560,8 @@ i64 phz_eng_syms() {
 #define JB_LVL      664             // php's output level under the worker's buffer
 #define JB_REC      672             // the thread's record (lib/php_rt.mc § the thread API)
 #define JB_TRACE    680
+#define JB_UNSH     688
+#define JB_NOSG     696
 #define JB_MAP      4096
 
 void phz_bput(uptr bf, uptr p, i64 n) {
@@ -1085,6 +1087,8 @@ i64 php_thr_eng_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a
     st64(rec + PHA_ARG, job);
     st64(job + JB_REC, rec);
     if (getenv("MCPHP_T3B_TRACE")) st64(job + JB_TRACE, 1);
+    if (getenv("MCPHP_T3B_UNSHARE")) st64(job + JB_UNSH, 1);
+    if (getenv("MCPHP_T3B_NOSG")) st64(job + JB_NOSG, 1);
     if (ph_thr_create(&phz_eng_body, job, rec + PHA_H) != 0) php_die("mc-php: cannot start a thread\n", 30);
     ph_lock();
     st64(ph_ttab + id * 8, rec);
@@ -1240,6 +1244,28 @@ void phz_share(uptr job) {
     }
 }
 
+void phz_unshare(uptr job) {
+    uptr tab = job + JB_TAB;
+    uptr dx = phz_dx_new(tab);
+    uptr ft = ld64(phx_eg + EGX_FUNCTION_TABLE);
+    uptr ct = ld64(phx_eg + EGX_CLASS_TABLE);
+    uptr zd = php_dlsym("zend_hash_del");
+    if (!zd) zd = php_dlsym("zend_hash_del@@16");
+    loop {
+        if (ld64(dx + DX_POS) >= ld64(tab + 8)) break;
+        i64 w = phz_rw(dx);
+        uptr p = phz_rw(dx);
+        uptr k = phz_rzs(dx);
+        uptr t = ft;
+        if (w) t = ct;
+        uptr d = ld64(t + 48);
+        st64(t + 48, 0);
+        callp(zd, t, k);
+        st64(t + 48, d);
+        phz_zs_rel(k);
+    }
+    phz_tr(job, "T unshared\n");
+}
 // the worker's request, once RINIT gave this thread its block: the code
 // shared, the call made as the request's shutdown function, what a fatal
 // error left if the call did not return
@@ -1247,9 +1273,11 @@ void phz_eng_run(uptr job) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr ls = callp(phx_ts_get);
     uptr pg = ls + ld64(phz_f(PHZ_PGO));
     uptr sg = ls + ld64(phz_f(PHZ_SGO));
+    if (!ld64(job + JB_NOSG)) {
     st8(pg + PGX_DURING_STARTUP, 0);
     st8(sg + SGX_HEADERS_SENT, 1);
     st8(sg + SGX_NO_HEADERS, 1);
+    }
     phz_tr(job, "T sg\n");
     callp(phz_f(PHZ_MAPEXT), ld64(job + JB_MAPLAST));
     phz_tr(job, "T mapext\n");
@@ -1274,6 +1302,7 @@ void phz_eng_run(uptr job) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     callp(phz_f(PHZ_SDFREE));
     phz_tr(job, "T sdfree\n");
     st64(phT + PHT_phz_job, 0);
+    if (ld64(job + JB_UNSH)) phz_unshare(job);
     if (ld64(job + JB_DONE)) return;
     // a bailout: php's own fatal error ended the call, and printed itself
     // into the worker's output
@@ -1293,8 +1322,10 @@ uptr phz_eng_body(uptr job) {
     phz_tr(job, "T tsres\n");
     uptr ls = callp(phx_ts_get);
     uptr pg = ls + ld64(phz_f(PHZ_PGO));
+    if (!ld64(job + JB_NOSG)) {
     st8(pg + PGX_EXPOSE_PHP, 0);
     st8(pg + PGX_AUTO_GLOBALS_JIT, 1);
+    }
     phz_tr(job, "T pg\n");
     i64 okr = (callp(phz_f(PHZ_RSTART)) & 0xffffffff) == 0;
     phz_tr(job, "T rstart\n");

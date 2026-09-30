@@ -880,6 +880,9 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
                 '$s = opcache_get_status(false); echo "opcache: enabled ", var_export($s["opcache_enabled"] ?? null, true), ", this script cached ", var_export(opcache_is_script_cached(__FILE__), true), ", file cache only ", var_export($s["file_cache_only"] ?? null, true), "\n";' \
                 '$f = realpath("tests/ext/threads/php.php"); echo "php.php: compiled ", var_export(opcache_compile_file($f), true), ", cached ", var_export(opcache_is_script_cached($f), true), "\n";' > "$tmp/t.d.php"
             MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
+            echo "      -- UNSHARE"; MCPHP_T3B_UNSHARE=1 MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
+            echo "      -- NOSG"; MCPHP_T3B_NOSG=1 MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
+            echo "      -- both"; MCPHP_T3B_NOSG=1 MCPHP_T3B_UNSHARE=1 MCPHP_T3B_TRACE=1 "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
         fi
         "$PHP" -d opcache.enable_cli=0 -d extension="$tmp/build/r.$sx" tests/ext/threads/php.php 2>&1 | tr -d '\r' > "$tmp/t.q"; tq=$?
         printf '%s\n' "a closure: mc-php: a php callable runs on another thread only when opcache caches the code it can reach: enable opcache (opcache.enable=1, and opcache.enable_cli=1 on the command line)" > "$tmp/t.qw"
