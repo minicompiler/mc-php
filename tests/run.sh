@@ -76,7 +76,7 @@ fi
 # arm64 host: plain is arm64, --machine=x86_64 is x86-64 System V,
 # --machine=x86_64-win is Windows x64. Cosmetic (dump only), but a regression
 # would mean a dump shows the wrong bytes.
-dm() { echo '<?php echo 1;' | "$BIN" --dump-asm ${2:+--machine=$2} /dev/stdin 2>&1 | awk '/_ph_at_load:/{f=1} f&&/\.word/{print $2; exit}'; }
+dm() { echo "<?php echo 1;" | "$BIN" --dump-asm ${1:+--machine=$1} /dev/stdin 2>&1 | awk '/_ph_at_load:/{f=1} f&&/\.word/{print $2; exit}'; }
 dm_plain=$(dm)
 dm_x64=$(dm x86_64)
 dm_win=$(dm x86_64-win)
