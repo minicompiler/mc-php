@@ -1462,3 +1462,52 @@ changed what the compiler does. The hosts branch is that commit and it is delete
   no longer read heredoc text as code, and `ph_scan_globals` skips a nowdoc and searches a
   heredoc's interpolations: `tests/g/131-nowdoc-text.php` (the first head refused its prose) and
   `tests/r/d6-globals-heredoc.php`.
+- threads, step 3b (2026-09-29, branch `threads-3b`, from main b7fa17e): **a php callable on a
+  thread of its own** (`docs/threads.md` § 3b; the probe is `probes/t3b` on branch
+  `threads-3b-probe`, mode 3 approved). A ZTS module's `mcphp_thread_start` takes a php closure,
+  a function's name, an array callable or an invokable object. The worker becomes a php thread
+  (`ts_resource_ex`, `php_request_startup`, then `php_request_shutdown` and `ts_free_thread`), so
+  it is a php REQUEST of its own: a FRESH copy of what MINIT left (its own RINIT), its own php
+  globals and statics. Only the CODE is shared: the starting request's user functions and
+  classes as they were at the start, added to the worker's tables BY POINTER, with the worker's
+  `ZEND_MAP_PTR` table extended to the starter's and the closure given a private run-time cache.
+  That needs opcache's immutable op_arrays. The start checks the closure (refcount NULL) and
+  every user function and class (`ZEND_ACC_IMMUTABLE`), and throws an Error naming
+  `opcache.enable`/`opcache.enable_cli` and the first thing not cached. There is no fallback. An
+  NTS php still refuses. Compiled (3a) workers are unchanged and still share the request's module
+  state; `docs/threads.md` has one table comparing the two kinds.
+  - Everything that crosses is a COPY through pages neither Zend heap owns: arguments, a
+    closure's captures and bound `$this`, the result (copied out of the worker's heap before its
+    request ends), and an uncaught throwable's class, message and code, rethrown at the join.
+    Plain values only: scalars, strings, arrays, and objects of the script's own classes or
+    `stdClass` (identity and cycles kept). Refused by name (`mc-php: cannot copy into or out of a
+    php thread: ...`): php's own classes and their subclasses, enum cases, and nesting past 256
+    levels. A resource is already refused at the module's boundary.
+  - The call runs as the worker request's one shutdown function (`append_user_shutdown_function`
+    + `php_call_shutdown_functions`). That is php's own `zend_try`, so a fatal error ends the
+    call and not the process; the join throws `mc-php: a php thread ended on a fatal error: ...`.
+    A trampoline (a fake internal function whose handler is `phz_tramp`) keeps an uncaught
+    exception in `EG(exception)`. `exit()` gives a null result.
+  - Output: each worker has its own output buffer. At the join the buffer is written through the
+    module's own write, in join order. A detached or unjoined worker's buffer is written at
+    RSHUTDOWN, and its throwable or fatal error is reported as a compiled thread's is.
+  - A function or class declared after the start is not in the worker: php's own `Call to
+    undefined function` Error, rethrown at the join. User constants and the request's
+    `ini_set()` changes do not cross either (measured and documented).
+  - Deviation from the approved sketch, on record: the shared entries are NOT removed before the
+    worker's shutdown. Shutdown leaves an immutable function or class alone and frees the
+    worker's own per-thread statics of them. Removing the entries leaked those statics: the debug
+    ZTS php reported 3 blocks for one `static` and one static property; leaving them in reported
+    0.
+  - mc bug found and worked around, not fixed: with -O on arm64, a register-allocated local
+    loaded as an earlier operand, followed by an operand containing `&&`/`||`, is passed as
+    garbage. A label drops every alias, including those of live depths. The repro prints 168
+    without -O and 3 with it. It hit 3b's endall swap (`phz_eng_end(rec, !exc && ...)` got
+    rec = -1). The swap now computes the flag into a local first, with a comment naming the bug.
+    The coordinator will fix mc after this PR. The same shape in mc-php: none in `lib/`; one in
+    `src/closure.mc:289`, the compiler, which is not built with opt.
+  - Cost: `lib/php_zts.mc` +952 lines; `PHT_SIZE_ZTS` 12464 -> 12472 (`phz_job`); 31 new offsets
+    in `lib/php_ext.mc`, graded by `tests/ext/abi.c` (which spells out `zend_closure`, a private
+    struct). php's names are looked up with `php_dlsym` (26, several ZTS-only). A start costs the
+    probe's ~400 us, mostly TSRM. The worker-context pool is documented as the known cost and is
+    not built.

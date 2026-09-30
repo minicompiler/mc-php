@@ -413,3 +413,955 @@ uptr php_thr_block(uptr from, i64 idx) {
     st64(b + PHT_phz_spn, ld64(from + PHT_phz_spn));
     return b;
 }
+
+// ---- a php callable on a thread of its own (threads step 3b) ---------------
+// mcphp_thread_start with a php callable -- a php closure, a function's name,
+// an array callable, an invokable object -- in a ZTS module (docs/threads.md
+// § 3b). The worker becomes a php thread: ts_resource_ex gives it TSRM
+// storage, php_request_startup a request of its own (its own EG, CG, PG, SG,
+// Zend heap, output layer, and this module's RINIT, so a FRESH copy of what
+// MINIT left: phz_privatize). php_request_shutdown and ts_free_thread end
+// both. What crosses between the two requests is copied through memory
+// neither heap owns:
+//
+//   * the CODE is shared, by pointer: the starting request's user functions
+//     and classes as they were at the start, added to the worker's tables.
+//     That is safe only for opcache's immutable op_arrays, whose run-time
+//     cache and statics live in per-thread ZEND_MAP_PTR slots (probes/t3b,
+//     mode 3): the start refuses code opcache does not cache, by name;
+//   * the closure gets a private run-time cache (ZEND_ACC_HEAP_RT_CACHE on
+//     the worker's copy of its function);
+//   * everything else is a VALUE copied: the arguments, the closure's
+//     captured variables and bound $this, the result and a thrown
+//     exception's class, message and code -- serialized out of one heap
+//     (phz_sx_*) and rebuilt in the other (phz_dx_*). Only plain values
+//     cross: see phz_uncopyable;
+//   * the worker's output goes to a buffer of its own and is written into
+//     the request's output at the join, in join order; a thread nobody joins
+//     has it written when the request waits for it (php_thr_endall).
+//
+// The call runs as the worker request's one shutdown function: that is
+// php's own call site with a bailout point (zend_try) an extension can reach
+// without setjmp (docs/plan.md D7), so a fatal error in the worker ends the
+// call and not the process. A trampoline -- an internal function whose
+// handler is phz_tramp -- is what php calls there, so the callable itself
+// runs under an internal frame and an uncaught exception stays in
+// EG(exception) for the trampoline to copy.
+//
+// The code is not taken out of the worker's tables before its request
+// ends: shutdown leaves an immutable function and class alone
+// (destroy_op_array returns on a NULL refcount, destroy_zend_class on
+// ZEND_ACC_IMMUTABLE) and frees the worker's own per-thread statics of
+// them, which a removal would have leaked.
+
+// php's names this road needs, looked up once: all of them exist only in a
+// running php, several only in a thread-safe one
+#define PHZ_TSRES      0
+#define PHZ_TSFREE     1
+#define PHZ_RSTART     2
+#define PHZ_RSTOP      3
+#define PHZ_PGO        4
+#define PHZ_SGO        5
+#define PHZ_CGO        6
+#define PHZ_MAPEXT     7
+#define PHZ_CECL       8
+#define PHZ_MKCL       9
+#define PHZ_PROPS      10
+#define PHZ_HFIND      11
+#define PHZ_HADD       12
+#define PHZ_HEND       13
+#define PHZ_HBACK      14
+#define PHZ_OSTART     15
+#define PHZ_OGET       16
+#define PHZ_ODISC      17
+#define PHZ_OEND       18
+#define PHZ_OLEVEL     19
+#define PHZ_SDADD      20
+#define PHZ_SDCALL     21
+#define PHZ_SDFREE     22
+#define PHZ_UNWIND     23
+#define PHZ_ZSHASH     24
+#define PHZ_STDCLASS   25
+#define PHZ_COUNT      26
+u8   phz_s[200];
+i64  phz_syms;                      // 0 not looked up, 1 every name found, 2 one missing
+uptr phz_missing;
+
+uptr phz_f(i64 i) { return ld64(phz_s + i * 8); }
+void phz_sym(i64 i, uptr name) {
+    uptr p = php_dlsym(name);
+    st64(phz_s + i * 8, p);
+    if (!p && !phz_missing) phz_missing = name;
+}
+i64 phz_eng_syms() {
+    ph_lock();
+    if (!phz_syms) {
+        phz_sym(PHZ_TSRES, "ts_resource_ex");
+        phz_sym(PHZ_TSFREE, "ts_free_thread");
+        phz_sym(PHZ_RSTART, "php_request_startup");
+        phz_sym(PHZ_RSTOP, "php_request_shutdown");
+        phz_sym(PHZ_PGO, "core_globals_offset");
+        phz_sym(PHZ_SGO, "sapi_globals_offset");
+        phz_sym(PHZ_CGO, "compiler_globals_offset");
+        phz_sym(PHZ_MAPEXT, "zend_map_ptr_extend");
+        phz_sym(PHZ_CECL, "zend_ce_closure");
+        phz_sym(PHZ_MKCL, "zend_create_closure");
+        phz_sym(PHZ_PROPS, "zend_std_get_properties");
+        phz_sym(PHZ_HFIND, "zend_hash_find");
+        phz_sym(PHZ_HADD, "zend_hash_add");
+        phz_sym(PHZ_HEND, "zend_hash_internal_pointer_end_ex");
+        phz_sym(PHZ_HBACK, "zend_hash_move_backwards_ex");
+        phz_sym(PHZ_OSTART, "php_output_start_default");
+        phz_sym(PHZ_OGET, "php_output_get_contents");
+        phz_sym(PHZ_ODISC, "php_output_discard");
+        phz_sym(PHZ_OEND, "php_output_end");
+        phz_sym(PHZ_OLEVEL, "php_output_get_level");
+        phz_sym(PHZ_SDADD, "append_user_shutdown_function");
+        phz_sym(PHZ_SDCALL, "php_call_shutdown_functions");
+        phz_sym(PHZ_SDFREE, "php_free_shutdown_functions");
+        phz_sym(PHZ_UNWIND, "zend_is_unwind_exit");
+        phz_sym(PHZ_ZSHASH, "zend_string_hash_func");
+        phz_sym(PHZ_STDCLASS, "zend_standard_class_def");
+        phz_syms = 1;
+        if (phz_missing) phz_syms = 2;
+    }
+    i64 r = phz_syms;
+    ph_unlock();
+    return r == 1;
+}
+
+// A job: what a php thread and the thread that starts and joins it share,
+// in pages neither Zend heap nor runtime arena owns. The buffers are
+// (pointer, length, capacity) triples.
+#define JB_FUNC     0               // 256: the closure's function, the worker's copy
+#define JB_FAKE     256             // 160: the trampoline, an internal function
+#define JB_NAME     416             // 40: its name, a string php never frees
+#define JB_ENTRY    456             // 56: the worker's shutdown-function entry
+#define JB_TAB      512             // buffer: the code the worker shares (which, pointer, name)
+#define JB_IN       536             // buffer: the callable's copy and the arguments
+#define JB_OUT      560             // buffer: the result, or what ended the call
+#define JB_TXT      584             // buffer: the worker's output
+#define JB_KIND     608             // 1 a Closure, 2 any other callable (a value)
+#define JB_SCOPE    616
+#define JB_CALLED   624
+#define JB_MAPLAST  632             // the starting thread's CG(map_ptr_last)
+#define JB_NARGS    640
+#define JB_EXC      648             // 0 a result, 1 a throwable, 2 a fatal error, 3 no request
+#define JB_DONE     656             // 1 once the call returned (0 after a bailout)
+#define JB_LVL      664             // php's output level under the worker's buffer
+#define JB_REC      672             // the thread's record (lib/php_rt.mc § the thread API)
+#define JB_MAP      4096
+
+void phz_bput(uptr bf, uptr p, i64 n) {
+    i64 len = ld64(bf + 8);
+    i64 cap = ld64(bf + 16);
+    if (len + n > cap) {
+        i64 nc = cap * 2;
+        if (nc < 4096) nc = 4096;
+        if (nc < len + n) nc = (len + n + 4095) / 4096 * 4096;
+        uptr nb = ph_os_map(nc);
+        if (!nb) php_die("mc-php: cannot map a php thread's memory\n", 41);
+        if (len) php_memcpy(nb, ld64(bf), len);
+        if (cap) ph_os_unmap(ld64(bf), cap);
+        st64(bf, nb);
+        st64(bf + 16, nc);
+    }
+    if (n) php_memcpy(ld64(bf) + len, p, n);
+    st64(bf + 8, len + n);
+}
+void phz_bw(uptr bf, i64 v) { u8 w[8]; st64(w, v); phz_bput(bf, w, 8); }
+// bytes, as their length and then the bytes padded to a word
+void phz_bstr(uptr bf, uptr p, i64 n) {
+    phz_bw(bf, n);
+    phz_bput(bf, p, n);
+    u8 z[8];
+    st64(z, 0);
+    if (n % 8) phz_bput(bf, z, 8 - n % 8);
+}
+void phz_bzs(uptr bf, uptr zs) { phz_bstr(bf, zs + ZSX_VAL, ld64(zs + ZSX_LEN)); }
+void phz_bfree(uptr bf) {
+    if (ld64(bf + 16)) ph_os_unmap(ld64(bf), ld64(bf + 16));
+    st64(bf, 0);
+    st64(bf + 8, 0);
+    st64(bf + 16, 0);
+}
+void phz_job_free(uptr job) {
+    phz_bfree(job + JB_TAB);
+    phz_bfree(job + JB_IN);
+    phz_bfree(job + JB_OUT);
+    phz_bfree(job + JB_TXT);
+    ph_os_unmap(job, JB_MAP);
+}
+
+// a zend_string of these bytes, in the calling thread's Zend heap
+uptr phz_zs(uptr p, i64 n) {
+    uptr z = phx_em(ZSX_HDR + n + 1);
+    st32(z, 1);
+    st32(z + 4, ZSX_GC_STRING);
+    st64(z + 8, 0);
+    st64(z + ZSX_LEN, n);
+    php_memcpy(z + ZSX_VAL, p, n);
+    st8(z + ZSX_VAL + n, 0);
+    return z;
+}
+void phz_zs_rel(uptr z) {
+    i64 r = ld32(z) - 1;
+    st32(z, r);
+    if (!r) phx_ef(z);
+}
+uptr phz_mstr(uptr zs) { return php_str_new(zs + ZSX_VAL, ld64(zs + ZSX_LEN)); }
+
+// ---- the copy: out of one heap ---------------------------------------------
+// A value as words: its type (php's IS_* numbers), then the payload. An
+// object is its class's name and its properties; the second time the same
+// object is met it is a reference to the first, so an object two places
+// share is one object in the copy and a cycle ends.
+#define PZ_OREF     9
+#define SX_BUF      0
+#define SX_OBJS     8               // object -> its index (the runtime's own array)
+#define SX_NOBJ     16
+#define SX_ERR      24              // the first refusal
+#define SX_DEPTH    32
+#define SX_SIZE     40
+#define PZ_MAXDEPTH 256
+
+uptr phz_sx_new(uptr bf) {
+    uptr cx = php_alloc(SX_SIZE);
+    st64(cx + SX_BUF, bf);
+    st64(cx + SX_OBJS, php_arr_new(8));
+    st64(cx + SX_NOBJ, 0);
+    st64(cx + SX_ERR, 0);
+    st64(cx + SX_DEPTH, 0);
+    return cx;
+}
+void phz_sx_err(uptr cx, uptr why) {
+    if (ld64(cx + SX_ERR)) return;
+    st64(cx + SX_ERR, php_str_concat(php_str_new("mc-php: cannot copy into or out of a php thread: ", 49), why));
+}
+i64 phz_sx_deep(uptr cx) {
+    st64(cx + SX_DEPTH, ld64(cx + SX_DEPTH) + 1);
+    if (ld64(cx + SX_DEPTH) <= PZ_MAXDEPTH) return 1;
+    phz_sx_err(cx, php_str_new("a value nested more than 256 levels deep (a recursive array?)", 61));
+    return 0;
+}
+
+// Why an object of this class cannot be copied, or 0. Only a plain object is:
+// one of the script's own classes, or a stdClass. php's other classes (a
+// Closure, a DateTime, an exception, a generator) keep state outside their
+// properties, and a class that extends one inherits that state; an enum case
+// is one object per request by definition.
+uptr phz_uncopyable(uptr ce) {
+    if (ce == ld64(phz_f(PHZ_STDCLASS))) return 0;
+    uptr nm = phz_mstr(ld64(ce + ZCX_NAME));
+    if (ld32(ce + CEX_FLAGS) & ACC_ENUM)
+        return php_str_concat(php_str_new("an enum case of ", 16), nm);
+    uptr c = ce;
+    loop {
+        if (!c) break;
+        if (ld8(c + CEX_TYPE) != ZCE_USER) {
+            uptr m = php_str_concat(php_str_new("an object of class ", 19), nm);
+            if (c == ce) return php_str_concat(m, php_str_new(", which is php's own", 20));
+            m = php_str_concat(m, php_str_new(", which extends php's own ", 26));
+            return php_str_concat(m, phz_mstr(ld64(c + ZCX_NAME)));
+        }
+        c = ld64(c + ZCX_PARENT);
+    }
+    return 0;
+}
+
+void phz_sx_val(uptr cx, uptr ez);
+// the entries of an array or of an object's properties: a key (0 and the
+// number, or 1 and the name), then the value
+i64 phz_sx_ht(uptr cx, uptr ht) {
+    uptr bf = ld64(cx + SX_BUF);
+    i64 n = 0;
+    u8 pos[8];
+    st64(pos, 0);
+    zend_hash_internal_pointer_reset_ex(ht, pos);
+    loop {
+        uptr v = zend_hash_get_current_data_ex(ht, pos);
+        if (!v) break;
+        uptr w = v;
+        if (phx_type(w) == IZ_INDIRECT) w = ld64(w);
+        if (phx_type(w) != IZ_UNDEF) {
+            u8 sk[8];
+            u8 nk[8];
+            st64(sk, 0);
+            st64(nk, 0);
+            if (zend_hash_get_current_key_ex(ht, sk, nk, pos) == HASH_KEY_IS_STRING) {
+                phz_bw(bf, 1);
+                phz_bzs(bf, ld64(sk));
+            } else {
+                phz_bw(bf, 0);
+                phz_bw(bf, ld64(nk));
+            }
+            phz_sx_val(cx, w);
+            n = n + 1;
+        }
+        zend_hash_move_forward_ex(ht, pos);
+    }
+    return n;
+}
+
+void phz_sx_obj(uptr cx, uptr zo) {
+    uptr bf = ld64(cx + SX_BUF);
+    uptr seen = php_ht_find(ld64(cx + SX_OBJS), zo, 0);
+    if (seen) {
+        phz_bw(bf, PZ_OREF);
+        phz_bw(bf, ld64(seen));
+        return;
+    }
+    uptr ce = ld64(zo + ZOX_CE);
+    uptr why = phz_uncopyable(ce);
+    if (why) { phz_sx_err(cx, why); return; }
+    if (!phz_sx_deep(cx)) return;
+    php_zv_cp(php_arr_islot(ld64(cx + SX_OBJS), zo), php_zlong(ld64(cx + SX_NOBJ)));
+    st64(cx + SX_NOBJ, ld64(cx + SX_NOBJ) + 1);
+    phz_bw(bf, IZ_OBJECT);
+    phz_bzs(bf, ld64(ce + ZCX_NAME));
+    i64 at = ld64(bf + 8);
+    phz_bw(bf, 0);
+    i64 n = phz_sx_ht(cx, callp(phz_f(PHZ_PROPS), zo));
+    st64(ld64(bf) + at, n);
+    st64(cx + SX_DEPTH, ld64(cx + SX_DEPTH) - 1);
+}
+
+void phz_sx_val(uptr cx, uptr ez) {
+    if (ld64(cx + SX_ERR)) return;
+    uptr bf = ld64(cx + SX_BUF);
+    i64 t = phx_type(ez);
+    if (t == IZ_INDIRECT) { ez = ld64(ez); t = phx_type(ez); }
+    if (t == IZ_REFERENCE) { ez = ld64(ez) + ZRX_VAL; t = phx_type(ez); }
+    if (t == IZ_UNDEF) t = IZ_NULL;
+    if (t <= IZ_TRUE) { phz_bw(bf, t); return; }
+    if (t == IZ_LONG || t == IZ_DOUBLE) { phz_bw(bf, t); phz_bw(bf, ld64(ez)); return; }
+    if (t == IZ_STRING) { phz_bw(bf, t); phz_bzs(bf, ld64(ez)); return; }
+    if (t == IZ_ARRAY) {
+        if (!phz_sx_deep(cx)) return;
+        phz_bw(bf, t);
+        i64 at = ld64(bf + 8);
+        phz_bw(bf, 0);
+        i64 n = phz_sx_ht(cx, ld64(ez));
+        st64(ld64(bf) + at, n);
+        st64(cx + SX_DEPTH, ld64(cx + SX_DEPTH) - 1);
+        return;
+    }
+    if (t == IZ_OBJECT) { phz_sx_obj(cx, ld64(ez)); return; }
+    if (t == IZ_RESOURCE) { phz_sx_err(cx, php_str_new("a resource", 10)); return; }
+    phz_sx_err(cx, php_str_concat(php_str_new("a value of php's internal type ", 31), php_itos(t)));
+}
+
+// ---- the copy: into the other heap -----------------------------------------
+// Always a valid zval, so the caller's one zval_ptr_dtor frees whatever was
+// built; a part that cannot be rebuilt is null and the reason is kept.
+#define DX_BASE     0
+#define DX_POS      8
+#define DX_OBJS     16              // index -> object
+#define DX_NOBJ     24
+#define DX_ERR      32
+#define DX_SIZE     40
+
+uptr phz_dx_new(uptr bf) {
+    uptr cx = php_alloc(DX_SIZE);
+    st64(cx + DX_BASE, ld64(bf));
+    st64(cx + DX_POS, 0);
+    st64(cx + DX_OBJS, php_arr_new(8));
+    st64(cx + DX_NOBJ, 0);
+    st64(cx + DX_ERR, 0);
+    return cx;
+}
+i64 phz_rw(uptr cx) {
+    i64 v = ld64(ld64(cx + DX_BASE) + ld64(cx + DX_POS));
+    st64(cx + DX_POS, ld64(cx + DX_POS) + 8);
+    return v;
+}
+uptr phz_rp(uptr cx, i64 n) {
+    uptr p = ld64(cx + DX_BASE) + ld64(cx + DX_POS);
+    st64(cx + DX_POS, ld64(cx + DX_POS) + (n + 7) / 8 * 8);
+    return p;
+}
+uptr phz_rzs(uptr cx) {
+    i64 n = phz_rw(cx);
+    return phz_zs(phz_rp(cx, n), n);
+}
+void phz_dx_err(uptr cx, uptr why) {
+    if (ld64(cx + DX_ERR)) return;
+    st64(cx + DX_ERR, php_str_concat(php_str_new("mc-php: cannot copy into or out of a php thread: ", 49), why));
+}
+void phz_znull(uptr ez) { st64(ez, 0); st32(ez + ZVX_TYPE_INFO, IZ_NULL); }
+
+void phz_dx_val(uptr cx, uptr ez);
+// n entries, into ht; obj: an object's property table, where a declared
+// property is a slot (IS_INDIRECT) the object already holds
+void phz_dx_ht(uptr cx, uptr ht, i64 n, i64 obj) {
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 kt = phz_rw(cx);
+        uptr k = 0;
+        i64 h = 0;
+        if (kt) k = phz_rzs(cx);
+        else h = phz_rw(cx);
+        u8 v[16];
+        phz_dx_val(cx, v);
+        if (!ht) zval_ptr_dtor(v);
+        if (ht && !k) zend_hash_index_update(ht, h, v);
+        if (ht && k) {
+            uptr slot = 0;
+            if (obj) slot = callp(phz_f(PHZ_HFIND), ht, k);
+            if (slot && phx_type(slot) == IZ_INDIRECT) {
+                uptr d = ld64(slot);
+                zval_ptr_dtor(d);
+                st64(d, ld64(v));
+                st32(d + ZVX_TYPE_INFO, ld32(v + ZVX_TYPE_INFO));
+                st32(d + 12, 0);
+            } else zend_hash_update(ht, k, v);
+        }
+        if (k) phz_zs_rel(k);
+        i = i + 1;
+    }
+}
+
+void phz_dx_obj(uptr cx, uptr ez) {
+    uptr nz = phz_rzs(cx);
+    i64 n = phz_rw(cx);
+    i64 idx = ld64(cx + DX_NOBJ);
+    st64(cx + DX_NOBJ, idx + 1);
+    phz_znull(ez);
+    uptr ce = zend_lookup_class_ex(nz, 0, FETCH_NO_AUTOLOAD);
+    if (ce) {
+        object_init_ex(ez, ce);
+        if (phx_zexc()) zend_clear_exception();
+    }
+    if (phx_type(ez) != IZ_OBJECT) {
+        phz_dx_err(cx, php_str_concat(php_str_new("no class ", 9),
+                       php_str_concat(phz_mstr(nz), php_str_new(" on this side", 13))));
+        phz_znull(ez);
+    }
+    uptr o = 0;
+    if (phx_type(ez) == IZ_OBJECT) o = ld64(ez);
+    php_zv_cp(php_arr_islot(ld64(cx + DX_OBJS), idx), php_zlong(o));
+    phz_zs_rel(nz);
+    uptr ht = 0;
+    if (o) ht = callp(phz_f(PHZ_PROPS), o);
+    phz_dx_ht(cx, ht, n, 1);
+}
+
+void phz_dx_val(uptr cx, uptr ez) {
+    phz_znull(ez);
+    i64 t = phz_rw(cx);
+    if (t <= IZ_TRUE) { st32(ez + ZVX_TYPE_INFO, t); return; }
+    if (t == IZ_LONG || t == IZ_DOUBLE) { st64(ez, phz_rw(cx)); st32(ez + ZVX_TYPE_INFO, t); return; }
+    if (t == IZ_STRING) { st64(ez, phz_rzs(cx)); st32(ez + ZVX_TYPE_INFO, IZ_STRING_EX); return; }
+    if (t == IZ_ARRAY) {
+        i64 n = phz_rw(cx);
+        uptr ht = _zend_new_array(n);
+        phz_dx_ht(cx, ht, n, 0);
+        st64(ez, ht);
+        st32(ez + ZVX_TYPE_INFO, IZ_ARRAY_EX);
+        return;
+    }
+    if (t == IZ_OBJECT) { phz_dx_obj(cx, ez); return; }
+    if (t == PZ_OREF) {
+        uptr b = php_ht_find(ld64(cx + DX_OBJS), phz_rw(cx), 0);
+        uptr o = 0;
+        if (b) o = ld64(b);
+        if (o) {
+            st32(o, ld32(o) + 1);
+            st64(ez, o);
+            st32(ez + ZVX_TYPE_INFO, IZ_OBJECT_EX);
+        }
+    }
+}
+
+// ---- the start --------------------------------------------------------------
+// the code the starting request can reach, as it is now, for the worker's
+// tables: each user function and class, with its key. Answers 0, or the
+// name of the first one opcache does not cache (the refusal names it).
+uptr phz_snap(uptr job, uptr kind) {
+    uptr tab = job + JB_TAB;
+    i64 w = 0;
+    loop {
+        if (w > 1) break;
+        uptr ht = ld64(phx_eg + EGX_FUNCTION_TABLE);
+        if (w) ht = ld64(phx_eg + EGX_CLASS_TABLE);
+        u8 pos[8];
+        st64(pos, 0);
+        callp(phz_f(PHZ_HEND), ht, pos);
+        loop {
+            uptr v = zend_hash_get_current_data_ex(ht, pos);
+            if (!v) break;
+            uptr p = ld64(v);
+            i64 user = 0;
+            i64 imm = 0;
+            uptr name = 0;
+            if (!w) {
+                // php's own functions are the table's first entries: a user
+                // function is never before one
+                if (ld8(p + ZFX_TYPE) != ZFN_USER) break;
+                user = 1;
+                imm = ld32(p + ZFX_FN_FLAGS) & ACC_IMMUTABLE;
+                name = ld64(p + ZFX_NAME);
+            } else {
+                // a class_alias of one of php's own classes can come after
+                // the script's: the class table is walked whole
+                user = ld8(p + CEX_TYPE) == ZCE_USER;
+                imm = ld32(p + CEX_FLAGS) & ACC_IMMUTABLE;
+                name = ld64(p + ZCX_NAME);
+            }
+            if (user) {
+                if (!imm) {
+                    st64(kind, "function ");
+                    if (w) st64(kind, "class ");
+                    return name;
+                }
+                u8 sk[8];
+                u8 nk[8];
+                st64(sk, 0);
+                st64(nk, 0);
+                zend_hash_get_current_key_ex(ht, sk, nk, pos);
+                if (ld64(sk)) {
+                    phz_bw(tab, w);
+                    phz_bw(tab, p);
+                    phz_bzs(tab, ld64(sk));
+                }
+            }
+            callp(phz_f(PHZ_HBACK), ht, pos);
+        }
+        w = w + 1;
+    }
+    return 0;
+}
+
+void phz_notcached(uptr kind, uptr zsname) {
+    uptr m = php_str_new("mc-php: a php callable runs on another thread only when opcache caches the code it can reach: enable opcache (opcache.enable=1, and opcache.enable_cli=1 on the command line); not cached: ", 187);
+    m = php_str_concat(m, php_str_new(kind, php_cstrlen(kind)));
+    php_throw_cls(php_str_new("Error", 5), php_str_concat(m, phz_mstr(zsname)));
+}
+
+// a handle of the thread table (lib/php_rt.mc's php_thr_start reserves one
+// the same way): the record is published once the thread exists
+i64 phz_thandle() {
+    ph_lock();
+    ph_tnext = ph_tnext + 1;
+    i64 id = ph_tnext;
+    if (id >= ph_tcap) {
+        i64 c = ph_tcap * 2 + 64;
+        uptr t = ph_os_map(c * 8);
+        if (!t) { ph_unlock(); php_die("mc-php: cannot map the thread table\n", 36); }
+        i64 i = 0;
+        loop { if (i >= ph_tcap) break; st64(t + i * 8, ld64(ph_ttab + i * 8)); i = i + 1; }
+        if (ph_ttab) ph_os_unmap(ph_ttab, ph_tcap * 8);
+        ph_ttab = t;
+        ph_tcap = c;
+    }
+    ph_unlock();
+    return id;
+}
+
+uptr phz_eng_body(uptr job);
+
+// an argument, into the copy; 0 when the runtime threw converting it
+i64 phz_sx_arg(uptr cx, uptr a) {
+    u8 ez[16];
+    phx_r2e(a, ez);
+    if (php_thrown()) { zval_ptr_dtor(ez); return 0; }
+    phz_sx_val(cx, ez);
+    zval_ptr_dtor(ez);
+    return 1;
+}
+
+i64 php_thr_eng_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (phx_offthread(phT)) return 0;
+    if (!phz_eng_syms()) {
+        uptr m = php_str_new("mc-php: a php callable on another thread needs php's ", 53);
+        m = php_str_concat(m, php_str_new(phz_missing, php_cstrlen(phz_missing)));
+        php_throw_cls(php_str_new("Error", 5), php_str_concat(m, php_str_new(", which this php does not export", 32)));
+        return 0;
+    }
+    u8 fz[16];
+    phx_r2e(fn, fz);
+    if (php_thrown()) { zval_ptr_dtor(fz); return 0; }
+    if (!(zend_is_callable_ex(fz, 0, 0, 0, 0, 0) & 255)) {
+        zval_ptr_dtor(fz);
+        uptr m = "mc-php: mcphp_thread_start() runs a callable";
+        php_throw_cls(php_str_new("Error", 5), php_str_new(m, php_cstrlen(m)));
+        return 0;
+    }
+    uptr job = ph_os_map(JB_MAP);
+    if (!job) php_die("mc-php: cannot map a php thread's memory\n", 41);
+    uptr zo = 0;
+    if (phx_type(fz) == IZ_OBJECT) {
+        zo = ld64(fz);
+        if (ld64(zo + ZOX_CE) != ld64(phz_f(PHZ_CECL))) zo = 0;
+    }
+    st64(job + JB_KIND, 2);
+    // a Closure: its function, the worker's copy -- and code opcache does
+    // not cache (a closure from eval(), from a script opcache skipped) is
+    // refused like any other
+    if (zo) {
+        uptr f = zo + ZCLX_FUNC;
+        uptr cf = job + JB_FUNC;
+        if (ld8(f + ZFX_TYPE) == ZFN_USER && ld64(f + OPX_REFCOUNT)) {
+            zval_ptr_dtor(fz);
+            ph_os_unmap(job, JB_MAP);
+            phz_notcached("the callable ", ld64(f + ZFX_NAME));
+            return 0;
+        }
+        php_memcpy(cf, f, ZFX_SIZE);
+        if (ld8(f + ZFX_TYPE) == ZFN_USER) {
+            // a cache of its own; not a first-class callable's any more: its
+            // statics are the copy's, not the function's
+            st32(cf + ZFX_FN_FLAGS, (ld32(cf + ZFX_FN_FLAGS) | ACC_HEAP_RT_CACHE) & ~ACC_FAKE_CLOSURE);
+            st64(cf + OPX_REFCOUNT, 0);
+        } else st64(cf + IFX_HANDLER, ld64(zo + ZCLX_ORIG));
+        st64(job + JB_KIND, 1);
+        st64(job + JB_SCOPE, ld64(f + ZFX_SCOPE));
+        st64(job + JB_CALLED, ld64(zo + ZCLX_CALLED));
+    }
+    u8 kind[8];
+    uptr nc = phz_snap(job, kind);
+    if (nc) {
+        zval_ptr_dtor(fz);
+        phz_job_free(job);
+        phz_notcached(ld64(kind), nc);
+        return 0;
+    }
+    uptr cx = phz_sx_new(job + JB_IN);
+    if (zo) {
+        uptr tz = zo + ZCLX_THIS;
+        uptr bf = job + JB_IN;
+        if (phx_type(tz) == IZ_OBJECT) { phz_bw(bf, 1); phz_sx_val(cx, tz); }
+        else phz_bw(bf, 0);
+        uptr sv = 0;
+        if (ld8(zo + ZCLX_FUNC + ZFX_TYPE) == ZFN_USER) sv = ld64(zo + ZCLX_FUNC + OPX_STATIC_VARS_PTR);
+        // a closure's statics are a plain pointer (never a map_ptr offset,
+        // whose low bit is set)
+        if (sv && !(sv & 1)) {
+            u8 az[16];
+            st64(az, sv);
+            st32(az + ZVX_TYPE_INFO, IZ_ARRAY);
+            phz_bw(bf, 1);
+            phz_sx_val(cx, az);
+        } else phz_bw(bf, 0);
+    } else phz_sx_val(cx, fz);
+    zval_ptr_dtor(fz);
+    st64(job + JB_NARGS, n);
+    i64 ok = 1;
+    if (ok && n > 0) ok = phz_sx_arg(cx, a1);
+    if (ok && n > 1) ok = phz_sx_arg(cx, a2);
+    if (ok && n > 2) ok = phz_sx_arg(cx, a3);
+    if (ok && n > 3) ok = phz_sx_arg(cx, a4);
+    if (ok && n > 4) ok = phz_sx_arg(cx, a5);
+    if (!ok || ld64(cx + SX_ERR)) {
+        phz_job_free(job);
+        if (ok) php_throw_cls(php_str_new("Error", 5), ld64(cx + SX_ERR));
+        return 0;
+    }
+    uptr ls = callp(phx_ts_get);
+    st64(job + JB_MAPLAST, ld64(ls + ld64(phz_f(PHZ_CGO)) + CGX_MAP_PTR_LAST));
+    ph_tapi = 1;
+    php_pin();
+    uptr rec = php_alloc(PHA_SIZE);
+    i64 i = 0;
+    loop { if (i >= PHA_SIZE) break; st64(rec + i, 0); i = i + 8; }
+    i64 id = phz_thandle();
+    uptr root = ld64(phT + PHT_ph_troot);
+    if (!root) root = phT;
+    st64(rec + PHA_ID, id);
+    st64(rec + PHA_ROOT, root);
+    st64(rec + PHA_N, 0 - 1);
+    st64(rec + PHA_ARG, job);
+    st64(job + JB_REC, rec);
+    if (ph_thr_create(&phz_eng_body, job, rec + PHA_H) != 0) php_die("mc-php: cannot start a thread\n", 30);
+    ph_lock();
+    st64(ph_ttab + id * 8, rec);
+    ph_unlock();
+    return id;
+}
+
+// ---- the worker ---------------------------------------------------------------
+// what php's output layer holds above JB_LVL, into the job's buffer: a level
+// the callable opened and left open is ended into the worker's own first
+void phz_out_take(uptr job) {
+    i64 base = ld64(job + JB_LVL);
+    loop {
+        if ((callp(phz_f(PHZ_OLEVEL)) & 0xffffffff) <= base + 1) break;
+        callp(phz_f(PHZ_OEND));
+    }
+    if ((callp(phz_f(PHZ_OLEVEL)) & 0xffffffff) != base + 1) return;
+    u8 z[16];
+    phz_znull(z);
+    callp(phz_f(PHZ_OGET), z);
+    if (phx_type(z) == IZ_STRING) {
+        uptr s = ld64(z);
+        phz_bput(job + JB_TXT, s + ZSX_VAL, ld64(s + ZSX_LEN));
+    }
+    zval_ptr_dtor(z);
+    callp(phz_f(PHZ_ODISC));
+}
+
+// what ended the call instead of a result: a throwable's class, message and
+// code (an Error of the runtime's own when a copy was refused)
+void phz_set_exc(uptr job, i64 kind, uptr cls, uptr msg, i64 code) {
+    uptr out = job + JB_OUT;
+    st64(out + 8, 0);
+    st64(job + JB_EXC, kind);
+    phz_bstr(out, cls + ZS_HDR, php_strlen(cls));
+    phz_bstr(out, msg + ZS_HDR, php_strlen(msg));
+    phz_bw(out, code);
+}
+
+// the throwable EG(exception) holds, taken off it
+void phz_take_exc(uptr job) {
+    uptr zo = ld64(phx_eg + phx_egx);
+    // exit() inside the callable ends the call with no result
+    if (callp(phz_f(PHZ_UNWIND), zo) & 255) {
+        zend_clear_exception();
+        phz_bw(job + JB_OUT, IZ_NULL);
+        return;
+    }
+    u8 r1[16];
+    u8 r2[16];
+    uptr mz = phx_zprop(zo, "message", r1);
+    uptr cz = phx_zprop(zo, "code", r2);
+    uptr msg = php_str_new("", 0);
+    if (phx_type(mz) == IZ_STRING) msg = phz_mstr(ld64(mz));
+    i64 code = 0;
+    if (phx_type(cz) == IZ_LONG) code = ld64(cz);
+    phz_set_exc(job, 1, phz_mstr(ld64(ld64(zo + ZOX_CE) + ZCX_NAME)), msg, code);
+    zend_clear_exception();
+}
+
+// the worker's Closure: the starting one's function, its bound $this and its
+// captured variables copied, and a run-time cache of its own
+void phz_mkclosure(uptr job, uptr dx, uptr fz) {
+    uptr fn = job + JB_FUNC;
+    u8 tz[16];
+    u8 sz[16];
+    phz_znull(tz);
+    phz_znull(sz);
+    if (phz_rw(dx)) phz_dx_val(dx, tz);
+    if (phz_rw(dx)) phz_dx_val(dx, sz);
+    if (ld8(fn + ZFX_TYPE) == ZFN_USER) {
+        st64(fn + OPX_STATIC_VARS_PTR, 0);
+        if (phx_type(sz) == IZ_ARRAY) st64(fn + OPX_STATIC_VARS_PTR, ld64(sz));
+    }
+    uptr tp = 0;
+    if (phx_type(tz) == IZ_OBJECT) tp = tz;
+    callp(phz_f(PHZ_MKCL), fz, fn, ld64(job + JB_SCOPE), ld64(job + JB_CALLED), tp);
+    zval_ptr_dtor(tz);
+    zval_ptr_dtor(sz);
+}
+
+void phz_call(uptr job) {
+    uptr dx = phz_dx_new(job + JB_IN);
+    u8 fz[16];
+    phz_znull(fz);
+    if (ld64(job + JB_KIND) == 1) phz_mkclosure(job, dx, fz);
+    else phz_dx_val(dx, fz);
+    i64 n = ld64(job + JB_NARGS);
+    u8 av[80];
+    i64 i = 0;
+    loop { if (i >= n) break; phz_dx_val(dx, av + i * 16); i = i + 1; }
+    u8 rv[16];
+    st64(rv, 0);
+    st32(rv + ZVX_TYPE_INFO, IZ_UNDEF);
+    if (ld64(dx + DX_ERR)) phz_set_exc(job, 1, php_str_new("Error", 5), ld64(dx + DX_ERR), 0);
+    else {
+        i64 lz = phx_lz;
+        phx_lz = 0;
+        _call_user_function_impl(0, fz, rv, n, av, 0);
+        phx_lz = lz;
+    }
+    i = 0;
+    loop { if (i >= n) break; zval_ptr_dtor(av + i * 16); i = i + 1; }
+    zval_ptr_dtor(fz);
+    if (phx_zexc()) phz_take_exc(job);
+    else if (!ld64(job + JB_EXC)) {
+        uptr cx = phz_sx_new(job + JB_OUT);
+        phz_sx_val(cx, rv);
+        if (ld64(cx + SX_ERR)) phz_set_exc(job, 1, php_str_new("Error", 5), ld64(cx + SX_ERR), 0);
+    }
+    zval_ptr_dtor(rv);
+}
+
+// the trampoline's handler: php calls it as the worker request's shutdown
+// function, under an internal frame of its own
+void phz_tramp(uptr ed, uptr rv) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr job = ld64(phT + PHT_phz_job);
+    st64(job + JB_LVL, callp(phz_f(PHZ_OLEVEL)) & 0xffffffff);
+    callp(phz_f(PHZ_OSTART));
+    phx_enter();
+    phz_call(job);
+    php_flush();
+    phx_leave();
+    phz_out_take(job);
+    st64(job + JB_DONE, 1);
+}
+
+// the starting request's code, in this worker's tables (phz_snap wrote it)
+void phz_share(uptr job) {
+    uptr tab = job + JB_TAB;
+    uptr dx = phz_dx_new(tab);
+    uptr ft = ld64(phx_eg + EGX_FUNCTION_TABLE);
+    uptr ct = ld64(phx_eg + EGX_CLASS_TABLE);
+    loop {
+        if (ld64(dx + DX_POS) >= ld64(tab + 8)) break;
+        i64 w = phz_rw(dx);
+        uptr p = phz_rw(dx);
+        uptr k = phz_rzs(dx);
+        u8 z[16];
+        st64(z, p);
+        st32(z + ZVX_TYPE_INFO, IZ_PTR);
+        uptr t = ft;
+        if (w) t = ct;
+        callp(phz_f(PHZ_HADD), t, k, z);
+        phz_zs_rel(k);
+    }
+}
+
+// the worker's request, once RINIT gave this thread its block: the code
+// shared, the call made as the request's shutdown function, what a fatal
+// error left if the call did not return
+void phz_eng_run(uptr job) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr ls = callp(phx_ts_get);
+    uptr pg = ls + ld64(phz_f(PHZ_PGO));
+    uptr sg = ls + ld64(phz_f(PHZ_SGO));
+    st8(pg + PGX_DURING_STARTUP, 0);
+    st8(sg + SGX_HEADERS_SENT, 1);
+    st8(sg + SGX_NO_HEADERS, 1);
+    callp(phz_f(PHZ_MAPEXT), ld64(job + JB_MAPLAST));
+    phz_share(job);
+    uptr nm = job + JB_NAME;
+    st32(nm, 1);
+    st32(nm + 4, ZSX_GC_STRING | ZSX_INTERNED | ZSX_PERSIST);
+    st64(nm + ZSX_LEN, 12);
+    php_memcpy(nm + ZSX_VAL, "mcphp_thread", 12);
+    callp(phz_f(PHZ_ZSHASH), nm);
+    uptr fk = job + JB_FAKE;
+    st8(fk + ZFX_TYPE, ZFN_INTERNAL);
+    st64(fk + ZFX_NAME, nm);
+    st64(fk + IFX_HANDLER, &phz_tramp);
+    st64(job + JB_ENTRY, fk);
+    st64(phT + PHT_phz_job, job);
+    callp(phz_f(PHZ_SDADD), job + JB_ENTRY);
+    callp(phz_f(PHZ_SDCALL));
+    callp(phz_f(PHZ_SDFREE));
+    st64(phT + PHT_phz_job, 0);
+    if (ld64(job + JB_DONE)) return;
+    // a bailout: php's own fatal error ended the call, and printed itself
+    // into the worker's output
+    phz_out_take(job);
+    uptr m = ld64(pg + PGX_LAST_ERROR_MESSAGE);
+    uptr msg = php_str_new("", 0);
+    if (m) msg = phz_mstr(m);
+    phz_set_exc(job, 2, php_str_new("", 0), msg, 0);
+}
+
+// the thread's entry. Nothing here may read the thread's block before
+// php_request_startup ran this module's RINIT, which makes the block
+// (phz_thread): this function names only process-wide words
+uptr phz_eng_body(uptr job) {
+    callp(phz_f(PHZ_TSRES), 0, 0);
+    uptr ls = callp(phx_ts_get);
+    uptr pg = ls + ld64(phz_f(PHZ_PGO));
+    st8(pg + PGX_EXPOSE_PHP, 0);
+    st8(pg + PGX_AUTO_GLOBALS_JIT, 1);
+    if ((callp(phz_f(PHZ_RSTART)) & 0xffffffff) == 0) phz_eng_run(job);
+    else st64(job + JB_EXC, 3);
+    callp(phz_f(PHZ_RSTOP), 0);
+    ph_lock();
+    st64(ld64(job + JB_REC) + PHA_STATE, 1);
+    ph_unlock();
+    callp(phz_f(PHZ_TSFREE));
+    return 0;
+}
+
+// ---- the join ----------------------------------------------------------------
+void phz_out_emit(uptr job) {
+    uptr t = job + JB_TXT;
+    if (ld64(t + 8)) php_write(ld64(t), ld64(t + 8));
+}
+
+// what ended the call, as the runtime's message; 0 for a result
+uptr phz_endmsg(uptr job, uptr cls) {
+    i64 e = ld64(job + JB_EXC);
+    if (e == 3) return php_str_new("mc-php: a php thread could not start its php request", 52);
+    if (!e) return 0;
+    uptr dx = phz_dx_new(job + JB_OUT);
+    i64 n = phz_rw(dx);
+    st64(cls, php_str_new(phz_rp(dx, n), n));
+    n = phz_rw(dx);
+    return php_str_new(phz_rp(dx, n), n);
+}
+
+uptr phz_eng_join(uptr rec) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    ph_thr_join(rec + PHA_H);
+    uptr job = ld64(rec + PHA_ARG);
+    phz_out_emit(job);
+    uptr r = php_znull();
+    i64 e = ld64(job + JB_EXC);
+    u8 cls[8];
+    st64(cls, 0);
+    uptr msg = phz_endmsg(job, cls);
+    if (phx_offthread(phT)) e = 0 - 1;
+    if (e == 0) {
+        uptr dx = phz_dx_new(job + JB_OUT);
+        u8 ez[16];
+        phz_dx_val(dx, ez);
+        if (ld64(dx + DX_ERR)) php_throw_cls(php_str_new("Error", 5), ld64(dx + DX_ERR));
+        else r = phx_e2r(ez);
+        zval_ptr_dtor(ez);
+    }
+    if (e == 1) {
+        // the same class, message and code, thrown here; a class this
+        // request does not have is the runtime's Error naming it
+        uptr dx = phz_dx_new(job + JB_OUT);
+        phz_rp(dx, phz_rw(dx));
+        phz_rp(dx, phz_rw(dx));
+        i64 code = phz_rw(dx);
+        uptr cz = phx_zstr(ld64(cls));
+        uptr ce = zend_lookup_class_ex(cz, 0, FETCH_NO_AUTOLOAD);
+        phz_zs_rel(cz);
+        if (ce) {
+            uptr mz = phx_zstr(msg);
+            zend_throw_exception(ce, mz + ZSX_VAL, code);
+            phz_zs_rel(mz);
+            phx_zcatch();
+        } else {
+            uptr m = php_str_concat(php_str_new("mc-php: a php thread ended on an uncaught ", 42), ld64(cls));
+            php_throw_cls(php_str_new("Error", 5), php_str_concat(php_str_concat(m, php_str_new(": ", 2)), msg));
+        }
+    }
+    if (e == 2) php_throw_cls(php_str_new("Error", 5), php_str_concat(php_str_new("mc-php: a php thread ended on a fatal error: ", 45), msg));
+    if (e == 3) php_throw_cls(php_str_new("Error", 5), msg);
+    phz_job_free(job);
+    return r;
+}
+
+// the end of the request (php_thr_endall): a php thread nobody joined is
+// waited for and its output written; report: its uncaught throwable or fatal
+// error as the warning a compiled thread's gets. 1 when it reported.
+i64 phz_eng_end(uptr rec, i64 report) {
+    ph_thr_join(rec + PHA_H);
+    uptr job = ld64(rec + PHA_ARG);
+    phz_out_emit(job);
+    i64 e = ld64(job + JB_EXC);
+    u8 cls[8];
+    st64(cls, 0);
+    uptr msg = phz_endmsg(job, cls);
+    phz_job_free(job);
+    if (!report || !e) return 0;
+    uptr s = php_str_new("mc-php: a thread neither joined nor detached ", 45);
+    if (e == 1) {
+        s = php_str_concat(php_str_concat(s, php_str_new("ended on an uncaught ", 21)), ld64(cls));
+        if (php_strlen(msg)) s = php_str_concat(php_str_concat(s, php_str_new(": ", 2)), msg);
+    }
+    if (e == 2) s = php_str_concat(php_str_concat(s, php_str_new("ended on a fatal error: ", 24)), msg);
+    if (e == 3) s = msg;
+    php_mreset();
+    php_ms(s);
+    php_raise_m(PHE_WARNING);
+    return 1;
+}

@@ -820,9 +820,12 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
     # mode (the flag set, a fresh string no longer written in place) and a php
     # callable refused -- by name, which differs between NTS and ZTS -- plus
     # the destructor lines of the copies and a detached thread's last line
-    "$PHP" -d extension="$tmp/build/r.$sx" tests/ext/threads/api.php 2>&1 | tr -d '\r' > "$tmp/t.a"; ta=$?
+    "$PHP" -d opcache.enable_cli=0 -d extension="$tmp/build/r.$sx" tests/ext/threads/api.php 2>&1 | tr -d '\r' > "$tmp/t.a"; ta=$?
     ref="mc-php: a php callable cannot run on another thread in a php without thread safety; build the module with thread_safety = \"zts\", or pass a compiled function"
-    [ "$TSV" = zts ] && ref="mc-php: a php callable cannot run on another thread yet: its own php context on the worker is threads step 3b; pass a compiled function"
+    # a ZTS php runs a php callable on a thread of its own (step 3b) only
+    # when opcache caches the code, and this run has no opcache: refused, by
+    # name (refuse() in threads.php cuts the path of what is not cached)
+    [ "$TSV" = zts ] && ref="mc-php: a php callable runs on another thread only when opcache caches the code it can reach: enable opcache (opcache.enable=1, and opcache.enable_cli=1 on the command line)"
     printf '%s\n' "before any thread: 0 1" "4 threads through the API: agree" "after the joins: 1 0" \
         "a joined thread's values: kkk 3 3" "a detached thread's values: kkkkk 5 5" "rethrown: caught from a thread" \
         "a php callable: $ref" "destructors: dtor 1" "dtor 2" "dtor 1" "1 2 1 distinct" \
@@ -831,6 +834,45 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
         say "thread API: compiled callables on threads, kept values after a join and a detach, a rethrow, shared mode, the php callable refused, each copy destructed once by its owner, a detached thread waited for by RSHUTDOWN"
     else
         bad "thread API (exit $ta)"; diff "$tmp/t.aw" "$tmp/t.a" | sed -n '1,12p' | sed 's/^/      /'
+    fi
+    # --- 20c. PHP callables on threads of their own (docs/threads.md § 3b):
+    # a ZTS php only, with opcache on -- each worker a php request of its own
+    # sharing the request's code, arguments and results copied, what cannot
+    # be copied refused by name, the worker's output written at its join in
+    # join order, a module global written by a worker of each kind -- and the
+    # same script with opcache off, whose first start is refused by name
+    if [ "$TSV" = zts ]; then
+        "$PHP" -d opcache.enable_cli=1 -d extension="$tmp/build/r.$sx" tests/ext/threads/php.php 2>&1 | tr -d '\r' > "$tmp/t.p"; tp=$?
+        {
+            printf '%s\n' "a closure: 42" "arguments: left7" "the request's code: 15" "a capture: 21" \
+                '$this, copied: 106, here still 0' \
+                "\$this refused: Error: mc-php: cannot copy into or out of a php thread: an object of class Ao, which extends php's own ArrayObject" \
+                "a string: ababab" 'an array: [9,"s9",{"k":[9,10]}]' "objects: one, a cycle, 3, Pt 3" \
+                "an argument refused: Error: mc-php: cannot copy into or out of a php thread: an object of class DateTime, which is php's own" \
+                "a closure argument refused: Error: mc-php: cannot copy into or out of a php thread: an object of class Closure, which is php's own" \
+                "a result refused: Error: mc-php: cannot copy into or out of a php thread: an object of class ArrayObject, which is php's own" \
+                "rethrown: DomainException boom 7" \
+                "declared after the start: here 30, there Error: Call to undefined function declared_late()" \
+                "statics: here 3, there 12, here 4" \
+                "a module global, a compiled worker: compiled" "a module global, a php worker: unset, then php" \
+                "a module global afterwards: compiled" \
+                "a fatal error: Error: mc-php: a php thread ended on a fatal error: Allowed memory size of 4194304 bytes exhausted" \
+                "exit(): NULL" "8 workers echo, joined in reverse:"
+            for w in 7 6 5 4 3 2 1 0; do printf 'w%s.0 w%s.1 w%s.2 \n' $w $w $w; done
+            printf '%s\n' "their sum: 28" "the script's last line" "the detached php thread says goodbye"
+        } > "$tmp/t.pw"
+        if [ "$tp" = 0 ] && cmp -s "$tmp/t.pw" "$tmp/t.p"; then
+            say "php callables on threads (opcache on): the request's code shared, values copied and refused by name, output in join order, a module global per kind of worker, a fatal error and exit() in a worker"
+        else
+            bad "php callables on threads (exit $tp)"; diff "$tmp/t.pw" "$tmp/t.p" | sed -n '1,12p' | sed 's/^/      /'
+        fi
+        "$PHP" -d opcache.enable_cli=0 -d extension="$tmp/build/r.$sx" tests/ext/threads/php.php 2>&1 | tr -d '\r' > "$tmp/t.q"; tq=$?
+        printf '%s\n' "a closure: mc-php: a php callable runs on another thread only when opcache caches the code it can reach: enable opcache (opcache.enable=1, and opcache.enable_cli=1 on the command line)" > "$tmp/t.qw"
+        if [ "$tq" = 0 ] && cmp -s "$tmp/t.qw" "$tmp/t.q"; then
+            say "php callables on threads (opcache off): refused by name"
+        else
+            bad "php callables on threads, opcache off (exit $tq)"; diff "$tmp/t.qw" "$tmp/t.q" | sed -n '1,6p' | sed 's/^/      /'
+        fi
     fi
 else
     bad "threads: it would not build"; sed 's/^/      /' "$tmp/t.build"

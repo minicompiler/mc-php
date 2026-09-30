@@ -121,4 +121,5 @@
 #define PHT_phz_idc            12440   // i64   its capacity
 #define PHT_phx_egx            12448   // i64   EG(exception)'s offset, as this thread measured it
 #define PHT_phx_egx_done       12456   // i64   1 once it did (or while RINIT must not)
-#define PHT_SIZE_ZTS           12464
+#define PHT_phz_job            12464   // uptr  a php thread's job, while its call runs (lib/php_zts.mc § 3b)
+#define PHT_SIZE_ZTS           12472

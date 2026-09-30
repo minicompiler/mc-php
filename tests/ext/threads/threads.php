@@ -84,7 +84,13 @@ function rethrow(): string {
 }
 function refuse(callable $f): string {
     try { mcphp_thread_start($f); return "started"; }
-    catch (\Error $e) { return $e->getMessage(); }
+    catch (\Error $e) {
+        // a ZTS php without opcache: what is not cached is named after the
+        // refusal, a closure by its file's path -- cut, so the recording holds
+        $m = $e->getMessage();
+        $p = strpos($m, "; not cached: ");
+        return $p === false ? $m : substr($m, 0, $p);
+    }
 }
 // shared mode: the flag, and whether a fresh string would be written in place
 function mode(): string { $s = str_repeat("m", 3); return mcphp_shared_mode() . " " . mcphp_str_mine($s); }
@@ -113,4 +119,23 @@ function late(int $ms): int { usleep($ms * 1000); echo "the detached thread fini
 function detach_late(int $ms): string {
     mcphp_thread_detach(mcphp_thread_start(fn(int $m): int => late($m), $ms));
     return "detached, running " . mcphp_thread_running();
+}
+
+// Threads step 3b (docs/threads.md § 3b): a PHP callable on a thread, which a
+// ZTS php runs as a php request of its own. php.php runs these, graded by
+// tests/ext.sh step 20c; an NTS php refuses every one of them.
+function prun0(callable $f): mixed { return mcphp_thread_join(mcphp_thread_start($f)); }
+function prun1(callable $f, mixed $a): mixed { return mcphp_thread_join(mcphp_thread_start($f, $a)); }
+function prun2(callable $f, mixed $a, mixed $b): mixed { return mcphp_thread_join(mcphp_thread_start($f, $a, $b)); }
+function pstart1(callable $f, mixed $a): int { return mcphp_thread_start($f, $a); }
+function pjoin(int $t): mixed { return mcphp_thread_join($t); }
+function pdetach(int $t): void { mcphp_thread_detach($t); }
+// one module global, written by a worker of each kind: a compiled worker
+// writes the request's module state, a php worker the copy its own request
+// started from
+function gset(string $v): string { global $g3b; $g3b = $v; return $v; }
+function gget(): string { global $g3b; return $g3b ?? "unset"; }
+function gcompiled(string $v): string {
+    mcphp_thread_join(mcphp_thread_start(fn(string $x): string => gset($x), $v));
+    return gget();
 }

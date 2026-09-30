@@ -703,13 +703,27 @@ void user_init() {
         uptr r = ph_swap(ph_rt, ph_rt_size, "i64 outer = !ld64(phT + PHT_ph_tidx);", "i64 outer = 0;");
         r = ph_swap(r, cstrlen(r), "uptr php_thr_block(uptr from, i64 idx) {", "uptr php_thr_block_nts(uptr from, i64 idx) {");
         r = ph_swap(r, cstrlen(r), "uptr php_ce_sslot_s(uptr ce, uptr name, uptr scope) {", "uptr php_ce_sslot_s_nts(uptr ce, uptr name, uptr scope) {");
-        // a php callable on a thread: a ZTS php can give it a context of its
-        // own, which is threads step 3b and not built yet
-        r = ph_swap(r, cstrlen(r), "a php callable cannot run on another thread in a php without thread safety; build the module with thread_safety = \\\"zts\\\", or pass a compiled function",
-                    "a php callable cannot run on another thread yet: its own php context on the worker is threads step 3b; pass a compiled function");
+        // a php callable on a thread: a ZTS php gives it a php thread and a
+        // request of its own (lib/php_zts.mc § 3b). Its record carries no
+        // block (PHA_N is -1, PHA_ARG its job), so the join and the end of the
+        // request take it before php_thr_reap would read one.
+        r = ph_swap(r, cstrlen(r), "    if (!php_thr_callable(fn)) return 0;",
+                    "    if (ph_eng && (php_zv_type(fn) != IS_OBJECT || php_is_proxy(ld64(fn)))) return php_thr_eng_start(fn, n, a1, a2, a3, a4, a5);\n    if (!php_thr_callable(fn)) return 0;");
+        r = ph_swap(r, cstrlen(r), "    if (!rec) { ph_tnotjoinable(id); return php_znull(); }\n",
+                    "    if (!rec) { ph_tnotjoinable(id); return php_znull(); }\n    if (ld64(rec + PHA_N) < 0) return phz_eng_join(rec);\n");
+        r = ph_swap(r, cstrlen(r), "    uptr exc = 0;\n", "    uptr exc = 0;\n    i64 rep = 0;\n");
+        // The report flag is computed into a local BEFORE the call, and on
+        // purpose: `phz_eng_end(rec, !exc && ...)` is miscompiled by mc -O on
+        // arm64 (mc 1dfa825) -- the && emits a label, a label drops every
+        // register alias, and `rec`'s (an argument already loaded, still
+        // live) is never materialised, so the call got -1. Remove the local
+        // once mc's allocator is fixed.
+        r = ph_swap(r, cstrlen(r), "        if (!rec) break;\n",
+                    "        if (!rec) break;\n        if (ld64(rec + PHA_N) < 0) { i64 rp = !exc && !rep && !ld64(rec + PHA_DET); if (phz_eng_end(rec, rp)) rep = 1; continue; }\n");
+        r = ph_swap(r, cstrlen(r), "if (!exc && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC))", "if (!exc && !rep && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC))");
         p_push_source("php runtime", r, cstrlen(r));
         ph_push_rt_host();
-        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12344\n", "#define PHT_SIZE 12464\n");
+        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12344\n", "#define PHT_SIZE 12472\n");
         p_push_source("php thread block", t, cstrlen(t));
         pass(&ph_tls_pass);
         return;

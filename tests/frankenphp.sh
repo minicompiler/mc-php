@@ -22,6 +22,10 @@
 #     all see an exception php's engine throws, as the later ones must;
 #   * FrankenPHP's resident memory after the whole load is within a bound of
 #     what it was after a warm-up: no leak across requests.
+#   * threads step 3b: threads.php starts two php callables on threads of
+#     their own per request (opcache on, FrankenPHP's default), from every
+#     php thread at once -- every answer the formula's, memory bounded -- and
+#     with opcache off the same page is refused, by name.
 #
 # Needs docker; on a macOS host run it inside the Linux VM, as tests/linux.sh.
 set -u
@@ -122,9 +126,50 @@ else bad "the answers came from $nthreads php thread(s): no concurrency was meas
 grow=$(( (r1 - r0) / 1024 ))
 if [ "$grow" -lt 32 ]; then say "resident memory: ${r0} KiB after the warm-up, ${r1} KiB after $reqs more requests (+${grow} MiB)"
 else bad "resident memory grew ${grow} MiB over $reqs requests (${r0} -> ${r1} KiB)"; fi
+# threads step 3b: php callables on threads of their own, two per request,
+# from every php thread at once (opcache is on: FrankenPHP's default). The
+# answer: "w<n>;" the first worker echoed, then 3n, then [n+1, "q" x (n+1)%5].
+docker exec "$name" sh -c "seq 1 $reqs | awk '{print \$1 % 50}' | xargs -P $par -I{} curl -fs --max-time 30 'http://127.0.0.1:8080/threads.php?n={}'" > "/tmp/fp.thr.$$" 2>/dev/null
+set -- $(awk '
+    function q(k,   o, i) { o = ""; for (i = 0; i < k; i++) o = o "q"; return o }
+    {
+        if (!match($0, /^w[0-9]+;/)) { bad++; if (shown++ < 3) print "      got  " $0 > "/dev/stderr"; next }
+        n = substr($0, 2, RLENGTH - 2) + 0
+        want = "w" n ";|" (3 * n) "|[" (n + 1) ",\"" q((n + 1) % 5) "\"]"
+        if ($0 != want) { bad++; if (shown++ < 3) print "      want " want "\n      got  " $0 > "/dev/stderr" }
+        ok++
+    }
+    END { print ok + 0, bad + 0 }' "/tmp/fp.thr.$$")
+tl=$(wc -l < "/tmp/fp.thr.$$" | tr -d ' ')
+if [ "$tl" = "$reqs" ] && [ "$2" = 0 ]; then
+    say "php callables on threads: $reqs requests, $par at a time, two php workers each, every answer the formula's (the request's own code, a worker's echo in the response)"
+else
+    bad "php callables on threads: $tl answers of $reqs, $2 wrong"
+    docker logs "$name" 2>&1 | tail -10 | sed 's/^/      /'
+fi
+r2=$(rss)
+grow2=$(( (r2 - r1) / 1024 ))
+if [ "$grow2" -lt 64 ]; then say "resident memory after them: ${r2} KiB (+${grow2} MiB)"
+else bad "resident memory grew ${grow2} MiB over the php-callable requests (${r1} -> ${r2} KiB)"; fi
+rm -f "/tmp/fp.thr.$$"
 if docker logs "$name" 2>&1 | grep -qi "segmentation\|fatal\|signal"; then
     bad "FrankenPHP logged a fault:"; docker logs "$name" 2>&1 | grep -i "segmentation\|fatal\|signal" | head -5 | sed 's/^/      /'
 fi
 rm -f /tmp/fp.warm.$$ /tmp/fp.run.$$
+# and the same page with opcache off: the start is refused, by name
+docker rm -f "$name" >/dev/null 2>&1
+docker run -d --name "$name" --platform "$plat" -v "$root:$root" \
+    -e MCPHP_FP_THREADS=$threads -e MCPHP_FP_ROOT="$root/$D" \
+    dunglas/frankenphp:php8.5-alpine sh -c \
+    "printf 'extension=$root/$D/build/zts.so\nopcache.enable=0\n' > /usr/local/etc/php/conf.d/zz-mcphp.ini; exec frankenphp run --config $root/$D/Caddyfile" >/dev/null
+i=0
+off=
+while [ $i -lt 60 ]; do
+    off=$(docker exec "$name" curl -fs --max-time 10 "http://127.0.0.1:8080/threads.php?n=4" 2>/dev/null) && break
+    sleep 1; i=$((i + 1))
+done
+want="E:mc-php: a php callable runs on another thread only when opcache caches the code it can reach: enable opcache (opcache.enable=1, and opcache.enable_cli=1 on the command line)"
+if [ "$off" = "$want" ]; then say "php callables on threads, opcache off: refused by name"
+else bad "php callables on threads, opcache off: got \"$off\""; fi
 [ "$fail" = 0 ] || { echo "  frankenphp: something failed"; exit 1; }
 echo "  frankenphp: a ZTS module under $threads php threads, every answer its own request's"

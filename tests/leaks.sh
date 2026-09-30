@@ -33,6 +33,12 @@
 #   through php's function table with strings and exceptions both ways.
 # A module built for this php has to say so: [php].debug = true and a build
 # id ending ",debug", or the loader refuses it by name.
+#
+# ZTS=1 runs the THREAD modules against a thread-safe debug php instead (the
+# image mc-php-phpdbg-zts, --enable-zts): the compiled threads and the thread
+# API as above, and php callables on threads of their own (tests/ext.sh step
+# 20c, threads step 3b) with opcache on -- a worker is a php request of its
+# own, and the debug allocator reports each thread's request when it ends.
 set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH= cd -- "$here/.." && pwd)
@@ -46,19 +52,23 @@ case "$arch" in
 esac
 bin=build/mc-php-linux-$nick
 [ -f "$bin" ] || { echo "tests/leaks.sh: no $bin -- mc build src --config src/mc-php.linux-$arch.toml" >&2; exit 2; }
+zts=${ZTS:-0}
 img=mc-php-phpdbg-$nick
+base=php:8.5-alpine
+cfz=
+if [ "$zts" = 1 ]; then img=mc-php-phpdbg-zts-$nick; base=php:8.5-zts-alpine; cfz=--enable-zts; fi
 if ! docker image inspect "$img" > /dev/null 2>&1; then
-    echo "== building $img (php 8.5, --enable-debug) =="
+    echo "== building $img (php 8.5, --enable-debug $cfz) =="
     printf '%s\n' \
-        'FROM php:8.5-alpine' \
+        "FROM $base" \
         'RUN apk add --no-cache $PHPIZE_DEPS bison re2c linux-headers lld \' \
         ' && docker-php-source extract && cd /usr/src/php \' \
-        ' && ./configure --prefix=/opt/phpdbg --enable-debug --disable-all --disable-cgi --disable-phpdbg --without-pear > /dev/null \' \
+        " && ./configure --prefix=/opt/phpdbg --enable-debug $cfz --disable-all --disable-cgi --disable-phpdbg --without-pear > /dev/null \\" \
         ' && make -j4 > /dev/null && make install > /dev/null && /opt/phpdbg/bin/php -v' \
         | docker build --platform "$plat" -t "$img" - || exit 2
 fi
 
-exec docker run --rm --platform "$plat" -v "$root:$root" -w "$root" -e BIN="$bin" "$img" sh -c '
+exec docker run --rm --platform "$plat" -v "$root:$root" -w "$root" -e BIN="$bin" -e ZTS="$zts" "$img" sh -c '
 set -u
 PHP=/opt/phpdbg/bin/php
 fail=0
@@ -71,7 +81,8 @@ echo "  build:  $bid"
 t=/tmp/mcphp-leaks
 rm -rf "$t"; mkdir -p "$t"
 # the project file for THIS php, from the Linux one
-dbg() { sed "s/^build_id = .*/build_id = \"$bid\"/; s/^debug = .*/debug = true/; s/^api = .*/api = $api/" "$1"; }
+tsv=nts; [ "$ZTS" = 1 ] && tsv=zts
+dbg() { sed "s/^build_id = .*/build_id = \"$bid\"/; s/^debug = .*/debug = true/; s/^api = .*/api = $api/; s/^thread_safety = .*/thread_safety = \"$tsv\"/" "$1"; }
 
 # one run: the answer must be what the release php printed, and the debug
 # allocator must have nothing to report
@@ -93,6 +104,8 @@ leakfree() {
     say "$name: exit 0, no block left at the end of the request"
 }
 
+# the THREAD modules only on a ZTS php (ZTS=1, the header says why)
+if [ "$ZTS" != 1 ]; then
 cp -R examples/decimal "$t/decimal"
 dbg examples/decimal/mcphp.linux.toml > "$t/decimal/dbg.toml"
 rm -rf "$t/decimal/build"
@@ -213,6 +226,7 @@ if "$BIN" build "$t/cal" --config "$t/cal/r.toml" > "$t/k.out" 2>&1; then
 else
     bad "the callables module: it would not build"; sed "s/^/      /" "$t/k.out"
 fi
+fi
 # compiled functions on several OS threads at once (the module of tests/ext.sh
 # step 20): each thread bumps an arena of its own, and nothing php allocates may be
 # left by it, 30 rounds of 4 threads
@@ -230,6 +244,16 @@ if "$BIN" build "$t/thr" --config "$t/thr/r.toml" > "$t/th.out" 2>&1; then
       printf "%s\n" "for (\$k = 0; \$k < 30; \$k++) { th\\api(4, 50); th\\keep(4); th\\rethrow(); }"
     } > "$t/thr/api.php"
     leakfree "the thread API (tests/ext/threads/api.php), 30 rounds" -d extension="$t/thr/build/r.so" "$t/thr/api.php"
+    # php callables on threads of their own (tests/ext.sh step 20c): results
+    # a string, an array and an object, copied out of the heap of each worker
+    # before its request ends, a fatal error and exit() in a worker, and a
+    # detached one -- 10 rounds, opcache on
+    if [ "$ZTS" = 1 ]; then
+        { cat tests/ext/threads/php.php
+          printf "%s\n" "for (\$k = 0; \$k < 10; \$k++) { th\\prun1(fn(int \$n) => str_repeat(\"ab\", \$n), \$k); th\\prun1(fn(int \$n) => [\$n, [\"k\" => \"v\$n\"]], \$k); th\\prun1(fn(\$p) => [\$p, new Pt(\$k, 1)], \$o); err(fn() => th\\prun0(function () { throw new DomainException(\"d\"); })); }"
+        } > "$t/thr/php.php"
+        leakfree "php callables on threads (tests/ext/threads/php.php), opcache on, 10 more rounds" -d opcache.enable_cli=1 -d extension="$t/thr/build/r.so" "$t/thr/php.php"
+    fi
 else
     bad "the threads module: it would not build"; sed "s/^/      /" "$t/th.out"
 fi
