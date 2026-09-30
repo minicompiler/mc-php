@@ -559,6 +559,7 @@ i64 phz_eng_syms() {
 #define JB_DONE     656             // 1 once the call returned (0 after a bailout)
 #define JB_LVL      664             // php's output level under the worker's buffer
 #define JB_REC      672             // the thread's record (lib/php_rt.mc § the thread API)
+#define JB_TRACE    680
 #define JB_MAP      4096
 
 void phz_bput(uptr bf, uptr p, i64 n) {
@@ -969,6 +970,7 @@ i64 phz_thandle() {
 }
 
 uptr phz_eng_body(uptr job);
+void phz_tr(uptr job, uptr m) { if (ld64(job + JB_TRACE)) write(2, m, php_cstrlen(m)); }
 
 // an argument, into the copy; 0 when the runtime threw converting it
 i64 phz_sx_arg(uptr cx, uptr a) {
@@ -1082,6 +1084,7 @@ i64 php_thr_eng_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a
     st64(rec + PHA_N, 0 - 1);
     st64(rec + PHA_ARG, job);
     st64(job + JB_REC, rec);
+    if (getenv("MCPHP_T3B_TRACE")) st64(job + JB_TRACE, 1);
     if (ph_thr_create(&phz_eng_body, job, rec + PHA_H) != 0) php_die("mc-php: cannot start a thread\n", 30);
     ph_lock();
     st64(ph_ttab + id * 8, rec);
@@ -1167,7 +1170,9 @@ void phz_call(uptr job) {
     uptr dx = phz_dx_new(job + JB_IN);
     u8 fz[16];
     phz_znull(fz);
+    phz_tr(job, "T dx\n");
     if (ld64(job + JB_KIND) == 1) phz_mkclosure(job, dx, fz);
+    phz_tr(job, "T mkcl\n");
     else phz_dx_val(dx, fz);
     i64 n = ld64(job + JB_NARGS);
     u8 av[80];
@@ -1180,7 +1185,9 @@ void phz_call(uptr job) {
     else {
         i64 lz = phx_lz;
         phx_lz = 0;
+        phz_tr(job, "T callfn\n");
         _call_user_function_impl(0, fz, rv, n, av, 0);
+        phz_tr(job, "T callret\n");
         phx_lz = lz;
     }
     i = 0;
@@ -1199,10 +1206,13 @@ void phz_call(uptr job) {
 // function, under an internal frame of its own
 void phz_tramp(uptr ed, uptr rv) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr job = ld64(phT + PHT_phz_job);
+    phz_tr(job, "T tramp\n");
     st64(job + JB_LVL, callp(phz_f(PHZ_OLEVEL)) & 0xffffffff);
     callp(phz_f(PHZ_OSTART));
+    phz_tr(job, "T ostart\n");
     phx_enter();
     phz_call(job);
+    phz_tr(job, "T called\n");
     php_flush();
     phx_leave();
     phz_out_take(job);
@@ -1240,8 +1250,11 @@ void phz_eng_run(uptr job) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     st8(pg + PGX_DURING_STARTUP, 0);
     st8(sg + SGX_HEADERS_SENT, 1);
     st8(sg + SGX_NO_HEADERS, 1);
+    phz_tr(job, "T sg\n");
     callp(phz_f(PHZ_MAPEXT), ld64(job + JB_MAPLAST));
+    phz_tr(job, "T mapext\n");
     phz_share(job);
+    phz_tr(job, "T share\n");
     uptr nm = job + JB_NAME;
     st32(nm, 1);
     st32(nm + 4, ZSX_GC_STRING | ZSX_INTERNED | ZSX_PERSIST);
@@ -1255,8 +1268,11 @@ void phz_eng_run(uptr job) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     st64(job + JB_ENTRY, fk);
     st64(phT + PHT_phz_job, job);
     callp(phz_f(PHZ_SDADD), job + JB_ENTRY);
+    phz_tr(job, "T sdadd\n");
     callp(phz_f(PHZ_SDCALL));
+    phz_tr(job, "T sdcall\n");
     callp(phz_f(PHZ_SDFREE));
+    phz_tr(job, "T sdfree\n");
     st64(phT + PHT_phz_job, 0);
     if (ld64(job + JB_DONE)) return;
     // a bailout: php's own fatal error ended the call, and printed itself
@@ -1272,18 +1288,25 @@ void phz_eng_run(uptr job) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 // php_request_startup ran this module's RINIT, which makes the block
 // (phz_thread): this function names only process-wide words
 uptr phz_eng_body(uptr job) {
+    phz_tr(job, "T body\n");
     callp(phz_f(PHZ_TSRES), 0, 0);
+    phz_tr(job, "T tsres\n");
     uptr ls = callp(phx_ts_get);
     uptr pg = ls + ld64(phz_f(PHZ_PGO));
     st8(pg + PGX_EXPOSE_PHP, 0);
     st8(pg + PGX_AUTO_GLOBALS_JIT, 1);
-    if ((callp(phz_f(PHZ_RSTART)) & 0xffffffff) == 0) phz_eng_run(job);
+    phz_tr(job, "T pg\n");
+    i64 okr = (callp(phz_f(PHZ_RSTART)) & 0xffffffff) == 0;
+    phz_tr(job, "T rstart\n");
+    if (okr) phz_eng_run(job);
     else st64(job + JB_EXC, 3);
     callp(phz_f(PHZ_RSTOP), 0);
+    phz_tr(job, "T rstop\n");
     ph_lock();
     st64(ld64(job + JB_REC) + PHA_STATE, 1);
     ph_unlock();
     callp(phz_f(PHZ_TSFREE));
+    phz_tr(job, "T tsfree\n");
     return 0;
 }
 
