@@ -493,6 +493,15 @@ void phz_sym(i64 i, uptr name) {
     st64(phz_s + i * 8, p);
     if (!p && !phz_missing) phz_missing = name;
 }
+// a ZEND_FASTCALL name: MSVC builds of php make it __vectorcall, whose
+// export carries its argument bytes (src/win/php8ts.def says the same of the
+// names php_ext.mc imports); anywhere else the plain name is found first
+void phz_symv(i64 i, uptr name, uptr vname) {
+    uptr p = php_dlsym(name);
+    if (!p) p = php_dlsym(vname);
+    st64(phz_s + i * 8, p);
+    if (!p && !phz_missing) phz_missing = name;
+}
 i64 phz_eng_syms() {
     ph_lock();
     if (!phz_syms) {
@@ -507,10 +516,10 @@ i64 phz_eng_syms() {
         phz_sym(PHZ_CECL, "zend_ce_closure");
         phz_sym(PHZ_MKCL, "zend_create_closure");
         phz_sym(PHZ_PROPS, "zend_std_get_properties");
-        phz_sym(PHZ_HFIND, "zend_hash_find");
-        phz_sym(PHZ_HADD, "zend_hash_add");
-        phz_sym(PHZ_HEND, "zend_hash_internal_pointer_end_ex");
-        phz_sym(PHZ_HBACK, "zend_hash_move_backwards_ex");
+        phz_symv(PHZ_HFIND, "zend_hash_find", "zend_hash_find@@16");
+        phz_symv(PHZ_HADD, "zend_hash_add", "zend_hash_add@@24");
+        phz_symv(PHZ_HEND, "zend_hash_internal_pointer_end_ex", "zend_hash_internal_pointer_end_ex@@16");
+        phz_symv(PHZ_HBACK, "zend_hash_move_backwards_ex", "zend_hash_move_backwards_ex@@16");
         phz_sym(PHZ_OSTART, "php_output_start_default");
         phz_sym(PHZ_OGET, "php_output_get_contents");
         phz_sym(PHZ_ODISC, "php_output_discard");
@@ -520,7 +529,7 @@ i64 phz_eng_syms() {
         phz_sym(PHZ_SDCALL, "php_call_shutdown_functions");
         phz_sym(PHZ_SDFREE, "php_free_shutdown_functions");
         phz_sym(PHZ_UNWIND, "zend_is_unwind_exit");
-        phz_sym(PHZ_ZSHASH, "zend_string_hash_func");
+        phz_symv(PHZ_ZSHASH, "zend_string_hash_func", "zend_string_hash_func@@8");
         phz_sym(PHZ_STDCLASS, "zend_standard_class_def");
         phz_syms = 1;
         if (phz_missing) phz_syms = 2;
