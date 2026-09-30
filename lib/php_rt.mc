@@ -6749,13 +6749,67 @@ i64 ph_shared_off(uptr phT, uptr what, i64 n) {
 // a rehash cannot invalidate an alias.
 uptr ph_globals;
 
+// `global $x`: the entry, made null when there is none -- php's global
+// statement creates it, and an entry the top level holds undefined (below)
+// becomes null the same way
 uptr php_gvar(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_pin();                                // the global table
     if (!ph_globals) ph_globals = php_arr_new(16);
     uptr b = php_ht_find(ph_globals, php_str_hash(name), name);
-    if (b) return ld64(b);
+    if (b) {
+        uptr e = ld64(b);
+        if (php_zv_type(e) == IS_UNDEF) php_zv_settype(e, IS_NULL);
+        return e;
+    }
     uptr z = php_znull();
     php_zv_cp(php_arr_sslot(ph_globals, name), php_zlong(z));
+    return z;
+}
+
+// The top level's scope IS the global table: a top-level name some function
+// declares `global` is bound to its entry once, when the program's (or
+// MINIT's) top-level code starts. An entry no one has assigned is IS_UNDEF,
+// php's "does not exist": php_gread warns on it, isset and ?? see it as
+// unset, and unset() puts it back (php_gunset).
+uptr php_gtop(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    php_pin();
+    if (!ph_globals) ph_globals = php_arr_new(16);
+    uptr b = php_ht_find(ph_globals, php_str_hash(name), name);
+    if (b) return ld64(b);
+    uptr z = php_zundef();
+    php_zv_cp(php_arr_sslot(ph_globals, name), php_zlong(z));
+    return z;
+}
+// a read of such a name (name: the C string, no `$`)
+uptr php_gread(uptr z, uptr name) {
+    if (php_zv_type(z) == IS_UNDEF) return php_undef_var(name);
+    return z;
+}
+// unset() at the top level removes the BINDING, not the value: the entry
+// becomes a NEW undefined zval, answered for the top level's slot, and the
+// old one lives on for any reference still holding it (`$r = &$g`)
+uptr php_gunset(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    php_pin();
+    if (!ph_globals) ph_globals = php_arr_new(16);
+    uptr z = php_zundef();
+    php_zv_cp(php_arr_sslot(ph_globals, name), php_zlong(z));
+    return z;
+}
+// the same read without the warning (an arrow function's implicit capture)
+uptr php_gq(uptr z) {
+    if (php_zv_type(z) == IS_UNDEF) return php_znull();
+    return z;
+}
+// the name's entry becomes the zval z: a top-level reference (`$g = &$x`,
+// foreach by reference) rebinds the GLOBAL, as php's does
+void php_gbind(uptr name, uptr z) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    php_pin();
+    if (!ph_globals) ph_globals = php_arr_new(16);
+    php_zv_cp(php_arr_sslot(ph_globals, name), php_zlong(z));
+}
+// a reference TO an entry no one assigned: php creates it, null
+uptr php_gdef(uptr z) {
+    if (php_zv_type(z) == IS_UNDEF) php_zv_settype(z, IS_NULL);
     return z;
 }
 

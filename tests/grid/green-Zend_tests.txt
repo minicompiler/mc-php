@@ -70,6 +70,7 @@ php-src/Zend/tests/bug38469.phpt
 php-src/Zend/tests/bug39018_2.phpt
 php-src/Zend/tests/bug39438.phpt
 php-src/Zend/tests/bug39602.phpt
+php-src/Zend/tests/bug40509.phpt
 php-src/Zend/tests/bug42143.phpt
 php-src/Zend/tests/bug42772.phpt
 php-src/Zend/tests/bug43183.phpt
@@ -129,7 +130,6 @@ php-src/Zend/tests/bug78502.phpt
 php-src/Zend/tests/bug78598.phpt
 php-src/Zend/tests/bug79155.phpt
 php-src/Zend/tests/bug79364.phpt
-php-src/Zend/tests/bug79791.phpt
 php-src/Zend/tests/bug80255.phpt
 php-src/Zend/tests/bug80404.phpt
 php-src/Zend/tests/class_alias/bug76451.phpt
@@ -172,7 +172,6 @@ php-src/Zend/tests/closures/closure_bug66622.phpt
 php-src/Zend/tests/closures/closure_const_expr/property_initializer_scope_001.phpt
 php-src/Zend/tests/closures/closure_extra_args.phpt
 php-src/Zend/tests/coalesce/assign_coalesce_006.phpt
-php-src/Zend/tests/coalesce/bug81684.phpt
 php-src/Zend/tests/coalesce/coalesce_assign_optimization.phpt
 php-src/Zend/tests/code_before_loop_var_free.phpt
 php-src/Zend/tests/comparison/compare_002_64bit.phpt
@@ -305,7 +304,6 @@ php-src/Zend/tests/foreach/foreach_011.phpt
 php-src/Zend/tests/foreach/foreach_013.phpt
 php-src/Zend/tests/foreach/foreach_014.phpt
 php-src/Zend/tests/foreach/foreach_undefined.phpt
-php-src/Zend/tests/foreach/foreach_unset_globals.phpt
 php-src/Zend/tests/foreach/gh11222.phpt
 php-src/Zend/tests/frameless_jmp_001.phpt
 php-src/Zend/tests/frameless_jmp_002.phpt
@@ -318,7 +316,6 @@ php-src/Zend/tests/gc/gc_027.phpt
 php-src/Zend/tests/gc/gc_031.phpt
 php-src/Zend/tests/gc/gc_034.phpt
 php-src/Zend/tests/generators/bug65035.phpt
-php-src/Zend/tests/gh10168/assign.phpt
 php-src/Zend/tests/gh10168/assign_static_prop.phpt
 php-src/Zend/tests/gh10168/assign_static_untyped_prop.phpt
 php-src/Zend/tests/gh11016.phpt
@@ -333,7 +330,6 @@ php-src/Zend/tests/gh13178_3.phpt
 php-src/Zend/tests/gh13178_5.phpt
 php-src/Zend/tests/gh15712.phpt
 php-src/Zend/tests/gh20672.phpt
-php-src/Zend/tests/globals_005.phpt
 php-src/Zend/tests/grammar/bug31341.phpt
 php-src/Zend/tests/grammar/bug35411.phpt
 php-src/Zend/tests/grammar/bug41401.phpt
@@ -456,7 +452,6 @@ php-src/Zend/tests/magic_methods/bug77613.phpt
 php-src/Zend/tests/magic_methods/bug80045.phpt
 php-src/Zend/tests/magic_methods/constructor_args.phpt
 php-src/Zend/tests/magic_methods/dtor_scope.phpt
-php-src/Zend/tests/magic_methods/magic_get_destroy_object.phpt
 php-src/Zend/tests/magic_methods/magic_methods_021.phpt
 php-src/Zend/tests/magic_methods/magic_methods_inheritance_rules.phpt
 php-src/Zend/tests/match/001.phpt
@@ -551,11 +546,11 @@ php-src/Zend/tests/nullsafe_operator/034.phpt
 php-src/Zend/tests/nullsafe_operator/035.phpt
 php-src/Zend/tests/nullsafe_operator/036.phpt
 php-src/Zend/tests/nullsafe_operator/037.phpt
+php-src/Zend/tests/nullsafe_operator/040.phpt
 php-src/Zend/tests/nullsafe_operator/bug81216_2.phpt
 php-src/Zend/tests/nullsafe_operator/constant_propagation.phpt
 php-src/Zend/tests/numeric_strings/array_offset.phpt
 php-src/Zend/tests/numeric_strings/explicit_cast_leading_numeric_must_work.phpt
-php-src/Zend/tests/numeric_strings/oss_fuzz_427814456.phpt
 php-src/Zend/tests/object-null.phpt
 php-src/Zend/tests/object_property_ref_incdec.phpt
 php-src/Zend/tests/objects/objects_009.phpt
@@ -611,6 +606,7 @@ php-src/Zend/tests/return_types/void_allowed.phpt
 php-src/Zend/tests/static_variables/static_variable.phpt
 php-src/Zend/tests/static_variables/static_variable_in_private_method.phpt
 php-src/Zend/tests/static_variables/static_variables_global.phpt
+php-src/Zend/tests/static_variables/static_variables_global_2.phpt
 php-src/Zend/tests/str_offset_001.phpt
 php-src/Zend/tests/str_offset_003.phpt
 php-src/Zend/tests/string_offset_int_min_max.phpt
@@ -803,8 +799,6 @@ php-src/Zend/tests/type_declarations/variance/stringable.phpt
 php-src/Zend/tests/type_declarations/weak_call_strict.phpt
 php-src/Zend/tests/typehints/fq_nullable.phpt
 php-src/Zend/tests/unset/bug34518.phpt
-php-src/Zend/tests/unset/bug81377.phpt
-php-src/Zend/tests/unset/unset_cv08.phpt
 php-src/Zend/tests/unset/unset_cv11.phpt
 php-src/Zend/tests/use_const/alias.phpt
 php-src/Zend/tests/use_const/basic.phpt

@@ -18,6 +18,9 @@ void ph_program() {
     // `<?=` opens a file too, and it is an ECHO: leave it for the statement
     // loop below, which takes the echo branch on it
     if (!ph_at("<?=", 3)) ph_next();              // <?php
+    // php's top-level scope is the global table: every name some function
+    // declares `global` is its entry here, bound once, before anything runs
+    ph_gtop_bind();
     loop {
         if (ph_tid == T_EOF) break;
         if (ph_ns_close()) continue;
@@ -44,6 +47,14 @@ void ph_program() {
     // no program -- phx_leave is the flush plus the bridge that turns a
     // pending php throwable into a Zend one, the same pair every handler
     // uses.
+    i64 gp = ph_gtop_prologue();
+    if (gp) {
+        i64 gt = gp;
+        loop { if (!nd_next(gt)) break; gt = nd_next(gt); }
+        if (ph_main_head) set_nd_next(gt, ph_main_head);
+        if (!ph_main_head) ph_main_tail = gt;
+        ph_main_head = gp;
+    }
     i64 fin = 0;
     i64 fin2 = 0;
     if (ph_ext) {
@@ -163,8 +174,44 @@ uptr ph_scan_name(uptr src, i64 len, uptr pi) {
 // zval. This hops over what is not code: `//`, `#` (but not `#[`), `/* */`
 // and both quote forms. A `&$x` inside a double-quoted string is an
 // interpolation and not a reference either, so skipping it is right too.
+// A heredoc or nowdoc that opens at i (`<<<ID`, `<<<"ID"`, `<<<'ID'`): the
+// index just past its closing identifier, 0 when i opens none. *now is 1 for
+// a nowdoc, whose body interpolates nothing. The closing identifier is the
+// first line that starts, after spaces and tabs, with the identifier and
+// then a byte that cannot continue it (php 7.3's flexible syntax).
+i64 ph_heredoc_end(uptr src, i64 len, i64 i, uptr now) {
+    if (i + 3 >= len || ld8(src + i) != 60 || ld8(src + i + 1) != 60 || ld8(src + i + 2) != 60) return 0;
+    i64 j = i + 3;
+    loop { if (j >= len) break; if (ld8(src + j) != 32 && ld8(src + j) != 9) break; j = j + 1; }
+    i64 q = 0;
+    if (j < len && (ld8(src + j) == 39 || ld8(src + j) == 34)) { q = ld8(src + j); j = j + 1; }
+    i64 s = j;
+    loop { if (j >= len) break; if (!ph_nmb(ld8(src + j), j == s)) break; j = j + 1; }
+    i64 n = j - s;
+    if (n == 0) return 0;
+    if (q) { if (j >= len || ld8(src + j) != q) return 0; j = j + 1; }
+    st64(now, q == 39);
+    // the body starts on the next line
+    loop { if (j >= len) return len; if (ld8(src + j) == 10) break; j = j + 1; }
+    loop {
+        if (j >= len) return len;
+        j = j + 1;                                   // past the newline
+        i64 k = j;
+        loop { if (k >= len) break; if (ld8(src + k) != 32 && ld8(src + k) != 9) break; k = k + 1; }
+        if (k + n <= len && str_eq(xstrdup(src + k, n), xstrdup(src + s, n))
+            && (k + n == len || !ph_nmb(ld8(src + k + n), 0)))
+            return k + n;
+        loop { if (j >= len) return len; if (ld8(src + j) == 10) break; j = j + 1; }
+    }
+    return len;
+}
+
 i64 ph_scan_hop(uptr src, i64 len, i64 i) {
     i64 c = ld8(src + i);
+    // a heredoc or a nowdoc is text, as a quoted string is
+    u8 hn[8];
+    i64 he = ph_heredoc_end(src, len, i, hn);
+    if (he) return he;
     if (c == 47 && i + 1 < len && ld8(src + i + 1) == 47) {
         i = i + 2;
         loop { if (i >= len) break; if (ld8(src + i) == 10) break; i = i + 1; }
@@ -453,7 +500,37 @@ void ph_checked_config() {
     toml_err_key("php.checked_reads", "mc-php: expected true or false");
 }
 
+// `$GLOBALS` is refused by name, at its own line: php's view of the global
+// table as an array is not built (the top level reaches the table through
+// its variables, ph_gtop_bind). Comments, single-quoted strings and a
+// nowdoc's body are not code; a double-quoted string or a heredoc
+// interpolates, so it is searched.
+void ph_scan_globals(uptr name, uptr src, i64 len) {
+    i64 i = 0;
+    loop {
+        if (i >= len) break;
+        i64 c = ld8(src + i);
+        u8 hn[8];
+        i64 he = ph_heredoc_end(src, len, i, hn);
+        if (he && ld64(hn)) { i = he; continue; }       // a nowdoc
+        if (he) { i = i + 3; continue; }                 // a heredoc: its body is searched
+        if (c != 34) {
+            i64 hop = ph_scan_hop(src, len, i);
+            if (hop != i) { i = hop; continue; }
+        }
+        if (c == 36 && i + 8 <= len && str_eq(xstrdup(src + i + 1, 7), "GLOBALS")
+            && (i + 8 == len || !ph_nmb(ld8(src + i + 8), 0))) {
+            i64 line = 1;
+            i64 j = 0;
+            loop { if (j >= i) break; if (ld8(src + j) == 10) line = line + 1; j = j + 1; }
+            ph_refuse2(name, line, "the global table as an array", "$GLOBALS", "D6");
+        }
+        i = i + 1;
+    }
+}
+
 void ph_on_source(uptr name, uptr src, i64 len) {
+    if (ph_pushing || ph_ends(name, ".php")) ph_scan_globals(name, src, len);
     ph_scan_decl(src, len);
     ph_scan_brf(src, len);
     ph_scan_refs(src, len);

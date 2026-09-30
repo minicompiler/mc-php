@@ -70,7 +70,6 @@ php-src/ext/standard/tests/strings/bug77853.phpt
 php-src/ext/standard/tests/strings/bug78003.phpt
 php-src/ext/standard/tests/strings/bug78346.phpt
 php-src/ext/standard/tests/strings/bug78612.phpt
-php-src/ext/standard/tests/strings/bug78840.phpt
 php-src/ext/standard/tests/strings/bug79951.phpt
 php-src/ext/standard/tests/strings/chop_basic.phpt
 php-src/ext/standard/tests/strings/chop_variation3.phpt

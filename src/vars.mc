@@ -58,6 +58,73 @@ void ph_gset_add(uptr n) {
     ph_ngset = ph_ngset + 1;
 }
 
+// The first ph_ngtop names of ph_gsetn -- those the scan had when the top
+// level began (ph_program) -- are bound to their global-table entry for the
+// whole top level: php's top-level scope IS the global table. A name a
+// later `require` adds is bound at its first top-level assignment instead.
+i64 ph_ngtop;
+i64 ph_gtop_has(uptr n) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_ngtop) break;
+        if (str_eq(ld64(ph_gsetn + i * 8), n)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// bind the names, ONCE, before the first top-level statement is compiled;
+// ph_gtop_prologue writes the statements that bind them at run time
+void ph_gtop_bind() {
+    ph_ngtop = ph_ngset;
+    i64 i = 0;
+    loop {
+        if (i >= ph_ngtop) break;
+        uptr d = ld64(ph_gsetn + i * 8);
+        ph_var_bind(d, PT_MIXED);
+        ph_set_ref(d);
+        i = i + 1;
+    }
+}
+// An assignment that REBINDS a name -- foreach's variables, a reference
+// assignment -- rather than storing into it. For a top-level name bound to
+// the global table, the table is what changes: a value is stored into the
+// entry, a reference makes the entry that zval (php_gbind). A block, so a
+// caller may chain it like the one assignment it replaces.
+i64 ph_rebind(uptr d, i64 v, i64 byref) {
+    if (!ph_toplevel || !ph_gtop_has(d)) return ph_set(ph_mangle(d, "v_"), v);
+    i64 lv = node_new(N_IDENT, ph_tline, ph_tfile);
+    set_nd_name(lv, ph_mangle(d, "v_"));
+    set_nd_type(lv, ty_pzv);
+    i64 s = node_new(N_EXPRSTMT, ph_tline, ph_tfile);
+    if (!byref) set_nd_a(s, ph_c2("php_zv_store", lv, v, ty_pzv));
+    if (byref) {
+        set_nd_a(s, ph_c2("php_gbind", ph_strlit(d + 1, cstrlen(d + 1)), lv, TY_VOID));
+        i64 a = ph_set(ph_mangle(d, "v_"), v);
+        set_nd_next(a, s);
+        s = a;
+    }
+    i64 b = node_new(N_BLOCK, ph_tline, ph_tfile);
+    set_nd_a(b, s);
+    return b;
+}
+
+i64 ph_gtop_prologue() {
+    i64 head = 0;
+    i64 tail = 0;
+    i64 i = 0;
+    loop {
+        if (i >= ph_ngtop) break;
+        uptr d = ld64(ph_gsetn + i * 8);
+        i64 s = ph_set(ph_mangle(d, "v_"), ph_c1("php_gtop", ph_strlit(d + 1, cstrlen(d + 1)), ty_pzv));
+        if (tail) set_nd_next(tail, s);
+        if (!tail) head = s;
+        tail = s;
+        i = i + 1;
+    }
+    return head;
+}
+
 i64 ph_gset_has(uptr n) {
     i64 i = 0;
     loop {

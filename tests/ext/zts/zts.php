@@ -15,6 +15,11 @@ final class _Box {
 $zts_g = ['a' => 1, 'list' => [1, 2]];
 $zts_box = new _Box();
 define('ZTS_K', 7);
+// a top-level read of a name only a function's `global` creates, at MINIT:
+// every request's copy of MINIT's globals carries what it read (7)
+function zts_gset(): void { global $zts_only; $zts_only = 5; }
+zts_gset();
+$zts_top = $zts_only + 2;
 
 // echoed, not returned: it has to pass through php's output layer on every
 // php thread, into the ob_start() level index.php opened
@@ -26,9 +31,9 @@ function zts_say(int $n): void {
 // THAT request's module state: it reads the global this request just wrote
 function zts_shared(int $x): int { global $zts_g; return $x * 3 + (int) $zts_g['a']; }
 
-// n|calls|a|list|count|items|K|s|f|R|helper|boom:rev|api|thread
+// n|calls|a|list|count|items|K top|s|f|R|helper|boom:rev|api|thread
 function work(int $n, callable $boom): string {
-    global $zts_g, $zts_box;
+    global $zts_g, $zts_box, $zts_top;
     static $calls = 0;
     $calls++;
     $zts_g['a'] += $n;
@@ -55,5 +60,5 @@ function work(int $n, callable $boom): string {
     $b = $b . ":" . (string) $rev("z$n");
     $tv = (int) mcphp_thread_join(mcphp_thread_start(fn(int $x): int => zts_shared($x), $n));
     return $n . "|" . $calls . "|" . $zts_g['a'] . "|" . count($zts_g['list']) . "|" . _Box::$count
-        . "|" . $k . "|" . ZTS_K . "|" . $s . "|" . $f($n) . "|" . ZTS_R . "|" . $h . "|" . $b . "|" . $tv . "|" . mcphp_thread();
+        . "|" . $k . "|" . ZTS_K . $zts_top . "|" . $s . "|" . $f($n) . "|" . ZTS_R . "|" . $h . "|" . $b . "|" . $tv . "|" . mcphp_thread();
 }
