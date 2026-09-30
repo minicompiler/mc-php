@@ -844,7 +844,9 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
     if [ "$TSV" = zts ]; then
         # opcache: built into php on Linux and macOS; a Windows php may carry
         # it as php_opcache.dll, loaded only when asked for
-        opc="-d opcache.enable_cli=1"
+        # file_update_protection: opcache does not cache a file younger than
+        # it (2 s by default), and a test may write one just before it runs
+        opc="-d opcache.enable_cli=1 -d opcache.file_update_protection=0"
         "$PHP" $opc -r 'exit(function_exists("opcache_get_status") ? 0 : 1);' 2>/dev/null \
             || opc="$opc -d zend_extension=opcache"
         "$PHP" $opc -r 'exit(function_exists("opcache_get_status") ? 0 : 1);' 2>/dev/null \
@@ -875,7 +877,8 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
             bad "php callables on threads (exit $tp)"; diff "$tmp/t.pw" "$tmp/t.p" | grep '^>' | sed -n '1,12p' | sed 's/^/      /'
             # the whole refusal (php.php cuts what is not cached) and opcache's own view
             printf '%s\n' '<?php' 'try { th\prun0(fn() => 1); echo "started\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }' \
-                '$s = opcache_get_status(false); echo "opcache: enabled ", var_export($s["opcache_enabled"] ?? null, true), ", this script cached ", var_export(opcache_is_script_cached(__FILE__), true), ", file cache only ", var_export($s["file_cache_only"] ?? null, true), "\n";' > "$tmp/t.d.php"
+                '$s = opcache_get_status(false); echo "opcache: enabled ", var_export($s["opcache_enabled"] ?? null, true), ", this script cached ", var_export(opcache_is_script_cached(__FILE__), true), ", file cache only ", var_export($s["file_cache_only"] ?? null, true), "\n";' \
+                '$f = realpath("tests/ext/threads/php.php"); echo "php.php: compiled ", var_export(opcache_compile_file($f), true), ", cached ", var_export(opcache_is_script_cached($f), true), "\n";' > "$tmp/t.d.php"
             "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
         fi
         "$PHP" -d opcache.enable_cli=0 -d extension="$tmp/build/r.$sx" tests/ext/threads/php.php 2>&1 | tr -d '\r' > "$tmp/t.q"; tq=$?
