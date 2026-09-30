@@ -1387,6 +1387,7 @@ i64 phx_fcall_l2(uptr c, i64 v1, i64 v2, i64 lazy) { uptr phT = ph_tcur; if (!ph
 #define ZCLX_THIS           312
 #define ZCLX_CALLED         328
 #define ZCLX_ORIG           336
+#define SMX_DEACTIVATE      40
 #define IZ_ARRAY_EX         775     // IS_ARRAY | (REFCOUNTED | COLLECTABLE) << 8
 #define GCX_IMMUTABLE       64      // GC_IMMUTABLE: never counted
 #define HASH_KEY_IS_STRING  1

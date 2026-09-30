@@ -187,5 +187,6 @@ int main(void) {
     P("ZCLX_THIS",           offsetof(abi_closure, this_ptr));
     P("ZCLX_CALLED",         offsetof(abi_closure, called_scope));
     P("ZCLX_ORIG",           offsetof(abi_closure, orig_internal_handler));
+    P("SMX_DEACTIVATE",      offsetof(sapi_module_struct, deactivate));
     return 0;
 }

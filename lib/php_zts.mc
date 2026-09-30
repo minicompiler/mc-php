@@ -301,9 +301,7 @@ void phz_privatize() {
 // php_ext.mc names it before it declares it
 i64 phx_egx_ok() { return phx_egx_done; }
 
-i64 phz_bare2;
 i64 phx_ts_rinit(i64 mtype, i64 mnum) {
-    if (phz_bare2 && callp(phx_ts_get) != phx_ts_ls0) return 0;
     uptr b = phz_thread();
     i64 egx = ld64(b + PHT_phx_egx_done);
     st64(b + PHT_phx_egx_done, 1);
@@ -314,17 +312,9 @@ i64 phx_ts_rinit(i64 mtype, i64 mnum) {
     st64(b + PHT_phx_egx_done, egx);
     return 0;
 }
-i64 phz_trg;
-i64 phz_postdeact() { if (phz_trg) write(2, "P\n", 2); return 0; }
-void phz_t0(uptr m) { if (phz_trg) write(2, m, php_cstrlen(m)); }
 i64 phx_ts_rshutdown(i64 mtype, i64 mnum) {
-    phz_t0("R1\n");
-    if (phz_bare2 && callp(phx_ts_get) != phx_ts_ls0) return 0;
     phz_thread();
-    phz_t0("R2\n");
-    i64 r = phx_rshutdown(mtype, mnum);
-    phz_t0("R3\n");
-    return r;
+    return phx_rshutdown(mtype, mnum);
 }
 
 // MINIT's arena made read-only (MCPHP_ZTS_READONLY=1, a test's switch): any
@@ -405,7 +395,6 @@ uptr phx_ts_module(uptr me) {
     st64(me + MEX_GLOBALS_ID_PTR, phx_ts_id);
     st64(me + MEX_GLOBALS_CTOR, &phx_ts_gctor);
     st64(me + MEX_GLOBALS_DTOR, &phx_ts_gdtor);
-    st64(me + 128, &phz_postdeact);
     return me;
 }
 
@@ -570,10 +559,6 @@ i64 phz_eng_syms() {
 #define JB_DONE     656             // 1 once the call returned (0 after a bailout)
 #define JB_LVL      664             // php's output level under the worker's buffer
 #define JB_REC      672             // the thread's record (lib/php_rt.mc § the thread API)
-#define JB_TRACE    680
-#define JB_UNSH     688
-#define JB_NOSG     696
-#define JB_BARE     704
 #define JB_MAP      4096
 
 void phz_bput(uptr bf, uptr p, i64 n) {
@@ -984,7 +969,32 @@ i64 phz_thandle() {
 }
 
 uptr phz_eng_body(uptr job);
-void phz_tr(uptr job, uptr m) { if (ld64(job + JB_TRACE)) write(2, m, php_cstrlen(m)); }
+
+// On Windows the SAPI is a module apart (php.exe, or a web server's DLL)
+// with its own copy of php's per-thread cache, which only threads the SAPI
+// started ever set: its deactivate, which php_request_shutdown calls on
+// every thread, reads that cache and faults on a php thread this module
+// made (php-cli's sapi_cli_deactivate, measured under cdb on both Windows
+// legs). A worker's request never belonged to the SAPI, so on such a php
+// the SAPI's deactivate is skipped on a worker's thread and called as it was
+// on every other. Installed once, before the first worker exists.
+uptr phz_sapi_deact0;
+i64 phz_sapi_on;
+i64 phz_sapi_deact() {
+    uptr b = ph_tget();
+    if (b && ld64(b + PHT_phz_job)) return 0;
+    if (phz_sapi_deact0) return callp(phz_sapi_deact0);
+    return 0;
+}
+void phz_sapi_wrap() {
+    // a Windows php: the one that exports its win32 helpers
+    if (phz_sapi_on || !php_dlsym("php_win32_error_to_msg")) return;
+    phz_sapi_on = 1;
+    uptr sm = php_dlsym("sapi_module");
+    if (!sm) return;
+    phz_sapi_deact0 = ld64(sm + SMX_DEACTIVATE);
+    st64(sm + SMX_DEACTIVATE, &phz_sapi_deact);
+}
 
 // an argument, into the copy; 0 when the runtime threw converting it
 i64 phz_sx_arg(uptr cx, uptr a) {
@@ -1086,6 +1096,9 @@ i64 php_thr_eng_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a
     uptr ls = callp(phx_ts_get);
     st64(job + JB_MAPLAST, ld64(ls + ld64(phz_f(PHZ_CGO)) + CGX_MAP_PTR_LAST));
     ph_tapi = 1;
+    ph_lock();
+    phz_sapi_wrap();
+    ph_unlock();
     php_pin();
     uptr rec = php_alloc(PHA_SIZE);
     i64 i = 0;
@@ -1098,11 +1111,6 @@ i64 php_thr_eng_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a
     st64(rec + PHA_N, 0 - 1);
     st64(rec + PHA_ARG, job);
     st64(job + JB_REC, rec);
-    if (getenv("MCPHP_T3B_TRACE")) { st64(job + JB_TRACE, 1); phz_trg = 1; }
-    if (getenv("MCPHP_T3B_UNSHARE")) st64(job + JB_UNSH, 1);
-    if (getenv("MCPHP_T3B_NOSG")) st64(job + JB_NOSG, 1);
-    if (getenv("MCPHP_T3B_BARE")) st64(job + JB_BARE, 1);
-    if (getenv("MCPHP_T3B_BARE2")) { st64(job + JB_BARE, 1); phz_bare2 = 1; }
     if (ph_thr_create(&phz_eng_body, job, rec + PHA_H) != 0) php_die("mc-php: cannot start a thread\n", 30);
     ph_lock();
     st64(ph_ttab + id * 8, rec);
@@ -1188,10 +1196,8 @@ void phz_call(uptr job) {
     uptr dx = phz_dx_new(job + JB_IN);
     u8 fz[16];
     phz_znull(fz);
-    phz_tr(job, "T dx\n");
     if (ld64(job + JB_KIND) == 1) phz_mkclosure(job, dx, fz);
     else phz_dx_val(dx, fz);
-    phz_tr(job, "T mkcl\n");
     i64 n = ld64(job + JB_NARGS);
     u8 av[80];
     i64 i = 0;
@@ -1203,9 +1209,7 @@ void phz_call(uptr job) {
     else {
         i64 lz = phx_lz;
         phx_lz = 0;
-        phz_tr(job, "T callfn\n");
         _call_user_function_impl(0, fz, rv, n, av, 0);
-        phz_tr(job, "T callret\n");
         phx_lz = lz;
     }
     i = 0;
@@ -1224,13 +1228,10 @@ void phz_call(uptr job) {
 // function, under an internal frame of its own
 void phz_tramp(uptr ed, uptr rv) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr job = ld64(phT + PHT_phz_job);
-    phz_tr(job, "T tramp\n");
     st64(job + JB_LVL, callp(phz_f(PHZ_OLEVEL)) & 0xffffffff);
     callp(phz_f(PHZ_OSTART));
-    phz_tr(job, "T ostart\n");
     phx_enter();
     phz_call(job);
-    phz_tr(job, "T called\n");
     php_flush();
     phx_leave();
     phz_out_take(job);
@@ -1258,28 +1259,6 @@ void phz_share(uptr job) {
     }
 }
 
-void phz_unshare(uptr job) {
-    uptr tab = job + JB_TAB;
-    uptr dx = phz_dx_new(tab);
-    uptr ft = ld64(phx_eg + EGX_FUNCTION_TABLE);
-    uptr ct = ld64(phx_eg + EGX_CLASS_TABLE);
-    uptr zd = php_dlsym("zend_hash_del");
-    if (!zd) zd = php_dlsym("zend_hash_del@@16");
-    loop {
-        if (ld64(dx + DX_POS) >= ld64(tab + 8)) break;
-        i64 w = phz_rw(dx);
-        uptr p = phz_rw(dx);
-        uptr k = phz_rzs(dx);
-        uptr t = ft;
-        if (w) t = ct;
-        uptr d = ld64(t + 48);
-        st64(t + 48, 0);
-        callp(zd, t, k);
-        st64(t + 48, d);
-        phz_zs_rel(k);
-    }
-    phz_tr(job, "T unshared\n");
-}
 // the worker's request, once RINIT gave this thread its block: the code
 // shared, the call made as the request's shutdown function, what a fatal
 // error left if the call did not return
@@ -1287,16 +1266,11 @@ void phz_eng_run(uptr job) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr ls = callp(phx_ts_get);
     uptr pg = ls + ld64(phz_f(PHZ_PGO));
     uptr sg = ls + ld64(phz_f(PHZ_SGO));
-    if (!ld64(job + JB_NOSG)) {
     st8(pg + PGX_DURING_STARTUP, 0);
     st8(sg + SGX_HEADERS_SENT, 1);
     st8(sg + SGX_NO_HEADERS, 1);
-    }
-    phz_tr(job, "T sg\n");
     callp(phz_f(PHZ_MAPEXT), ld64(job + JB_MAPLAST));
-    phz_tr(job, "T mapext\n");
     phz_share(job);
-    phz_tr(job, "T share\n");
     uptr nm = job + JB_NAME;
     st32(nm, 1);
     st32(nm + 4, ZSX_GC_STRING | ZSX_INTERNED | ZSX_PERSIST);
@@ -1310,13 +1284,9 @@ void phz_eng_run(uptr job) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     st64(job + JB_ENTRY, fk);
     st64(phT + PHT_phz_job, job);
     callp(phz_f(PHZ_SDADD), job + JB_ENTRY);
-    phz_tr(job, "T sdadd\n");
     callp(phz_f(PHZ_SDCALL));
-    phz_tr(job, "T sdcall\n");
     callp(phz_f(PHZ_SDFREE));
-    phz_tr(job, "T sdfree\n");
-    st64(phT + PHT_phz_job, 0);
-    if (ld64(job + JB_UNSH)) phz_unshare(job);
+    // phz_job stays set until the thread ends: phz_sapi_deact reads it
     if (ld64(job + JB_DONE)) return;
     // a bailout: php's own fatal error ended the call, and printed itself
     // into the worker's output
@@ -1331,28 +1301,18 @@ void phz_eng_run(uptr job) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 // php_request_startup ran this module's RINIT, which makes the block
 // (phz_thread): this function names only process-wide words
 uptr phz_eng_body(uptr job) {
-    phz_tr(job, "T body\n");
     callp(phz_f(PHZ_TSRES), 0, 0);
-    phz_tr(job, "T tsres\n");
     uptr ls = callp(phx_ts_get);
     uptr pg = ls + ld64(phz_f(PHZ_PGO));
-    if (!ld64(job + JB_NOSG)) {
     st8(pg + PGX_EXPOSE_PHP, 0);
     st8(pg + PGX_AUTO_GLOBALS_JIT, 1);
-    }
-    phz_tr(job, "T pg\n");
-    i64 okr = (callp(phz_f(PHZ_RSTART)) & 0xffffffff) == 0;
-    phz_tr(job, "T rstart\n");
-    if (okr && !ld64(job + JB_BARE)) phz_eng_run(job);
-    if (ld64(job + JB_BARE)) st64(job + JB_EXC, 3);
+    if ((callp(phz_f(PHZ_RSTART)) & 0xffffffff) == 0) phz_eng_run(job);
     else st64(job + JB_EXC, 3);
     callp(phz_f(PHZ_RSTOP), 0);
-    phz_tr(job, "T rstop\n");
     ph_lock();
     st64(ld64(job + JB_REC) + PHA_STATE, 1);
     ph_unlock();
     callp(phz_f(PHZ_TSFREE));
-    phz_tr(job, "T tsfree\n");
     return 0;
 }
 
