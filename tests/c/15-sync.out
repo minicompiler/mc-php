@@ -1,0 +1,21 @@
+under a mutex: exact
+atomic add:    exact
+cas loop:      exact
+xchg spin:     exact
+add: 40 then 42
+cas: true false -> 7
+xchg: 7 then -5
+store and wrap: yes
+trylock from another thread while held: false
+trylock by the holder: false
+the waiter saw what was written before the unlock: 1234
+Error: mc-php: mutex 1 is already held by this thread
+Error: mc-php: mutex 1 is held by another thread
+Error: mc-php: mutex 1 is not locked
+Error: mc-php: handle 1 is a mutex, not an atomic
+Error: mc-php: handle 5 is an atomic, not a mutex
+Error: mc-php: handle 0 is not a live mutex
+Error: mc-php: handle 999999 is not a live atomic
+Error: mc-php: handle -3 is not a live atomic
+Error: mc-php: handle 4194309 is not a live atomic
+the mutex still works: true

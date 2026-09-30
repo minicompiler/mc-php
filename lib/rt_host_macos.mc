@@ -120,15 +120,23 @@ extern i64 pthread_create(uptr tid, uptr attr, uptr fn, uptr arg);
 extern i64 pthread_join(uptr tid, uptr ret);
 extern uptr mmap(uptr addr, i64 n, i64 prot, i64 flags, i64 fd, i64 off);
 extern i64 munmap(uptr addr, i64 n);
-// The runtime's own lock (the thread API's table and lists, lib/php_rt.mc §
-// the thread API): one mutex, made with the thread key. Not the user's lock:
-// those are step 4.
-extern i64 pthread_mutex_init(uptr m, uptr attr);
-extern i64 pthread_mutex_lock(uptr m);
-extern i64 pthread_mutex_unlock(uptr m);
-u8 ph_lk[64];
-void ph_lock() { pthread_mutex_lock(ph_lk); }
-void ph_unlock() { pthread_mutex_unlock(ph_lk); }
+// Sleeping on a word (lib/php_rt.mc § native sync): ph_os_wait sleeps while
+// the low 32 bits at `a` equal `v` (a spurious return is the caller's to
+// retry), ph_os_wake wakes one sleeper, or all of them. __ulock_wait and
+// __ulock_wake are libSystem's private interface -- the one libc++'s
+// std::atomic::wait is built on, so it does not go away quietly:
+// UL_COMPARE_AND_WAIT 1 | ULF_NO_ERRNO 0x01000000, ULF_WAKE_ALL 0x100, and a
+// timeout of 0 is none.
+// ponytail: private SPI; os_sync_wait_on_address/os_sync_wake_by_address_*
+// (public since macOS 14.4) are the upgrade once the floor is 14.4.
+extern i64 __ulock_wait(i64 op, uptr a, i64 v, i64 us);
+extern i64 __ulock_wake(i64 op, uptr a, i64 wv);
+void ph_os_wait(uptr a, i64 v) { __ulock_wait(0x01000001, a, v, 0); }
+void ph_os_wake(uptr a, i64 all) {
+    i64 op = 0x01000001;
+    if (all) op = op | 0x100;
+    __ulock_wake(op, a, 0);
+}
 i64 ph_tkey;
 uptr ph_tget() { return pthread_getspecific(ph_tkey); }
 void ph_tset(uptr b) { pthread_setspecific(ph_tkey, b); }
@@ -137,7 +145,6 @@ void ph_tinit() {
     st64(k, 0);
     pthread_key_create(k, 0);
     ph_tkey = ld64(k);
-    pthread_mutex_init(ph_lk, 0);
 }
 // the logical CPUs online (mcphp_hardware_concurrency): sysconf(_SC_NPROCESSORS_ONLN)
 extern i64 sysconf(i64 name);

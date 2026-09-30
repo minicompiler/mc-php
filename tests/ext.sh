@@ -829,9 +829,12 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
     printf '%s\n' "before any thread: 0 1" "4 threads through the API: agree" "after the joins: 1 0" \
         "a joined thread's values: kkk 3 3" "a detached thread's values: kkkkk 5 5" "rethrown: caught from a thread" \
         "a php callable: $ref" "destructors: dtor 1" "dtor 2" "dtor 1" "1 2 1 distinct" \
+        "sync from 4 compiled threads: exact exact" "the process's atomic, made at MINIT: 1" \
+        "sync refused: mc-php: mutex 4 is already held by this thread" "sync refused: mc-php: mutex 4 is not locked" \
+        "sync refused: mc-php: handle 4 is a mutex, not an atomic" \
         "the detached thread finished inside the request" > "$tmp/t.aw"
     if [ "$ta" = 0 ] && cmp -s "$tmp/t.aw" "$tmp/t.a"; then
-        say "thread API: compiled callables on threads, kept values after a join and a detach, a rethrow, shared mode, the php callable refused, each copy destructed once by its owner, a detached thread waited for by RSHUTDOWN"
+        say "thread API: compiled callables on threads, kept values after a join and a detach, a rethrow, shared mode, the php callable refused, each copy destructed once by its owner, a detached thread waited for by RSHUTDOWN; a mutex and an atomic from 4 compiled threads exact, the process's atomic made at MINIT, three sync refusals by name"
     else
         bad "thread API (exit $ta)"; diff "$tmp/t.aw" "$tmp/t.a" | sed -n '1,12p' | sed 's/^/      /'
     fi
@@ -871,7 +874,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
                 'autoloaded after the start: here 5, there Error: Class "LateAuto" not found' \
                 "statics: here 3, there 12, here 4" \
                 "a module global, a compiled worker: compiled" "a module global, a php worker: unset, then php" \
-                "a module global afterwards: compiled"
+                "a module global afterwards: compiled" "sync with 4 php workers: 10000 10000"
             if [ "$sx" = dll ]; then printf '%s\n' "a fatal error: not on Windows"
             else printf '%s\n' "a fatal error: Error: mc-php: a php thread ended on a fatal error: Allowed memory size of 4194304 bytes exhausted"; fi
             printf '%s\n' "exit(): NULL" "8 workers echo, joined in reverse:"
@@ -893,7 +896,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
             bad "php callables on threads: stderr"; diff "$tmp/t.pew" "$tmp/t.pe2" | sed -n '1,8p' | sed 's/^/      /'
         fi
         if [ "$tp" = 0 ] && cmp -s "$tmp/t.pw" "$tmp/t.p"; then
-            say "php callables on threads (opcache on): the request's code shared, values copied and refused by name, output in join order, a module global per kind of worker, a fatal error and exit() in a worker"
+            say "php callables on threads (opcache on): the request's code shared, values copied and refused by name, output in join order, a module global per kind of worker, a mutex and an atomic shared with 4 php workers, a fatal error and exit() in a worker"
         else
             bad "php callables on threads (exit $tp)"; diff "$tmp/t.pw" "$tmp/t.p" | sed -n '1,30p' | sed 's/^/      /'
             # the whole refusal (php.php cuts what is not cached) and opcache's own view

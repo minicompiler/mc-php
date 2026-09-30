@@ -54,6 +54,26 @@ echo "statics: here ", counter(), ", there ", th\prun0(fn() => counter() . count
 echo "a module global, a compiled worker: ", th\gcompiled("compiled"), "\n";
 echo "a module global, a php worker: ", th\prun0(fn() => th\gget() . ", then " . th\gset("php")), "\n";
 echo "a module global afterwards: ", th\gget(), "\n";
+// native sync (step 4) from php workers, through the module's wrappers: a
+// read, an add and a store that only the mutex makes whole, and an atomic
+// add, from four workers and this request at once
+$sm = th\sy_mutex();
+$sa = th\sy_atomic(0);
+$sb = th\sy_atomic(0);
+$sw = function (int $m, int $a, int $b): int {
+    for ($k = 0; $k < 2000; $k++) {
+        th\sy_lock($m);
+        th\sy_store($a, th\sy_load($a) + 1);
+        th\sy_unlock($m);
+        th\sy_add($b, 1);
+    }
+    return 0;
+};
+$ws = [];
+for ($i = 0; $i < 4; $i++) $ws[] = th\pstart3($sw, $sm, $sa, $sb);
+$sw($sm, $sa, $sb);
+foreach ($ws as $w) th\pjoin($w);
+echo "sync with 4 php workers: ", th\sy_load($sa), " ", th\sy_load($sb), "\n";
 // a fatal error unwinds to php's zend_try; on Windows that unwind is SEH's and
 // cannot cross the module's frames (docs/threads.md § 3b), so it is not made
 if (PHP_OS_FAMILY === "Windows") echo "a fatal error: not on Windows\n";

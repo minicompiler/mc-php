@@ -553,20 +553,30 @@ i64 ph_dollar_expr() {
 
 // The runtime's own system layer, one file per host: what a PROGRAM this
 // compiler writes calls, which is not what the compiler calls. All four are
-// embedded and one is pushed, chosen by host_os()/host_arch() -- there is no
+// embedded and one is pushed, chosen by host_os() and the target's
+// architecture (ph_target_arch: [target].arch, else the host's) -- there is no
 // conditional compilation in this language, and a binary that carries four
 // small files and picks one is smaller and far easier to prove than four
 // compilers that each carry one.
 //
-// The choice is the HOST's because mc's default target is the host's
-// (mc's M37): `mc-php --exe x.php` writes a binary for the machine it is
-// running on, so the runtime's calls have to be that machine's.
+// The operating system is the HOST's because mc's default target is the
+// host's (mc's M37): `mc-php --exe x.php` writes a binary for the machine it is
+// running on, so the runtime's calls have to be that machine's. The
+// architecture is [target].arch when the project names one: the same system
+// may be built for another architecture (a Windows-on-ARM mc-php writes the
+// x64 extension php loads there), and the atomic words are instructions.
 #embed ph_rt_macos   "../lib/rt_host_macos.mc"
 #embed ph_rt_linux   "../lib/rt_host_linux.mc"
 #embed ph_rt_lin_a64 "../lib/rt_host_linux_aarch64.mc"
 #embed ph_rt_lin_x64 "../lib/rt_host_linux_x86_64.mc"
 #embed ph_rt_win     "../lib/rt_host_windows.mc"
 #embed ph_rt_win_st  "../lib/rt_host_windows_start.mc"
+// the atomic words (docs/threads.md § Step 4): raw instructions, so one per
+// instruction set and calling convention, chosen by the TARGET's architecture
+// -- a Windows-on-ARM mc-php builds the x64 extension php loads there
+#embed ph_rt_at_a64   "../lib/rt_atomic_arm64.mc"
+#embed ph_rt_at_x64   "../lib/rt_atomic_x86_64.mc"
+#embed ph_rt_at_win   "../lib/rt_atomic_win64.mc"
 
 // A push puts its source ON TOP of the lexer's stack, so the LAST push is the
 // FIRST thing parsed (mc's p_push_source has #include's semantics, and it was
@@ -613,8 +623,27 @@ uptr ph_swap(uptr src, i64 n, uptr from, uptr to) {
     return r;
 }
 
+// the architecture the output is FOR: [target].arch when `mc build` read one
+// (mc's driver has it before user_init), else the host's -- a Windows-on-ARM
+// mc-php builds the x64 extension php loads there
+uptr ph_target_arch() {
+    uptr a = drv_arch();
+    if (!a) a = host_arch();
+    return a;
+}
+
+// the atomic words for it
+void ph_push_rt_atomic(uptr os, uptr a) {
+    if (str_eq(a, "aarch64")) { p_push_source("php runtime atomics", ph_rt_at_a64, ph_rt_at_a64_size); return; }
+    if (str_eq(a, "x86_64") && str_eq(os, "windows")) { p_push_source("php runtime atomics", ph_rt_at_win, ph_rt_at_win_size); return; }
+    if (str_eq(a, "x86_64")) { p_push_source("php runtime atomics", ph_rt_at_x64, ph_rt_at_x64_size); return; }
+    err_at2("mc-php", 1, "mc-php: no atomic words for this architecture", a);
+}
+
 void ph_push_rt_host() {
     uptr os = host_os();
+    uptr arch = ph_target_arch();
+    ph_push_rt_atomic(os, arch);
     if (str_eq(os, "macos")) {
         p_push_source("php runtime host", ph_rt_macos, ph_rt_macos_size);
         return;
@@ -639,7 +668,7 @@ void ph_push_rt_host() {
     }
     if (str_eq(os, "linux")) {
         p_push_source("php runtime host", ph_rt_linux, ph_rt_linux_size);
-        uptr a = host_arch();
+        uptr a = arch;
         if (str_eq(a, "aarch64")) {
             p_push_source("php runtime host arch", ph_rt_lin_a64, ph_rt_lin_a64_size);
             return;

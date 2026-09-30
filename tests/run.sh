@@ -18,6 +18,8 @@
 #   d8check      every .php in the project is in a regime with an obligation
 #   lencheck     every hand-counted string length in src/ and lib/ is right
 #   aritycheck   every library row's callee exists with that many parameters
+#   sweep_sync   the runtime's atomic words re-assembled by llvm-mc, and emitted
+#                by mc exactly (skipped, with a line, where llvm-mc is not)
 #   ext          examples/hello compiled into a .so that php LOADS, and its
 #                answers compared with php's own for the same source
 #   examples     every other examples/ directory, by tests/examples.sh
@@ -52,6 +54,7 @@ echo "== the sources =="
 python3 tests/d8check.py    || fail=1
 python3 tests/lencheck.py   || fail=1
 python3 tests/aritycheck.py || fail=1
+MC=$MC python3 tests/sweep_sync.py || fail=1
 
 echo ""
 echo "== the compiler =="

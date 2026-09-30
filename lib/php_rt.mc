@@ -11115,7 +11115,7 @@ i64 php_thr_run(uptr fn, i64 n, i64 arg) { uptr phT = ph_tcur; if (!phT) phT = p
 // arena before start returns; join copies the result (or the exception) back
 // into the joiner's. Module state -- globals, statics, constants -- is ONE
 // copy every thread reads and writes, as in C: the races are the
-// developer's, and the locks are step 4.
+// developer's, and so is the mutex that removes them (§ native sync, below).
 //
 // What keeps that memory-safe, without a copy on every store:
 //   * a thread's arena is never released at its join: the chunks are kept
@@ -11398,7 +11398,7 @@ void php_thr_report(uptr ez) {
 // skipdet: a detached thread is neither waited for nor touched -- the
 // program's end, where the process's exit ends it, as in C.
 uptr php_thr_endall(uptr root, i64 free, i64 skipdet) {
-    if (!ph_tapi) return 0;
+    if (!ph_tapi) { if (free) php_sy_endreq(root); return 0; }
     uptr exc = 0;
     loop {
         ph_lock();
@@ -11425,6 +11425,188 @@ uptr php_thr_endall(uptr root, i64 free, i64 skipdet) {
         }
         st64(root + PHT_ph_tret, 0);
         st64(root + PHT_ph_shared, 0);
+        php_sy_endreq(root);
     }
     return exc;
+}
+
+// ---- native sync (docs/threads.md § Step 4) ---------------------------------
+// The runtime's own lock and the objects a program locks with: no pthread
+// mutex, no SRWLOCK -- a word, the atomic words (lib/rt_atomic_*.mc) and the
+// host's sleep on a word (ph_os_wait/ph_os_wake: futex, __ulock,
+// WaitOnAddress).
+//
+// The lock is Drepper's mutex (Futexes Are Tricky, mutex 3): 0 free, 1 locked,
+// 2 locked and maybe waited on. A lock that finds it free takes it with one
+// compare-and-swap; one that does not marks it 2 and sleeps while it stays 2;
+// an unlock that finds 2 wakes one sleeper. The word needs no initialisation,
+// so it works before anything else exists.
+void ph_mx_lock(uptr w) {
+    if (ph_at_cas(w, 0, 1)) return;
+    loop {
+        if (ph_at_xchg(w, 2) == 0) return;
+        ph_os_wait(w, 2);
+    }
+}
+void ph_mx_unlock(uptr w) { if (ph_at_xchg(w, 0) == 2) ph_os_wake(w, 0); }
+
+// the runtime's lock: the thread API's table and lists, the extension's
+// deferred frees, a ZTS module's tables, the sync table below. Not recursive:
+// nothing that holds it takes it again.
+i64 ph_lkw;
+void ph_lock() { ph_mx_lock(&ph_lkw); }
+void ph_unlock() { ph_mx_unlock(&ph_lkw); }
+
+// The objects: mcphp_mutex*, mcphp_atomic* (src/builtin.mc). A handle is an
+// int, (generation << 22) | index, into a table of 32-byte slots that never
+// move: a directory of chunks, 1024 slots each, allocated as they are needed.
+// A slot freed goes back on a free list with its generation bumped, so a
+// handle that outlived its object is refused by name and never reaches
+// another object. Making one takes the runtime lock; using one does not.
+// ponytail: a fixed directory, 4096 chunks = 4194303 live objects; a
+// directory that grows is the upgrade if a program ever needs more.
+#define SY_FREE    0
+#define SY_MUTEX   1
+#define SY_ATOMIC  2
+#define SY_HDR     0                // (generation << 8) | kind
+#define SY_W0      8                // the mutex's word, the atomic's value; a free slot's next
+#define SY_W1      16               // the mutex's holder, its thread block; 0 when free
+#define SY_OWN     24               // the request that made it (its root block); 0: the process's
+#define SY_SIZE    32
+#define SY_GMASK   0x1FFFFFFFFFF    // 41 bits of generation: a handle stays a positive int
+uptr ph_sydir[4096];
+i64  ph_syn;                        // the highest index handed out
+i64  ph_syfree;                     // the free list's first index, 0 when empty
+i64  ph_syreq;                      // live slots a request owns
+i64  ph_syown;                      // 1 once an extension's MINIT ended (lib/php_ext.mc)
+
+uptr ph_sy_at(i64 i) { return ld64(ph_sydir + (i >> 10) * 8) + (i & 1023) * SY_SIZE; }
+
+// A new object. On the extension road one made by a request belongs to it and
+// is freed at its end (php_sy_endreq), after every thread of it was waited
+// for; one made at MINIT, or by a program, lives as long as the process.
+i64 ph_sy_new(i64 kind, i64 v) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr own = 0;
+    if (ph_syown) { own = ld64(phT + PHT_ph_troot); if (!own) own = phT; }
+    ph_lock();
+    i64 i = ph_syfree;
+    uptr s = 0;
+    if (i) {
+        s = ph_sy_at(i);
+        ph_syfree = ld64(s + SY_W0);
+    } else {
+        i = ph_syn + 1;
+        if (i >= 4096 * 1024) { ph_unlock(); php_die("mc-php: more than 4194303 sync objects\n", 39); }
+        if (!ld64(ph_sydir + (i >> 10) * 8)) {
+            uptr c = ph_os_map(1024 * SY_SIZE);
+            if (!c) { ph_unlock(); php_die("mc-php: cannot map the sync table\n", 34); }
+            st64(ph_sydir + (i >> 10) * 8, c);
+        }
+        s = ph_sy_at(i);
+        ph_syn = i;
+    }
+    i64 g = ld64(s + SY_HDR) >> 8;
+    st64(s + SY_W0, v);
+    st64(s + SY_W1, 0);
+    st64(s + SY_OWN, own);
+    ph_at_store(s + SY_HDR, (g << 8) | kind);
+    if (own) ph_syreq = ph_syreq + 1;
+    ph_unlock();
+    return (g << 22) | i;
+}
+
+uptr ph_sy_s(uptr c) { return php_str_new(c, php_cstrlen(c)); }
+
+// the slot a handle names when it is a live object of this kind; otherwise
+// the named Error, and 0
+uptr ph_sy_slot(i64 h, i64 kind) {
+    i64 i = h & 0x3FFFFF;
+    i64 hd = 0 - 1;
+    uptr s = 0;
+    if (h > 0 && i > 0 && i <= ph_syn && ld64(ph_sydir + (i >> 10) * 8)) {
+        s = ph_sy_at(i);
+        hd = ph_at_load(s + SY_HDR);
+    }
+    i64 live = hd >= 0 && (hd >> 8) == ((h >> 22) & SY_GMASK) && (hd & 255) != SY_FREE;
+    if (live && (hd & 255) == kind) return s;
+    uptr want = "mutex";
+    if (kind == SY_ATOMIC) want = "atomic";
+    uptr m = php_str_concat(ph_sy_s("mc-php: handle "), php_itos(h));
+    if (!live) m = php_str_concat(m, ph_sy_s(" is not a live "));
+    if (live && (hd & 255) == SY_MUTEX) m = php_str_concat(m, ph_sy_s(" is a mutex, not an "));
+    if (live && (hd & 255) == SY_ATOMIC) m = php_str_concat(m, ph_sy_s(" is an atomic, not a "));
+    php_throw_str(ph_sy_s("Error"), php_str_concat(m, ph_sy_s(want)));
+    return 0;
+}
+
+void ph_sy_refuse(uptr what, i64 h, uptr why) {
+    php_throw_str(ph_sy_s("Error"), php_str_concat(php_str_concat(ph_sy_s(what), php_itos(h)), ph_sy_s(why)));
+}
+
+// The mutex. Its holder is the thread's block, so a thread that locks what it
+// already holds -- which would sleep forever -- is refused instead: these are
+// not recursive mutexes. Lock is an acquire and unlock a release, so what one
+// holder wrote under the mutex the next holder reads (docs/threads.md § the
+// memory model). A thread that ends holding a mutex leaves it locked.
+i64 php_sy_mutex() { return ph_sy_new(SY_MUTEX, 0); }
+uptr php_sy_lock(i64 h) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr s = ph_sy_slot(h, SY_MUTEX);
+    if (s && ld64(s + SY_W1) == phT) { ph_sy_refuse("mc-php: mutex ", h, " is already held by this thread"); s = 0; }
+    if (s) {
+        ph_mx_lock(s + SY_W0);
+        st64(s + SY_W1, phT);
+    }
+    return php_znull();
+}
+i64 php_sy_trylock(i64 h) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr s = ph_sy_slot(h, SY_MUTEX);
+    if (!s) return 0;
+    if (ld64(s + SY_W1) == phT) return 0;
+    if (!ph_at_cas(s + SY_W0, 0, 1)) return 0;
+    st64(s + SY_W1, phT);
+    return 1;
+}
+uptr php_sy_unlock(i64 h) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr s = ph_sy_slot(h, SY_MUTEX);
+    if (s && ld64(s + SY_W1) != phT) {
+        if (!ph_at_load(s + SY_W0)) ph_sy_refuse("mc-php: mutex ", h, " is not locked");
+        else ph_sy_refuse("mc-php: mutex ", h, " is held by another thread");
+        s = 0;
+    }
+    if (s) {
+        st64(s + SY_W1, 0);
+        ph_mx_unlock(s + SY_W0);
+    }
+    return php_znull();
+}
+
+// The atomic: one 64-bit value, every operation sequentially consistent.
+i64 php_sy_atomic(i64 v) { return ph_sy_new(SY_ATOMIC, v); }
+i64 php_sy_load(i64 h) { uptr s = ph_sy_slot(h, SY_ATOMIC); if (!s) return 0; return ph_at_load(s + SY_W0); }
+uptr php_sy_store(i64 h, i64 v) { uptr s = ph_sy_slot(h, SY_ATOMIC); if (s) ph_at_store(s + SY_W0, v); return php_znull(); }
+i64 php_sy_add(i64 h, i64 d) { uptr s = ph_sy_slot(h, SY_ATOMIC); if (!s) return 0; return ph_at_add(s + SY_W0, d); }
+i64 php_sy_cas(i64 h, i64 e, i64 n) { uptr s = ph_sy_slot(h, SY_ATOMIC); if (!s) return 0; return ph_at_cas(s + SY_W0, e, n); }
+i64 php_sy_xchg(i64 h, i64 v) { uptr s = ph_sy_slot(h, SY_ATOMIC); if (!s) return 0; return ph_at_xchg(s + SY_W0, v); }
+
+// The end of a request (php_thr_endall, free): what it made is freed, its
+// generation bumped. Every thread of it has been waited for.
+// ponytail: a scan of the table, and only when a request owns a live object;
+// a list per request is the upgrade if requests make thousands.
+void php_sy_endreq(uptr root) {
+    if (!ph_syreq) return;
+    ph_lock();
+    i64 i = 1;
+    loop {
+        if (i > ph_syn) break;
+        uptr s = ph_sy_at(i);
+        i64 hd = ld64(s + SY_HDR);
+        if ((hd & 255) != SY_FREE && ld64(s + SY_OWN) == root) {
+            ph_at_store(s + SY_HDR, (((hd >> 8) + 1) & SY_GMASK) << 8);
+            st64(s + SY_W0, ph_syfree);
+            ph_syfree = i;
+            ph_syreq = ph_syreq - 1;
+        }
+        i = i + 1;
+    }
+    ph_unlock();
 }

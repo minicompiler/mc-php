@@ -62,8 +62,6 @@ extern i64  GetCurrentDirectoryA(i64 size, uptr buf);
 extern i64  SetCurrentDirectoryA(uptr name);
 extern i64  GetLastError();
 extern void SetLastError(i64 code);
-extern void AcquireSRWLockExclusive(uptr l);
-extern void ReleaseSRWLockExclusive(uptr l);
 extern i64  GetActiveProcessorCount(i64 group);
 
 // The flags the runtime writes and only this file reads. They are the
@@ -321,6 +319,15 @@ i64 chmod(uptr path, i64 mode) {
 // lib/php_rt.mc declares after this file -- is an import of ucrtbase.dll on
 // the one-step road. `#dylib` stays in effect across the pushed sources, which
 // is the point: it is set once, here, and the runtime is not edited per host.
+// WaitOnAddress and the two wakes are not kernel32's: the synchronization API
+// set exports them (kernelbase.dll implements it, and every Windows 8 and
+// later resolves the set). On the object road tests/winsys.sh puts the same
+// three names, bound to the same DLL, into kernel32.lib.
+#dylib "api-ms-win-core-synch-l1-2-0.dll"
+extern i64  WaitOnAddress(uptr a, uptr cmp, i64 size, i64 ms);
+extern void WakeByAddressSingle(uptr a);
+extern void WakeByAddressAll(uptr a);
+
 #dylib "ucrtbase.dll"
 extern uptr setlocale(i64 category, uptr name);
 
@@ -390,13 +397,19 @@ i64 ph_tkey;
 uptr ph_tget() { return TlsGetValue(ph_tkey); }
 void ph_tset(uptr b) { TlsSetValue(ph_tkey, b); }
 void ph_tinit() { ph_tkey = rtw_int(TlsAlloc()); }
-// The runtime's own lock (lib/php_rt.mc § the thread API): a slim
-// reader/writer lock, which needs no initialisation (SRWLOCK_INIT is zero).
-// Not the user's lock: those are step 4. (Both are declared at the top: below
-// the `#dylib` they would be imports of ucrtbase.dll.)
-u8 ph_lk[8];
-void ph_lock() { AcquireSRWLockExclusive(ph_lk); }
-void ph_unlock() { ReleaseSRWLockExclusive(ph_lk); }
+// Sleeping on a word (lib/php_rt.mc § native sync): ph_os_wait sleeps while
+// the low 32 bits at `a` equal `v` (a spurious return is the caller's to
+// retry), ph_os_wake wakes one sleeper, or all of them. WaitOnAddress compares
+// against a COPY of the value, 4 bytes of it; INFINITE is 0xFFFFFFFF.
+void ph_os_wait(uptr a, i64 v) {
+    u8 c[8];
+    st64(c, v);
+    WaitOnAddress(a, c, 4, 0xFFFFFFFF);
+}
+void ph_os_wake(uptr a, i64 all) {
+    if (all) WakeByAddressAll(a);
+    else WakeByAddressSingle(a);
+}
 // the logical processors of every group (mcphp_hardware_concurrency)
 i64 ph_os_ncpu() { i64 n = rtw_int(GetActiveProcessorCount(0xffff)); if (n < 1) return 1; return n; }
 // fresh zeroed pages: reserved and committed (MEM_COMMIT | MEM_RESERVE,

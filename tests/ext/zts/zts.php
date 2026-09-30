@@ -66,3 +66,26 @@ function work(int $n, callable $boom): string {
 // own, started and joined by the module (tests/frankenphp.sh, threads.php)
 function zts_pstart(callable $f, int $n): int { return mcphp_thread_start($f, $n); }
 function zts_pjoin(int $t): mixed { return mcphp_thread_join($t); }
+// native sync (step 4) under a threaded SAPI (tests/frankenphp.sh, sync.php):
+// an atomic made at MINIT is the process's and counts every request; a mutex
+// and an atomic a request makes are freed at its end, so their slots are
+// reused and the handles' indices stay small however many requests ran
+$zts_sy_hits = mcphp_atomic(0);
+function zts_sy_bump(int $m, int $a): int {
+    mcphp_mutex_lock($m);
+    $v = mcphp_atomic_load($a);
+    mcphp_atomic_store($a, $v + 1);
+    mcphp_mutex_unlock($m);
+    return $v;
+}
+function zts_sync(int $n): string {
+    global $zts_sy_hits;
+    $m = mcphp_mutex();
+    $a = mcphp_atomic($n);
+    $t = mcphp_thread_start(fn(int $m, int $a): int => zts_sy_bump($m, $a), $m, $a);
+    zts_sy_bump($m, $a);
+    mcphp_thread_join($t);
+    mcphp_atomic_add($zts_sy_hits, 1);
+    return $n . "|" . mcphp_atomic_load($a) . "|" . max($m & 0x3FFFFF, $a & 0x3FFFFF);
+}
+function zts_sync_hits(): int { global $zts_sy_hits; return mcphp_atomic_load($zts_sy_hits); }

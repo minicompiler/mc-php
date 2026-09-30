@@ -511,6 +511,53 @@ i64 ph_ftable_call(uptr name, uptr av, i64 na, uptr fl, i64 line, i64 fb) {
     return ph_calln("phx_fcall", cv, 6, ty_pzv);
 }
 
+// Native sync, the primitive layer (docs/threads.md § Step 4): int handles
+// into lib/php_rt.mc's table, every one of them an object of the process.
+//   mcphp_mutex(): int                       mcphp_atomic(int $v = 0): int
+//   mcphp_mutex_lock(int $m): void           mcphp_atomic_load(int $a): int
+//   mcphp_mutex_trylock(int $m): bool        mcphp_atomic_store(int $a, int $v): void
+//   mcphp_mutex_unlock(int $m): void         mcphp_atomic_add(int $a, int $d): int   (the value before)
+//                                            mcphp_atomic_cas(int $a, int $e, int $n): bool
+//                                            mcphp_atomic_xchg(int $a, int $v): int  (the value before)
+// A handle that is not a live object of the kind, a lock of a mutex the
+// thread holds, an unlock of one it does not: a named Error. 0 when `name`
+// is none of these.
+i64 ph_bi_sync(uptr name, i64 line, uptr fl) {
+    uptr rt = 0;
+    i64 lo = 1;
+    i64 hi = 1;
+    i64 ety = PT_INT;
+    if (str_eq(name, "mcphp_mutex"))         { rt = "php_sy_mutex"; lo = 0; hi = 0; }
+    if (str_eq(name, "mcphp_mutex_lock"))    { rt = "php_sy_lock"; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_mutex_trylock")) { rt = "php_sy_trylock"; ety = PT_BOOL; }
+    if (str_eq(name, "mcphp_mutex_unlock"))  { rt = "php_sy_unlock"; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_atomic"))        { rt = "php_sy_atomic"; lo = 0; }
+    if (str_eq(name, "mcphp_atomic_load"))   rt = "php_sy_load";
+    if (str_eq(name, "mcphp_atomic_store"))  { rt = "php_sy_store"; lo = 2; hi = 2; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_atomic_add"))    { rt = "php_sy_add"; lo = 2; hi = 2; }
+    if (str_eq(name, "mcphp_atomic_cas"))    { rt = "php_sy_cas"; lo = 3; hi = 3; ety = PT_BOOL; }
+    if (str_eq(name, "mcphp_atomic_xchg"))   { rt = "php_sy_xchg"; lo = 2; hi = 2; }
+    if (!rt) return 0;
+    u8 np[8];
+    uptr av = ph_read_args(3, fl, line, np);
+    i64 n = ld64(np);
+    if (n < lo || n > hi) ph_todo2(fl, line, "the wrong number of arguments for", name);
+    i64 a0 = 0;
+    i64 a1 = 0;
+    i64 a2 = 0;
+    if (n > 0) a0 = ph_to_int(ph_a(av, 0), ph_aty(av, 0));
+    if (n > 1) a1 = ph_to_int(ph_a(av, 1), ph_aty(av, 1));
+    if (n > 2) a2 = ph_to_int(ph_a(av, 2), ph_aty(av, 2));
+    // mcphp_atomic() starts at 0
+    if (str_eq(name, "mcphp_atomic") && n == 0) { a0 = ph_int(0); n = 1; }
+    i64 ty = TY_I64;
+    if (ety == PT_NULL) ty = ty_pzv;
+    i64 c = ph_call(rt, n, a0, a1, a2, 0, ty);
+    ph_ety = ety;
+    if (ety == PT_BOOL) return ph_cast(TY_U8, c);
+    return c;
+}
+
 i64 ph_builtin(uptr name, i64 line, uptr fl) {
     // the name as written, resolved (src/ns.mc): as a function here, as a
     // constant where one is looked up, as a class before `::`. Outside a
@@ -822,6 +869,8 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         return ph_c3("php_thr_run", fp, ph_to_int(ph_a(tav, 1), ph_aty(tav, 1)),
                      ph_to_int(ph_a(tav, 2), ph_aty(tav, 2)), TY_I64);
     }
+    i64 sy = ph_bi_sync(name, line, fl);
+    if (sy) return sy;
     // The thread API (docs/threads.md § Step 3), the primitive layer:
     //   mcphp_thread_start(callable $fn, mixed ...$args): int
     //   mcphp_thread_join(int $t): mixed

@@ -466,12 +466,12 @@ Module state, per kind:
 | `class_alias()` | still refused on another thread: the class table is the program's code, and C has no runtime equivalent |
 | `register_shutdown_function()` | still refused on another thread: only the starting thread's list runs |
 
-**Unsafe without a lock** (the locks are step 4; until then this is the developer's
-responsibility, as in C). Each of these is undefined behaviour, not merely nondeterminism:
+**Unsafe without a lock** (step 4's mutex makes each of these safe, § Step 4; without one this
+is the developer's responsibility, as in C). Each of these is undefined behaviour, not merely nondeterminism:
 - **A torn value.** A php value is 16 bytes: an 8-byte payload and an 8-byte type. A store is two
   64-bit stores, so a reader racing a writer can see the new type with the old payload, or the
   reverse -- for example an array type over an integer's bits, which crashes when it is read.
-  Step 4's locks are the fix. Until then, a variable one thread writes while another reads it is
+  Step 4's mutex is the fix. Without it, a variable one thread writes while another reads it is
   a bug in the program.
 - Two threads writing the same variable. The last store wins, with no ordering.
 - Read-modify-write, such as `$count++`, `$g['a'] += 1` or `$list[] = $x`: updates get lost, and
@@ -514,8 +514,9 @@ stored into shared state (a store barrier on module state), or give each thread 
 ### Each road
 
 **Program road (exe).** Everything is compiled, so every thread is a native OS thread with no
-Zend: step 1's machinery behind the public API. Windows uses `CreateThread`, `TlsGetValue` and an
-`SRWLOCK`; POSIX uses pthreads and a mutex. `mcphp_hardware_concurrency` is
+Zend: step 1's machinery behind the public API. Windows uses `CreateThread` and `TlsGetValue`;
+POSIX uses pthreads and a thread key. The runtime's lock is step 4's word on both (§ Step 4).
+`mcphp_hardware_concurrency` is
 `sysconf(_SC_NPROCESSORS_ONLN)` on Linux and macOS, and `GetActiveProcessorCount`
 on Windows.
 
@@ -746,3 +747,125 @@ php callable on a thread is worth it for work that takes much longer than a mill
   `opcache.enable=0` the same page answers the refusal.
 - The Windows ZTS legs (arm64 and x64) run `tests/ext.sh`, so § 20c runs there too, with
   opcache loaded as a `zend_extension` where the php does not load it by itself.
+
+## Step 4: native sync
+
+Step 3 left every race to the developer. Step 4 gives the developer the tools: a mutex and
+atomics, built on the atomic instructions and the operating system's sleep on a word -- `futex`
+on Linux, `__ulock_wait` on macOS, `WaitOnAddress` on Windows. No pthread mutex and no
+`SRWLOCK` is left anywhere in the runtime: the runtime's own lock moved onto the same word
+(4a). A semaphore, a wait group, a condition variable and timeouts are 4b.
+
+### The API (4a)
+
+Ten builtins, compiled by mc-php on both roads:
+
+```php
+$m = mcphp_mutex(): int;                         // a handle
+mcphp_mutex_lock(int $m): void;                  // sleeps until it is free
+$ok = mcphp_mutex_trylock(int $m): bool;         // false when it is held, by anyone
+mcphp_mutex_unlock(int $m): void;
+
+$a = mcphp_atomic(int $v = 0): int;              // a handle to one 64-bit value
+$v = mcphp_atomic_load(int $a): int;
+mcphp_atomic_store(int $a, int $v): void;
+$old = mcphp_atomic_add(int $a, int $d): int;    // the value before; wraps as C's does
+$ok = mcphp_atomic_cas(int $a, int $e, int $n): bool;   // stores $n when the value is $e
+$old = mcphp_atomic_xchg(int $a, int $v): int;   // the value before
+```
+
+- **An int handle, for both.** Like a thread's, it is a value: it crosses nothing, is never
+  counted, and is copied into a thread's arguments as an int. An atomic is a handle and not a
+  variable because a php variable is 16 bytes and two stores; the handle names 8 bytes the
+  runtime owns.
+- **Named refusals, as `Error`:** a handle that is not a live object (`mc-php: handle N is not a
+  live mutex`), one of the other kind (`mc-php: handle N is an atomic, not a mutex`), a lock of a
+  mutex the calling thread already holds (`mc-php: mutex N is already held by this thread` -- it
+  would sleep for ever), an unlock by a thread that does not hold it (`mc-php: mutex N is held by
+  another thread`) or of a mutex nobody holds (`mc-php: mutex N is not locked`).
+- **Not recursive.** A thread that locks what it holds is refused, not counted. A recursive mutex
+  is out of scope; code that needs one keeps its own count beside the handle.
+- **Lifetime.** On the program road an object lives as long as the process. On the extension road
+  one made at MINIT lives as long as the process, and one a request makes is freed at the
+  request's end, after every thread of the request was waited for. A 3b worker is a request of
+  its own, so what it makes is freed when it ends. A freed handle is refused by name, never
+  reused silently: a handle is `(generation << 22) | index` into a table of slots, and a freed
+  slot's generation moves on.
+- **A thread that ends holding a mutex leaves it locked**, as a pthread mutex does.
+- **Intrinsics, like `mcphp_thread_*`**: they exist only in compiled code. Interpreted php calls
+  a wrapper the module publishes, as `tests/ext/threads/threads.php` does:
+
+  ```php
+  namespace th;
+  function sy_mutex(): int { return mcphp_mutex(); }
+  function sy_lock(int $m): void { mcphp_mutex_lock($m); }
+  function sy_unlock(int $m): void { mcphp_mutex_unlock($m); }
+  function sy_add(int $a, int $d): int { return mcphp_atomic_add($a, $d); }
+  ```
+
+### The memory model: what a lock makes safe
+
+Step 3's list of what is unsafe without a lock is exactly what a lock fixes. **Take the same mutex
+around every read and every write of a piece of shared module state -- a global, a static, an
+array in one -- and that state is data-race-free:**
+
+- `mcphp_mutex_lock` is an acquire and `mcphp_mutex_unlock` a release, so everything one holder
+  wrote before its unlock is visible to the next holder after its lock: no torn 16-byte value,
+  no lost update, no array read mid-resize.
+- mc keeps only locals in registers, never a global, a static or an array element, so every read
+  after the lock is a real load of memory the lock ordered.
+- 3a's rules keep what was read under the lock valid after the unlock: a thread's arena is kept
+  until the request (or the program) ends, and shared mode frees no string and writes none in
+  place, so a value read under the lock does not dangle once another thread overwrites the slot
+  it came from.
+- The atomics are sequentially consistent: every thread sees their operations in one order.
+
+What stays the developer's, as in C: state touched without the lock, two mutexes taken in two
+orders (a deadlock), and a value read under the lock and written back after the unlock.
+`tests/c/15-sync.php` is the proof in numbers: eight threads each add 1 twenty thousand times to
+a global under a mutex, and the count is exact; without the two lines of locking it lost 18201
+of 160000 in a measured run.
+
+### How it is built
+
+- **The atomic words** (`lib/rt_atomic_arm64.mc`, `rt_atomic_x86_64.mc`, `rt_atomic_win64.mc`):
+  five functions -- load, store, add, compare-and-swap, exchange -- whose bodies are raw
+  instructions (`#opcode`), one file per instruction set and calling convention, chosen by the
+  TARGET's architecture (a Windows-on-ARM mc-php builds the x64 extension php loads there).
+  AArch64 uses `ldar`/`stlr` and `ldaxr`/`stlxr` loops, each loop inside one function, so nothing
+  needs the ARMv8.1 LSE instructions. x86-64 uses `mov`, `xchg`, `lock xadd` and
+  `lock cmpxchg`, in the System V registers and in the Windows x64 ones. `tests/sweep_sync.py`
+  re-assembles every word with llvm-mc and checks that mc emits exactly those words.
+- **The mutex** is Drepper's (Futexes Are Tricky, mutex 3): a word that is 0 free, 1 locked and 2
+  locked and maybe waited on. An uncontended lock is one compare-and-swap and an uncontended
+  unlock one exchange; a sleeper sleeps while the word is 2, and an unlock that finds 2 wakes one.
+  The word needs no initialisation, so the runtime's own lock (`ph_lock`: the thread table, the
+  deferred frees, a ZTS module's tables) is the same code over a global word, and works before
+  anything else exists.
+- **The sleep on a word** is the host layer's `ph_os_wait`/`ph_os_wake`:
+  - Linux: `futex(2)`, `FUTEX_WAIT_PRIVATE`/`FUTEX_WAKE_PRIVATE`, through libc's `syscall`.
+  - macOS: `__ulock_wait`/`__ulock_wake`, libSystem's private interface -- the one libc++'s
+    `std::atomic::wait` is built on. `os_sync_wait_on_address` (public since macOS 14.4) is the
+    upgrade once the floor is 14.4, noted as a `ponytail:` in `lib/rt_host_macos.mc`.
+  - Windows: `WaitOnAddress`/`WakeByAddressSingle`/`WakeByAddressAll`, imported from the
+    synchronization API set, `api-ms-win-core-synch-l1-2-0.dll`. On the object road
+    `tests/winsys.sh` puts those three names into `kernel32.lib`, bound to that DLL
+    (`src/win/synch.def`), so no link line changed.
+- **The table** is 32-byte slots -- a header (generation and kind), the word, the mutex's holder
+  (the thread's runtime block) and the request that made it -- in chunks of 1024 behind a fixed
+  directory of 4096 chunks: at most 4194303 live objects (a `ponytail:` in `lib/php_rt.mc`). Slots
+  never move, so an operation on a handle takes no lock; making one takes the runtime's lock, and
+  a freed slot goes on a free list. The end of a request scans the table only when a request owns
+  a live object.
+
+### The gates (4a)
+
+- `tests/c/15-sync.php`: the four exact counts under contention (a mutex, an add, a
+  compare-and-swap loop, an exchange spin lock), the values the operations answer, trylock, a
+  waiter that sees what was written before the unlock, and every refusal by name.
+- `tests/c/16-thread-churn.php`: the runtime's lock under contention -- eight starter threads each
+  start and join 1250 short threads at once, ten thousand in all, and every one is counted.
+- `tests/ext.sh` § 20b: a mutex and an atomic from four compiled threads on the extension road,
+  an atomic made at MINIT, and three refusals. § 20c (ZTS): a mutex and an atomic shared by four
+  php workers and the request, through the module's wrappers.
+- `tests/sweep_sync.py`: the llvm-mc sweep over the atomic words.
