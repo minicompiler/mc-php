@@ -865,9 +865,10 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
                 "declared after the start: here 30, there Error: Call to undefined function declared_late()" \
                 "statics: here 3, there 12, here 4" \
                 "a module global, a compiled worker: compiled" "a module global, a php worker: unset, then php" \
-                "a module global afterwards: compiled" \
-                "a fatal error: Error: mc-php: a php thread ended on a fatal error: Allowed memory size of 4194304 bytes exhausted" \
-                "exit(): NULL" "8 workers echo, joined in reverse:"
+                "a module global afterwards: compiled"
+            if [ "$sx" = dll ]; then printf '%s\n' "a fatal error: not on Windows"
+            else printf '%s\n' "a fatal error: Error: mc-php: a php thread ended on a fatal error: Allowed memory size of 4194304 bytes exhausted"; fi
+            printf '%s\n' "exit(): NULL" "8 workers echo, joined in reverse:"
             for w in 7 6 5 4 3 2 1 0; do printf 'w%s.0 w%s.1 w%s.2 \n' $w $w $w; done
             printf '%s\n' "their sum: 28"
             # a Windows php's opcache links a class that extends one of php's

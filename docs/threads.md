@@ -669,7 +669,11 @@ as that `Error`, for a result.
   as an object of the same class made there. Its trace and `previous` do not cross.
 - **A fatal error** (a memory limit, for example) ends the worker's call, not the process, and
   php prints it into the worker's output. The join then throws `Error`:
-  `mc-php: a php thread ended on a fatal error: <php's message>`.
+  `mc-php: a php thread ended on a fatal error: <php's message>`. **Not on Windows:** there,
+  php's bailout is a `longjmp` that unwinds with SEH, and the module's frames between the
+  bailout point and the callable carry no unwind data (mc emits no `.pdata`), so a fatal error
+  in a worker ends the process. The same probably holds for a fatal error in any php code the
+  module calls on Windows (not measured).
 - **`exit()`** ends the call with a `null` result.
 
 **The SAPI on Windows.** php-cli (`php.exe`) and a web server's php module are modules apart

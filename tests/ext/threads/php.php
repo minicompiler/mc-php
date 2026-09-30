@@ -48,13 +48,18 @@ echo "statics: here ", counter(), ", there ", th\prun0(fn() => counter() . count
 echo "a module global, a compiled worker: ", th\gcompiled("compiled"), "\n";
 echo "a module global, a php worker: ", th\prun0(fn() => th\gget() . ", then " . th\gset("php")), "\n";
 echo "a module global afterwards: ", th\gget(), "\n";
-$f = err(fn() => th\prun0(function () {
-    ini_set("display_errors", "0");
-    ini_set("log_errors", "0");
-    ini_set("memory_limit", "4M");
-    return str_repeat("x", 8 << 20);
-}));
-echo "a fatal error: ", substr($f, 0, strpos($f, " (tried")), "\n";
+// a fatal error unwinds to php's zend_try; on Windows that unwind is SEH's and
+// cannot cross the module's frames (docs/threads.md § 3b), so it is not made
+if (PHP_OS_FAMILY === "Windows") echo "a fatal error: not on Windows\n";
+else {
+    $f = err(fn() => th\prun0(function () {
+        ini_set("display_errors", "0");
+        ini_set("log_errors", "0");
+        ini_set("memory_limit", "4M");
+        return str_repeat("x", 8 << 20);
+    }));
+    echo "a fatal error: ", substr($f, 0, strpos($f, " (tried")), "\n";
+}
 echo "exit(): ", var_export(th\prun0(function () { exit(3); }), true), "\n";
 $ts = [];
 for ($i = 0; $i < 8; $i++) {

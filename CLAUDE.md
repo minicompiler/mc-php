@@ -1518,6 +1518,10 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     - a Windows opcache links a class that extends one of php's own at run time, so it is not
       immutable and every later start is refused by its name. That is documented, and the gate
       expects it.
+    - a fatal error in a worker ends the PROCESS on Windows. php's bailout `longjmp` unwinds with
+      SEH, and mc's frames between it and the callable have no `.pdata`. This is documented, and
+      php.php skips that case on Windows. It probably affects any fatal error in php code the
+      module calls on Windows; that has not been measured.
   - Cost: `lib/php_zts.mc` +952 lines; `PHT_SIZE_ZTS` 12464 -> 12472 (`phz_job`); 31 new offsets
     in `lib/php_ext.mc`, graded by `tests/ext/abi.c` (which spells out `zend_closure`, a private
     struct). php's names are looked up with `php_dlsym` (26, several ZTS-only). A start costs the
