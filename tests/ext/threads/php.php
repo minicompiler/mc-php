@@ -12,7 +12,6 @@ class Acc {
     public function __construct(public int $base) {}
     public function adder(): Closure { return function (int $x): int { $this->log[] = $x; return $this->base + $x + count($this->log); }; }
 }
-class Ao extends ArrayObject { public function f(): Closure { return fn() => 1; } }
 function err(Closure $f): string {
     try { $f(); return "no error"; }
     catch (Error $e) { return get_class($e) . ": " . $e->getMessage(); }
@@ -27,7 +26,7 @@ $c = 7;
 echo "a capture: ", th\prun0(function () use ($c) { return $c * 3; }), "\n";
 $a = new Acc(100);
 echo "\$this, copied: ", th\prun1($a->adder(), 5), ", here still ", count($a->log), "\n";
-echo "\$this refused: ", err(fn() => th\prun0((new Ao)->f())), "\n";
+echo "\$this refused: ", err(fn() => th\prun0(Closure::bind(function () { return 1; }, new ArrayObject([])))), "\n";
 echo "a string: ", th\prun1(fn(int $n) => str_repeat("ab", $n), 3), "\n";
 echo "an array: ", json_encode(th\prun1(fn(int $n) => [$n, "s$n", ["k" => [$n, $n + 1]]], 9)), "\n";
 $o = new stdClass;
@@ -66,4 +65,11 @@ $s = 0;
 foreach (array_reverse($ts) as $t) $s += th\pjoin($t);
 echo "their sum: $s\n";
 th\pdetach(th\pstart1(function (string $x) { echo "the detached php thread says $x\n"; }, "goodbye"));
+// last of the starts: once a class that extends one of php's own is declared,
+// a Windows php refuses every start (docs/threads.md § 3b, opcache links
+// such a class at run time, in the request's memory)
+if (true) {
+    class Ao extends ArrayObject { public function f(): Closure { return fn() => 1; } }
+}
+echo "\$this of a class extending php's own: ", err(fn() => th\prun0((new Ao)->f())), "\n";
 echo "the script's last line\n";

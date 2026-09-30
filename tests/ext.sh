@@ -856,7 +856,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
         {
             printf '%s\n' "a closure: 42" "arguments: left7" "the request's code: 15" "a capture: 21" \
                 '$this, copied: 106, here still 0' \
-                "\$this refused: Error: mc-php: cannot copy into or out of a php thread: an object of class Ao, which extends php's own ArrayObject" \
+                "\$this refused: Error: mc-php: cannot copy into or out of a php thread: an object of class ArrayObject, which is php's own" \
                 "a string: ababab" 'an array: [9,"s9",{"k":[9,10]}]' "objects: one, a cycle, 3, Pt 3" \
                 "an argument refused: Error: mc-php: cannot copy into or out of a php thread: an object of class DateTime, which is php's own" \
                 "a closure argument refused: Error: mc-php: cannot copy into or out of a php thread: an object of class Closure, which is php's own" \
@@ -869,7 +869,16 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
                 "a fatal error: Error: mc-php: a php thread ended on a fatal error: Allowed memory size of 4194304 bytes exhausted" \
                 "exit(): NULL" "8 workers echo, joined in reverse:"
             for w in 7 6 5 4 3 2 1 0; do printf 'w%s.0 w%s.1 w%s.2 \n' $w $w $w; done
-            printf '%s\n' "their sum: 28" "the script's last line" "the detached php thread says goodbye"
+            printf '%s\n' "their sum: 28"
+            # a Windows php's opcache links a class that extends one of php's
+            # own at run time, in the request's memory: from then on it
+            # refuses every start, by that class's name
+            if [ "$sx" = dll ]; then
+                printf '%s\n' "\$this of a class extending php's own: Error: mc-php: a php callable runs on another thread only when opcache caches the code it can reach: enable opcache (opcache.enable=1, and opcache.enable_cli=1 on the command line); not cached: class Ao"
+            else
+                printf '%s\n' "\$this of a class extending php's own: Error: mc-php: cannot copy into or out of a php thread: an object of class Ao, which extends php's own ArrayObject"
+            fi
+            printf '%s\n' "the script's last line" "the detached php thread says goodbye"
         } > "$tmp/t.pw"
         if [ "$tp" = 0 ] && cmp -s "$tmp/t.pw" "$tmp/t.p"; then
             say "php callables on threads (opcache on): the request's code shared, values copied and refused by name, output in join order, a module global per kind of worker, a fatal error and exit() in a worker"

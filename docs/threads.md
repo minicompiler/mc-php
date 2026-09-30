@@ -610,6 +610,13 @@ With opcache off, this is the first thing the first start says. A function from 
 refused with opcache on too, because opcache does not cache it. There is no fallback to a copy
 of the callable.
 
+**On Windows, a class that extends one of php's own classes is not cached immutable.** A
+Windows opcache links such a class at run time, in the request's memory, because php's own
+classes are not at the same address in every process. Once a request declares one (an
+exception class included), every later start is refused, naming it: `not cached: class Ao`.
+Linux and macOS cache such a class and are not affected. `php.php` declares one after its last
+start, and the gate expects each platform's answer.
+
 #### The code the worker sees: the tables at the start
 
 The starting request's user functions and classes are listed when the thread starts, and added
@@ -665,6 +672,15 @@ as that `Error`, for a result.
   `mc-php: a php thread ended on a fatal error: <php's message>`.
 - **`exit()`** ends the call with a `null` result.
 
+**The SAPI on Windows.** php-cli (`php.exe`) and a web server's php module are modules apart
+from `php8ts.dll`, each with its own copy of php's per-thread cache. Only threads the SAPI started
+ever set that copy. `php_request_shutdown` calls the SAPI's deactivate on every thread, and on a
+worker's thread php-cli's reads the unset cache and faults (measured under `cdb` on both Windows
+legs). A worker's request never belonged to the SAPI. So on a Windows php the module wraps
+`sapi_module.deactivate` once, before the first worker, and skips the SAPI's deactivate on a
+worker's thread. Linux and macOS link the SAPI into the same image as the engine, and there the
+wrapper is not installed.
+
 The call runs as the worker request's one **shutdown function**, because
 `php_call_shutdown_functions` is php's own call site with a bailout point (`zend_try`). An
 extension can reach it without `setjmp`, which this runtime does not have (docs/plan.md D7).
@@ -709,4 +725,5 @@ php callable on a thread is worth it for work that takes much longer than a mill
 - `tests/frankenphp.sh`: `threads.php` starts two php workers per request from eight php
   threads, and every answer must follow the formula. Memory stays bounded. With
   `opcache.enable=0` the same page answers the refusal.
-- The Windows ZTS legs run `tests/ext.sh`, so § 20c runs there too.
+- The Windows ZTS legs (arm64 and x64) run `tests/ext.sh`, so § 20c runs there too, with
+  opcache loaded as a `zend_extension` where the php does not load it by itself.

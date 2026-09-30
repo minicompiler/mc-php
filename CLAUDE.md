@@ -1506,6 +1506,18 @@ changed what the compiler does. The hosts branch is that commit and it is delete
     rec = -1). The swap now computes the flag into a local first, with a comment naming the bug.
     The coordinator will fix mc after this PR. The same shape in mc-php: none in `lib/`; one in
     `src/closure.mc:289`, the compiler, which is not built with opt.
+  - Windows, found by the two ZTS CI legs:
+    - php's `ZEND_FASTCALL` names are exported `@@N`-decorated there, and are looked up both
+      ways;
+    - the legs' php loads opcache only as `-d zend_extension=opcache`, which 20c now asks for;
+    - every worker crashed in `php_request_shutdown`. `cdb` put it in php.exe's
+      `sapi_cli_deactivate`, which reads php.exe's own copy of php's per-thread cache, set only
+      on threads php-cli started. The module now wraps `sapi_module.deactivate` once on a
+      Windows php (the one that exports `php_win32_error_to_msg`) and skips it on a worker's
+      thread;
+    - a Windows opcache links a class that extends one of php's own at run time, so it is not
+      immutable and every later start is refused by its name. That is documented, and the gate
+      expects it.
   - Cost: `lib/php_zts.mc` +952 lines; `PHT_SIZE_ZTS` 12464 -> 12472 (`phz_job`); 31 new offsets
     in `lib/php_ext.mc`, graded by `tests/ext/abi.c` (which spells out `zend_closure`, a private
     struct). php's names are looked up with `php_dlsym` (26, several ZTS-only). A start costs the
