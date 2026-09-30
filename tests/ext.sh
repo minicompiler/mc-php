@@ -883,7 +883,7 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
         if [ "$tp" = 0 ] && cmp -s "$tmp/t.pw" "$tmp/t.p"; then
             say "php callables on threads (opcache on): the request's code shared, values copied and refused by name, output in join order, a module global per kind of worker, a fatal error and exit() in a worker"
         else
-            bad "php callables on threads (exit $tp)"; diff "$tmp/t.pw" "$tmp/t.p" | grep '^>' | sed -n '1,12p' | sed 's/^/      /'
+            bad "php callables on threads (exit $tp)"; diff "$tmp/t.pw" "$tmp/t.p" | sed -n '1,30p' | sed 's/^/      /'
             # the whole refusal (php.php cuts what is not cached) and opcache's own view
             printf '%s\n' '<?php' 'try { th\prun0(fn() => 1); echo "started\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }' \
                 '$s = opcache_get_status(false); echo "opcache: enabled ", var_export($s["opcache_enabled"] ?? null, true), ", this script cached ", var_export(opcache_is_script_cached(__FILE__), true), ", file cache only ", var_export($s["file_cache_only"] ?? null, true), "\n";' \
