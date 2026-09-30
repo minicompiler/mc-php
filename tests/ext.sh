@@ -873,6 +873,10 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
             say "php callables on threads (opcache on): the request's code shared, values copied and refused by name, output in join order, a module global per kind of worker, a fatal error and exit() in a worker"
         else
             bad "php callables on threads (exit $tp)"; diff "$tmp/t.pw" "$tmp/t.p" | grep '^>' | sed -n '1,12p' | sed 's/^/      /'
+            # the whole refusal (php.php cuts what is not cached) and opcache's own view
+            printf '%s\n' '<?php' 'try { th\prun0(fn() => 1); echo "started\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }' \
+                '$s = opcache_get_status(false); echo "opcache: enabled ", var_export($s["opcache_enabled"] ?? null, true), ", this script cached ", var_export(opcache_is_script_cached(__FILE__), true), ", file cache only ", var_export($s["file_cache_only"] ?? null, true), "\n";' > "$tmp/t.d.php"
+            "$PHP" $opc -d extension="$tmp/build/r.$sx" "$tmp/t.d.php" 2>&1 | tr -d '\r' | sed 's/^/      /'
         fi
         "$PHP" -d opcache.enable_cli=0 -d extension="$tmp/build/r.$sx" tests/ext/threads/php.php 2>&1 | tr -d '\r' > "$tmp/t.q"; tq=$?
         printf '%s\n' "a closure: mc-php: a php callable runs on another thread only when opcache caches the code it can reach: enable opcache (opcache.enable=1, and opcache.enable_cli=1 on the command line)" > "$tmp/t.qw"
