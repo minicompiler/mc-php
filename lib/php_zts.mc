@@ -1172,8 +1172,8 @@ void phz_call(uptr job) {
     phz_znull(fz);
     phz_tr(job, "T dx\n");
     if (ld64(job + JB_KIND) == 1) phz_mkclosure(job, dx, fz);
-    phz_tr(job, "T mkcl\n");
     else phz_dx_val(dx, fz);
+    phz_tr(job, "T mkcl\n");
     i64 n = ld64(job + JB_NARGS);
     u8 av[80];
     i64 i = 0;
