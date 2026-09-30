@@ -11636,6 +11636,16 @@ uptr php_sy_release(i64 h) {
 // add(-1), wait blocks until it is 0. A decrement to 0 wakes every waiter; a
 // decrement below 0 is a bug, refused by name (Go panics), the counter put
 // back first.
+//
+// The put-back is ordered before the refusal, not before visibility: a
+// caller that drives the counter negative is refused misuse, but between
+// ph_at_add(s + SY_W0, n) and the corrective ph_at_add(s + SY_W0, 0 - n) the
+// counter momentarily holds that negative value, visible to any concurrent
+// reader. A php_sy_wg_wait polling `v <= 0` on another thread can sample it
+// there and return done early, stranding the still-pending, legitimate Add
+// (it is never brought back to 0). This is a consequence of the refused
+// misuse, not a separate bug; correct programs never drive the counter
+// negative and never observe it.
 i64 php_sy_wg() { return ph_sy_new(SY_WG, 0); }
 uptr php_sy_wg_add(i64 h, i64 n) {
     uptr s = ph_sy_slot(h, SY_WG);

@@ -895,7 +895,11 @@ mcphp_cond_broadcast(int $c): void;
   one, `release` adds one and wakes a waiter. `acquire($s, 0)` never sleeps, so it is a try.
 - **The wait group** is Go's: `add` changes the counter, `done` is `add(-1)`, `wait` blocks
   until it is 0. A decrement below 0 is refused by name (`mc-php: waitgroup N counter went
-  negative`), the counter put back first.
+  negative`), the counter put back first -- but that put-back is ordered before the refusal,
+  not before visibility, so a concurrent `wait` polling the counter can briefly see the negative
+  value and return early, stranding a still-pending, legitimate `add`. This is a consequence of
+  the refused misuse (a program that never over-decrements never observes it), not a separate
+  bug.
 - **The condition variable** is called holding a mutex: `wait` releases it, sleeps until a
   signal, and reacquires it before returning. `wait` of a mutex the calling thread does not hold
   is refused by name. The caller loops on its own predicate, as with `pthread_cond_wait`, so a
