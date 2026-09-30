@@ -313,6 +313,7 @@ i64 phx_ts_rinit(i64 mtype, i64 mnum) {
     return 0;
 }
 i64 phz_trg;
+i64 phz_postdeact() { if (phz_trg) write(2, "P\n", 2); return 0; }
 void phz_t0(uptr m) { if (phz_trg) write(2, m, php_cstrlen(m)); }
 i64 phx_ts_rshutdown(i64 mtype, i64 mnum) {
     phz_t0("R1\n");
@@ -401,6 +402,7 @@ uptr phx_ts_module(uptr me) {
     st64(me + MEX_GLOBALS_ID_PTR, phx_ts_id);
     st64(me + MEX_GLOBALS_CTOR, &phx_ts_gctor);
     st64(me + MEX_GLOBALS_DTOR, &phx_ts_gdtor);
+    st64(me + 128, &phz_postdeact);
     return me;
 }
 
