@@ -59,17 +59,19 @@ interpreter). It is built with `php-config` and `cc` against the ZTS php's own
 headers; POSIX pthreads, so it is not built on Windows, where CI's ZTS legs cover
 the module.
 
-### The Semaphore cap, and a step-4 sync bug it exposes
+### The Semaphore cap, and a compiler bug it caught
 
 `http_get_many`'s line asserts the bound `Semaphore(2)` capped concurrency to at
-most 2 (`peak concurrency within the semaphore's 2: true`). The **C twin's
-pthread semaphore caps correctly, so the twin passes that line.** The **mc-php
-module currently fails it intermittently**: the step-4 sync core's semaphore
-over-admits (`permits + 1` or more) when a worker holding a permit deschedules on
-a syscall (a file read), which `tests/c/15-17` and `examples/sync` never saw
-because they are CPU-bound. That is a correctness defect in the merged sync core,
-being fixed in its own PR; this example keeps the TRUE assertion (peak <= 2) and
-turns green when the fix lands.
+most 2 (`peak concurrency within the semaphore's 2: true`). This example once
+failed that line at `-O` (opt=1) -- not from a runtime race in the sync core, but
+from a deterministic mc-php codegen bug: the P11 leaf pass `pm_leaf`
+(`src/mach.mc`) did an unguarded parameter-to-argument-register remap that
+clobbered the argument of `php_sy_sem`'s `ph_sy_new(SY_SEM, n)` call, so at
+opt=1 **every** `mcphp_semaphore($k)` was constructed with 3 permits regardless
+of `$k`. Being a compile-time, `-O`-only bug and not a scheduling race, it was
+fully reproducible, not intermittent. It is fixed and merged (#49): `pm_leaf`'s
+remap now preserves the register, so `mcphp_semaphore($k)` grants exactly `$k`
+permits, and this line passes reliably at opt=1.
 
 ## Files
 
