@@ -481,7 +481,6 @@ i64 ph_ev_wait(uptr ev, uptr out, i64 max, i64 ms) {
 // needs (an anonymous CreatePipe one does not support overlapped I/O). A named
 // pipe, server end FILE_FLAG_OVERLAPPED, client end the writer. [r, w] into out2.
 extern uptr CreateNamedPipeA(uptr name, i64 openMode, i64 pipeMode, i64 maxInst, i64 outBuf, i64 inBuf, i64 timeout, uptr sa);
-extern i64  GetCurrentProcessId();
 i64 ph_pipe_seq;
 // append a non-negative integer to name[] in decimal, starting at `at`; return
 // the next index. A local itoa so the host needs no zend_string #define (it is
