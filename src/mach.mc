@@ -1133,9 +1133,21 @@ void pm_leaf() {
             i64 xi = ins_rn(m);
             i64 clob = 0;
             i64 bad = 0;
-            // only a function with a (tail) call can clobber xi for an argument
-            // before the parameter's last read; a pure leaf never reuses an
-            // argument register, so keep its remap exactly as before.
+            // This program-order scan is control-flow-blind: it walks
+            // instructions textually, not along edges. For a forward branch
+            // that is harmless -- worst case it over-rejects and drops a
+            // valid remap, a perf-only loss. On a loop BACK-EDGE it is
+            // theoretically unsound: a read of rd textually before xi's
+            // first write, both inside the loop body, could see a clobbered
+            // xi on the second iteration while this linear scan still keeps
+            // the remap. What actually makes it safe here is not the scan --
+            // it is the tail-call gate above (hasbl): pm_leaf returns with no
+            // remap at all unless every I_BL is a tail call, so a non-tail
+            // call inside a loop already bails the whole function, and the
+            // only writes to x0..x7 preceding a read of rd are tail-call
+            // argument setups, never a back-edge over such a read. If that
+            // gate is ever relaxed, this scan alone becomes unsound and must
+            // be made control-flow-aware.
             i64 j = ins_base;
             if (!hasbl) j = nins;
             loop {
