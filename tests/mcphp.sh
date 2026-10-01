@@ -67,6 +67,13 @@ case $(uname -s) in MINGW*|MSYS*|CYGWIN*) exe=$tmp.exe ;; esac
 # so a test that reads its own environment sees what php's run of it saw.
 rc_env=
 [ -n "${MCPHP__RC:-}" ] && rc_env="MCPHP_RC=$MCPHP__RC"
+# MCPHP_OPT=N compiles at mc's optimisation level N (default 0). The gate runs
+# the whole corpus once at each level: the two must agree, which is the
+# opt0 == opt1 check. The build road takes it as [project].opt (mc reads it
+# there); the single-file roads take it as the --opt= flag.
+opt_flag=
+opt_proj=
+[ -n "${MCPHP_OPT:-}" ] && { opt_flag="--opt=$MCPHP_OPT"; opt_proj="opt = $MCPHP_OPT"; }
 # A source with a project file beside it (tests/c: NAME.toml, e.g.
 # `[php] checked_reads = true`) is built the project road, `mc-php build`:
 # the file's own tables plus a [project] this wrapper writes. The generated
@@ -81,12 +88,12 @@ if [ -f "$cfg" ]; then
     kind=exe; po=$pnm; pdest=$exe
     [ "$exe" != "$tmp" ] && po=$pnm.exe
     [ -n "${MCPHP_WINLINK:-}" ] && { kind=obj; po=$pnm.obj; pdest=$tmp.obj; }
-    { printf '[project]\nentry = "%s"\nout = "%s"\nkind = "%s"\n\n' "$(basename "$src")" "$po" "$kind"; cat "$cfg"; } > "$pdir/$pnm.toml"
+    { printf '[project]\nentry = "%s"\nout = "%s"\nkind = "%s"\n' "$(basename "$src")" "$po" "$kind"; [ -n "$opt_proj" ] && echo "$opt_proj"; printf '\n'; cat "$cfg"; } > "$pdir/$pnm.toml"
     env $rc_env "$MCPHP" build "$pdir" --config "$pdir/$pnm.toml" > "$out" 2> "$err" &
 elif [ -n "${MCPHP_WINLINK:-}" ]; then
-    env $rc_env "$MCPHP" "$src" -o "$tmp.obj" > "$out" 2> "$err" &
+    env $rc_env "$MCPHP" $opt_flag "$src" -o "$tmp.obj" > "$out" 2> "$err" &
 else
-    env $rc_env "$MCPHP" --exe "$src" -o "$exe" > "$out" 2> "$err" &
+    env $rc_env "$MCPHP" $opt_flag --exe "$src" -o "$exe" > "$out" 2> "$err" &
 fi
 mcpid=$!
 trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj" "$pdir/$pnm" "$pdir/$pnm".*; exit 143' TERM

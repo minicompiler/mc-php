@@ -103,6 +103,17 @@ echo "== the fixtures again, every string counted (MCPHP_RC=check) =="
 MCPHP__RC=check sh tests/fixtures.sh || fail=1
 
 echo ""
+echo "== the fixtures again at --opt=1 (opt0 == opt1) =="
+# mc's register allocator only moves a parameter into a callee-saved register
+# at --opt=1, so the leaf pass that reassigns parameters (src/mach.mc pm_leaf)
+# is only exercised there. The whole corpus at --opt=1 must still agree with
+# php and with each recording -- the opt0 == opt1 check. c/17-sync-blocking's
+# `semaphore bound: true true false` is the sentinel: before the pm_leaf guard
+# it was `true true true` at --opt=1 (a g(CONST, param) call whose argument
+# setup clobbered the parameter's register).
+MCPHP_OPT=1 sh tests/fixtures.sh || fail=1
+
+echo ""
 echo "== the extension road =="
 # The other half of what this compiler is for, and it is a DIFFERENTIAL like
 # the one above: examples/hello/check.php runs twice, once with the compiled

@@ -1079,6 +1079,7 @@ void pm_leaf() {
     i64 lepi = 0 - 1;
     i64 q = nins - 1;
     loop { if (q < ins_base) break; if (ins_op(ins_at(q)) == 0) { lepi = ins_label(ins_at(q)); break; } q = q - 1; }
+    i64 hasbl = 0;
     i64 i = ins_base;
     loop {
         if (i >= nins) break;
@@ -1088,6 +1089,7 @@ void pm_leaf() {
         // (x0 and the depth registers) on its way to the epilogue, so no local
         // is read once the callee may have clobbered its register
         if (ins_op(e) == I_BL) {
+            hasbl = 1;
             i64 j = i + 1;
             i64 ok = 0;
             loop {
@@ -1113,7 +1115,14 @@ void pm_leaf() {
         }
         i = i + 1;
     }
-    // a parameter's register to its argument register: `mov xR, xi` in a leaf
+    // a parameter's register to its argument register: `mov xR, xi` in a leaf.
+    // Keeping the parameter in xi is correct only while xi still holds it: if
+    // anything writes xi (the call's own `mov x0, #CONST` arg setup) BEFORE the
+    // last read of xR, the renamed read sees that value instead of the
+    // parameter -- the clobber the guard below rejects. A write to xi after the
+    // last read (the function's own return value) is harmless, so this is an
+    // ordering test, not just "xi is written somewhere".
+    // ponytail: O(n*n) over one function's instructions, which are few.
     i64 any = 0;
     i = ins_base;
     loop {
@@ -1121,8 +1130,34 @@ void pm_leaf() {
         uptr m = ins_at(i);
         i64 rd = ins_rd(m);
         if (ins_op(m) == I_MOV && rd >= 19 && rd <= 28 && ins_rn(m) >= 0 && ins_rn(m) < 8 && ld8(pm_map + rd) == rd) {
-            st8(pm_map + rd, ins_rn(m));
-            any = 1;
+            i64 xi = ins_rn(m);
+            i64 clob = 0;
+            i64 bad = 0;
+            // only a function with a (tail) call can clobber xi for an argument
+            // before the parameter's last read; a pure leaf never reuses an
+            // argument register, so keep its remap exactly as before.
+            i64 j = ins_base;
+            if (!hasbl) j = nins;
+            loop {
+                if (j >= nins) break;
+                uptr t = ins_at(j);
+                i64 ot = ins_op(t);
+                i64 fs = pm_rfields(ot);
+                if (fs > 0) {
+                    i64 dest = (fs & 1) && ot != I_STR && ot != PM_STG && ot != I_CBZ && ot != I_CBNZ && ot != I_STP_PRE;
+                    i64 rmask = fs;
+                    if (dest) rmask = fs - 1;
+                    i64 f = 1;
+                    loop {
+                        if (f > 8) break;
+                        if ((rmask & f) && pm_rget(t, f) == rd && clob) bad = 1;
+                        f = f * 2;
+                    }
+                    if (dest && ins_rd(t) == xi) clob = 1;
+                }
+                j = j + 1;
+            }
+            if (!bad) { st8(pm_map + rd, xi); any = 1; }
         }
         i = i + 1;
     }
