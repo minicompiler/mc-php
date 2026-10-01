@@ -3,6 +3,8 @@ EXPORTS
 CloseHandle
 CreateDirectoryA
 CreateFileA
+CreateIoCompletionPort
+CreateNamedPipeA
 CreateProcessA
 CreateThread
 DeleteFileA
@@ -20,6 +22,7 @@ GetLastError
 GetModuleFileNameA
 GetModuleHandleA
 GetProcAddress
+GetQueuedCompletionStatus
 GetStdHandle
 GetTickCount64
 K32GetProcessMemoryInfo
@@ -36,5 +39,6 @@ TlsGetValue
 TlsSetValue
 VirtualAlloc
 VirtualFree
+VirtualProtect
 WaitForSingleObject
 WriteFile
