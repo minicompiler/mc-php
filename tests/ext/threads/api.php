@@ -20,5 +20,10 @@ th\sy_unlock($m);
 try { th\sy_unlock($m); } catch (Error $e) { echo "sync refused: ", $e->getMessage(), "\n"; }
 try { th\sy_load($m); } catch (Error $e) { echo "sync refused: ", $e->getMessage(), "\n"; }
 echo "sync blocking, 8 compiled threads: ", th\sy_block(8), "\n";
+// await (docs/threads.md § Step 5): a module function reached from the engine
+// cannot suspend -- an EG frame is open, so await is refused BY NAME (it would
+// corrupt the executor on resume). The guard is phx_depth != 0.
+try { th\engine_await(); echo "engine await: no throw\n"; }
+catch (\Throwable $e) { echo "engine await: ", $e->getMessage(), "\n"; }
 // last, and echoing nothing after it: the thread's line is the output's last
 th\detach_late(100);

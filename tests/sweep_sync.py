@@ -31,7 +31,14 @@ if not llvm_mc or not objcopy or not os.path.exists(llvm_mc):
 
 FILES = (("lib/rt_atomic_arm64.mc", "aarch64-linux-gnu", "elf-obj"),
          ("lib/rt_atomic_x86_64.mc", "x86_64-linux-gnu", "elf-obj-x86_64"),
-         ("lib/rt_atomic_win64.mc", "x86_64-linux-gnu", "coff-obj-x86_64"))
+         ("lib/rt_atomic_win64.mc", "x86_64-linux-gnu", "coff-obj-x86_64"),
+         # the stackful-fiber context switch (docs/threads.md § Step 5): the
+         # same raw-word mechanism, one file per convention. ph_ctx_bootstrap
+         # is ordinary mc code in the same file, not a word function, so the
+         # name regex above skips it.
+         ("lib/rt_fiber_arm64.mc", "aarch64-linux-gnu", "elf-obj"),
+         ("lib/rt_fiber_x86_64.mc", "x86_64-linux-gnu", "elf-obj-x86_64"),
+         ("lib/rt_fiber_win64.mc", "x86_64-linux-gnu", "coff-obj-x86_64"))
 tmp = tempfile.mkdtemp()
 fail = 0
 
@@ -49,10 +56,10 @@ for path, triple, backend in FILES:
     src = open(os.path.join(root, path)).read().split("\n")
     funcs = []; cur = None
     for line in src:
-        m = re.match(r"^(?:i64|void) (ph_at_\w+)\(", line)
+        m = re.match(r"^(?:i64|void) (ph_at_\w+|ph_ctx_swap)\(", line)
         if m: cur = [m.group(1), [], []]; funcs.append(cur); continue
         if cur is None: continue
-        m = re.match(r"^    ph_w\((0x[0-9A-Fa-f]{8})\);\s*//(.*)$", line)
+        m = re.match(r"^    ph_f?w\((0x[0-9A-Fa-f]{8})\);\s*//(.*)$", line)
         if m: cur[1].append(int(m.group(1), 16)); cur[2].append(m.group(2)); continue
         if line.startswith("}"):
             m = re.match(r"^}\s*//\s*(\d+:)\s*$", line)

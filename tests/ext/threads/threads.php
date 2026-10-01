@@ -218,3 +218,12 @@ function sy_block(int $t): string {
     foreach ($hs as $h) mcphp_thread_join($h);
     return (mcphp_atomic_load($a) === $t ? "wg" : "WG") . " " . (mcphp_atomic_load($woke) === $t ? "bc" : "BC");
 }
+
+// docs/threads.md § Step 5: this runs with php's engine on the stack (the
+// engine called it), so the await inside must be refused by name -- suspending
+// with an EG frame open would corrupt the executor on resume. Never returns a
+// value; the await throws first.
+function engine_await(): int {
+    mcphp_await(mcphp_timer(1));
+    return 0;
+}

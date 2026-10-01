@@ -429,6 +429,91 @@ i64 ph_os_ncpu() { i64 n = rtw_int(GetActiveProcessorCount(0xffff)); if (n < 1) 
 // PAGE_READWRITE), 0 when the system says no
 uptr ph_os_map(i64 n) { return VirtualAlloc(0, n, 0x3000, 4); }
 void ph_os_unmap(uptr p, i64 n) { VirtualFree(p, 0, 0x8000); }        // MEM_RELEASE
+
+// --- the event loop's fiber stacks and reactor (docs/threads.md § Step 5) ---
+// A fiber's stack, the lowest page PAGE_NOACCESS (1) as a guard. VirtualProtect
+// wants the previous-protection out-param.
+extern i64 VirtualProtect(uptr addr, i64 n, i64 prot, uptr old);
+uptr ph_os_map_stack(i64 n) {
+    uptr p = VirtualAlloc(0, n, 0x3000, 4);           // MEM_COMMIT|RESERVE, PAGE_READWRITE
+    if (!p) return 0;
+    u8 old[8];
+    VirtualProtect(p, 4096, 1, old);                  // PAGE_NOACCESS guard page
+    return p;
+}
+
+// IOCP is the Windows completion port: the proactor the design's completion
+// shape is native to (§ 2). ph_ev_arm associates the handle and POSTS the read;
+// the completion carries the byte count, so ph_ev_wait returns nbytes >= 0 and
+// the loop does NOT read again (ph_io_complete uses the count).
+extern uptr CreateIoCompletionPort(uptr h, uptr port, uptr key, i64 nthreads);
+extern i64  GetQueuedCompletionStatus(uptr port, uptr pbytes, uptr pkey, uptr povl, i64 ms);
+uptr ph_ev_create() { uptr p = CreateIoCompletionPort(0 - 1, 0, 0, 0); return p; }  // INVALID_HANDLE_VALUE
+i64 ph_ev_arm(uptr ev, i64 fd, uptr ud, uptr buf, i64 len) {
+    CreateIoCompletionPort(fd, ev, 0, 0);             // associate (idempotent per handle)
+    uptr ov = php_alloc(40);                          // OVERLAPPED (32) + our ud (8)
+    i64 i = 0; loop { if (i >= 40) break; st8(ov + i, 0); i = i + 1; }
+    st64(ov + 32, ud);
+    ReadFile(fd, buf, len, 0, ov);                    // async; the completion posts to ev
+    return 0;
+}
+i64 ph_ev_wait(uptr ev, uptr out, i64 max, i64 ms) {
+    if (max > 64) max = 64;
+    i64 n = 0;
+    loop {
+        if (n >= max) break;
+        u8 nb[8]; u8 key[8]; u8 ovp[8];
+        st64(nb, 0); st64(ovp, 0);
+        i64 to = 0; if (n == 0) to = ms;              // block on the first, poll the rest
+        i64 ok = GetQueuedCompletionStatus(ev, nb, key, ovp, to);
+        uptr ov = ld64(ovp);
+        if (!ov) break;                               // timeout or no more completions
+        st64(out + n * 16, ld64(ov + 32));            // ud
+        i64 got = ld64(nb) & 0xffffffff;
+        if (!ok) got = 0;                             // a failed read (EOF/broken pipe) -> empty
+        st64(out + n * 16 + 8, got);                  // nbytes >= 0: already read by IOCP
+        n = n + 1;
+    }
+    return n;
+}
+
+// Test scaffolding (docs/threads.md § Step 5): an OVERLAPPED pipe, which IOCP
+// needs (an anonymous CreatePipe one does not support overlapped I/O). A named
+// pipe, server end FILE_FLAG_OVERLAPPED, client end the writer. [r, w] into out2.
+extern uptr CreateNamedPipeA(uptr name, i64 openMode, i64 pipeMode, i64 maxInst, i64 outBuf, i64 inBuf, i64 timeout, uptr sa);
+extern i64  GetCurrentProcessId();
+i64 ph_pipe_seq;
+// append a non-negative integer to name[] in decimal, starting at `at`; return
+// the next index. A local itoa so the host needs no zend_string #define (it is
+// parsed before lib/php_rt.mc, where ZS_HDR lives).
+i64 rtw_num(uptr name, i64 at, i64 v) {
+    u8 d[24];
+    i64 k = 0;
+    if (v == 0) { st8(d, 48); k = 1; }
+    loop { if (v <= 0) break; st8(d + k, 48 + v % 10); v = v / 10; k = k + 1; }
+    i64 i = k - 1;
+    loop { if (i < 0) break; st8(name + at, ld8(d + i)); at = at + 1; i = i - 1; }
+    return at;
+}
+i64 ph_os_pipe(uptr out2) {
+    ph_pipe_seq = ph_pipe_seq + 1;
+    u8 name[64];
+    uptr pfx = "\\\\.\\pipe\\mcphp-";
+    i64 i = 0; loop { i64 c = ld8(pfx + i); if (!c) break; st8(name + i, c); i = i + 1; }
+    i = rtw_num(name, i, GetCurrentProcessId());
+    st8(name + i, 45); i = i + 1;                      // '-'
+    i = rtw_num(name, i, ph_pipe_seq);
+    st8(name + i, 0);
+    // server (read) end: inbound, overlapped
+    uptr r = CreateNamedPipeA(name, 0x40000001, 0, 1, 4096, 4096, 0, 0);  // PIPE_ACCESS_INBOUND|FILE_FLAG_OVERLAPPED
+    if (r + 1 == 0) return 1;
+    // client (write) end: GENERIC_WRITE, OPEN_EXISTING
+    uptr w = CreateFileA(name, 0x40000000, 0, 0, 3, 0, 0);
+    if (w + 1 == 0) { CloseHandle(r); return 1; }
+    st64(out2, r);
+    st64(out2 + 8, w);
+    return 0;
+}
 // the size of a thread's arena: committed up front, which the system charges: kept smaller
 i64 ph_os_arena() { return 67108864; }
 // the process's committed bytes, -1 when they cannot be read:

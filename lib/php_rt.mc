@@ -11471,6 +11471,7 @@ void ph_unlock() { ph_mx_unlock(&ph_lkw); }
 #define SY_SEM     3
 #define SY_WG      4
 #define SY_COND    5
+#define SY_FUTURE  6                // docs/threads.md § Step 5: W0 = state (0 pending, 1 done, 2 failed), W1 = the ph_fut record
 #define SY_HDR     0                // (generation << 8) | kind
 #define SY_W0      8                // the mutex's word, the atomic's value; a free slot's next
 #define SY_W1      16               // the mutex's holder, its thread block; 0 when free
@@ -11526,7 +11527,8 @@ uptr ph_sy_kname(i64 k) {
     if (k == SY_ATOMIC) return "atomic";
     if (k == SY_SEM) return "semaphore";
     if (k == SY_WG) return "waitgroup";
-    return "condition variable";
+    if (k == SY_COND) return "condition variable";
+    return "future";
 }
 uptr ph_sy_art(i64 k) { if (k == SY_ATOMIC) return "an "; return "a "; }
 
@@ -11726,4 +11728,418 @@ void php_sy_endreq(uptr root) {
         i = i + 1;
     }
     ph_unlock();
+}
+
+// =====================================================================
+// Step 5: the event loop, stackful fibers and await of real I/O
+// (docs/threads.md § Step 5). Cooperative concurrency on ONE thread: one
+// fiber runs at a time and yields at an await, so within a thread there is
+// no data race and no deep copy of a value crossing an await (cross-thread
+// completion and its deep copy are step 6b). A future and a timer are new
+// SY_FUTURE slots in the sync table (§ Step 4). The context switch is a raw
+// per-arch word (lib/rt_fiber_*.mc, ph_ctx_swap); the backend is per-OS
+// (ph_ev_* in lib/rt_host_*.mc: kqueue / epoll / IOCP), driven by one
+// backend-neutral loop here. Everything is lazy: a program that never awaits
+// allocates no loop and no fiber stack.
+// =====================================================================
+void ph_ctx_swap(uptr from, uptr to);
+void ph_ctx_bootstrap(uptr ctx, uptr top, uptr tramp);
+
+#define PH_CTX        256             // a saved context: arm64 uses 152, Win64 224
+// ponytail: a flat 128 KiB stack per outstanding await, measured at ~16.9 KiB
+// committed (one page touched by a shallow awaiter). A pooled or segmented
+// stack is the upgrade when a server holds tens of thousands of connections;
+// PH_FIB_MAX is the named ceiling until then.
+#define PH_FIB_STK    131072          // a fiber's stack: 128 KiB, lazily committed, a guard page below
+#define PH_FIB_MAX    1024            // the ceiling on outstanding awaits (live fiber stacks) per loop
+
+// a future's extra state, beside the SY slot's W0 (the done-state) and W1
+// (this record). Allocated from the arena, zeroed.
+#define FUT_VALUE     0               // the value (done) or the throwable (failed), a zval
+#define FUT_WAITER    8               // the one fiber awaiting this, 0 = none (step 5: single waiter)
+#define FUT_DEADLINE  16              // a timer's monotonic deadline (ph_os_now_ms()+ms); 0 = not a timer
+#define FUT_TNEXT     24              // the loop's sorted timer list link
+#define FUT_FD        32              // a pending read's fd, -1 = none
+#define FUT_BUF       40              // its buffer
+#define FUT_LEN       48              // its length
+#define FUT_SLOT      56              // the SY slot this future lives in (to set the done-state)
+#define FUT_SIZE      64
+
+// a fiber: its saved context, its stack, and the callable it runs. It never
+// migrates threads (FIB_THR), which is what keeps the phT fast-path valid
+// across a swap (docs/threads.md § 5 risk 5).
+#define FIB_CTX       0               // PH_CTX bytes: where the loop swaps to resume it
+#define FIB_STACK     256            // the mmap'd stack base (with a guard page)
+#define FIB_STKSZ     264
+#define FIB_STATE     272             // 0 new, 1 suspended, 2 running, 3 done
+#define FIB_THR       280             // the thread that created it (the no-migration invariant)
+#define FIB_FUT       288             // the future its return value / exception completes
+#define FIB_RNEXT     296             // ready-queue link
+#define FIB_FN        304             // the callable, a zval
+#define FIB_NARG      312
+#define FIB_ARGS      320             // five zvals
+#define FIB_SIZE      360
+
+// one event loop per thread, in the thread block (PHT_ph_loop), lazy.
+#define LOOP_EV       0               // ph_ev_create()'s handle
+#define LOOP_READYH   8               // ready fibers to resume, head
+#define LOOP_READYT   16              // and tail
+#define LOOP_TIMERS   24              // the sorted timer-future list, head
+#define LOOP_CUR      32              // the fiber running now, 0 = the loop itself is running
+#define LOOP_CTX      40              // PH_CTX bytes: a fiber swaps back here
+#define LOOP_NPEND    296             // timers + io submissions outstanding
+#define LOOP_NFIB     304             // live fiber stacks (the ceiling)
+#define LOOP_THR      312             // the owning thread (cross-checks no-migration)
+#define LOOP_SIZE     320
+
+uptr ph_cur_phT() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); return phT; }
+
+// the thread's loop, made on first use. ph_ev_create is the only thing that
+// can fail here; a program that never awaits never calls this.
+uptr ph_loop_ensure(uptr phT) {
+    uptr lp = ld64(phT + PHT_ph_loop);
+    if (lp) return lp;
+    lp = php_alloc(LOOP_SIZE);
+    i64 i = 0; loop { if (i >= LOOP_SIZE) break; st64(lp + i, 0); i = i + 8; }
+    uptr ev = ph_ev_create();
+    if (!ev) php_die("mc-php: cannot create the event loop\n", 37);
+    st64(lp + LOOP_EV, ev);
+    st64(lp + LOOP_THR, phT);
+    st64(phT + PHT_ph_loop, lp);
+    return lp;
+}
+
+void ph_loop_ready_push(uptr lp, uptr fib) {
+    st64(fib + FIB_RNEXT, 0);
+    uptr t = ld64(lp + LOOP_READYT);
+    if (t) st64(t + FIB_RNEXT, fib);
+    else st64(lp + LOOP_READYH, fib);
+    st64(lp + LOOP_READYT, fib);
+}
+uptr ph_loop_ready_pop(uptr lp) {
+    uptr h = ld64(lp + LOOP_READYH);
+    if (!h) return 0;
+    uptr n = ld64(h + FIB_RNEXT);
+    st64(lp + LOOP_READYH, n);
+    if (!n) st64(lp + LOOP_READYT, 0);
+    return h;
+}
+
+// a future complete / fail: set the slot's done-state and the value, and make
+// its waiting fiber ready. Within a thread the value is already this thread's,
+// so no deep copy (§ Step 5, cooperative).
+void ph_fut_done(uptr lp, uptr fut, i64 state, uptr val) {
+    uptr slot = ld64(fut + FUT_SLOT);
+    uptr z = php_zv_alloc();
+    if (val) php_zv_cp(z, val); else php_zv_cp(z, php_znull());
+    st64(fut + FUT_VALUE, z);
+    st64(slot + SY_W0, state);
+    uptr w = ld64(fut + FUT_WAITER);
+    if (w) { st64(fut + FUT_WAITER, 0); ph_loop_ready_push(lp, w); }
+}
+
+// insert a timer future into the sorted (by deadline) list
+void ph_timer_insert(uptr lp, uptr fut) {
+    i64 d = ld64(fut + FUT_DEADLINE);
+    uptr p = 0;
+    uptr c = ld64(lp + LOOP_TIMERS);
+    loop {
+        if (!c) break;
+        if (ld64(c + FUT_DEADLINE) > d) break;
+        p = c; c = ld64(c + FUT_TNEXT);
+    }
+    st64(fut + FUT_TNEXT, c);
+    if (p) st64(p + FUT_TNEXT, fut); else st64(lp + LOOP_TIMERS, fut);
+    st64(lp + LOOP_NPEND, ld64(lp + LOOP_NPEND) + 1);
+}
+
+// fire every timer whose deadline has passed; the remainder's wait is
+// recomputed on the next turn (§ Step 4b: a spurious wake never shortens it)
+void ph_timers_fire(uptr lp) {
+    i64 now = ph_os_now_ms();
+    loop {
+        uptr c = ld64(lp + LOOP_TIMERS);
+        if (!c) break;
+        if (ld64(c + FUT_DEADLINE) > now) break;
+        st64(lp + LOOP_TIMERS, ld64(c + FUT_TNEXT));
+        st64(lp + LOOP_NPEND, ld64(lp + LOOP_NPEND) - 1);
+        ph_fut_done(lp, c, 1, 0);
+    }
+}
+
+// the next wait in ms: the nearest timer's remainder, or -1 (block) when there
+// is none
+i64 ph_loop_timeout(uptr lp) {
+    uptr c = ld64(lp + LOOP_TIMERS);
+    if (!c) return 0 - 1;
+    i64 d = ld64(c + FUT_DEADLINE) - ph_os_now_ms();
+    if (d < 0) return 0;
+    return d;
+}
+
+// resume a fiber; the no-migration invariant is enforced here (condition 1):
+// a fiber created by another thread fails loudly, because resuming it would
+// run it on the wrong thread's arena -- a silent corruption otherwise.
+void ph_fib_resume(uptr lp, uptr fib) {
+    if (ld64(fib + FIB_THR) != ld64(lp + LOOP_THR))
+        php_die("mc-php: a fiber was resumed by a thread that did not create it (no-migration invariant)\n", 88);
+    st64(lp + LOOP_CUR, fib);
+    st64(fib + FIB_STATE, 2);
+    ph_ctx_swap(lp + LOOP_CTX, fib + FIB_CTX);
+    st64(lp + LOOP_CUR, 0);
+    // the fiber yielded: finished (free its stack, now that we are off it) or
+    // suspended at an await (leave it)
+    if (ld64(fib + FIB_STATE) == 3) {
+        ph_os_unmap(ld64(fib + FIB_STACK), ld64(fib + FIB_STKSZ));
+        st64(lp + LOOP_NFIB, ld64(lp + LOOP_NFIB) - 1);
+    }
+}
+
+// read a ready fd into its future's buffer and complete it. On POSIX the loop
+// does the read (nb < 0 from ph_ev_wait, the reactor emulation); on Windows
+// the bytes are already in the buffer and nb is the count.
+void ph_io_complete(uptr lp, uptr fut, i64 nb) {
+    if (nb < 0) nb = read(ld64(fut + FUT_FD), ld64(fut + FUT_BUF), ld64(fut + FUT_LEN));
+    if (nb < 0) nb = 0;
+    st64(lp + LOOP_NPEND, ld64(lp + LOOP_NPEND) - 1);
+    ph_fut_done(lp, fut, 1, php_zstr(php_str_new(ld64(fut + FUT_BUF), nb)));
+}
+
+// the loop. stopfut != 0: drive until that future is done (a top-level await,
+// the drive-to-completion bridge). stopfut == 0: drive until nothing is
+// pending (mcphp_loop_run).
+void ph_loop_drive(uptr lp, i64 stopfut) {
+    u8 evb[1024];                         // 64 events * 16 bytes
+    loop {
+        // resume every ready fiber
+        loop {
+            uptr fib = ph_loop_ready_pop(lp);
+            if (!fib) break;
+            ph_fib_resume(lp, fib);
+        }
+        if (stopfut) {
+            uptr slot = ph_sy_slot(stopfut, SY_FUTURE);
+            if (!slot) return;
+            if (ld64(slot + SY_W0) != 0) return;
+        } else {
+            if (!ld64(lp + LOOP_READYH) && !ld64(lp + LOOP_NPEND)) return;
+        }
+        if (ld64(lp + LOOP_READYH)) continue;    // a fiber became ready; drain first
+        i64 ms = ph_loop_timeout(lp);
+        if (ms < 0 && !ld64(lp + LOOP_NPEND)) return;   // nothing would ever wake us
+        i64 n = ph_ev_wait(ld64(lp + LOOP_EV), evb, 64, ms);
+        ph_timers_fire(lp);
+        i64 i = 0;
+        loop {
+            if (i >= n) break;
+            uptr fut = ld64(evb + i * 16);
+            i64 nb = ld64(evb + i * 16 + 8);
+            ph_io_complete(lp, fut, nb);
+            i = i + 1;
+        }
+    }
+}
+
+// a bare, pending future: a new SY_FUTURE slot with its ph_fut record
+i64 php_fut_new() {
+    uptr fut = php_alloc(FUT_SIZE);
+    i64 i = 0; loop { if (i >= FUT_SIZE) break; st64(fut + i, 0); i = i + 8; }
+    st64(fut + FUT_FD, 0 - 1);
+    i64 h = ph_sy_new(SY_FUTURE, 0);          // W0 = state 0 (pending)
+    uptr slot = ph_sy_slot(h, SY_FUTURE);
+    st64(slot + SY_W1, fut);
+    st64(fut + FUT_SLOT, slot);
+    return h;
+}
+
+uptr php_fut_complete(i64 h, uptr v) {
+    uptr slot = ph_sy_slot(h, SY_FUTURE);
+    if (!slot) return php_znull();
+    if (ld64(slot + SY_W0) != 0) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: the future is already resolved", 38));
+        return php_znull();
+    }
+    uptr phT = ph_cur_phT();
+    uptr lp = ph_loop_ensure(phT);
+    ph_fut_done(lp, ld64(slot + SY_W1), 1, v);
+    return php_znull();
+}
+
+uptr php_fut_fail(i64 h, uptr e) {
+    uptr slot = ph_sy_slot(h, SY_FUTURE);
+    if (!slot) return php_znull();
+    if (ld64(slot + SY_W0) != 0) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: the future is already resolved", 38));
+        return php_znull();
+    }
+    uptr phT = ph_cur_phT();
+    uptr lp = ph_loop_ensure(phT);
+    ph_fut_done(lp, ld64(slot + SY_W1), 2, e);
+    return php_znull();
+}
+
+// the await core, shared by mcphp_await and mcphp_io_read. On a fiber: park
+// and swap to the loop. Top-level: nested-drive until done. Refuses when
+// php's engine is live on the stack (extension road), which would corrupt the
+// executor on resume (condition 3).
+uptr ph_await_h(i64 h) {
+    uptr phT = ph_cur_phT();
+    if (ld64(phT + PHT_phx_depth)) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: await cannot suspend while php's engine is on the stack", 63));
+        return php_znull();
+    }
+    uptr lp = ph_loop_ensure(phT);
+    uptr slot = ph_sy_slot(h, SY_FUTURE);
+    if (!slot) return php_znull();
+    uptr fut = ld64(slot + SY_W1);
+    if (ld64(slot + SY_W0) == 0) {
+        uptr cur = ld64(lp + LOOP_CUR);
+        if (cur) {
+            st64(fut + FUT_WAITER, cur);
+            st64(cur + FIB_STATE, 1);
+            ph_ctx_swap(cur + FIB_CTX, lp + LOOP_CTX);
+        } else {
+            ph_loop_drive(lp, h);
+        }
+    }
+    slot = ph_sy_slot(h, SY_FUTURE);
+    if (!slot) return php_znull();
+    fut = ld64(slot + SY_W1);
+    if (ld64(slot + SY_W0) == 2) { php_throw(ld64(fut + FUT_VALUE)); return php_znull(); }
+    uptr v = ld64(fut + FUT_VALUE);
+    if (!v) return php_znull();
+    return v;
+}
+
+uptr php_await(i64 h) { return ph_await_h(h); }
+
+// a timer: a future the loop completes after ms (§ Step 4b deadline rule)
+i64 php_timer(i64 ms) {
+    if (ms < 0) ms = 0;
+    uptr phT = ph_cur_phT();
+    uptr lp = ph_loop_ensure(phT);
+    i64 h = php_fut_new();
+    uptr slot = ph_sy_slot(h, SY_FUTURE);
+    uptr fut = ld64(slot + SY_W1);
+    st64(fut + FUT_DEADLINE, ph_os_now_ms() + ms);
+    ph_timer_insert(lp, fut);
+    return h;
+}
+
+uptr php_loop_run() {
+    uptr phT = ph_cur_phT();
+    uptr lp = ph_loop_ensure(phT);
+    ph_loop_drive(lp, 0);
+    return php_znull();
+}
+
+// the fiber trampoline: the first swap into a fresh fiber lands here. It runs
+// the callable, completes the fiber's future with the result (or its thrown
+// exception), marks itself done and swaps back to the loop for the last time.
+// The loop frees the stack once control is off it (ph_fib_resume).
+void ph_fiber_trampoline() {
+    uptr phT = ph_cur_phT();
+    uptr lp = ld64(phT + PHT_ph_loop);
+    uptr fib = ld64(lp + LOOP_CUR);
+    uptr r = php_call_zv(ld64(fib + FIB_FN), ld64(fib + FIB_NARG),
+                         ld64(fib + FIB_ARGS), ld64(fib + FIB_ARGS + 8), ld64(fib + FIB_ARGS + 16),
+                         ld64(fib + FIB_ARGS + 24), ld64(fib + FIB_ARGS + 32));
+    uptr fut = ld64(fib + FIB_FUT);
+    if (ld64(phT + PHT_ph_exc)) {
+        uptr e = ld64(phT + PHT_ph_exc);
+        st64(phT + PHT_ph_exc, 0);
+        ph_fut_done(lp, fut, 2, e);
+    } else {
+        ph_fut_done(lp, fut, 1, r);
+    }
+    st64(fib + FIB_STATE, 3);
+    ph_ctx_swap(fib + FIB_CTX, lp + LOOP_CTX);
+}
+
+// spawn a callable on a fresh fiber; return a future for its result. The stack
+// is mapped with a guard page, the context bootstrapped to the trampoline. The
+// ceiling is a named refusal, not a crash (condition 2).
+i64 php_fib_spawn(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
+    if (!php_thr_callable(fn)) { return 0; }    // braces: distinct from php_thr_start's line, which a ZTS swap targets (src/program.mc)
+    uptr phT = ph_cur_phT();
+    uptr lp = ph_loop_ensure(phT);
+    if (ld64(lp + LOOP_NFIB) >= PH_FIB_MAX) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: too many outstanding awaits", 35));
+        return 0;
+    }
+    uptr stk = ph_os_map_stack(PH_FIB_STK);
+    if (!stk) { php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: cannot map a fiber stack", 32)); return 0; }
+    uptr fib = php_alloc(FIB_SIZE);
+    i64 i = 0; loop { if (i >= FIB_SIZE) break; st64(fib + i, 0); i = i + 8; }
+    st64(fib + FIB_STACK, stk);
+    st64(fib + FIB_STKSZ, PH_FIB_STK);
+    st64(fib + FIB_THR, phT);
+    st64(fib + FIB_FN, fn);
+    st64(fib + FIB_NARG, n);
+    if (n > 0) st64(fib + FIB_ARGS, a1);
+    if (n > 1) st64(fib + FIB_ARGS + 8, a2);
+    if (n > 2) st64(fib + FIB_ARGS + 16, a3);
+    if (n > 3) st64(fib + FIB_ARGS + 24, a4);
+    if (n > 4) st64(fib + FIB_ARGS + 32, a5);
+    ph_ctx_bootstrap(fib + FIB_CTX, stk + PH_FIB_STK, &ph_fiber_trampoline);
+    i64 h = php_fut_new();
+    st64(fib + FIB_FUT, ld64(ph_sy_slot(h, SY_FUTURE) + SY_W1));
+    st64(lp + LOOP_NFIB, ld64(lp + LOOP_NFIB) + 1);
+    ph_loop_ready_push(lp, fib);
+    return h;
+}
+
+// submit a non-blocking read and suspend until the bytes are in (EOF -> empty
+// string). The I/O trigger step 6b extends to file://sockets; step 5's fd is
+// the self-test's own pipe/socket.
+uptr php_io_read(i64 fd, i64 len) {
+    if (len < 0) len = 0;
+    uptr phT = ph_cur_phT();
+    uptr lp = ph_loop_ensure(phT);
+    i64 h = php_fut_new();
+    uptr slot = ph_sy_slot(h, SY_FUTURE);
+    uptr fut = ld64(slot + SY_W1);
+    uptr buf = php_alloc(len + 1);
+    st64(fut + FUT_FD, fd);
+    st64(fut + FUT_BUF, buf);
+    st64(fut + FUT_LEN, len);
+    if (ph_ev_arm(ld64(lp + LOOP_EV), fd, fut, buf, len) != 0) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: cannot submit the read", 30));
+        return php_znull();
+    }
+    st64(lp + LOOP_NPEND, ld64(lp + LOOP_NPEND) + 1);
+    return ph_await_h(h);
+}
+
+// Test scaffolding (docs/threads.md § Step 5): a non-blocking pipe, its two
+// fds packed (read << 32 | write); a write; a close. NOT the step-5 surface --
+// a program awaits file://sockets in 6b, the self-test needs a bare fd.
+i64 php_test_pipe() {
+    u8 fds[16];
+    if (ph_os_pipe(fds) != 0) return 0 - 1;
+    return (ld64(fds) << 32) | (ld64(fds + 8) & 0xffffffff);
+}
+i64 php_test_fd_write(i64 fd, uptr z) {
+    uptr s = ld64(z);                              // the zval's zend_string
+    return write(fd, s + ZS_HDR, ld64(s + 16));    // val at ZS_HDR(24), len at 16
+}
+uptr php_test_fd_close(i64 fd) { close(fd); return php_znull(); }
+
+// Test scaffolding (condition 1): resume a fiber as if from the wrong thread,
+// to confirm the no-migration guard fires loudly. It corrupts the fiber's
+// creating-thread field and drives the loop, which aborts by name.
+uptr php_test_migrate() {
+    uptr phT = ph_cur_phT();
+    uptr lp = ph_loop_ensure(phT);
+    uptr stk = ph_os_map_stack(PH_FIB_STK);
+    uptr fib = php_alloc(FIB_SIZE);
+    i64 i = 0; loop { if (i >= FIB_SIZE) break; st64(fib + i, 0); i = i + 8; }
+    st64(fib + FIB_STACK, stk);
+    st64(fib + FIB_STKSZ, PH_FIB_STK);
+    st64(fib + FIB_THR, phT + 4096);               // pretend another thread created it
+    ph_ctx_bootstrap(fib + FIB_CTX, stk + PH_FIB_STK, &ph_fiber_trampoline);
+    st64(lp + LOOP_NFIB, ld64(lp + LOOP_NFIB) + 1);
+    ph_loop_ready_push(lp, fib);
+    ph_loop_drive(lp, 0);                           // resumes it -> ph_fib_resume aborts
+    return php_znull();
 }

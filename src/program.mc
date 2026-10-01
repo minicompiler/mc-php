@@ -577,6 +577,12 @@ i64 ph_dollar_expr() {
 #embed ph_rt_at_a64   "../lib/rt_atomic_arm64.mc"
 #embed ph_rt_at_x64   "../lib/rt_atomic_x86_64.mc"
 #embed ph_rt_at_win   "../lib/rt_atomic_win64.mc"
+// the stackful-fiber context switch (docs/threads.md § Step 5): raw words too,
+// one per instruction set and calling convention, chosen the same way as the
+// atomics (ph_atomic_kind)
+#embed ph_rt_fib_a64  "../lib/rt_fiber_arm64.mc"
+#embed ph_rt_fib_x64  "../lib/rt_fiber_x86_64.mc"
+#embed ph_rt_fib_win  "../lib/rt_fiber_win64.mc"
 
 // A push puts its source ON TOP of the lexer's stack, so the LAST push is the
 // FIRST thing parsed (mc's p_push_source has #include's semantics, and it was
@@ -692,10 +698,21 @@ void ph_push_rt_atomic(uptr os, uptr a) {
     err_at2("mc-php", 1, "mc-php: no atomic words for this architecture", a);
 }
 
+// the fiber context switch for this target (docs/threads.md § Step 5): the
+// same architecture choice as the atomics
+void ph_push_rt_fiber(uptr os, uptr a) {
+    i64 k = ph_atomic_kind(os, a);
+    if (k == 0) { p_push_source("php runtime fiber", ph_rt_fib_a64, ph_rt_fib_a64_size); return; }
+    if (k == 1) { p_push_source("php runtime fiber", ph_rt_fib_x64, ph_rt_fib_x64_size); return; }
+    if (k == 2) { p_push_source("php runtime fiber", ph_rt_fib_win, ph_rt_fib_win_size); return; }
+    err_at2("mc-php", 1, "mc-php: no fiber words for this architecture", a);
+}
+
 void ph_push_rt_host() {
     uptr os = host_os();
     uptr arch = ph_target_arch();
     ph_push_rt_atomic(os, arch);
+    ph_push_rt_fiber(os, arch);
     if (str_eq(os, "macos")) {
         p_push_source("php runtime host", ph_rt_macos, ph_rt_macos_size);
         return;
@@ -798,7 +815,7 @@ void user_init() {
         r = ph_swap(r, cstrlen(r), "if (!exc && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC))", "if (!exc && !rep && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC))");
         p_push_source("php runtime", r, cstrlen(r));
         ph_push_rt_host();
-        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12344\n", "#define PHT_SIZE 12472\n");
+        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12352\n", "#define PHT_SIZE 12480\n");
         p_push_source("php thread block", t, cstrlen(t));
         pass(&ph_tls_pass);
         return;

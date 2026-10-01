@@ -928,7 +928,7 @@ number; a wrong handle names its actual kind against the wanted one.
   dump the x86-64 atomic words, not the arm64 ones (the atomics file follows the selected
   machine in a dump mode).
 
-## Step 5: the event loop and `await` of real I/O (DESIGN, not yet built)
+## Step 5: the event loop and `await` of real I/O (BUILT)
 
 Steps 1-4 give threads and sync. Step 5 adds the other half of concurrency: one thread that
 does many I/Os at once, by suspending the php call at an `await` point until the I/O is ready,
@@ -937,7 +937,44 @@ non-blocking `file://`/socket fetches). The step-6a `await` in `examples/awaitab
 placeholder -- it runs the callable to completion on the calling thread; step 5 makes `await`
 really suspend.
 
-**This section is the approved-before-implementation design.** Nothing below is built.
+### Built (as-built, and what the design under-scoped)
+
+The design below was approved before implementation and is accurate, with the following
+decisions the owner ruled during the build (and this is what shipped):
+
+- **The surface is EIGHT intrinsics, not six.** The six listed in § 4 could not *create* a fiber,
+  so `ph_ctx_swap` would have been dead code and the mandatory no-migration / stack-exhaustion
+  self-tests unreachable. Added as full published intrinsics:
+  - **`mcphp_spawn(callable $fn, mixed ...$args): int`** -- run `$fn` on a fresh fiber, returning
+    an `SY_FUTURE` that completes with its return value (or fails with its thrown exception). The
+    single-thread analog of `mcphp_thread_start`; the fiber entry point.
+  - **`mcphp_io_read(int $fd, int $len): string`** -- submit a non-blocking read via
+    `ph_io_submit`, suspend until the bytes are in (EOF -> empty string). The I/O trigger step 6b
+    extends to `file://`/sockets; step 5's fd is the self-test's own pipe/socket.
+- **Fibers are COOPERATIVE on one thread** (one runs at a time, yields at an await), so within a
+  thread there is NO data race and NO deep copy of a value crossing an await -- args and results
+  pass as ordinary in-arena values. Cross-thread future completion and its deep copy stay in
+  step 6b. (This supersedes the "deep-copied (`php_tc_*`)" note in § 4.)
+- Files: `lib/rt_fiber_{arm64,x86_64,win64}.mc` (`ph_ctx_swap` + `ph_ctx_bootstrap`, raw words,
+  arch-selected in `src/program.mc` like the atomics, swept by `tests/sweep_sync.py`); the loop
+  core, futures, timers, fibers and the eight runtime functions in `lib/php_rt.mc`
+  (`SY_FUTURE` = 6); the per-OS reactor `ph_ev_create`/`ph_ev_arm`/`ph_ev_wait` and
+  `ph_os_map_stack`/`ph_os_pipe` in `lib/rt_host_{macos,linux,windows}.mc`; the builtins in
+  `src/builtin.mc` (`ph_bi_async`); one lazy loop per thread in `lib/php_tls.mc` (`PHT_ph_loop`).
+- Fiber stacks are **128 KiB**, a guard page below (`PROT_NONE` / `PAGE_NOACCESS`), lazily
+  committed; the ceiling is **1024** outstanding awaits per loop (`PH_FIB_MAX`), past which
+  `mcphp_spawn` is the named refusal `mc-php: too many outstanding awaits`. Per-await reserved
+  cost is the 128 KiB stack plus one guard page; committed (RSS) is only the pages a shallow
+  awaiter touches -- measured at **~16.9 KiB per outstanding await** (one 16 KiB page on this
+  Apple-Silicon host: 1024 live fibers moved max RSS from 1.67 MiB to 18.97 MiB). The upgrade for
+  a server holding tens of thousands of connections is a pooled or segmented stack (a `ponytail:`
+  note in the fiber record).
+- The self-test is `tests/c/18-await.php` (a timer, a future completed/failed, fibers that await a
+  timer, a pipe read awaited on a fiber), `tests/c/19-await-migrate.php` (the no-migration abort,
+  condition 1) and `tests/c/20-await-exhaust.php` (the ceiling refusal, condition 2); the
+  engine-live refusal (condition 3) is exercised on the extension road. `mcphp_pipe` /
+  `mcphp_fd_write` / `mcphp_fd_close` / `mcphp_test_migrate` are test scaffolding, not the surface.
+
 Measured facts about the tree it builds on carry a `file:line`.
 
 ### What exists to build on, and what does not

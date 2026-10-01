@@ -349,6 +349,42 @@ else
     skip "the C twin of sync: no $CC here, or it would not build -- no C column"
 fi
 
+# --- await (step 5): the event loop, fibers and await of real I/O ---------------
+# tests/c/18-await.php runs on the program road (a timer, a future, fibers that
+# await a timer over ph_ctx_swap, a pipe read); its C twin (kqueue/epoll +
+# ucontext, tests/c/await.c) must reach the SAME output byte for byte, and the
+# two are timed. The .php is graded against tests/c/18-await.out by the fixture
+# harness too; here it is the twin that proves the loop's semantics independently.
+echo "  -- await"
+aw=$tmp/await
+ar=$(MCPHP_BIN=$BIN MCPHP_OUT=$aw sh "$here/mcphp.sh" tests/c/18-await.php 2>&1 | tr -d '\r')
+aw_bin=$aw; [ -f "$aw.exe" ] && aw_bin=$aw.exe
+want=$(tr -d '\r' < tests/c/18-await.out)
+if [ "$ar" = "$want" ]; then
+    say "18-await.php: timer, future, spawned fibers over ph_ctx_swap, and a pipe read"
+else
+    bad "18-await.php: output differs from 18-await.out"
+fi
+if [ "$host" = windows ]; then
+    skip "the C twin of await on Windows: kqueue/epoll and ucontext are POSIX (the .php uses IOCP)"
+elif command -v "$CC" >/dev/null 2>&1 && "$CC" -O2 -o "$tmp/await-c" tests/c/await.c 2>"$tmp/c.err"; then
+    cr=$("$tmp/await-c" | tr -d '\r')
+    [ "$cr" = "$want" ] && say "the C twin (kqueue/epoll + ucontext): byte for byte the .php" \
+        || bad "the C twin: output differs from the .php"
+    row=$("$PHP" -r '
+        $b = [INF, INF];
+        foreach ([$argv[1], $argv[2]] as $k => $x) {
+            for ($r = 0; $r < 3; $r++) {
+                $t = hrtime(true); exec(escapeshellarg($x)); $d = (hrtime(true) - $t) / 1e6;
+                if ($d < $b[$k]) $b[$k] = $d;
+            }
+        }
+        printf("mc-php %.0f ms, C %.0f ms (%.2fx)", $b[0], $b[1], $b[0] / $b[1]);' "$aw_bin" "$tmp/await-c")
+    say "bench: $row -- best of three; not gated"
+else
+    skip "the C twin of await: no $CC here, or it would not build -- no C column"
+fi
+
 # --- awaitable -----------------------------------------------------------------
 # The compiled awaitable.src.php: a ZTS extension on native OS threads and native
 # sync (docs/threads.md steps 3 and 4). parallel() runs each php callable on an

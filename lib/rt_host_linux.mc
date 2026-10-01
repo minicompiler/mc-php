@@ -140,6 +140,67 @@ uptr ph_os_map(i64 n) {
     return p;
 }
 void ph_os_unmap(uptr p, i64 n) { munmap(p, n); }
+
+// --- the event loop's fiber stacks and reactor (docs/threads.md § Step 5) ---
+// A fiber's stack: the lowest page PROT_NONE as a guard (best effort -- the
+// length must be a multiple of the page size, so mprotect of one 4 KiB page is
+// a no-op where the page is larger, and the stack is then unguarded but still
+// correct). 0 when the kernel says no.
+extern i64 mprotect(uptr addr, i64 n, i64 prot);
+uptr ph_os_map_stack(i64 n) {
+    uptr p = mmap(0, n, 3, 0x4022, 0 - 1, 0);          // RW, PRIVATE|ANON|NORESERVE
+    if (p + 1 == 0) return 0;
+    mprotect(p, 4096, 0);                              // PROT_NONE guard page
+    return p;
+}
+
+// epoll is the Linux reactor. ph_ev_arm registers a one-shot readable interest
+// with data = ud; the loop does the read on readiness (ph_ev_wait returns
+// nbytes = -1). The epoll_event layout differs by architecture (packed on
+// x86-64, not on aarch64), so its size and data offset come from the arch file
+// (ph_ep_evsize / ph_ep_dataoff). EPOLLIN 1 | EPOLLONESHOT 0x40000000.
+extern i64 epoll_create1(i64 flags);
+extern i64 epoll_ctl(i64 ep, i64 op, i64 fd, uptr ev);
+extern i64 epoll_wait(i64 ep, uptr ev, i64 max, i64 ms);
+uptr ph_ev_create() { i64 e = epoll_create1(0); if (e < 0) return 0; return e; }
+i64 ph_ev_arm(uptr ev, i64 fd, uptr ud, uptr buf, i64 len) {
+    u8 ee[16];
+    i64 i = 0; loop { if (i >= 16) break; st8(ee + i, 0); i = i + 1; }
+    st32(ee, 0x40000001);                              // EPOLLIN | EPOLLONESHOT
+    st64(ee + ph_ep_dataoff(), ud);
+    if (epoll_ctl(ev, 1, fd, ee) < 0) {               // EPOLL_CTL_ADD
+        if (epoll_ctl(ev, 3, fd, ee) < 0) return 1;   // EPOLL_CTL_MOD, re-arm
+    }
+    return 0;
+}
+i64 ph_ev_wait(uptr ev, uptr out, i64 max, i64 ms) {
+    if (max > 64) max = 64;
+    u8 el[1024];                                       // 64 * 16, covers either layout
+    i64 n = epoll_wait(ev, el, max, ms);
+    if (n < 0) n = 0;
+    i64 sz = ph_ep_evsize();
+    i64 off = ph_ep_dataoff();
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        st64(out + i * 16, ld64(el + i * sz + off));   // ud
+        st64(out + i * 16 + 8, 0 - 1);                 // nbytes = -1: the loop reads
+        i = i + 1;
+    }
+    return n;
+}
+
+// Test scaffolding (docs/threads.md § Step 5): a non-blocking pipe. pipe2 with
+// O_NONBLOCK (0x800 on both Linux architectures). [r, w] into out2.
+extern i64 pipe2(uptr fds, i64 flags);
+i64 ph_os_pipe(uptr out2) {
+    u8 fds[8];
+    if (pipe2(fds, 0x800) != 0) return 1;              // O_NONBLOCK
+    st64(out2, ld32(fds) & 0xffffffff);
+    st64(out2 + 8, ld32(fds + 4) & 0xffffffff);
+    return 0;
+}
+
 // the size of a thread's arena: reserved (MAP_NORESERVE): pages are touched as used
 i64 ph_os_arena() { return 268435456; }
 // the process's virtual size in bytes, -1 when it cannot be read: the first
