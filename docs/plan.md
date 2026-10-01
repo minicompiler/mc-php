@@ -1114,10 +1114,18 @@ interpreter on the same source), § 7 item 1. What already has code moves into
      interleaved): module / twins **1.083 (1.038-1.174)**, faster than the interpreter in every
      round (0.882, 0.830-0.987). The hand-written `extA.mc`/`extB.mc` went back to `reference/`
      only (they were copies) and the pinned refusal is gone.
-   - `awaitable` -- DONE as **hand-written mc**: `awaitable.mc` from `reference/aw6.mc`, 37 lines
-     against `check.expect` (await, forked `parallel` over any callable, libcurl on pthreads under
-     a semaphore, the sync primitives), and `awaitable.src.php` refused at its first line, pinned.
-     Its README lists the five refusals behind it. POSIX only; Windows SKIPS by name.
+   - `awaitable` -- DONE as a **compiled ZTS extension** mc-php builds from `awaitable.src.php`
+     (the hand-written `awaitable.mc` and its fork/pipe/curl/dlsym/`#[Extern]` road are retired to
+     `reference/`, with `signals.php`): `parallel()` runs each php callable on an OS thread of its
+     own (docs/threads.md § 3b), `http_get_many()` reads each `file://` on a compiled worker
+     through the runtime's native `file_get_contents` under a bound `Semaphore`, and
+     `Semaphore`/`WaitGroup`/`Mutex` are thin php classes over `mcphp_semaphore*`/
+     `mcphp_waitgroup*`/`mcphp_mutex*` (threads step 4). `check.php` is 38/38 byte for byte against
+     `check.expect` on a thread-safe php -- including line 33's true `Semaphore(2)` cap (peak <= 2)
+     at opt=1, which the mc-php machine's `pm_leaf` fix (#49) makes exact. The C twin
+     (`c/awaitable.c` + `c/twin.php`) is rebuilt on native pthreads and prints the same bytes. It
+     needs a ZTS php with opcache, so it SKIPS on an NTS one (macOS) with the reason; CI's ZTS legs
+     run it. Nothing deferred to 6b.
    - **NEXT, not in that pull request: a large-volume "mission critical" DATABASE example.** What
      it needs from the compiler, each measured by the examples above:
      * **calling a C library from PHP source** -- sqlite3 or libpq, which is
