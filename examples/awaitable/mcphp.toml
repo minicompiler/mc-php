@@ -1,13 +1,14 @@
-# awaitable -- awaitable.src.php, the PHP form of awaitable.mc, described by a file.
+# awaitable -- awaitable.src.php, a ZTS PHP extension, described by a file.
 #
 #     mc-php build examples/awaitable --config examples/awaitable/mcphp.toml
 #
-# This is the build the example is WORKING TOWARD. It compiles; tests/examples.sh
-# loads what it writes and records how many of check.expect's lines check.php
-# already prints through it (README.md lists what the bodies still wait for).
-# Until every line does, the example is the hand-written awaitable.mc, which
-# tests/examples.sh compiles with plain mc and links itself. On Windows the
-# build stops at #[Extern]'s named refusal, which the gate pins.
+# The extension is the compiled awaitable.src.php: no C, no phpize. It is a ZTS
+# module -- parallel() runs php callables on threads, which a thread-safe php
+# runs as php requests of their own (docs/threads.md, step 3b) -- so it loads
+# only into a thread-safe php. macOS ships an NTS php, so tests/examples.sh does
+# not run it natively here; it builds the LINUX module and runs check.php in
+# Docker (php:8.5-zts-alpine). This file is the macOS/Mach-O build for a
+# thread-safe macOS php; mcphp.linux.toml and mcphp.windows.toml are the others.
 
 [project]
 entry = "awaitable.src.php"
@@ -29,5 +30,5 @@ version = "0.1.0"
 [php]
 api = 20250925
 build_id = "API20250925,NTS"
-thread_safety = "nts"
+thread_safety = "zts"
 debug = false

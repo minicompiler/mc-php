@@ -2,9 +2,10 @@
 // The owner's demonstration (reference/aw6.php, translated): eight heavy
 // calls sequentially and then through parallel(), timed. Not a gate -- the
 // times are the host's -- but tests/examples.sh runs it and requires the
-// "same results: true" line.
+// "same results: true" line. Runs on a thread-safe php (parallel runs each
+// callable on an OS thread of its own, docs/threads.md § 3b).
 //
-//     php -d extension=build/awaitable.so demo.php
+//     php -d extension=build/awaitable.so -d opcache.enable_cli=1 demo.php
 //
 // ANY callable the developer already has. Its body stays interpreted and is
 // never compiled.
@@ -27,8 +28,8 @@ $par = \awaitable\parallel('heavy', ...$args);
 $tpar = (hrtime(true) - $t) / 1e6;
 
 printf("sequential  %8.1f ms\n", $tseq);
-printf("parallel    %8.1f ms   %.1fx   distinct pids: %d\n", $tpar, $tseq / $tpar,
-   count(array_unique(array_column($par, 'pid'))));
+printf("parallel    %8.1f ms   %.1fx   threads of this process: %s\n", $tpar, $tseq / $tpar,
+   var_export(array_unique(array_column($par, 'pid')) === [getmypid()], true));
 printf("same results: %s\n", var_export(
    array_column($seq, 'sum') === array_column($par, 'sum'), true));
 

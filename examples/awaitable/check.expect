@@ -7,9 +7,9 @@ awaitable\Intent done=true failed=false data=42 exception=NULL
 internal callable: INTENT
 a callable that throws: failed=true RuntimeException: boom
 TypeError: awaitable\await(): Argument #1 ($fn) must be a valid callback
-parallel: 6 results, the same sums as sequential: true, distinct pids: 6, none of them this process: true
+parallel: 6 results, the same sums as sequential: true, all on threads of this process: true, peak concurrency: 6
 sums: 599997,600003,600002,600001,600000,600006
-after parallel: completed() = 0, peak() = 0, errors() = 0
+after parallel: completed() = 6, peak() = 6, errors() = 0
 array(2) {
   [0]=>
   string(3) "[a]"

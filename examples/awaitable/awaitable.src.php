@@ -1,27 +1,18 @@
 <?php
-// The SOURCE the extension compiler is meant to consume: this file is to
-// compile to the awaitable.so that awaitable.mc produces today by hand. No C,
-// no phpize. It compiles; README.md lists what its bodies still wait for, and
-// tests/examples.sh records how far check.php gets through the compiled
-// module (and, on Windows, pins #[Extern]'s refusal).
+// awaitable -- a ZTS PHP extension, compiled by mc-php from this file. No C, no
+// phpize. It is the redesign onto native OS threads (docs/threads.md § Step 3)
+// and native sync (§ Step 4): no fork, no pipe, no dlsym, no #[Extern]. So it
+// builds and runs on every host mc-php targets, Windows included, wherever a
+// thread-safe php loads it.
+//
+//   mc-php build examples/awaitable --config examples/awaitable/mcphp.linux.toml
+//
+// The thread and sync primitives (mcphp_thread_start/join, mcphp_semaphore*,
+// mcphp_waitgroup*, mcphp_mutex*, mcphp_atomic*) are mc-php intrinsics: they
+// exist only in compiled code, so this file IS the compiler's input and never
+// runs under interpreted php. check.php exercises what it publishes.
 
 namespace awaitable;
-
-// --- foreign declarations -------------------------------------------------
-// The attribute names the library; the signature is the ABI. `variadic` marks
-// a call whose extra argument travels on the stack (curl_easy_setopt), which is
-// what the compiler has to know in order to place it.
-#[Extern('curl')] function curl_easy_init(): Ptr {}
-#[Extern('curl', variadic: 1)] function curl_easy_setopt(Ptr $h, int $opt, mixed $v): int {}
-#[Extern('curl')] function curl_easy_perform(Ptr $h): int {}
-#[Extern('curl')] function curl_easy_strerror(int $code): Ptr {}
-#[Extern('pthread')] function pthread_create(Ptr $tid, Ptr $attr, Ptr $fn, Ptr $arg): int {}
-#[Extern('pthread')] function pthread_join(Ptr $tid, Ptr $ret): int {}
-
-// The engine's own state -- executor_globals, zend_ce_exception, which
-// awaitable.mc reads through dlsym -- is not declared here: calling a php
-// callable, catching what it throws and handing back an object are the
-// compiler's own crossing, so the source never touches the engine's globals.
 
 // --- what the extension publishes ----------------------------------------
 final class Intent {
@@ -46,136 +37,131 @@ function await(callable $fn, mixed ...$args): Intent {
     return $i;
 }
 
-// The sync primitives are for PARALLELISM AND CONCURRENCY, not for async: they
-// coordinate the threads that run underneath, and they are what caps and joins
-// them. bind() makes every thread this process starts pass through it.
+// --- the sync primitives, thin wrappers over the intrinsics ----------------
+// Each holds one native handle -- an int the runtime owns -- in a PRIVATE
+// property, so the handle is not the caller's to write (docs/threads.md § 4).
+// bind() makes the threads http_get_many starts pass through this semaphore.
 final class Semaphore {
-    public function __construct(int $n = 1) {}
-    public function acquire(): void {} public function release(): void {}
-    public function bind(): void {}    public function unbind(): void {}
+    private int $__h;
+    public function __construct(int $n = 1) { $this->__h = \mcphp_semaphore($n); }
+    public function acquire(): void { \mcphp_semaphore_acquire($this->__h); }
+    public function release(): void { \mcphp_semaphore_release($this->__h); }
+    public function bind(): void { global $bound_sem; $bound_sem = $this->__h; }
+    public function unbind(): void { global $bound_sem; $bound_sem = 0; }
 }
 final class WaitGroup {
-    public function add(int $n = 1): void {}
-    public function done(): void {} public function wait(): void {}
+    private int $__h;
+    public function __construct() { $this->__h = \mcphp_waitgroup(); }
+    public function add(int $n = 1): void { \mcphp_waitgroup_add($this->__h, $n); }
+    public function done(): void { \mcphp_waitgroup_done($this->__h); }
+    public function wait(): void { \mcphp_waitgroup_wait($this->__h); }
 }
-final class Mutex { public function lock(): void {} public function unlock(): void {} }
+final class Mutex {
+    private int $__h;
+    public function __construct() { $this->__h = \mcphp_mutex(); }
+    public function lock(): void { \mcphp_mutex_lock($this->__h); }
+    public function unlock(): void { \mcphp_mutex_unlock($this->__h); }
+}
 
-// --- where the parallelism lives ------------------------------------------
-// There is no #[Thread]: the dev hands over a callable HE already has, and its
-// body is never compiled. The interpreter is not reentrant, so an interpreted
-// body runs off the main line only in another PROCESS -- a full copy of the
-// interpreter, which is why any callable works with no bootstrap and no ZTS.
-//
-//   $r = parallel($anyCallable, ...$args);   // one child per arg, runs at once
-//   $i = await(parallel(...), $fn, ...$a);   // and await still hands an Intent
-//
-// The value comes home through php's own serialize/unserialize over a pipe,
-// and that is also the bound: only what serialize accepts crosses back, and
-// nothing the child mutates is shared. On Windows there is no fork, so that
-// door becomes CreateProcess + re-exec, or a second interpreter under ZTS.
-//
-// The C library's side of it is declared like curl's. A buffer C writes into
-// -- pipe()'s two descriptors, waitpid()'s status, read()'s bytes -- is a php
-// string of that length: C sees its bytes, and unpack() reads them back.
-#[Extern('c')] function fork(): int {}
-#[Extern('c')] function pipe(string $fds): int {}
-#[Extern('c')] function waitpid(int $pid, string $status, int $options): int {}
-#[Extern('c')] function _exit(int $code): void {}
-#[Extern('c', name: 'read')] function c_read(int $fd, string $buf, int $n): int {}
-#[Extern('c', name: 'write')] function c_write(int $fd, string $buf, int $n): int {}
-#[Extern('c', name: 'close')] function c_close(int $fd): int {}
-// errno is a macro in C: the thread's error number, read right after a call
-// that failed (src/extern.mc). EINTR is 4 on every host this runs on.
-#[Extern('c')] function errno(): int {}
-const EINTR = 4;
+// --- the counters ----------------------------------------------------------
+// Process-wide atomics, so a native worker and the thread that started it read
+// and write the same word. Since reset(): peak is the greatest number of tasks
+// that ran at once, completed the tasks that returned, errors the ones that
+// threw. They count the THREADS -- parallel's and http_get_many's alike, now
+// that both ARE threads.
+$c_peak = \mcphp_atomic(0);
+$c_completed = \mcphp_atomic(0);
+$c_errors = \mcphp_atomic(0);
+$c_running = \mcphp_atomic(0);
+$bound_sem = 0;
 
-// since the last reset(): peak and completed count the THREADS (http_get and
-// http_get_many, as the C twin does), errors the parallel children that threw
-$peak = 0;
-$completed = 0;
-$errors = 0;
+function _bump(int $h, int $v): void {
+    while (true) {
+        $cur = \mcphp_atomic_load($h);
+        if ($v <= $cur) return;
+        if (\mcphp_atomic_cas($h, $cur, $v)) return;
+    }
+}
 
+function peak(): int { global $c_peak; return \mcphp_atomic_load($c_peak); }
+function completed(): int { global $c_completed; return \mcphp_atomic_load($c_completed); }
+function errors(): int { global $c_errors; return \mcphp_atomic_load($c_errors); }
+function reset(): void {
+    global $c_peak, $c_completed, $c_errors, $c_running;
+    \mcphp_atomic_store($c_peak, 0);
+    \mcphp_atomic_store($c_completed, 0);
+    \mcphp_atomic_store($c_errors, 0);
+    \mcphp_atomic_store($c_running, 0);
+}
+
+// --- parallel: any php callable, one thread per argument -------------------
+// Each argument runs the callable on an OS thread of its own -- a php request
+// on a thread-safe php (docs/threads.md § 3b) -- and the threads share this
+// process, so a task's getmypid() is the parent's, not a forked child's. The
+// handles are joined in submission order, so the results stay ordered.
 function parallel(callable $fn, mixed ...$args): array {
-    global $errors;
+    global $c_completed, $c_peak, $c_errors;
     $n = count($args);
     if ($n === 0) throw new \ArgumentCountError('awaitable\parallel() expects at least 2 arguments, 1 given');
     if ($n > 64) throw new \TypeError('awaitable\parallel(): at most 64 jobs');
-    $pids = [];
-    $fds = [];
-    foreach ($args as $i => $arg) {
-        // a job that cannot start is -1 in ITS slot, answered as failed
-        $pids[$i] = -1;
-        $p = str_repeat("\0", 8);
-        if (pipe($p) !== 0) continue;
-        [$r, $w] = array_values(unpack('l2', $p));
-        $k = fork();
-        if ($k === 0) {
-            c_close($r);
-            _child($w, $fn, $arg);
-        }
-        c_close($w);
-        if ($k < 0) { c_close($r); continue; }
-        $pids[$i] = $k;
-        $fds[$i] = $r;
-    }
+    $h = [];
+    foreach ($args as $i => $arg) $h[$i] = \mcphp_thread_start($fn, $arg);
+    // every one is outstanding until the joins begin
+    _bump($c_peak, $n);
     $out = [];
-    foreach ($args as $i => $arg) {
-        $tag = '1';
-        $body = '';
-        if ($pids[$i] !== -1) {
-            $all = _read_all($fds[$i]);
-            c_close($fds[$i]);
-            // a signal handler installed without SA_RESTART makes a blocked
-            // waitpid() return -1 with EINTR: asked again, as the C twin does,
-            // and on no other error (ECHILD: someone else reaped the child)
-            $st = str_repeat("\0", 8);
-            while (waitpid($pids[$i], $st, 0) < 0 && errno() === EINTR) {}
-            if ($all !== '') { $tag = substr($all, 0, 1); $body = substr($all, 1); }
-        }
-        if ($tag === '0') {
-            $v = $body === '' ? false : @unserialize($body);
-            $out[] = $v === false && $body !== 'b:0;' ? null : $v;
-        } else {
-            $errors++;
-            $out[] = $body === '' ? null : $body;
+    foreach ($h as $i => $handle) {
+        try {
+            $out[$i] = \mcphp_thread_join($handle);
+            \mcphp_atomic_add($c_completed, 1);
+        } catch (\Throwable $e) {
+            \mcphp_atomic_add($c_errors, 1);
+            $out[$i] = $e->getMessage();
         }
     }
     return $out;
 }
 
-// the child: call, serialize, write '0' and the bytes -- or '1' and the message
-// of what it threw -- and leave without running php's shutdown
-function _child(int $w, callable $fn, mixed $arg): void {
-    try {
-        $s = '0' . serialize($fn($arg));
-    } catch (\Throwable $e) {
-        $s = '1' . $e->getMessage();
+// --- the threads: native work on OS threads, capped by a semaphore ---------
+// http_get_many runs each fetch on a native thread (a compiled worker, no php
+// engine, its own arena) through the runtime's own file_get_contents. A bound
+// semaphore caps how many run at once, and the peak counter records how many
+// actually did.
+function http_get_many(...$urls): array {
+    global $bound_sem, $c_running, $c_peak, $c_completed;
+    $sem = $bound_sem;
+    $run = $c_running;
+    $pk = $c_peak;
+    $cp = $c_completed;
+    $h = [];
+    foreach ($urls as $i => $url) {
+        $h[$i] = \mcphp_thread_start(fn(string $u): string => _http_do($u, $sem, $run, $pk, $cp), $url);
     }
-    _write_all($w, $s);
-    _exit(0);
+    $out = [];
+    foreach ($h as $i => $handle) $out[$i] = \mcphp_thread_join($handle);
+    return $out;
 }
 
-function _write_all(int $fd, string $s): void {
-    while ($s !== '') {
-        $k = c_write($fd, $s, strlen($s));
-        if ($k <= 0) return;
-        $s = substr($s, $k);
-    }
+// one worker: through the semaphore, count itself in and out, and read the file
+function _http_do(string $u, int $sem, int $run, int $pk, int $cp): string {
+    if ($sem !== 0) \mcphp_semaphore_acquire($sem);
+    $n = \mcphp_atomic_add($run, 1) + 1;
+    _bump($pk, $n);
+    $body = _read($u);
+    \mcphp_atomic_add($run, -1);
+    \mcphp_atomic_add($cp, 1);
+    if ($sem !== 0) \mcphp_semaphore_release($sem);
+    return $body;
 }
 
-// to the end of the pipe, asking again on EINTR (as above)
-function _read_all(int $fd): string {
-    $all = '';
-    while (true) {
-        $buf = str_repeat("\0", 65536);
-        $k = c_read($fd, $buf, 65536);
-        if ($k < 0 && errno() === EINTR) continue;
-        if ($k <= 0) return $all;
-        $all .= substr($buf, 0, $k);
-    }
+function http_get(string $url): string {
+    $b = _read($url);
+    if ($b === '') throw new \Exception('awaitable\http_get: cannot read ' . $url);
+    return $b;
 }
 
-function peak(): int { global $peak; return $peak; }
-function completed(): int { global $completed; return $completed; }
-function errors(): int { global $errors; return $errors; }
-function reset(): void { global $peak, $completed, $errors; $peak = 0; $completed = 0; $errors = 0; }
+// a file:// url is a path; the runtime's file_get_contents reads it
+function _read(string $u): string {
+    $p = substr($u, 0, 7) === 'file://' ? substr($u, 7) : $u;
+    $b = @file_get_contents($p);
+    return $b === false ? '' : $b;
+}

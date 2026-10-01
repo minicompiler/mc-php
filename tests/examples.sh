@@ -18,18 +18,11 @@
 #                    and the bench row against the interpreted source and the
 #                    twins -- printed, not gated. Then hello and decimal, two
 #                    mc-php extensions that do not call each other, together.
-#   awaitable        hand-written mc: check.php against check.expect, and the
-#                    demo; then awaitable.src.php's first refusal, pinned.
-#
-# The HAND-WRITTEN halves are compiled by plain mc ($MC), not by mc-php: every
-# source mc-php compiles gets the php runtime pushed into it, which is right
-# for PHP and wrong for a file that is its own module. They are POSIX only
-# (dlsym, pthreads, fork) and skip on Windows with the reason printed, and
-# they skip -- again saying why -- where there is no mc beside the compiler.
-#
-# A PINNED refusal is the build each hand-written example is waiting for: it
-# must fail, with exactly the recorded message. The day the compiler can
-# build it, this fails and says so, and the hand-written file retires.
+#   awaitable        the compiled awaitable.src.php, a ZTS extension on native
+#                    OS threads and native sync: check.php against check.expect,
+#                    the demo, and the C twin (c/awaitable.c + c/twin.php) graded
+#                    the same way. It needs a thread-safe php and skips on an NTS
+#                    one (docs/threads.md § 3b); CI's ZTS legs run it.
 #
 # Exits 0 only when every step that ran passed.
 set -u
@@ -86,52 +79,6 @@ differential() {
         diff -u "$tmp/i.err" "$tmp/n.err" | sed -n '3,20p' | sed 's/^/      /'; }
     [ "$nrc" = "$irc" ] || { ok=0; bad "$name: exit $nrc native, $irc interpreted"; }
     [ "$ok" = 1 ] && say "$name: $(wc -l < "$tmp/n.out" | tr -d ' ') lines, byte for byte php's own, exit $nrc"
-}
-
-# pin EX WANT: the build this example waits for is refused, and its last line
-# is exactly "EX/WANT" -- equality, not a substring, so a changed suffix or a
-# second message on the line is a moved refusal (the reviewer of #18).
-pin() {
-    "$BIN" build "$1" --config "$1/mcphp.toml" > "$tmp/pin.out" 2>&1; rc=$?
-    got=$(tail -1 "$tmp/pin.out" | tr -d '\r')
-    if [ "$rc" = 0 ]; then
-        bad "$1: the pinned build SUCCEEDED -- the compiler can do it now; retire the hand-written file"
-    elif [ "$got" = "$1/$2" ]; then
-        say "pinned (exit $rc): $2"
-    else
-        bad "$1: the pinned refusal moved"; printf '      want %s\n      got  %s\n' "$1/$2" "$got"
-    fi
-    rm -rf "$1/build"
-}
-
-# The hand-written half: the target php's four module-header values, the
-# host's dlsym handle, plain mc, and the host's link.
-pv() { "$PHP" -i | tr -d '\r' | sed -n "s/^$1 => //p" | head -1; }
-api=$(pv 'PHP API'); bid=$(pv 'PHP Extension Build')
-zts=0; [ "$(pv 'Thread Safety')" = enabled ] && zts=1
-dbg=0; [ "$(pv 'Debug Build')" = yes ] && dbg=1
-rtld='0 - 2'; [ "$host" = linux ] && rtld=0
-# a C variadic argument: on the stack after eight registers on Apple arm64, in
-# the next register everywhere else (examples/awaitable/awaitable.mc)
-vdecl='i64 a, i64 b, i64 c, i64 d, i64 e, i64 f, '; vpad='0, 0, 0, 0, 0, 0, '
-[ "$host" = linux ] && { vdecl=; vpad=; }
-hand_ok() {
-    [ "$host" = windows ] && { skip "$1 on Windows: dlsym, pthreads and fork are POSIX, and a DLL publishes only what -export names (README.md)"; return 1; }
-    command -v "$MC" >/dev/null 2>&1 || { skip "$1: no mc here ($MC) -- the hand-written files are plain mc, not mc-php input"; return 1; }
-    return 0
-}
-# handbuild SRC OUT: fill the template, compile with mc, link a loadable module
-handbuild() {
-    sed -e "s/@API@/$api/g; s/@ZTS@/$zts/g; s/@DEBUG@/$dbg/g; s/@BUILDID@/$bid/g; s/@RTLD_DEFAULT@/$rtld/g; s/@VARDECL@/$vdecl/g; s/@VARPAD@/$vpad/g" \
-        "$1" > "$tmp/gen.mc"
-    rm -f "$2"
-    "$MC" "$tmp/gen.mc" -o "$tmp/gen.o" > "$tmp/hb.out" 2>&1 || { bad "mc $1:"; sed 's/^/      /' "$tmp/hb.out"; return 1; }
-    if [ "$host" = linux ]; then
-        ld.lld -shared -Bsymbolic -o "$2" "$tmp/gen.o" > "$tmp/hb.out" 2>&1
-    else
-        ld -bundle -undefined dynamic_lookup -arch arm64 -platform_version macos 13.0 13.0 \
-           -syslibroot "$(xcrun --show-sdk-path)" -lSystem -o "$2" "$tmp/gen.o" > "$tmp/hb.out" 2>&1
-    fi || { bad "link $1:"; sed 's/^/      /' "$tmp/hb.out"; return 1; }
 }
 
 # --- decimal: PHP compiled by mc-php ------------------------------------------
@@ -403,96 +350,65 @@ else
 fi
 
 # --- awaitable -----------------------------------------------------------------
+# The compiled awaitable.src.php: a ZTS extension on native OS threads and native
+# sync (docs/threads.md steps 3 and 4). parallel() runs each php callable on an
+# OS thread of its own, which a thread-safe php runs as a php request of its own
+# (§ 3b, opcache required), so it loads only into a ZTS php with opcache. macOS
+# ships an NTS php, so this is SKIPPED there; CI runs it on the ZTS legs --
+# macos/arm64, linux/{aarch64,x86_64} (in php:8.5-zts-alpine), and windows -- and
+# tests/frankenphp.sh runs the ZTS road under a real threaded SAPI.
 echo "  -- awaitable"
 EX=examples/awaitable
-# signals.php: parallel() while SIGCHLD arrives with no SA_RESTART, so the
-# parent's blocked read() and waitpid() return EINTR -- every answer home and
-# no child left unreaped -- and under a handler that reaps any child and under
-# SIG_IGN, where parallel()'s own waitpid() answers ECHILD and must stop
-# (pcntl is what installs such handlers)
-aw_signals() {
-    if ! "$PHP" -m | tr -d '\r' | grep -qix pcntl; then
-        skip "signals.php ($2): this php has no pcntl"; return
-    fi
-    # bounded: a retry loop that does not stop is a hang, not an answer
-    lim "$PHP" -d extension="$1" "$EX/signals.php" > "$tmp/sig.out" 2>&1
-    [ "$timedout" = yes ] && echo "(timed out after ${LIM_SECS:-30} s)" >> "$tmp/sig.out"
-    if printf '%s\n' "slept 400, slept 10, slept 20, slept 30, slept 40, slept 50" \
-        "SIGCHLD seen: true" "a child left unreaped: false" \
-        "slept 300, slept 10, slept 20" "slept 200, slept 10" "done" | cmp -s - "$tmp/sig.out"; then
-        say "signals.php ($2): EINTR asked again, ECHILD not; every answer home, no child left unreaped"
-    else
-        bad "signals.php ($2):"; sed -n '1,6p' "$tmp/sig.out" | sed 's/^/      /'
-    fi
-}
-if hand_ok "awaitable.mc"; then
-    if ! "$PHP" -m | tr -d '\r' | grep -qix curl; then
-        skip "awaitable.mc: this php has no curl, and the module resolves libcurl from php's own process"
-    elif handbuild "$EX/awaitable.mc" "$tmp/awaitable.$sx"; then
-        "$PHP" -d extension="$tmp/awaitable.$sx" "$EX/check.php" > "$tmp/aw.out" 2>&1; awrc=$?
+if [ "$TSV" != zts ]; then
+    skip "awaitable: needs a thread-safe (ZTS) php; this one is $TSV (docs/threads.md § 3b). CI's ZTS legs run it"
+elif ! "$PHP" -m | tr -d '\r' | grep -qi opcache; then
+    skip "awaitable: a php callable on a thread needs opcache (docs/threads.md § 3b); this php has none"
+else
+    # the compiled module: check.php byte for byte against check.expect, and the
+    # timed demo. -d opcache.enable_cli=1: parallel()'s php callables are 3b
+    # workers, which need the code opcache caches.
+    if build "$EX" "$EX/mcphp$suf.toml" "awaitable.$sx"; then
+        say "built: $(wc -c < "$EX/build/awaitable.$sx" | tr -d ' ') bytes from $EX/awaitable.src.php"
+        "$PHP" -d extension="$EX/build/awaitable.$sx" -d opcache.enable_cli=1 "$EX/check.php" > "$tmp/aw.out" 2>&1; awrc=$?
         if [ "$awrc" = 0 ] && cmp -s "$tmp/aw.out" "$EX/check.expect"; then
             say "check.php: $(wc -l < "$tmp/aw.out" | tr -d ' ') lines, every one check.expect's"
         else
             bad "check.php exited $awrc, or differs from $EX/check.expect:"
             diff -u "$EX/check.expect" "$tmp/aw.out" | sed -n '3,24p' | sed 's/^/      /'
         fi
-        "$PHP" -d extension="$tmp/awaitable.$sx" "$EX/demo.php" > "$tmp/demo.out" 2>&1; demorc=$?
+        "$PHP" -d extension="$EX/build/awaitable.$sx" -d opcache.enable_cli=1 "$EX/demo.php" > "$tmp/demo.out" 2>&1; demorc=$?
         if [ "$demorc" = 0 ] && grep -q '^same results: true$' "$tmp/demo.out"; then
             say "demo.php: $(sed -n 2p "$tmp/demo.out" | tr -s ' ')"
         else
             bad "demo.php (exit $demorc):"; sed -n '1,12p' "$tmp/demo.out" | sed 's/^/      /'
         fi
+        rm -rf "$EX/build"
     fi
-fi
-# the C twin (c/awaitable.c): the same extension written the ordinary way,
-# the specification the compiled module is measured against, graded by the
-# same check.php against the same check.expect
-CC=${CC:-cc}
-if [ "$host" = windows ]; then
-    skip "the C twin of awaitable on Windows: fork, pipe and pthreads are POSIX (README.md)"
-elif command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; then
-    inc=$(php-config --includes)
-    if "$CC" -O2 -bundle -undefined dynamic_lookup -o "$tmp/c-awaitable.so" "$EX/c/awaitable.c" $inc -lcurl 2>"$tmp/c.err" ||
-       "$CC" -O2 -shared -fPIC -o "$tmp/c-awaitable.so" "$EX/c/awaitable.c" $inc -lcurl -lpthread 2>>"$tmp/c.err"; then
-        "$PHP" -d extension="$tmp/c-awaitable.so" "$EX/check.php" > "$tmp/awc.out" 2>&1; awcrc=$?
-        if [ "$awcrc" = 0 ] && cmp -s "$tmp/awc.out" "$EX/check.expect"; then
-            say "check.php (the C twin): $(wc -l < "$tmp/awc.out" | tr -d ' ') lines, every one check.expect's"
+    # the C twin (c/awaitable.c): the same workload as an ordinary C extension,
+    # on native pthreads -- the specification the module is measured against. Its
+    # driver c/twin.php names each parallel workload (the twin has no php
+    # interpreter per thread, so it runs the C EQUIVALENT), and prints
+    # check.expect's bytes: the module's checksum. POSIX pthreads, so not Windows.
+    CC=${CC:-cc}
+    if [ "$host" = windows ]; then
+        skip "the C twin of awaitable on Windows: pthreads are POSIX; CI's ZTS legs cover the module there (README.md)"
+    elif command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; then
+        inc=$(php-config --includes)
+        if "$CC" -O2 -bundle -undefined dynamic_lookup -o "$tmp/c-awaitable.so" "$EX/c/awaitable.c" $inc -lpthread 2>"$tmp/c.err" ||
+           "$CC" -O2 -shared -fPIC -o "$tmp/c-awaitable.so" "$EX/c/awaitable.c" $inc -lpthread 2>>"$tmp/c.err"; then
+            "$PHP" -d extension="$tmp/c-awaitable.so" -d opcache.enable_cli=1 "$EX/c/twin.php" > "$tmp/awc.out" 2>&1; awcrc=$?
+            if [ "$awcrc" = 0 ] && cmp -s "$tmp/awc.out" "$EX/check.expect"; then
+                say "the C twin: twin.php $(wc -l < "$tmp/awc.out" | tr -d ' ') lines, every one check.expect's (the module's checksum)"
+            else
+                bad "the C twin: twin.php exited $awcrc, or differs from $EX/check.expect:"
+                diff -u "$EX/check.expect" "$tmp/awc.out" | sed -n '3,24p' | sed 's/^/      /'
+            fi
         else
-            bad "check.php (the C twin) exited $awcrc, or differs from $EX/check.expect:"
-            diff -u "$EX/check.expect" "$tmp/awc.out" | sed -n '3,24p' | sed 's/^/      /'
+            bad "the C twin of awaitable would not build:"; sed 's/^/      /' "$tmp/c.err"
         fi
-        aw_signals "$tmp/c-awaitable.so" "the C twin"
     else
-        bad "the C twin of awaitable would not build:"; sed 's/^/      /' "$tmp/c.err"
+        skip "the C twin of awaitable: no php-config or no $CC here"
     fi
-else
-    skip "the C twin of awaitable: no php-config or no $CC here"
-fi
-# The build this example is working toward: awaitable.src.php through mc-php,
-# loaded, and check.php run against check.expect. How many of its lines
-# already agree -- the leading ones, up to the first that does not -- is the
-# example's PROGRESS, recorded here: fewer is a regression, more is a gain to
-# record in the same commit, and all of them means the hand-written
-# awaitable.mc can retire. Windows refuses #[Extern] by name (src/extern.mc),
-# so there the first C declaration's refusal is pinned.
-AW_PROGRESS=32
-if [ "$host" = windows ]; then
-    pin "$EX" "awaitable.src.php:14: mc-php: an #[Extern] function on Windows: the link names no library for it: awaitable\\curl_easy_init"
-elif ! "$PHP" -m | tr -d '\r' | grep -qix curl; then
-    skip "awaitable.src.php compiled: this php has no curl, and the module resolves libcurl from php's own process"
-elif build "$EX" "$EX/mcphp$suf.toml" "awaitable.$sx"; then
-    "$PHP" -d extension="$EX/build/awaitable.$sx" "$EX/check.php" > "$tmp/awp.out" 2>&1
-    n=$(awk 'NR == FNR { w[FNR] = $0; next } $0 != w[FNR] { exit } { k = FNR } END { print k + 0 }' \
-        "$EX/check.expect" "$tmp/awp.out")
-    total=$(wc -l < "$EX/check.expect" | tr -d ' ')
-    if [ "$n" = "$AW_PROGRESS" ]; then
-        say "awaitable.src.php compiled: check.php agrees with check.expect for $n of $total lines"
-    else
-        bad "awaitable.src.php compiled: check.php agrees for $n of $total lines, the recording says $AW_PROGRESS (record it)"
-        diff "$EX/check.expect" "$tmp/awp.out" | sed -n '1,8p' | sed 's/^/      /'
-    fi
-    aw_signals "$EX/build/awaitable.$sx" "the compiled module"
-    rm -rf "$EX/build"
 fi
 
 [ "$fail" = 0 ] || { echo "  examples: something failed"; exit 1; }
