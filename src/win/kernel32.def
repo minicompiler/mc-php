@@ -1,5 +1,6 @@
 LIBRARY kernel32.dll
 EXPORTS
+CancelIoEx
 CloseHandle
 CreateDirectoryA
 CreateFileA
