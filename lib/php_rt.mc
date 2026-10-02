@@ -11774,7 +11774,7 @@ void ph_ctx_bootstrap(uptr ctx, uptr top, uptr tramp);
 // a future's extra state, beside the SY slot's W0 (the done-state) and W1
 // (this record). Allocated from the arena, zeroed.
 #define FUT_VALUE     0               // the value (done) or the throwable (failed), a zval
-#define FUT_WAITER    8               // the one fiber awaiting this, 0 = none (step 5: single waiter)
+#define FUT_WAITER    8               // head of the fibers awaiting this (FIB_WNEXT-linked), 0 = none
 #define FUT_DEADLINE  16              // a timer's monotonic deadline (ph_os_now_ms()+ms); 0 = not a timer
 #define FUT_TNEXT     24              // the loop's sorted timer list link
 #define FUT_FD        32              // a pending read's fd, -1 = none
@@ -11783,7 +11783,8 @@ void ph_ctx_bootstrap(uptr ctx, uptr top, uptr tramp);
 #define FUT_SLOT      56              // the SY slot this future lives in (to set the done-state)
 #define FUT_IONEXT    64              // the loop's pending-I/O list link (a future is a timer XOR an I/O read)
 #define FUT_OWNER     72              // the thread that created it: cross-thread completion is refused until step 6b
-#define FUT_SIZE      80
+#define FUT_PRODUCER  80              // 1 = owned by a producer (timer/spawn/io): the public complete/fail refuse it
+#define FUT_SIZE      88
 
 // a fiber: its saved context, its stack, and the callable it runs. It never
 // migrates threads (FIB_THR), which is what keeps the phT fast-path valid
@@ -11799,7 +11800,8 @@ void ph_ctx_bootstrap(uptr ctx, uptr top, uptr tramp);
 #define FIB_NARG      312
 #define FIB_ARGS      320             // five zvals
 #define FIB_LNEXT     360             // the loop's all-fibers list link (teardown unmaps the still-suspended ones)
-#define FIB_SIZE      368
+#define FIB_WNEXT     368             // waiter-queue link: the next fiber awaiting the same future (FUT_WAITER chain)
+#define FIB_SIZE      376
 
 // one event loop per thread, in the thread block (PHT_ph_loop), lazy.
 #define LOOP_EV       0               // ph_ev_create()'s handle
@@ -11871,8 +11873,17 @@ void ph_fut_done(uptr lp, uptr fut, i64 state, uptr val) {
     if (val) php_zv_cp(z, val); else php_zv_cp(z, php_znull());
     st64(fut + FUT_VALUE, z);
     st64(slot + SY_W0, state);
+    // make EVERY waiting fiber ready (two fibers may await the same future):
+    // completion must resume all of them, not only the latest to register
     uptr w = ld64(fut + FUT_WAITER);
-    if (w) { st64(fut + FUT_WAITER, 0); ph_loop_ready_push(lp, w); }
+    st64(fut + FUT_WAITER, 0);
+    loop {
+        if (!w) break;
+        uptr nx = ld64(w + FIB_WNEXT);
+        st64(w + FIB_WNEXT, 0);
+        ph_loop_ready_push(lp, w);          // clears FIB_RNEXT; FIB_WNEXT is a separate field
+        w = nx;
+    }
 }
 
 // insert a timer future into the sorted (by deadline) list
@@ -12023,8 +12034,21 @@ void ph_loop_drive(uptr lp, i64 stopfut) {
     }
 }
 
+// refuse a bare future op while php's engine is live (extension road): a future
+// record lives in the transient call chunk, but its SY slot is request-scoped
+// and survives phx_leave, so a returned handle -- or a value stored by
+// complete/fail -- would point at released memory (condition 3). 1 = refused.
+i64 ph_fut_elive(uptr phT) {
+    if (ld64(phT + PHT_phx_depth)) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: a future cannot be created or resolved while php's engine is on the stack", 81));
+        return 1;
+    }
+    return 0;
+}
+
 // a bare, pending future: a new SY_FUTURE slot with its ph_fut record
 i64 php_fut_new() {
+    if (ph_fut_elive(ph_cur_phT())) return 0;
     uptr fut = php_alloc(FUT_SIZE);
     i64 i = 0; loop { if (i >= FUT_SIZE) break; st64(fut + i, 0); i = i + 8; }
     st64(fut + FUT_FD, 0 - 1);
@@ -12045,15 +12069,29 @@ i64 ph_fut_notowner(uptr fut, uptr phT) {
     return 1;
 }
 
+// refuse resolving a producer-owned future (a timer, a spawned fiber, a pending
+// read) from the public complete/fail: the producer still holds it in the timer
+// or I/O list and in LOOP_NPEND, so an external resolution leaves it there and a
+// later loop_run sleeps to its original deadline. The loop completes these. 1 = refused.
+i64 ph_fut_producer(uptr fut) {
+    if (ld64(fut + FUT_PRODUCER)) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: a timer or spawned future cannot be resolved by hand; let the loop complete it", 86));
+        return 1;
+    }
+    return 0;
+}
+
 uptr php_fut_complete(i64 h, uptr v) {
+    uptr phT = ph_cur_phT();
+    if (ph_fut_elive(phT)) return php_znull();
     uptr slot = ph_sy_slot(h, SY_FUTURE);
     if (!slot) return php_znull();
     if (ld64(slot + SY_W0) != 0) {
         php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: the future is already resolved", 38));
         return php_znull();
     }
-    uptr phT = ph_cur_phT();
     uptr fut = ld64(slot + SY_W1);
+    if (ph_fut_producer(fut)) return php_znull();
     if (ph_fut_notowner(fut, phT)) return php_znull();
     uptr lp = ph_loop_ensure(phT);
     ph_fut_done(lp, fut, 1, v);
@@ -12061,6 +12099,8 @@ uptr php_fut_complete(i64 h, uptr v) {
 }
 
 uptr php_fut_fail(i64 h, uptr e) {
+    uptr phT = ph_cur_phT();
+    if (ph_fut_elive(phT)) return php_znull();
     uptr slot = ph_sy_slot(h, SY_FUTURE);
     if (!slot) return php_znull();
     if (ld64(slot + SY_W0) != 0) {
@@ -12074,8 +12114,8 @@ uptr php_fut_fail(i64 h, uptr e) {
         php_throw_str(php_str_new("TypeError", 9), php_str_new("mcphp_future_fail(): Argument #2 ($e) must be of type Throwable", 63));
         return php_znull();
     }
-    uptr phT = ph_cur_phT();
     uptr fut = ld64(slot + SY_W1);
+    if (ph_fut_producer(fut)) return php_znull();
     if (ph_fut_notowner(fut, phT)) return php_znull();
     uptr lp = ph_loop_ensure(phT);
     ph_fut_done(lp, fut, 2, e);
@@ -12096,6 +12136,7 @@ uptr ph_await_h(i64 h) {
     if (ld64(slot + SY_W0) == 0) {
         uptr cur = ld64(lp + LOOP_CUR);
         if (cur) {
+            st64(cur + FIB_WNEXT, ld64(fut + FUT_WAITER));   // prepend to the waiter queue
             st64(fut + FUT_WAITER, cur);
             st64(cur + FIB_STATE, 1);
             ph_ctx_swap(cur + FIB_CTX, lp + LOOP_CTX);
@@ -12123,6 +12164,7 @@ i64 php_timer(i64 ms) {
     i64 h = php_fut_new();
     uptr slot = ph_sy_slot(h, SY_FUTURE);
     uptr fut = ld64(slot + SY_W1);
+    st64(fut + FUT_PRODUCER, 1);               // the loop completes it; reject a by-hand complete/fail
     st64(fut + FUT_DEADLINE, ph_os_now_ms() + ms);
     ph_timer_insert(lp, fut);
     return h;
@@ -12187,16 +12229,21 @@ i64 php_fib_spawn(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     st64(fib + FIB_STACK, stk);
     st64(fib + FIB_STKSZ, PH_FIB_STK);
     st64(fib + FIB_THR, phT);
-    st64(fib + FIB_FN, fn);
+    // store value COPIES of the callable and args (php_zv_val deep-copies an
+    // array), as the thread path does: scheduling must not alias the caller's
+    // zvals, which it may mutate before the loop runs this fiber
+    st64(fib + FIB_FN, php_zv_val(fn));
     st64(fib + FIB_NARG, n);
-    if (n > 0) st64(fib + FIB_ARGS, a1);
-    if (n > 1) st64(fib + FIB_ARGS + 8, a2);
-    if (n > 2) st64(fib + FIB_ARGS + 16, a3);
-    if (n > 3) st64(fib + FIB_ARGS + 24, a4);
-    if (n > 4) st64(fib + FIB_ARGS + 32, a5);
+    if (n > 0) st64(fib + FIB_ARGS, php_zv_val(a1));
+    if (n > 1) st64(fib + FIB_ARGS + 8, php_zv_val(a2));
+    if (n > 2) st64(fib + FIB_ARGS + 16, php_zv_val(a3));
+    if (n > 3) st64(fib + FIB_ARGS + 24, php_zv_val(a4));
+    if (n > 4) st64(fib + FIB_ARGS + 32, php_zv_val(a5));
     ph_ctx_bootstrap(fib + FIB_CTX, stk + PH_FIB_STK, &ph_fiber_trampoline);
     i64 h = php_fut_new();
-    st64(fib + FIB_FUT, ld64(ph_sy_slot(h, SY_FUTURE) + SY_W1));
+    uptr ffut = ld64(ph_sy_slot(h, SY_FUTURE) + SY_W1);
+    st64(ffut + FUT_PRODUCER, 1);              // the fiber completes it; reject a by-hand complete/fail
+    st64(fib + FIB_FUT, ffut);
     st64(lp + LOOP_NFIB, ld64(lp + LOOP_NFIB) + 1);
     st64(fib + FIB_LNEXT, ld64(lp + LOOP_FIBLIST)); st64(lp + LOOP_FIBLIST, fib);  // track for teardown
     ph_loop_ready_push(lp, fib);
@@ -12229,6 +12276,7 @@ uptr php_io_read(i64 fd, i64 len) {
     uptr slot = ph_sy_slot(h, SY_FUTURE);
     uptr fut = ld64(slot + SY_W1);
     uptr buf = php_alloc(len + 1);
+    st64(fut + FUT_PRODUCER, 1);               // the loop completes it; reject a by-hand complete/fail
     st64(fut + FUT_FD, fd);
     st64(fut + FUT_BUF, buf);
     st64(fut + FUT_LEN, len);
@@ -12288,5 +12336,19 @@ void ph_loop_destroy(uptr lp) {
         if (ld64(f + FIB_STATE) != 3) ph_os_unmap(ld64(f + FIB_STACK), ld64(f + FIB_STKSZ));
         f = nx;
     }
+    // cancel and drain every still-pending read BEFORE the backend handle closes
+    // and this loop's arena is freed: on Windows (IOCP) the kernel may still be
+    // about to write the OVERLAPPED and buffer of an outstanding ReadFile, so
+    // closing the port without cancelling is a use-after-free. On POSIX these two
+    // are no-ops (epoll/kqueue hold no user buffer across the wait).
+    uptr io = ld64(lp + LOOP_IOLIST);
+    i64 nio = 0;
+    loop {
+        if (!io) break;
+        ph_ev_cancel(ld64(lp + LOOP_EV), ld64(io + FUT_FD));
+        nio = nio + 1;
+        io = ld64(io + FUT_IONEXT);
+    }
+    if (nio) ph_ev_drain(ld64(lp + LOOP_EV), nio);
     ph_ev_close(ld64(lp + LOOP_EV));
 }

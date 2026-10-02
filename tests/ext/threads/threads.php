@@ -114,8 +114,11 @@ function dtors(): string {
     return $r1 . " " . $r2->n . " " . $r3->n . " " . (($r3 === $a) ? "same" : "distinct");
 }
 // a detached thread the request does not wait for itself: RSHUTDOWN does,
-// so its line comes out before php ends
-function late(int $ms): int { usleep($ms * 1000); echo "the detached thread finished inside the request\n"; return 1; }
+// so its line comes out before php ends. The compiled worker AWAITS a timer
+// (not usleep), so it builds an event loop that ph_loop_destroy tears down on
+// the RSHUTDOWN reap path -- the unjoined counterpart of workers_await's
+// join-time teardown (docs/threads.md § Step 5).
+function late(int $ms): int { mcphp_await(mcphp_timer($ms)); echo "the detached thread finished inside the request\n"; return 1; }
 function detach_late(int $ms): string {
     mcphp_thread_detach(mcphp_thread_start(fn(int $m): int => late($m), $ms));
     return "detached, running " . mcphp_thread_running();

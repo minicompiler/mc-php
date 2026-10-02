@@ -255,29 +255,60 @@ uptr ph_link_cfg(uptr src, uptr out, uptr opt) {
     if (str_eq(host_os(), "macos")) {
         ph_link_put(b, "\n[linker]\ncmd = \"ld\"\nargs = [\"{obj}\", \"-lSystem\", \"-syslibroot\", \"{sdk}\", \"-o\", \"{out}\"]\n");
     } else {
-        // Linux, musl: the crt objects and libc.so, and the dynamic linker for
-        // this architecture
-        ph_link_put(b, "\n[linker]\ncmd = \"ld.lld\"\nargs = [\"-dynamic-linker\", \"/lib/ld-musl-");
-        ph_link_put(b, host_arch());
-        ph_link_put(b, ".so.1\", \"-L/usr/lib\", \"/usr/lib/crt1.o\", \"/usr/lib/crti.o\", \"{obj}\", \"-lc\", \"/usr/lib/crtn.o\", \"-o\", \"{out}\"]\n");
+        // Linux: pick the libc the HOST actually has, the way mc's own sandbox
+        // does (src/sandbox.mc). The CONFIGURED libc of this compiler (gnu/musl)
+        // is a build-time toml choice, not an mc host answer -- there is no
+        // host_libc() -- so the loader present on disk is the signal. The musl
+        // loader present -> the musl crt + ld.lld, exactly as before; otherwise
+        // the platform compiler driver links, so the crt objects and the dynamic
+        // linker are the ones IT ships and no glibc path is hard-coded here.
+        uptr arch = host_arch();
+        uptr musl = p_cat(p_cat("/lib/ld-musl-", arch, 0, cstrlen(arch)), ".so.1", 0, 5);
+        if (lex_readable(musl)) {
+            ph_link_put(b, "\n[linker]\ncmd = \"ld.lld\"\nargs = [\"-dynamic-linker\", \"/lib/ld-musl-");
+            ph_link_put(b, arch);
+            ph_link_put(b, ".so.1\", \"-L/usr/lib\", \"/usr/lib/crt1.o\", \"/usr/lib/crti.o\", \"{obj}\", \"-lc\", \"/usr/lib/crtn.o\", \"-o\", \"{out}\"]\n");
+        } else {
+            ph_link_put(b, "\n[linker]\ncmd = \"cc\"\nargs = [\"{obj}\", \"-o\", \"{out}\"]\n");
+        }
     }
     return b;
+}
+
+// an unsupported flag on the single-file road is an error, not a silently-built
+// binary: a typo (--libz-dir) would otherwise produce a program (exit 2).
+i64 ph_link_badopt(uptr a) {
+    write(2, "mc-php: unsupported option: ", 28);
+    write(2, a, cstrlen(a));
+    write(2, "\n", 1);
+    return 2;
 }
 
 i64 ph_link_single(i64 argc, uptr argv) {
     uptr src = 0;
     uptr out = 0;
     uptr opt = 0;
+    uptr ldir = 0;                    // --libs-dir value, forwarded to mc build
+    uptr sdir = 0;                    // --sysroot-dir value, forwarded to mc build
     i64 i = 1;
     loop {
         if (i >= argc) break;
         uptr a = ld64(argv + i * 8);
-        if (ld8(a) == 45) {
-            if (str_eq(a, "-o") && i + 1 < argc) { out = ld64(argv + (i + 1) * 8); i = i + 2; continue; }
-            if (mem_eq(a, "--opt=", 6)) opt = a + 6;
-            if (str_eq(a, "--libs-dir") || str_eq(a, "--sysroot-dir")) { i = i + 2; continue; }
-            i = i + 1;
-            continue;
+        if (ld8(a) == 45) {                              // a flag
+            if (str_eq(a, "-o")) {
+                if (i + 1 >= argc) return ph_link_badopt(a);
+                out = ld64(argv + (i + 1) * 8); i = i + 2; continue;
+            }
+            if (mem_eq(a, "--opt=", 6)) { opt = a + 6; i = i + 1; continue; }
+            if (str_eq(a, "--libs-dir")) {
+                if (i + 1 >= argc) return ph_link_badopt(a);
+                ldir = ld64(argv + (i + 1) * 8); i = i + 2; continue;
+            }
+            if (str_eq(a, "--sysroot-dir")) {
+                if (i + 1 >= argc) return ph_link_badopt(a);
+                sdir = ld64(argv + (i + 1) * 8); i = i + 2; continue;
+            }
+            return ph_link_badopt(a);                    // every other flag: reject it
         }
         src = a;
         i = i + 1;
@@ -295,14 +326,21 @@ i64 ph_link_single(i64 argc, uptr argv) {
     uptr pid = php_dec(ph_pid());
     uptr cfg = p_cat(p_cat(".mcphp-link-", pid, 0, cstrlen(pid)), ".toml", 0, 5);
     write_file(cfg, b);
-    uptr av = xalloc(6 * 8);
-    st64(av + 0 * 8, "mc-php");
-    st64(av + 1 * 8, "build");
-    st64(av + 2 * 8, ".");
-    st64(av + 3 * 8, "--config");
-    st64(av + 4 * 8, cfg);
-    st64(av + 5 * 8, 0);
-    i64 rc = callp(&drv_build, 5, av);
+    // mc build . --config cfg, carrying the toolchain-path options the caller gave
+    i64 na = 5;
+    if (ldir) na = na + 2;
+    if (sdir) na = na + 2;
+    uptr av = xalloc((na + 1) * 8);
+    i64 k = 0;
+    st64(av + k * 8, "mc-php"); k = k + 1;
+    st64(av + k * 8, "build");  k = k + 1;
+    st64(av + k * 8, ".");      k = k + 1;
+    st64(av + k * 8, "--config"); k = k + 1;
+    st64(av + k * 8, cfg);      k = k + 1;
+    if (ldir) { st64(av + k * 8, "--libs-dir");    k = k + 1; st64(av + k * 8, ldir); k = k + 1; }
+    if (sdir) { st64(av + k * 8, "--sysroot-dir"); k = k + 1; st64(av + k * 8, sdir); k = k + 1; }
+    st64(av + k * 8, 0);
+    i64 rc = callp(&drv_build, k, av);
     unlink(cfg);
     // mc wrote <out>.o beside the program; drop it
     unlink(p_cat(out, ".o", 0, 2));

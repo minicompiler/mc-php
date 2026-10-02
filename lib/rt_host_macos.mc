@@ -221,6 +221,10 @@ i64 ph_ev_wait(uptr ev, uptr out, i64 max, i64 ms) {
 }
 // close the kqueue fd when its loop is torn down (docs/threads.md § Step 5)
 void ph_ev_close(uptr ev) { close(ev); }
+// kqueue holds no user buffer across the wait (the loop does the read itself), so
+// there is nothing the kernel can write after teardown: cancel/drain are no-ops.
+void ph_ev_cancel(uptr ev, i64 fd) {}
+void ph_ev_drain(uptr ev, i64 n) {}
 // read a ready fd for the loop's reactor emulation: retry EINTR (4), signal -2
 // on EAGAIN (35 on macOS: readiness was spurious, re-arm), -1 on any other
 // error (a real failure, not a false EOF).

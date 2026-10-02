@@ -357,20 +357,26 @@ fi
 # harness too; here it is the twin that proves the loop's semantics independently.
 echo "  -- await"
 aw=$tmp/await
-ar=$(MCPHP_BIN=$BIN MCPHP_OUT=$aw sh "$here/mcphp.sh" tests/c/18-await.php 2>&1 | tr -d '\r')
+# capture to a file (so the program's exit status survives, not tr's, and
+# trailing newlines are not stripped by $(...)), normalize CRs to another file,
+# and cmp byte for byte against the expected output
+MCPHP_BIN=$BIN MCPHP_OUT=$aw sh "$here/mcphp.sh" tests/c/18-await.php > "$tmp/await.raw" 2>&1; arc=$?
 aw_bin=$aw; [ -f "$aw.exe" ] && aw_bin=$aw.exe
-want=$(tr -d '\r' < tests/c/18-await.out)
-if [ "$ar" = "$want" ]; then
+tr -d '\r' < tests/c/18-await.out > "$tmp/await.want"
+tr -d '\r' < "$tmp/await.raw" > "$tmp/await.got"
+if [ "$arc" = 0 ] && cmp -s "$tmp/await.got" "$tmp/await.want"; then
     say "18-await.php: timer, future, spawned fibers over ph_ctx_swap, and a pipe read"
 else
-    bad "18-await.php: output differs from 18-await.out"
+    bad "18-await.php: output differs from 18-await.out (exit $arc)"
 fi
 if [ "$host" = windows ]; then
     skip "the C twin of await on Windows: kqueue/epoll and ucontext are POSIX (the .php uses IOCP)"
 elif command -v "$CC" >/dev/null 2>&1 && "$CC" -O2 -o "$tmp/await-c" tests/c/await.c 2>"$tmp/c.err"; then
-    cr=$("$tmp/await-c" | tr -d '\r')
-    [ "$cr" = "$want" ] && say "the C twin (kqueue/epoll + ucontext): byte for byte the .php" \
-        || bad "the C twin: output differs from the .php"
+    "$tmp/await-c" > "$tmp/await-c.raw"; crc=$?
+    tr -d '\r' < "$tmp/await-c.raw" > "$tmp/await-c.got"
+    { [ "$crc" = 0 ] && cmp -s "$tmp/await-c.got" "$tmp/await.want"; } \
+        && say "the C twin (kqueue/epoll + ucontext): byte for byte the .php" \
+        || bad "the C twin: output differs from the .php (exit $crc)"
     row=$("$PHP" -r '
         $b = [INF, INF];
         foreach ([$argv[1], $argv[2]] as $k => $x) {

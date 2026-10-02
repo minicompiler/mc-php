@@ -32,6 +32,7 @@
 extern uptr GetStdHandle(i64 nStdHandle);
 extern i64  WriteFile(uptr h, uptr buf, i64 n, uptr written, uptr overlapped);
 extern i64  ReadFile(uptr h, uptr buf, i64 n, uptr got, uptr overlapped);
+extern i64  CancelIoEx(uptr h, uptr overlapped);
 extern uptr CreateFileA(uptr name, i64 access, i64 share, uptr sa,
                         i64 disposition, i64 flags, uptr tmpl);
 extern i64  CloseHandle(uptr h);
@@ -465,6 +466,27 @@ uptr ph_os_map_stack(i64 n) {
 uptr ph_ev_create() { uptr p = CreateIoCompletionPort(0 - 1, 0, 0, 0); return p; }  // INVALID_HANDLE_VALUE
 // close the completion port when its loop is torn down (docs/threads.md § Step 5)
 void ph_ev_close(uptr ev) { CloseHandle(ev); }
+// cancel a still-pending ReadFile on a handle before the loop's arena (holding
+// its OVERLAPPED and buffer) is freed: CancelIoEx(h, 0) cancels every pending
+// op this process issued on the handle. A cancelled op still POSTS a completion
+// packet, drained below, so the kernel is done touching the OVERLAPPED/buffer
+// before the memory goes (lib/php_rt.mc ph_loop_destroy).
+void ph_ev_cancel(uptr ev, i64 fd) { CancelIoEx(fd, 0); }
+// drain the completion packets the cancellations post: one per outstanding read.
+// GetQueuedCompletionStatus dequeues an aborted op (returning FALSE, povl set),
+// so we wait for `n` packets with a bounded per-packet timeout and stop early if
+// none arrives (best effort: the handle close that follows aborts the rest).
+void ph_ev_drain(uptr ev, i64 n) {
+    i64 got = 0;
+    loop {
+        if (got >= n) break;
+        u8 nb[8]; u8 key[8]; u8 ovp[8];
+        st64(ovp, 0);
+        GetQueuedCompletionStatus(ev, nb, key, ovp, 1000);
+        if (!ld64(ovp)) break;                        // nothing dequeued within the timeout
+        got = got + 1;
+    }
+}
 i64 ph_ev_arm(uptr ev, i64 fd, uptr ud, uptr buf, i64 len) {
     if (!CreateIoCompletionPort(fd, ev, 0, 0)) return 1;   // associate; 0 = failed, nothing is armed
     uptr ov = php_alloc(40);                          // OVERLAPPED (32) + our ud (8)
