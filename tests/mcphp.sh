@@ -53,10 +53,12 @@ out=$tmp.out
 # compiler kept going, kept writing the binary, and left exactly the orphan
 # the temporary-directory bound exists to prevent.
 # Windows: an executable is a `.exe` or the loader will not start it, and on
-# windows/aarch64 mc has no one-step PE writer (its exe slot is 0), so there
-# the compiler writes an OBJECT and lld-link makes the program -- the road
+# on Windows mc writes an OBJECT and lld-link makes the program -- the road
 # tests/windows.sh asks for by setting MCPHP_WINLINK to the directory
-# tests/winsys.sh filled. windows/x86_64 keeps the one-step --exe.
+# tests/winsys.sh filled, with MCPHP_WINMACHINE the -machine for the arch.
+# windows/aarch64 has no one-step PE writer at all; windows/x86_64 does, but
+# the bare --exe has no CRT, so mc-php's per-thread runtime (threads, fibers)
+# needs ucrtbase too and takes the same object + lld-link road.
 exe=$tmp
 case $(uname -s) in MINGW*|MSYS*|CYGWIN*) exe=$tmp.exe ;; esac
 # MCPHP__RC=check (tests/grid.sh's and tests/fixtures.sh's private name for
@@ -120,7 +122,7 @@ if [ "$rc" != 0 ]; then
 fi
 
 if [ -n "${MCPHP_WINLINK:-}" ]; then
-    lld-link -machine:arm64 -subsystem:console -entry:mc_start -nodefaultlib \
+    lld-link -machine:"${MCPHP_WINMACHINE:-arm64}" -subsystem:console -entry:mc_start -nodefaultlib \
         -out:"$exe" "$tmp.obj" "$MCPHP_WINLINK/kernel32.lib" "$MCPHP_WINLINK/ucrtbase.lib" \
         > "$out" 2> "$err"
     lrc=$?
