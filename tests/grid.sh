@@ -13,6 +13,8 @@ cd "$root"
 bin=${1:-build/mc-php}; out=${2:-build/grid}; full=${3:-}
 MCPHP_BIN=$(CDPATH= cd -- "$(dirname -- "$bin")" && pwd)/$(basename "$bin")
 export MCPHP_BIN
+# the macOS SDK path once, so tests/link.sh does not run xcrun per test
+[ "$(uname -s)" = Darwin ] && export MCPHP_SDK=${MCPHP_SDK:-$(xcrun --show-sdk-path)}
 . "$(dirname -- "$0")/tmp.sh"
 mcphp_tmp_init mcphp-grid
 mcphp_tmp_watch

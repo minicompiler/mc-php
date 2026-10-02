@@ -29,11 +29,12 @@
 name = "mc-php"
 version = "0.1.0"
 # p_skip_to and syntax_expr("$") -- probes/t4 measured that PHP's byte stream
-# cannot be owned without them, and they landed in 1.1.0. 1.3.2 because the
-# native windows/x86_64 --exe PE writer now emits Win64 unwind data
-# (.pdata/.xdata, mc PR #110), which a thread/fiber/IOCP stack walk needs:
-# without it the PE crashed on load (exit 127) on that one target.
-mc = "1.3.2"
+# cannot be owned without them, and they landed in 1.1.0. 1.3.3 because the
+# build is now one road on every host -- an OBJECT linked by the platform
+# linker, no one-step --exe -- and macOS needs 1.3.3's fix that routes a string
+# constant with an embedded NUL to __TEXT,__const (not __cstring, which ld
+# coalesces and truncates): PHP binary strings carry NULs.
+mc = "1.3.3"
 
 # An SPDX identifier, for anyone reading the manifest. There are no
 # [package].files and no [[permission]] rows: those exist for mc's package

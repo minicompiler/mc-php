@@ -44,6 +44,8 @@ cd "$root"
 MC=${MC:-mc}
 BIN=${BIN:-build/mc-php}
 export BIN
+# the macOS SDK path once, so tests/link.sh does not run xcrun per fixture
+[ "$(uname -s)" = Darwin ] && export MCPHP_SDK=${MCPHP_SDK:-$(xcrun --show-sdk-path)}
 fail=0
 
 "$MC" --version

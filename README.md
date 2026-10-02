@@ -68,7 +68,7 @@ says so.
 | **the extension back end, beyond scalars** | it takes plain functions with **declared scalar** parameters and a declared scalar return. A variadic, a by-reference parameter, a default, `mixed`, an array, an object, a class the module declares, a namespace: each is a **named refusal** at the declaration's own position, not a silent lowering. |
 | **the generated code** | it is correct and it is no longer slower than php. The two calls `--dump-asm` named -- `php_pos` and `php_thrown`, emitted per statement whatever it contained -- are emitted only where something can raise or throw, and `%` by a positive literal is one instruction: `fib(30)` went 3.18x -> **6.31x** and a 3-million-iteration loop 0.86x -> **4.00x**, against 11.0x and 5.5x for the same two functions hand-written in mc. What is left is that every local lives in the frame. [`reference/README.md`](reference/README.md) has the table. |
 | `mcphp.toml` | part read, part still design -- [docs/php-extension.md](docs/php-extension.md) § The project file is the line between the two. |
-| Windows | **built ON Windows, not cross-built**: the compiler is compiled on each Windows runner by its own mc and linked with `lld-link`, because mc's one-step PE road is closed for a translation unit that holds mc's core (`docs/plan.md` § 5). A PROGRAM on windows/arm64 needs `lld-link` too (mc has no arm64 PE writer); on windows/x86_64 `mc-php --exe` writes the `.exe` itself. The extension is an x64 `.dll` on both, because php ships no arm64 Windows build. The `.phpt` grid has not been run there. |
+| Windows | **built ON Windows, not cross-built**: the compiler is compiled on each Windows runner by its own mc and linked with `lld-link`, because mc's one-step PE road is closed for a translation unit that holds mc's core (`docs/plan.md` § 5). A PROGRAM is an object linked with `lld-link` on both arches (there is no one-step `--exe` any more). The extension is an x64 `.dll` on both, because php ships no arm64 Windows build. The `.phpt` grid has not been run there. |
 | generators | `yield` is not built. 252 of the 13623 disagreeing tests use it; the decision and its cost are in `docs/plan.md` D6. |
 | `eval` and reflection | refused **by design**, by name, with exit 3 -- `docs/plan.md` D1 and D6. A refusal is an answer, not a failure. |
 | most of the corpus | 14468 tests still disagree and 1929 are refused by design. The number below is the whole claim; nothing here rounds it up. |
@@ -104,11 +104,15 @@ sudo mv $A/mc-php /usr/local/bin/
 Verify the checksum before unpacking it, not after: the line above fails loudly if the archive is
 not the one that was built.
 
-**The archive is one binary and there is nothing to install beside it.** The runtime is inside the
-compiler (`#embed`) and since the hosts branch it declares its own system calls, so a released
-mc-php does not need mc, mc's library tree, a linker or a sysroot to compile a `.php`. The Linux
-binaries are dynamic ELF64 against **musl** (`/lib/ld-musl-<arch>.so.1`); on a glibc distribution
-run them in a musl container, or build your own with `libc = "gnu"` in `[target]`.
+**The archive is one binary and it needs no mc beside it.** The runtime is inside the compiler
+(`#embed`) and since the hosts branch it declares its own system calls, so a released mc-php needs
+neither mc nor mc's library tree to compile a `.php`. It does need a **platform linker and the
+platform libc** to make a runnable program: mc-php writes an OBJECT and links it -- the same object
++ linker road on every host, and there is no one-step `--exe` any more. That is `ld` + the macOS
+SDK on macOS, `ld.lld` + musl (`crt*.o`, `libc`) on Linux, and `lld-link` +
+`kernel32.lib`/`ucrtbase.lib` on Windows (the per-OS table below). The Linux binaries are dynamic
+ELF64 against **musl** (`/lib/ld-musl-<arch>.so.1`); on a glibc distribution run them in a musl
+container, or build your own with `libc = "gnu"` in `[target]`.
 
 A row is here because something **ran** it. `file` saying "ELF 64-bit LSB executable" is not a
 proof and no row rests on one.
@@ -124,18 +128,17 @@ curl -fsSLO $BASE/$A.tar.gz
 curl -fsSLO $BASE/$A.tar.gz.sha256
 sha256sum -c $A.tar.gz.sha256
 tar -xzf $A.tar.gz
-./$A/mc-php.exe --exe hello.php -o hello.exe && ./hello.exe     # windows/x86_64
 ```
 
-On **windows/arm64** there is no one-step `.exe`: mc has no direct PE writer for that
-architecture yet, so the compiler writes an object and `lld-link` (one LLVM install) makes the
-program, with the two import libraries the archive carries beside `mc-php.exe` (lists of names,
-written by `tests/winsys.sh` from `src/win/*.def`):
+A program is an object linked with `lld-link` (one LLVM install) on **both** Windows architectures
+-- there is no one-step `.exe` on either -- with the two import libraries the archive carries beside
+`mc-php.exe` (lists of names, written by `tests/winsys.sh` from `src/win/*.def`):
 
 ```sh
 ./$A/mc-php.exe hello.php -o hello.obj
-lld-link -machine:arm64 -subsystem:console -entry:mc_start -nodefaultlib \
-    -out:hello.exe hello.obj $A/kernel32.lib $A/ucrtbase.lib
+lld-link -machine:x64 -subsystem:console -entry:mc_start -nodefaultlib \
+    -out:hello.exe hello.obj $A/kernel32.lib $A/ucrtbase.lib   # -machine:arm64 on windows/arm64
+./hello.exe
 ```
 
 A program imports from **kernel32.dll** and, for libm and `setlocale`, **ucrtbase.dll** -- both are
@@ -153,7 +156,7 @@ the machine.
 
 | | what | why |
 |---|---|---|
-| every OS | **mc 1.3.2 or newer** -- [a release](https://github.com/minicompiler/mc/releases), untarred, `mc` on `PATH` | `p_skip_to` and `syntax_expr("$")` landed in 1.1.0 and PHP's byte stream cannot be owned without them (`probes/t4`); 1.3.2 is the native windows/x86_64 `--exe` PE writer emitting Win64 unwind data (mc PR #110), which a thread/fiber/IOCP stack walk needs |
+| every OS | **mc 1.3.3 or newer** -- [a release](https://github.com/minicompiler/mc/releases), untarred, `mc` on `PATH` | `p_skip_to` and `syntax_expr("$")` landed in 1.1.0 and PHP's byte stream cannot be owned without them (`probes/t4`); 1.3.3 routes a string constant with an embedded NUL to `__TEXT,__const` so `ld` copies it verbatim, which the macOS object + linker road needs for PHP binary strings |
 | every OS | **php 8.5**, any build | only for the TESTS: every fixture is compared byte for byte against what `php` prints |
 | every OS | **python3** | the `.phpt` grid runner and three source gates |
 | for the grid only | **php-src at tag `php-8.5.10`**, cloned at the repository root | it is the oracle corpus, 21395 tests, and it is not committed |
@@ -165,7 +168,7 @@ One row per operating system, each naming the exact command that provides it.
 
 | OS | what | provided by | note |
 |---|---|---|---|
-| **every** | mc 1.3.2+ | [a published mc release](https://github.com/minicompiler/mc/releases) | measured here |
+| **every** | mc 1.3.3+ | [a published mc release](https://github.com/minicompiler/mc/releases) | measured here |
 | **every** | a `php` of the **target** build, *or* four values written into `mcphp.toml` | any php 8.5 install | only `PHP API`, `PHP Extension Build`, `Thread Safety` and `Debug Build` are read -- they are `zend_module_entry`'s `zend_api`, `build_id`, `zts` and `zend_debug`, and nothing else about php is consulted. **Cross-build: state the four and no php is needed.** |
 | **macOS** | `ld`, and `xcrun --show-sdk-path` | `xcode-select --install` (the Xcode command line tools) | the link is `ld -bundle -undefined dynamic_lookup` |
 | **Linux** | a linker that does `-shared -Bsymbolic` | `apt install lld` / `dnf install lld` -- `ld.lld` is what was measured | `-Bsymbolic` is **not optional**: mc takes the address of its own functions with `adrp`/`add`, and in a shared object a default-visibility symbol is preemptible, so the link is refused without it |
@@ -184,7 +187,7 @@ Windows by `tests/windows.sh`, each loading the module into the runner's own php
 
 ```sh
 mc build                      # macOS -> build/mc-php
-build/mc-php --exe hello.php -o hello && ./hello
+build/mc-php hello.php -o hello && ./hello   # compiles AND links (needs ld + the macOS SDK)
 ```
 
 `mc.toml` is the project file and there is no makefile: the same rule the compiler is being built

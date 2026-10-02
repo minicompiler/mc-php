@@ -67,6 +67,6 @@ record the same thing for the program road.
 
 One more thing that fell out of the same measurement and is **not** the extension road's: a php
 ternary allocates per evaluation, so `function f(int $n): int { return $n < 2 ? $n : f($n-1) +
-f($n-2); }` exhausts the 48 MiB arena at `f(30)` -- on the PROGRAM road too, with
-`mc-php --exe`. The `if` form of the same function runs in both. Reported rather than worked
+f($n-2); }` exhausts the 48 MiB arena at `f(30)` -- on the PROGRAM road too
+(`mc-php f.php -o f`). The `if` form of the same function runs in both. Reported rather than worked
 around.
