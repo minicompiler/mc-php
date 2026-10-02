@@ -219,6 +219,21 @@ i64 ph_ev_wait(uptr ev, uptr out, i64 max, i64 ms) {
     }
     return n;
 }
+// close the kqueue fd when its loop is torn down (docs/threads.md § Step 5)
+void ph_ev_close(uptr ev) { close(ev); }
+// read a ready fd for the loop's reactor emulation: retry EINTR (4), signal -2
+// on EAGAIN (35 on macOS: readiness was spurious, re-arm), -1 on any other
+// error (a real failure, not a false EOF).
+i64 ph_io_read_ready(i64 fd, uptr buf, i64 len) {
+    loop {
+        i64 n = read(fd, buf, len);
+        if (n >= 0) return n;
+        i64 e = php_c_errno();
+        if (e == 4) continue;
+        if (e == 35) return 0 - 2;
+        return 0 - 1;
+    }
+}
 
 // Test scaffolding (docs/threads.md § Step 5, the self-test): a pipe whose
 // read end is non-blocking. NOT part of the step-5 surface -- users await

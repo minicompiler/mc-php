@@ -8,9 +8,14 @@
 // fiber (so the kqueue/epoll/IOCP backend drives the completion).
 
 // --- a top-level timer await: the nested-loop drive-to-completion bridge ----
+// the deadline must actually be met: an immediate (broken) timer would still
+// print "timer done" without this elapsed check, so a run under ~8 ms fails the
+// fixture (10 ms requested; 8 ms tolerates a coarse clock).
+$ta = mcphp_now_ms();
 $t0 = mcphp_timer(10);
 mcphp_await($t0);
-echo "timer done\n";
+$el = mcphp_now_ms() - $ta;
+echo "timer done", ($el >= 8 ? "" : " (too fast: {$el} ms)"), "\n";
 
 // --- a future, completed and failed, awaited at top level --------------------
 $f = mcphp_future();

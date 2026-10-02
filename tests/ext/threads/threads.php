@@ -227,3 +227,13 @@ function engine_await(): int {
     mcphp_await(mcphp_timer(1));
     return 0;
 }
+
+// docs/threads.md § Step 5: a COMPILED worker has no php engine on its stack, so
+// its await SUCCEEDS where engine_await() is refused. mcphp_threads runs each
+// worker compiled (phx_depth == 0) and joins them; worker i awaits a timer and
+// returns i + 1, so the sum is n(n+1)/2. This exercises the worker thread-block
+// allocator, a real suspend/resume off the engine, and the loop teardown at the
+// worker's reap (php_thr_run's join -> ph_loop_destroy, the same teardown
+// RSHUTDOWN's reap runs for an unjoined worker).
+function await_timer(int $ms, int $id): int { mcphp_await(mcphp_timer($ms)); return $id + 1; }
+function workers_await(int $n, int $ms): int { return mcphp_threads('th\await_timer', $n, $ms); }

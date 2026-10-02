@@ -3,7 +3,7 @@
 // failed, fibers that await a timer, and a pipe read awaited on a fiber -- on
 // raw kqueue (macOS) / epoll (Linux) and ucontext fibers, so the loop's
 // semantics are validated independently and its output is byte for byte the
-// .php's (tests/await.sh compares them, and times both). mc-php's own fibers
+// .php's (tests/examples.sh compares them, and times both). mc-php's own fibers
 // are ph_ctx_swap (lib/rt_fiber_*.mc); here the twin uses ucontext.
 #define _XOPEN_SOURCE 700       // macOS: the ucontext routines require it
 #define _GNU_SOURCE

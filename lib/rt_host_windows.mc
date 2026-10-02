@@ -64,6 +64,15 @@ extern i64  GetLastError();
 extern void SetLastError(i64 code);
 extern i64  GetActiveProcessorCount(i64 group);
 extern u64  GetTickCount64();
+// kernel32, used by the event loop (docs/threads.md § Step 5). Declared HERE,
+// above every `#dylib`, so the one-step road imports them from kernel32 and not
+// from ucrtbase.dll (which has none of them; the loader would refuse the whole
+// program). On the object road tests/winsys.sh / src/win/kernel32.def binds the
+// same names. VirtualProtect wants the previous-protection out-param.
+extern i64  VirtualProtect(uptr addr, i64 n, i64 prot, uptr old);
+extern uptr CreateIoCompletionPort(uptr h, uptr port, uptr key, i64 nthreads);
+extern i64  GetQueuedCompletionStatus(uptr port, uptr pbytes, uptr pkey, uptr povl, i64 ms);
+extern uptr CreateNamedPipeA(uptr name, i64 openMode, i64 pipeMode, i64 maxInst, i64 outBuf, i64 inBuf, i64 timeout, uptr sa);
 
 // The flags the runtime writes and only this file reads. They are the
 // Microsoft C runtime's values (_O_*, and O_CREAT is mc's lib/sys_windows.mc
@@ -431,9 +440,15 @@ uptr ph_os_map(i64 n) { return VirtualAlloc(0, n, 0x3000, 4); }
 void ph_os_unmap(uptr p, i64 n) { VirtualFree(p, 0, 0x8000); }        // MEM_RELEASE
 
 // --- the event loop's fiber stacks and reactor (docs/threads.md § Step 5) ---
-// A fiber's stack, the lowest page PAGE_NOACCESS (1) as a guard. VirtualProtect
-// wants the previous-protection out-param.
-extern i64 VirtualProtect(uptr addr, i64 n, i64 prot, uptr old);
+// A fiber's stack, the lowest page PAGE_NOACCESS (1) as a guard.
+// ponytail: unlike the POSIX hosts (mmap MAP_NORESERVE / NORESERVE, so only the
+// pages a shallow awaiter touches are committed), this MEM_COMMIT|MEM_RESERVE
+// commits the whole 128 KiB up front -- PAGE_NOACCESS on the guard page does NOT
+// make the rest lazy. So on Windows the committed cost is the full 128 KiB per
+// outstanding await: 1024 live fibers commit ~128 MiB (vs ~17 MiB measured on
+// Apple Silicon). The upgrade is MEM_RESERVE only + a PAGE_GUARD top region that
+// grows the stack on fault (the native Windows idiom); taken when step 6b holds
+// many awaits at once. PH_FIB_MAX bounds it until then.
 uptr ph_os_map_stack(i64 n) {
     uptr p = VirtualAlloc(0, n, 0x3000, 4);           // MEM_COMMIT|RESERVE, PAGE_READWRITE
     if (!p) return 0;
@@ -445,16 +460,21 @@ uptr ph_os_map_stack(i64 n) {
 // IOCP is the Windows completion port: the proactor the design's completion
 // shape is native to (§ 2). ph_ev_arm associates the handle and POSTS the read;
 // the completion carries the byte count, so ph_ev_wait returns nbytes >= 0 and
-// the loop does NOT read again (ph_io_complete uses the count).
-extern uptr CreateIoCompletionPort(uptr h, uptr port, uptr key, i64 nthreads);
-extern i64  GetQueuedCompletionStatus(uptr port, uptr pbytes, uptr pkey, uptr povl, i64 ms);
+// the loop does NOT read again (ph_io_complete uses the count). The IOCP API
+// names are declared at the top of this file, above the `#dylib`s.
 uptr ph_ev_create() { uptr p = CreateIoCompletionPort(0 - 1, 0, 0, 0); return p; }  // INVALID_HANDLE_VALUE
+// close the completion port when its loop is torn down (docs/threads.md § Step 5)
+void ph_ev_close(uptr ev) { CloseHandle(ev); }
 i64 ph_ev_arm(uptr ev, i64 fd, uptr ud, uptr buf, i64 len) {
-    CreateIoCompletionPort(fd, ev, 0, 0);             // associate (idempotent per handle)
+    if (!CreateIoCompletionPort(fd, ev, 0, 0)) return 1;   // associate; 0 = failed, nothing is armed
     uptr ov = php_alloc(40);                          // OVERLAPPED (32) + our ud (8)
     i64 i = 0; loop { if (i >= 40) break; st8(ov + i, 0); i = i + 1; }
     st64(ov + 32, ud);
-    ReadFile(fd, buf, len, 0, ov);                    // async; the completion posts to ev
+    // async; a completion posts to ev on success OR on ERROR_IO_PENDING (997).
+    // any other failure queues NO packet, so it must be propagated -- otherwise
+    // the caller counts an op that never completes and the loop waits for ever.
+    i64 ok = ReadFile(fd, buf, len, 0, ov) & RTW_BOOL;
+    if (!ok && GetLastError() != 997) return 1;
     return 0;
 }
 i64 ph_ev_wait(uptr ev, uptr out, i64 max, i64 ms) {
@@ -465,7 +485,7 @@ i64 ph_ev_wait(uptr ev, uptr out, i64 max, i64 ms) {
         u8 nb[8]; u8 key[8]; u8 ovp[8];
         st64(nb, 0); st64(ovp, 0);
         i64 to = 0; if (n == 0) to = ms;              // block on the first, poll the rest
-        i64 ok = GetQueuedCompletionStatus(ev, nb, key, ovp, to);
+        i64 ok = GetQueuedCompletionStatus(ev, nb, key, ovp, to) & RTW_BOOL;  // a BOOL: mask the high half
         uptr ov = ld64(ovp);
         if (!ov) break;                               // timeout or no more completions
         st64(out + n * 16, ld64(ov + 32));            // ud
@@ -476,11 +496,15 @@ i64 ph_ev_wait(uptr ev, uptr out, i64 max, i64 ms) {
     }
     return n;
 }
+// POSIX-only: the loop's reactor emulation reads a ready fd. On Windows IOCP
+// already did the read (ph_ev_wait returns nbytes >= 0), so ph_io_complete never
+// calls this; it exists for linking the backend-neutral loop core.
+i64 ph_io_read_ready(i64 fd, uptr buf, i64 len) { return 0; }
 
 // Test scaffolding (docs/threads.md § Step 5): an OVERLAPPED pipe, which IOCP
 // needs (an anonymous CreatePipe one does not support overlapped I/O). A named
 // pipe, server end FILE_FLAG_OVERLAPPED, client end the writer. [r, w] into out2.
-extern uptr CreateNamedPipeA(uptr name, i64 openMode, i64 pipeMode, i64 maxInst, i64 outBuf, i64 inBuf, i64 timeout, uptr sa);
+// CreateNamedPipeA is declared at the top of this file, above the `#dylib`s.
 i64 ph_pipe_seq;
 // append a non-negative integer to name[] in decimal, starting at `at`; return
 // the next index. A local itoa so the host needs no zend_string #define (it is

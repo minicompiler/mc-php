@@ -805,8 +805,8 @@ void user_init() {
         // request of its own (lib/php_zts.mc § 3b). Its record carries no
         // block (PHA_N is -1, PHA_ARG its job), so the join and the end of the
         // request take it before php_thr_reap would read one.
-        r = ph_swap(r, cstrlen(r), "    if (!php_thr_callable(fn)) return 0;",
-                    "    if (ph_eng && (php_zv_type(fn) != IS_OBJECT || php_is_proxy(ld64(fn)))) return php_thr_eng_start(fn, n, a1, a2, a3, a4, a5);\n    if (!php_thr_callable(fn)) return 0;");
+        r = ph_swap(r, cstrlen(r), "    if (!php_thr_callable(fn, \"mcphp_thread_start\")) return 0;",
+                    "    if (ph_eng && (php_zv_type(fn) != IS_OBJECT || php_is_proxy(ld64(fn)))) return php_thr_eng_start(fn, n, a1, a2, a3, a4, a5);\n    if (!php_thr_callable(fn, \"mcphp_thread_start\")) return 0;");
         r = ph_swap(r, cstrlen(r), "    if (!rec) { ph_tnotjoinable(id); return php_znull(); }\n",
                     "    if (!rec) { ph_tnotjoinable(id); return php_znull(); }\n    if (ld64(rec + PHA_N) < 0) return phz_eng_join(rec);\n");
         r = ph_swap(r, cstrlen(r), "    uptr exc = 0;\n", "    uptr exc = 0;\n    i64 rep = 0;\n");

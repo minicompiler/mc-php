@@ -25,5 +25,10 @@ echo "sync blocking, 8 compiled threads: ", th\sy_block(8), "\n";
 // corrupt the executor on resume). The guard is phx_depth != 0.
 try { th\engine_await(); echo "engine await: no throw\n"; }
 catch (\Throwable $e) { echo "engine await: ", $e->getMessage(), "\n"; }
+// a COMPILED worker (no engine on its stack) awaits a timer successfully, where
+// engine_await above is refused: four workers, worker i returns i + 1, sum 10
+// (docs/threads.md § Step 5). Covers the worker thread-block allocator, the
+// off-engine suspend/resume, and the loop teardown at reap.
+echo "worker await: ", th\workers_await(4, 5), "\n";
 // last, and echoing nothing after it: the thread's line is the output's last
 th\detach_late(100);

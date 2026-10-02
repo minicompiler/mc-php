@@ -834,9 +834,10 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
         "sync refused: mc-php: handle 4 is a mutex, not an atomic" \
         "sync blocking, 8 compiled threads: wg bc" \
         "engine await: mc-php: await cannot suspend while php's engine is on the stack" \
+        "worker await: 10" \
         "the detached thread finished inside the request" > "$tmp/t.aw"
     if [ "$ta" = 0 ] && cmp -s "$tmp/t.aw" "$tmp/t.a"; then
-        say "thread API: compiled callables on threads, kept values after a join and a detach, a rethrow, shared mode, the php callable refused, each copy destructed once by its owner, a detached thread waited for by RSHUTDOWN; a mutex and an atomic from 4 compiled threads exact, the process's atomic made at MINIT, three sync refusals by name, a wait group and a broadcast across 8 compiled threads, and await refused with php's engine on the stack"
+        say "thread API: compiled callables on threads, kept values after a join and a detach, a rethrow, shared mode, the php callable refused, each copy destructed once by its owner, a detached thread waited for by RSHUTDOWN; a mutex and an atomic from 4 compiled threads exact, the process's atomic made at MINIT, three sync refusals by name, a wait group and a broadcast across 8 compiled threads, await refused with php's engine on the stack, and a compiled worker's await succeeding off the engine"
     else
         bad "thread API (exit $ta)"; diff "$tmp/t.aw" "$tmp/t.a" | sed -n '1,12p' | sed 's/^/      /'
     fi
