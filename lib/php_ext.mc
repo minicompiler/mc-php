@@ -775,6 +775,10 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) { uptr phT = ph_tcur; if (!phT) phT = ph_
     // request is over, there is nothing left to catch it
     uptr te = php_thr_endall(phT, 0, 0);
     if (te) php_thr_report(te);
+    // the request thread's own event loop, if it ever awaited: close its backend
+    // handle and free any suspended fibers before the request state is reset
+    // (docs/threads.md § Step 5; a request that never awaited has none)
+    if (ld64(phT + PHT_ph_loop)) { ph_loop_destroy(ld64(phT + PHT_ph_loop)); st64(phT + PHT_ph_loop, 0); }
     php_flush();
     php_request_reset();
     // a userland function a call site cached is gone with the request

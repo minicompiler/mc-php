@@ -4,7 +4,7 @@ mc freezes a public surface: every name in its `tests/golden/surface.txt` keeps 
 
 The same list is [`tests/mcnames.mc`](../tests/mcnames.mc), a probe that names each one the way mc-php uses it -- a function called with the parameter count mc-php relies on, a global's address, a `#define`'s value. [`tests/mcnames.sh`](../tests/mcnames.sh) compiles it against the installed mc: a name that mc lacks, or a function whose parameter count changed, is refused on its own line, and the script prints the name, what it is and the mc version. It runs in CI with `--strict`, which also fails when the installed mc is not the version the probe pins.
 
-**Pinned: mc 1.3.1.** The probe's `// mc-version:` line and `MC_VERSION` in `.github/workflows/ci.yml` are the same value; `--strict` is what keeps them so.
+**Pinned: mc 1.3.3.** The probe's `// mc-version:` line and `MC_VERSION` in `.github/workflows/ci.yml` are the same value; `--strict` is what keeps them so.
 
 `[package].mc` in `mc.toml` is a different thing: the MINIMUM mc that can build mc-php. The pin is the exact version mc-php was verified against.
 

@@ -23,3 +23,9 @@ i64 php_stat_size(uptr p) {
 
 // futex(2)'s number: x86-64's own table (the generic one, AArch64's, says 98)
 i64 ph_sys_futex() { return 202; }
+
+// struct epoll_event on x86-64 is packed: events(u32) at 0, data(u64) at 4 --
+// 12 bytes (docs/threads.md § Step 5). On aarch64 it is not packed (16 bytes,
+// data at 8), which is why these are in the arch files.
+i64 ph_ep_evsize() { return 12; }
+i64 ph_ep_dataoff() { return 4; }

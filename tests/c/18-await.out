@@ -1,0 +1,6 @@
+timer done
+future value: 42
+future fail caught: boom
+spawn results: 3 7 11
+pipe read: hello pipe
+done

@@ -55,6 +55,9 @@ case "$BIN" in *.exe) sfx=.exe ;; esac
 cp "$BIN" "$tmp/mc-php$sfx"
 MCPHP_BIN=$tmp/mc-php$sfx
 export MCPHP_BIN
+# compute the macOS SDK path once; tests/mcphp.sh and tests/link.sh read it
+# instead of running xcrun per fixture (tests/link.sh)
+[ "$(uname -s)" = Darwin ] && export MCPHP_SDK=${MCPHP_SDK:-$(xcrun --show-sdk-path)}
 # The cleanup is the EXIT trap and the signal traps EXIT: a handler that
 # only cleans up RETURNS, so an interrupted run carried on with its
 # temporary directory already gone and ran the handler a second time on the
