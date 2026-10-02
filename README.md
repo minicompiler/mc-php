@@ -153,7 +153,7 @@ the machine.
 
 | | what | why |
 |---|---|---|
-| every OS | **mc 1.3.1 or newer** -- [a release](https://github.com/minicompiler/mc/releases), untarred, `mc` on `PATH` | `p_skip_to` and `syntax_expr("$")` landed in 1.1.0 and PHP's byte stream cannot be owned without them (`probes/t4`); 1.3.1 fixes an `-O` miscompile the runtime would hit (mc PR #109) |
+| every OS | **mc 1.3.2 or newer** -- [a release](https://github.com/minicompiler/mc/releases), untarred, `mc` on `PATH` | `p_skip_to` and `syntax_expr("$")` landed in 1.1.0 and PHP's byte stream cannot be owned without them (`probes/t4`); 1.3.2 is the native windows/x86_64 `--exe` PE writer emitting Win64 unwind data (mc PR #110), which a thread/fiber/IOCP stack walk needs |
 | every OS | **php 8.5**, any build | only for the TESTS: every fixture is compared byte for byte against what `php` prints |
 | every OS | **python3** | the `.phpt` grid runner and three source gates |
 | for the grid only | **php-src at tag `php-8.5.10`**, cloned at the repository root | it is the oracle corpus, 21395 tests, and it is not committed |
@@ -165,7 +165,7 @@ One row per operating system, each naming the exact command that provides it.
 
 | OS | what | provided by | note |
 |---|---|---|---|
-| **every** | mc 1.3.1+ | [a published mc release](https://github.com/minicompiler/mc/releases) | measured here |
+| **every** | mc 1.3.2+ | [a published mc release](https://github.com/minicompiler/mc/releases) | measured here |
 | **every** | a `php` of the **target** build, *or* four values written into `mcphp.toml` | any php 8.5 install | only `PHP API`, `PHP Extension Build`, `Thread Safety` and `Debug Build` are read -- they are `zend_module_entry`'s `zend_api`, `build_id`, `zts` and `zend_debug`, and nothing else about php is consulted. **Cross-build: state the four and no php is needed.** |
 | **macOS** | `ld`, and `xcrun --show-sdk-path` | `xcode-select --install` (the Xcode command line tools) | the link is `ld -bundle -undefined dynamic_lookup` |
 | **Linux** | a linker that does `-shared -Bsymbolic` | `apt install lld` / `dnf install lld` -- `ld.lld` is what was measured | `-Bsymbolic` is **not optional**: mc takes the address of its own functions with `adrp`/`add`, and in a shared object a default-visibility symbol is preemptible, so the link is refused without it |
