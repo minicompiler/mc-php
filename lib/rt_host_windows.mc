@@ -73,6 +73,7 @@ extern u64  GetTickCount64();
 extern i64  VirtualProtect(uptr addr, i64 n, i64 prot, uptr old);
 extern uptr CreateIoCompletionPort(uptr h, uptr port, uptr key, i64 nthreads);
 extern i64  GetQueuedCompletionStatus(uptr port, uptr pbytes, uptr pkey, uptr povl, i64 ms);
+extern i64  PostQueuedCompletionStatus(uptr port, i64 nbytes, uptr key, uptr overlapped);
 extern uptr CreateNamedPipeA(uptr name, i64 openMode, i64 pipeMode, i64 maxInst, i64 outBuf, i64 inBuf, i64 timeout, uptr sa);
 
 // The flags the runtime writes and only this file reads. They are the
@@ -559,6 +560,23 @@ i64 ph_os_pipe(uptr out2) {
     st64(out2 + 8, w);
     return 0;
 }
+
+// --- cross-thread loop wake (docs/threads.md § Step 6b) ---------------------
+// IOCP needs no fd: a worker on another thread posts a sentinel completion with
+// PostQueuedCompletionStatus, which ph_ev_wait dequeues like any packet and the
+// loop recognises by its udata (the loop marker, in the sentinel OVERLAPPED's
+// +32, where ph_ev_arm/ph_ev_wait already carry ud). The handle is that
+// sentinel OVERLAPPED, allocated once in the loop's arena; drain is a no-op.
+uptr ph_ev_wake_create(uptr ev, uptr marker) {
+    uptr ov = php_alloc(40);
+    i64 i = 0; loop { if (i >= 40) break; st8(ov + i, 0); i = i + 1; }
+    st64(ov + 32, marker);
+    return ov;
+}
+void ph_ev_wake_post(uptr ev, uptr handle) { PostQueuedCompletionStatus(ev, 0, 0, handle); }
+void ph_ev_wake_drain(uptr handle) {}
+void ph_ev_wake_close(uptr ev, uptr handle) {}
+
 // the size of a thread's arena: committed up front, which the system charges: kept smaller
 i64 ph_os_arena() { return 67108864; }
 // the process's committed bytes, -1 when they cannot be read:

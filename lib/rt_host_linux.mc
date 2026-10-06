@@ -220,6 +220,39 @@ i64 ph_os_pipe(uptr out2) {
     return 0;
 }
 
+// --- cross-thread loop wake (docs/threads.md § Step 6b) ---------------------
+// A self-pipe armed PERSISTENTLY (EPOLLIN without EPOLLONESHOT: level-triggered,
+// stays and re-fires while readable, which the drain clears) with data = the
+// loop's marker. Another thread writes one byte to interrupt ph_ev_wait after
+// enqueuing a completion. The handle is (read_fd << 32 | write_fd); 0 on fail.
+uptr ph_ev_wake_create(uptr ev, uptr marker) {
+    u8 fds[16];
+    if (ph_os_pipe(fds) != 0) return 0;
+    i64 r = ld64(fds);
+    i64 w = ld64(fds + 8);
+    u8 ee[16];
+    i64 i = 0; loop { if (i >= 16) break; st8(ee + i, 0); i = i + 1; }
+    st32(ee, 1);                                       // EPOLLIN (no EPOLLONESHOT: persistent)
+    st64(ee + ph_ep_dataoff(), marker);
+    if (epoll_ctl(ev, 1, r, ee) < 0) { close(r); close(w); return 0; }  // EPOLL_CTL_ADD
+    return (r << 32) | (w & 0xffffffff);
+}
+void ph_ev_wake_post(uptr ev, uptr handle) {
+    u8 one[1]; st8(one, 1);
+    write(handle & 0xffffffff, one, 1);
+}
+// drain the pending wake bytes with ONE read: epoll only reports the read end
+// when it is readable, so this never blocks, and any bytes past the buffer
+// re-fire the level interest and drain on the next turn.
+void ph_ev_wake_drain(uptr handle) {
+    u8 buf[256];
+    read(handle >> 32, buf, 256);
+}
+void ph_ev_wake_close(uptr ev, uptr handle) {
+    close(handle >> 32);
+    close(handle & 0xffffffff);
+}
+
 // the size of a thread's arena: reserved (MAP_NORESERVE): pages are touched as used
 i64 ph_os_arena() { return 268435456; }
 // the process's virtual size in bytes, -1 when it cannot be read: the first

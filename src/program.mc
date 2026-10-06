@@ -815,7 +815,7 @@ void user_init() {
         r = ph_swap(r, cstrlen(r), "if (!exc && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC))", "if (!exc && !rep && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC))");
         p_push_source("php runtime", r, cstrlen(r));
         ph_push_rt_host();
-        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12352\n", "#define PHT_SIZE 12480\n");
+        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12368\n", "#define PHT_SIZE 12496\n");
         p_push_source("php thread block", t, cstrlen(t));
         pass(&ph_tls_pass);
         return;

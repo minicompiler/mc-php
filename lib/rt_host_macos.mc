@@ -256,6 +256,43 @@ i64 ph_os_pipe(uptr out2) {
     return 0;
 }
 
+// --- cross-thread loop wake (docs/threads.md § Step 6b) ---------------------
+// A self-pipe the loop arms PERSISTENTLY (EV_ADD without EV_ONESHOT) with
+// udata = the loop's marker, so a worker on another thread can interrupt this
+// loop's ph_ev_wait by writing one byte after it enqueued a completion. The
+// handle is (read_fd << 32 | write_fd); 0 when the pipe cannot be made.
+uptr ph_ev_wake_create(uptr ev, uptr marker) {
+    u8 fds[16];
+    if (ph_os_pipe(fds) != 0) return 0;
+    i64 r = ld64(fds);
+    i64 w = ld64(fds + 8);
+    u8 ke[32];
+    i64 i = 0; loop { if (i >= 32) break; st8(ke + i, 0); i = i + 1; }
+    st64(ke, r);                                       // ident
+    st16(ke + 8, 0xFFFF);                              // EVFILT_READ (-1)
+    st16(ke + 10, 0x0001);                             // EV_ADD only: stays armed across waits
+    st64(ke + 24, marker);                             // udata = the loop marker
+    if (kevent(ev, ke, 1, 0, 0, 0) < 0) { close(r); close(w); return 0; }
+    return (r << 32) | (w & 0xffffffff);
+}
+// post a wake from another thread: one byte on the write end (atomic)
+void ph_ev_wake_post(uptr ev, uptr handle) {
+    u8 one[1]; st8(one, 1);
+    write(handle & 0xffffffff, one, 1);
+}
+// drain the pending wake bytes with ONE read: kqueue only reports the read end
+// when it is readable, so this never blocks, and any bytes past the buffer
+// re-fire the level interest and drain on the next turn. (A loop of reads would
+// block on a second, empty read if the fd were not non-blocking.)
+void ph_ev_wake_drain(uptr handle) {
+    u8 buf[256];
+    read(handle >> 32, buf, 256);
+}
+void ph_ev_wake_close(uptr ev, uptr handle) {
+    close(handle >> 32);
+    close(handle & 0xffffffff);
+}
+
 // the size of a thread's arena: reserved: pages are touched as used
 i64 ph_os_arena() { return 268435456; }
 // the process's virtual size in bytes, -1 when it cannot be read:

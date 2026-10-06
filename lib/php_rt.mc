@@ -11815,7 +11815,8 @@ void ph_ctx_bootstrap(uptr ctx, uptr top, uptr tramp);
 #define LOOP_THR      312             // the owning thread (cross-checks no-migration)
 #define LOOP_IOLIST   320             // pending-I/O futures, head (reject a second outstanding read on one fd)
 #define LOOP_FIBLIST  328             // every fiber this loop created, head (teardown unmaps the suspended ones)
-#define LOOP_SIZE     336
+#define LOOP_WAKE     336             // the self-wake handle (docs/threads.md § Step 6b): another thread posts here to interrupt ph_ev_wait after enqueuing a cross-thread completion
+#define LOOP_SIZE     344
 
 uptr ph_cur_phT() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); return phT; }
 
@@ -11843,8 +11844,51 @@ uptr ph_loop_ensure(uptr phT) {
     if (!ev) php_die("mc-php: cannot create the event loop\n", 37);
     st64(lp + LOOP_EV, ev);
     st64(lp + LOOP_THR, phT);
+    // the cross-thread self-wake (docs/threads.md § Step 6b): armed persistently
+    // with the loop as its marker, so a worker on another thread can interrupt
+    // this loop's ph_ev_wait. ud == lp is the wake, never a future pointer.
+    uptr wk = ph_ev_wake_create(ev, lp);
+    if (!wk) php_die("mc-php: cannot create the loop's self-wake\n", 43);
+    st64(lp + LOOP_WAKE, wk);
     st64(phT + PHT_ph_loop, lp);
     return lp;
+}
+
+// post a wake to a thread's loop, if it has one. Called by a producer on
+// another thread after it enqueued a completion on that thread's queue, so a
+// loop asleep in ph_ev_wait returns and drains it (docs/threads.md § Step 6b
+// risk 3). If the owner has no loop yet, it will drain the queue the first time
+// it drives one (the enqueue is visible under the lock), so no wake is lost.
+void ph_loop_wake(uptr phT) {
+    uptr lp = ld64(phT + PHT_ph_loop);
+    if (lp) ph_ev_wake_post(ld64(lp + LOOP_EV), ld64(lp + LOOP_WAKE));
+}
+
+// drain the cross-thread completion queue onto THIS thread's loop. Each entry
+// (XQ_FUT, XQ_STATE, XQ_VAL) was enqueued by another thread; its value lives in
+// that thread's arena, which the retention model keeps (docs/threads.md § the
+// memory retention ceiling), so it is deep-copied into this arena now, on this
+// thread, exactly as a thread join copies a result (php_tc_val).
+#define XQ_FUT    0
+#define XQ_STATE  8
+#define XQ_VAL    16
+#define XQ_NEXT   24
+#define XQ_SIZE   32
+void ph_xq_drain(uptr phT, uptr lp) {
+    ph_lock();
+    uptr e = ld64(phT + PHT_ph_xqh);
+    st64(phT + PHT_ph_xqh, 0);
+    st64(phT + PHT_ph_xqt, 0);
+    ph_unlock();
+    loop {
+        if (!e) break;
+        uptr nx = ld64(e + XQ_NEXT);
+        uptr v = ld64(e + XQ_VAL);
+        uptr copy = 0;
+        if (v) copy = php_tc_val(v);                 // deep copy into this arena
+        ph_fut_done(lp, ld64(e + XQ_FUT), ld64(e + XQ_STATE), copy);
+        e = nx;
+    }
 }
 
 void ph_loop_ready_push(uptr lp, uptr fib) {
@@ -11998,7 +12042,19 @@ void ph_io_complete(uptr lp, uptr fut, i64 nb) {
 // pending (mcphp_loop_run).
 void ph_loop_drive(uptr lp, i64 stopfut) {
     u8 evb[1024];                         // 64 events * 16 bytes
+    uptr phT = ld64(lp + LOOP_THR);
+    // is the awaited future a bare (non-producer) one? Such a future may be
+    // completed by ANOTHER thread, so a loop with nothing else pending must
+    // block on the self-wake instead of calling it a deadlock (§ Step 6b).
+    i64 stopbare = 0;
+    if (stopfut) {
+        uptr ss0 = ph_sy_slot(stopfut, SY_FUTURE);
+        if (ss0) { uptr sf0 = ld64(ss0 + SY_W1); if (sf0 && !ld64(sf0 + FUT_PRODUCER)) stopbare = 1; }
+    }
     loop {
+        // drain cross-thread completions first, so a waiter another thread just
+        // completed is made ready and resumed on this turn
+        if (ld64(phT + PHT_ph_xqh)) ph_xq_drain(phT, lp);
         // resume every ready fiber
         loop {
             uptr fib = ph_loop_ready_pop(lp);
@@ -12013,13 +12069,17 @@ void ph_loop_drive(uptr lp, i64 stopfut) {
             if (!ld64(lp + LOOP_READYH) && !ld64(lp + LOOP_NPEND)) return;
         }
         if (ld64(lp + LOOP_READYH)) continue;    // a fiber became ready; drain first
+        if (ld64(phT + PHT_ph_xqh)) continue;    // a cross-thread completion landed; drain it
         i64 ms = ph_loop_timeout(lp);
-        if (ms < 0 && !ld64(lp + LOOP_NPEND)) {   // nothing would ever wake us
-            // a top-level await of an unresolved future with no timer or I/O to
-            // complete it would otherwise return null (the "drive until done"
-            // contract broken): name the deadlock instead
-            if (stopfut) php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: await would block forever: the future has no timer or I/O to complete it", 80));
-            return;
+        if (ms < 0 && !ld64(lp + LOOP_NPEND)) {   // no timer or I/O would wake us
+            // a bare awaited future may still be completed from another thread;
+            // block on the self-wake. Otherwise nothing could ever complete it:
+            // name the deadlock (a top-level await) or return (loop_run).
+            if (!stopbare) {
+                if (stopfut) php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: await would block forever: the future has no timer or I/O to complete it", 80));
+                return;
+            }
+            ms = 0 - 1;                           // block until the self-wake fires
         }
         i64 n = ph_ev_wait(ld64(lp + LOOP_EV), evb, 64, ms);
         ph_timers_fire(lp);
@@ -12028,7 +12088,8 @@ void ph_loop_drive(uptr lp, i64 stopfut) {
             if (i >= n) break;
             uptr fut = ld64(evb + i * 16);
             i64 nb = ld64(evb + i * 16 + 8);
-            ph_io_complete(lp, fut, nb);
+            if (fut == lp) ph_ev_wake_drain(ld64(lp + LOOP_WAKE));   // the self-wake: consume it, drain happens at the top of the next turn
+            else ph_io_complete(lp, fut, nb);
             i = i + 1;
         }
     }
@@ -12060,12 +12121,27 @@ i64 php_fut_new() {
     return h;
 }
 
-// cross-thread completion is deferred to step 6b (the loop has no self-wake
-// yet): a future completed by a thread other than its creator would queue the
-// waiter on the wrong loop. Refuse it by name until then. 1 = refused.
-i64 ph_fut_notowner(uptr fut, uptr phT) {
-    if (ld64(fut + FUT_OWNER) == phT) return 0;
-    php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: a future can only be completed by its creating thread until step 6b", 75));
+// cross-thread completion (docs/threads.md § Step 6b): a future completed by a
+// thread other than its creator is routed to the creator's loop. The value is
+// copied into the producer's own (retained) arena now and deep-copied into the
+// owner's arena when its loop drains the queue, exactly as a thread join copies
+// a result. Then the owner's loop is woken so a sleeping ph_ev_wait returns.
+// 1 = routed (the caller must not complete it locally), 0 = this is the owner.
+i64 ph_fut_xcomplete(uptr fut, uptr phT, i64 state, uptr v) {
+    uptr owner = ld64(fut + FUT_OWNER);
+    if (owner == phT) return 0;
+    uptr e = php_alloc(XQ_SIZE);
+    st64(e + XQ_FUT, fut);
+    st64(e + XQ_STATE, state);
+    st64(e + XQ_VAL, 0);
+    if (v) st64(e + XQ_VAL, php_zv_val(v));          // a stable copy in this (retained) arena
+    st64(e + XQ_NEXT, 0);
+    ph_lock();
+    uptr t = ld64(owner + PHT_ph_xqt);
+    if (t) st64(t + XQ_NEXT, e); else st64(owner + PHT_ph_xqh, e);
+    st64(owner + PHT_ph_xqt, e);
+    ph_unlock();
+    ph_loop_wake(owner);
     return 1;
 }
 
@@ -12092,7 +12168,7 @@ uptr php_fut_complete(i64 h, uptr v) {
     }
     uptr fut = ld64(slot + SY_W1);
     if (ph_fut_producer(fut)) return php_znull();
-    if (ph_fut_notowner(fut, phT)) return php_znull();
+    if (ph_fut_xcomplete(fut, phT, 1, v)) return php_znull();
     uptr lp = ph_loop_ensure(phT);
     ph_fut_done(lp, fut, 1, v);
     return php_znull();
@@ -12116,7 +12192,7 @@ uptr php_fut_fail(i64 h, uptr e) {
     }
     uptr fut = ld64(slot + SY_W1);
     if (ph_fut_producer(fut)) return php_znull();
-    if (ph_fut_notowner(fut, phT)) return php_znull();
+    if (ph_fut_xcomplete(fut, phT, 2, e)) return php_znull();
     uptr lp = ph_loop_ensure(phT);
     ph_fut_done(lp, fut, 2, e);
     return php_znull();
@@ -12350,5 +12426,6 @@ void ph_loop_destroy(uptr lp) {
         io = ld64(io + FUT_IONEXT);
     }
     if (nio) ph_ev_drain(ld64(lp + LOOP_EV), nio);
+    if (ld64(lp + LOOP_WAKE)) ph_ev_wake_close(ld64(lp + LOOP_EV), ld64(lp + LOOP_WAKE));
     ph_ev_close(ld64(lp + LOOP_EV));
 }
