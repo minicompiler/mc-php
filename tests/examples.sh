@@ -200,8 +200,8 @@ fi
 # pointers and strings only; rows as arrays are slice 2. The extension road
 # resolves the symbols from php's own process, so it needs a php with sqlite3
 # loaded, and that is also what the oracle (oracle.php, php's SQLite3 class) uses.
-# Not a differential against db.php required: interpreted, #[Extern] bodies are
-# empty. The graded output is check.expect, and the oracle must print it too.
+# Not a differential (running the interpreted db.php against the module):
+# interpreted, #[Extern] bodies are empty. The graded output is check.expect, and the oracle must print it too.
 echo "  -- db"
 EX=examples/db
 dbso=$rootn/$EX/build/db.$sx
@@ -219,10 +219,13 @@ elif build "$EX" "$EX/mcphp$suf.toml" "db.$sx"; then
         tr -d '\r' < "$tmp/db.out" | diff -u "$EX/check.expect" - | sed -n '3,20p' | sed 's/^/      /'
         sed 's/^/      /' "$tmp/db.err"
     fi
-    if "$PHP" "$EX/oracle.php" 2>&1 | tr -d '\r' | cmp -s - "$EX/check.expect"; then
-        say "oracle.php: php's own SQLite3 class prints the same bytes"
+    "$PHP" "$EX/oracle.php" > "$tmp/dbo.out" 2> "$tmp/dbo.err"; orc=$?
+    if [ "$orc" = 0 ] && [ ! -s "$tmp/dbo.err" ] && tr -d '\r' < "$tmp/dbo.out" | cmp -s - "$EX/check.expect"; then
+        say "oracle.php: php's own SQLite3 class prints the same bytes, exit 0"
     else
-        bad "db oracle.php: php's SQLite3 disagrees with check.expect"
+        bad "db oracle.php: exit $orc, want check.expect and a quiet stderr"
+        tr -d '\r' < "$tmp/dbo.out" | diff -u "$EX/check.expect" - | sed -n '3,20p' | sed 's/^/      /'
+        sed 's/^/      /' "$tmp/dbo.err"
     fi
     vis=$("$PHP" -d extension="$dbso" -r '$f = get_extension_funcs("db"); sort($f); echo implode(" ", $f);' 2>&1 | tr -d '\r')
     if [ "$vis" = "db_close db_error db_exec db_load db_open db_scalar db_text" ]; then

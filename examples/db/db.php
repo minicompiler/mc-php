@@ -73,10 +73,12 @@ function db_load(int $db, string $table, int $n): int {
     $st = _ptr($out);
     $done = 0;
     for ($i = 1; $i <= $n; $i++) {
-        sqlite3_bind_int($st, 1, $i);
-        sqlite3_bind_text($st, 2, "row-" . $i, -1, _SQLITE_TRANSIENT);
-        sqlite3_bind_int($st, 3, $i * 7 % 1000);
-        if (sqlite3_step($st) !== _SQLITE_DONE) {
+        // a failed bind (SQLITE_NOMEM) leaves the statement unfit to step and the
+        // old bindings in place, so it ends the load like a failed step does
+        if (sqlite3_bind_int($st, 1, $i) !== 0
+            || sqlite3_bind_text($st, 2, "row-" . $i, -1, _SQLITE_TRANSIENT) !== 0
+            || sqlite3_bind_int($st, 3, $i * 7 % 1000) !== 0
+            || sqlite3_step($st) !== _SQLITE_DONE) {
             sqlite3_finalize($st);
             db_exec($db, "ROLLBACK");
             return -1;
@@ -85,7 +87,12 @@ function db_load(int $db, string $table, int $n): int {
         $done++;
     }
     sqlite3_finalize($st);
-    if (db_exec($db, "COMMIT") !== 0) return -1;
+    // a failed COMMIT (SQLITE_BUSY, a deferred constraint) leaves the transaction
+    // open: roll it back so the connection is not left mid-transaction
+    if (db_exec($db, "COMMIT") !== 0) {
+        db_exec($db, "ROLLBACK");
+        return -1;
+    }
     return $done;
 }
 

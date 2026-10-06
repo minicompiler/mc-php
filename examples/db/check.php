@@ -1,8 +1,8 @@
 <?php
 // The slice-1 driver. Run with db.so loaded it prints the lines in check.expect;
 // tests/examples.sh grades that, and grades the SAME SQL run through php's own
-// SQLite3 class (oracle.php) against it. It is not a differential against
-// db.php required: interpreted, the #[Extern] bodies are empty.
+// SQLite3 class (oracle.php) against it. It is not a differential (running the
+// interpreted db.php against the module): interpreted, the #[Extern] bodies are empty.
 declare(strict_types=1);
 
 $N = 1000;

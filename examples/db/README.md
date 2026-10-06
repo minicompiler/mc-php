@@ -25,12 +25,13 @@ back as an int or as text, and reports sqlite's own error codes and messages.
 
 `tests/examples.sh` builds `db.so`, runs `check.php` against `check.expect`, runs `oracle.php`
 against the same bytes, and checks that only the seven `db_*` names are published. It is **not**
-a differential against `db.php` required: interpreted, an `#[Extern]` body is empty.
+a differential (running the interpreted `db.php` against the module): interpreted, an `#[Extern]`
+body is empty.
 
 It is **SKIPPED by name** on Windows (`#[Extern]` is refused there) and on a php with no sqlite3
 extension. On the extension road the `sqlite3_*` symbols resolve from php's own process, so the
-link names no `-lsqlite3`; a php that has `sqlite3` or `pdo_sqlite` loaded is the whole
-requirement.
+link names no `-lsqlite3`. The requirement is a php with the `sqlite3` module loaded: the gate
+skips without it, and `oracle.php` uses its `SQLite3` class. `pdo_sqlite` alone is not enough.
 
 ## The out parameters
 

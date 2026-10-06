@@ -41,4 +41,6 @@ $d = new SQLite3($f);
 echo "file count ", scalar($d, "SELECT COUNT(*) FROM t"), "\n";
 $d->close();
 @unlink($f);
-echo "nodir 0\n";   // SQLite3 throws on an unopenable path; db_open's contract is 0
+// an unopenable path: SQLite3 throws, db_open's contract for the same case is 0
+try { new SQLite3("/no/such/dir/x.sqlite"); $nodir = 1; } catch (Throwable $e) { $nodir = 0; }
+echo "nodir ", $nodir, "\n";
