@@ -12399,7 +12399,7 @@ i64 php_connect(i64 ip, i64 port) {
     if (ph_elive(phT)) return 0 - 1;               // refuse while php's engine is on the stack
     uptr lp = ph_loop_ensure(phT);
     i64 fd = ph_os_connect(ip, port);
-    if (fd < 0) { php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: cannot create a socket to connect", 42)); return 0 - 1; }
+    if (fd < 0) { php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: cannot create a socket to connect", 41)); return 0 - 1; }
     i64 h = php_fut_new();
     uptr slot = ph_sy_slot(h, SY_FUTURE);
     uptr fut = ld64(slot + SY_W1);
