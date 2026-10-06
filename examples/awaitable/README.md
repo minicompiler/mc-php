@@ -17,9 +17,18 @@ $s = new \awaitable\Semaphore(2); $s->bind();      // caps http_get_many's threa
 new \awaitable\WaitGroup(); new \awaitable\Mutex();
 ```
 
-There is no async, so `await` does what await does: it suspends and runs to
-completion on the calling thread, and always hands back an `Intent` -- the
-envelope, never narrowed to the callable's own value.
+`await` always hands back an `Intent` -- the envelope, never narrowed to the
+callable's own value. Since step 6b it is **wired onto the event loop**: where
+the loop may suspend (no php engine on the stack -- the program road or a
+compiled worker, `mcphp_can_suspend()`) it runs the callable on a fresh fiber
+through `mcphp_spawn`/`mcphp_await`; under a live php engine -- this extension's
+own road, where suspending would corrupt the executor
+([docs/threads.md](../../docs/threads.md) § 6) -- it runs the callable inline,
+as it always did. The `Intent` is the same either way. The loop's "many I/Os on
+one thread" shape (a fiber per fetch, replacing a thread per fetch) is
+demonstrated and gated on the program road by `tests/c/23-http.php`; the
+non-blocking socket surface it drives is `mcphp_connect` + `mcphp_io_read`
+(`tests/c/22-connect.php`).
 
 The parallelism is **native OS threads**. `parallel` runs each php callable on a
 thread of its own; a thread-safe php runs it as a php request of its own
