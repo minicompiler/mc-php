@@ -245,6 +245,12 @@ if "$BIN" build "$t/thr" --config "$t/thr/r.toml" > "$t/th.out" 2>&1; then
       printf "%s\n" "for (\$k = 0; \$k < 30; \$k++) { th\\api(4, 50); th\\keep(4); th\\rethrow(); th\\sy_count(4, 100); }"
     } > "$t/thr/api.php"
     leakfree "the thread API (tests/ext/threads/api.php), 30 rounds" -d extension="$t/thr/build/r.so" "$t/thr/api.php"
+    # step 6b: a compiled worker drives the event loop inside a request -- a
+    # fiber awaits a timer, another a non-blocking pipe read -- and at the
+    # worker reap the loop is torn down and every fiber stack unmapped. 20
+    # rounds of 4 workers each; nothing of the loop may be left allocated.
+    printf "%s\n" "<?php for (\$k = 0; \$k < 20; \$k++) th\\await_io(4);" > "$t/thr/awio.php"
+    leakfree "step 6b: a compiled worker drives the loop (timer + pipe read), 20 rounds of 4" -d extension="$t/thr/build/r.so" "$t/thr/awio.php"
     # php callables on threads of their own (tests/ext.sh step 20c): results
     # a string, an array and an object, copied out of the heap of each worker
     # before its request ends, a fatal error and exit() in a worker, and a

@@ -22,16 +22,31 @@ final class Intent {
     public mixed $data = null;
 }
 
-// There is no async, so await does what await does: it SUSPENDS and RUNS to
-// completion. It always hands back an Intent -- the envelope is the wide type,
-// never narrowed to the callable's own return value.
+// await hands back an Intent -- the envelope is the wide type, never narrowed
+// to the callable's own return value. It is WIRED onto the loop (step 6b): where
+// the loop may suspend (the program road or a compiled worker -- no php engine),
+// it runs $fn on a fresh fiber and awaits the future through mcphp_spawn /
+// mcphp_await. Under a live php engine (this extension's own road) the loop may
+// not suspend (docs/threads.md § 6), so it runs $fn inline, as step 6a did; the
+// Intent is the same either way.
 function await(callable $fn, mixed ...$args): Intent {
     $i = new Intent();
-    try {
-        $i->data = $fn(...$args);
-    } catch (\Throwable $e) {
-        $i->failed = true;
-        $i->exception = $e;
+    if (\mcphp_can_suspend()) {
+        try {
+            // spawn one fiber running a closure that does the variadic call, so
+            // mcphp_spawn takes a single callable (its own arguments cap is 5)
+            $i->data = \mcphp_await(\mcphp_spawn(function () use ($fn, $args) { return $fn(...$args); }));
+        } catch (\Throwable $e) {
+            $i->failed = true;
+            $i->exception = $e;
+        }
+    } else {
+        try {
+            $i->data = $fn(...$args);
+        } catch (\Throwable $e) {
+            $i->failed = true;
+            $i->exception = $e;
+        }
     }
     $i->done = true;
     return $i;

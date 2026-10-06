@@ -66,6 +66,24 @@ function work(int $n, callable $boom): string {
 // own, started and joined by the module (tests/frankenphp.sh, threads.php)
 function zts_pstart(callable $f, int $n): int { return mcphp_thread_start($f, $n); }
 function zts_pjoin(int $t): mixed { return mcphp_thread_join($t); }
+// step 6b: a COMPILED worker drives the event loop inside a request under the
+// threaded SAPI (tests/frankenphp.sh, awio.php). The worker has no php engine,
+// so it may suspend (docs/threads.md § 6): fibers await a timer and a
+// non-blocking pipe read; at the worker's reap the loop is torn down and every
+// fiber stack unmapped, so nothing leaks across requests. Returns $n + 7.
+function zts_await_io(int $n): int {
+    return (int) mcphp_thread_join(mcphp_thread_start(function (int $x): int {
+        $f = mcphp_spawn(function (int $y): int { mcphp_await(mcphp_timer(1)); return $y + 1; }, $x);
+        $p = mcphp_pipe();
+        $rd = mcphp_spawn(function (int $fd): int { return strlen(mcphp_io_read($fd, 16)); }, $p >> 32);
+        mcphp_fd_write($p & 0xffffffff, "hello");
+        mcphp_loop_run();
+        $r = (int) mcphp_await($f) + (int) mcphp_await($rd) + 1;
+        mcphp_fd_close($p >> 32);
+        mcphp_fd_close($p & 0xffffffff);
+        return $r;
+    }, $n));
+}
 // native sync (step 4) under a threaded SAPI (tests/frankenphp.sh, sync.php):
 // an atomic made at MINIT is the process's and counts every request; a mutex
 // and an atomic a request makes are freed at its end, so their slots are

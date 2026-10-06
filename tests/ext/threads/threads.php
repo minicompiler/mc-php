@@ -51,6 +51,37 @@ function api(int $n, int $iters): int {
     foreach ($hs as $h) $sum += (int) mcphp_thread_join($h);
     return $sum;
 }
+// Step 6b: a COMPILED worker that drives the event loop inside a request. The
+// worker has no php engine, so it may suspend (docs/threads.md § 6): it spawns
+// fibers that await a timer and a non-blocking pipe read, drives the loop, and
+// completes a bare future on its own loop. At the worker's reap the loop is
+// torn down and every fiber stack unmapped. tests/leaks.sh and
+// tests/frankenphp.sh run this to prove the loop leaks nothing across requests
+// (cross-thread completion over the self-wake is gated by tests/c/21-xthread on
+// the program road, on every leg). Each round returns ($i + 1) + 5 (len
+// "hello") + 1 = $i + 7; await_io(4) sums 7+8+9+10 = 34.
+function await_io(int $rounds): int {
+    $total = 0;
+    for ($i = 0; $i < $rounds; $i++) {
+        $h = mcphp_thread_start(function (int $x): int {
+            // a fiber awaits a timer
+            $f = mcphp_spawn(function (int $y): int { mcphp_await(mcphp_timer(1)); return $y + 1; }, $x);
+            // a fiber awaits a non-blocking pipe read (loop-driven I/O)
+            $p = mcphp_pipe();
+            $rfd = $p >> 32;
+            $wfd = $p & 0xffffffff;
+            $rd = mcphp_spawn(function (int $fd): int { return strlen(mcphp_io_read($fd, 16)); }, $rfd);
+            mcphp_fd_write($wfd, "hello");
+            mcphp_loop_run();
+            $r = (int) mcphp_await($f) + (int) mcphp_await($rd) + 1;
+            mcphp_fd_close($rfd);
+            mcphp_fd_close($wfd);
+            return $r;
+        }, $i);
+        $total += (int) mcphp_thread_join($h);
+    }
+    return $total;
+}
 $kept_s = "";
 $kept_a = [];
 $kept_o = new _Acc();

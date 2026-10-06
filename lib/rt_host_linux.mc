@@ -220,6 +220,112 @@ i64 ph_os_pipe(uptr out2) {
     return 0;
 }
 
+// --- cross-thread loop wake (docs/threads.md § Step 6b) ---------------------
+// A self-pipe armed PERSISTENTLY (EPOLLIN without EPOLLONESHOT: level-triggered,
+// stays and re-fires while readable, which the drain clears) with data = the
+// loop's marker. Another thread writes one byte to interrupt ph_ev_wait after
+// enqueuing a completion. The handle is (read_fd << 32 | write_fd); 0 on fail.
+uptr ph_ev_wake_create(uptr ev, uptr marker) {
+    u8 fds[16];
+    if (ph_os_pipe(fds) != 0) return 0;
+    i64 r = ld64(fds);
+    i64 w = ld64(fds + 8);
+    u8 ee[16];
+    i64 i = 0; loop { if (i >= 16) break; st8(ee + i, 0); i = i + 1; }
+    st32(ee, 1);                                       // EPOLLIN (no EPOLLONESHOT: persistent)
+    st64(ee + ph_ep_dataoff(), marker);
+    if (epoll_ctl(ev, 1, r, ee) < 0) { close(r); close(w); return 0; }  // EPOLL_CTL_ADD
+    return (r << 32) | (w & 0xffffffff);
+}
+void ph_ev_wake_post(uptr ev, uptr handle) {
+    u8 one[1]; st8(one, 1);
+    // the wake MUST land: a 1-byte write is all-or-nothing, so retry EINTR (4);
+    // on EAGAIN (11, a full pipe) a readable wake is already pending -- stop
+    loop {
+        if (write(handle & 0xffffffff, one, 1) != 0 - 1) break;
+        if (php_c_errno() != 4) break;
+    }
+}
+// drain the pending wake bytes with ONE read: epoll only reports the read end
+// when it is readable, so this never blocks, and any bytes past the buffer
+// re-fire the level interest and drain on the next turn.
+void ph_ev_wake_drain(uptr handle) {
+    u8 buf[256];
+    read(handle >> 32, buf, 256);
+}
+void ph_ev_wake_close(uptr ev, uptr handle) {
+    close(handle >> 32);
+    close(handle & 0xffffffff);
+}
+
+// --- non-blocking TCP, driven by the loop (docs/threads.md § Step 6b) --------
+// As macOS, with Linux constants: AF_INET 2, SOCK_STREAM 1, EINPROGRESS 115,
+// SOL_SOCKET 1, SO_ERROR 4, SO_REUSEADDR 2, O_NONBLOCK 0x800, EPOLLOUT 4.
+// A Linux sockaddr_in has no sin_len: sin_family is a little-endian u16.
+extern i64 fcntl(i64 fd, i64 cmd, i64 arg);
+extern i64 socket(i64 dom, i64 type, i64 proto);
+extern i64 connect(i64 fd, uptr addr, i64 len);
+extern i64 bind(i64 fd, uptr addr, i64 len);
+extern i64 listen(i64 fd, i64 backlog);
+extern i64 accept(i64 fd, uptr addr, uptr alen);
+extern i64 setsockopt(i64 fd, i64 level, i64 opt, uptr val, i64 len);
+extern i64 getsockopt(i64 fd, i64 level, i64 opt, uptr val, uptr len);
+extern i64 getsockname(i64 fd, uptr addr, uptr alen);
+void ph_sa_in(uptr sa, i64 ip, i64 port) {
+    i64 i = 0; loop { if (i >= 16) break; st8(sa + i, 0); i = i + 1; }
+    st8(sa, 2);                                        // AF_INET (little-endian u16: 02 00)
+    st8(sa + 2, (port >> 8) & 0xff); st8(sa + 3, port & 0xff);
+    st8(sa + 4, (ip >> 24) & 0xff);  st8(sa + 5, (ip >> 16) & 0xff);
+    st8(sa + 6, (ip >> 8) & 0xff);   st8(sa + 7, ip & 0xff);
+}
+i64 ph_os_connect(i64 ip, i64 port) {
+    i64 fd = socket(2, 1, 0);
+    if (fd < 0) return 0 - 1;
+    fcntl(fd, 4, 0x800);                               // F_SETFL O_NONBLOCK
+    u8 sa[16]; ph_sa_in(sa, ip, port);
+    if (connect(fd, sa, 16) == 0) return fd;
+    if (php_c_errno() == 115) return fd;               // EINPROGRESS
+    close(fd); return 0 - 1;
+}
+i64 ph_os_sockerr(i64 fd) {
+    u8 e[8]; u8 l[8]; st64(e, 0); st64(l, 4);
+    getsockopt(fd, 1, 4, e, l);                        // SOL_SOCKET, SO_ERROR
+    return ld32(e) & 0xffffffff;
+}
+i64 ph_ev_arm_w(uptr ev, i64 fd, uptr ud) {
+    u8 ee[16];
+    i64 i = 0; loop { if (i >= 16) break; st8(ee + i, 0); i = i + 1; }
+    st32(ee, 0x40000004);                              // EPOLLOUT | EPOLLONESHOT
+    st64(ee + ph_ep_dataoff(), ud);
+    if (epoll_ctl(ev, 1, fd, ee) < 0) {               // EPOLL_CTL_ADD
+        if (epoll_ctl(ev, 3, fd, ee) < 0) return 1;   // EPOLL_CTL_MOD
+    }
+    return 0;
+}
+i64 ph_ev_arm_connect(uptr ev, i64 fd, uptr ud, i64 ip, i64 port) { return ph_ev_arm_w(ev, fd, ud); }
+i64 ph_os_listen(i64 port) {
+    i64 fd = socket(2, 1, 0);
+    if (fd < 0) return 0 - 1;
+    u8 one[4]; st32(one, 1);
+    setsockopt(fd, 1, 2, one, 4);                      // SOL_SOCKET, SO_REUSEADDR
+    u8 sa[16]; ph_sa_in(sa, 0x7f000001, port);
+    if (bind(fd, sa, 16) != 0) { close(fd); return 0 - 1; }
+    if (listen(fd, 16) != 0) { close(fd); return 0 - 1; }
+    u8 na[16]; u8 nl[8]; st64(nl, 16);
+    getsockname(fd, na, nl);
+    i64 ap = ((ld8(na + 2) & 0xff) << 8) | (ld8(na + 3) & 0xff);
+    return (fd << 32) | (ap & 0xffffffff);
+}
+i64 ph_os_accept_send(i64 lfd, uptr buf, i64 len) {
+    i64 c = accept(lfd, 0, 0);
+    if (c < 0) return 0 - 1;
+    write(c, buf, len);
+    close(c);
+    return 0;
+}
+// close a socket (a POSIX socket IS an fd: plain close, unlike Winsock)
+void ph_os_sock_close(i64 fd) { close(fd); }
+
 // the size of a thread's arena: reserved (MAP_NORESERVE): pages are touched as used
 i64 ph_os_arena() { return 268435456; }
 // the process's virtual size in bytes, -1 when it cannot be read: the first

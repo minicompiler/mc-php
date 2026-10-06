@@ -80,6 +80,7 @@ INSTRUMENTS = {
     'ext/threads/late.php': 'the class tests/ext/threads/php.php autoloads after a php thread started (ext.sh step 20c): it grades a module and is never compiled',
     'ext/zts/threads.php': 'the page tests/frankenphp.sh loads for php callables on threads (step 3b): it grades a module and is never compiled',
     'ext/zts/sync.php': 'the page tests/frankenphp.sh loads for native sync (step 4): it grades a module and is never compiled',
+    'ext/zts/awio.php': 'the page tests/frankenphp.sh loads for the event loop in a compiled worker (step 6b): it grades a module and is never compiled',
 }
 
 

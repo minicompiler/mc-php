@@ -1,0 +1,4 @@
+xthread value: from the worker
+xthread fail caught: worker boom
+xthread array: 1 2 3
+done

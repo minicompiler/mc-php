@@ -27,6 +27,8 @@ GetQueuedCompletionStatus
 GetStdHandle
 GetTickCount64
 K32GetProcessMemoryInfo
+LoadLibraryA
+PostQueuedCompletionStatus
 MoveFileExA
 ReadFile
 RemoveDirectoryA

@@ -1157,12 +1157,8 @@ three backends.
   bytes). No http, no php engine. `tests/c/18-await.php` on the program road; `tests/ext.sh`
   exercises the compiled-worker await on the extension road.
 
-**Step 6b (next) -- wiring onto the loop:**
-- `examples/awaitable`'s `http_get`/`http_get_many` on non-blocking `file://` and sockets
-  (connect/read as loop I/O, replacing the blocking worker of 6a).
-- the `Intent`-returning userland `await()` over the primitive.
-- cross-thread future completion (a worker completing a loop's future via the loop's self-wake
-  fd), and whatever socket surface (`connect`, `accept`) the http fetch needs.
+**Step 6b (BUILT) -- wiring onto the loop:** the non-blocking socket surface, the userland
+`await()` over the primitive, and cross-thread future completion. See **§ Step 6b (BUILT)** below.
 
 ### 8. Gates (for when it is built)
 
@@ -1207,3 +1203,120 @@ three backends.
    `phT` held across it is still this thread's block -- but the no-migration invariant must be
    enforced (a fiber is resumed only by its creating thread's loop) and asserted by the
    self-test, because a violation is a silent wrong-arena bug, not a crash.
+
+## Step 6b (BUILT)
+
+Step 5 built the loop, fibers, futures and timers. Step 6b wires onto them: a non-blocking
+socket surface, the userland `await()` over the primitive, and cross-thread completion. The
+loop runs where there is no php engine (the program road and compiled workers); under a live
+engine `await` is still refused (§ 6), so the demonstrations and gates are on the program road
+and in compiled-worker threads.
+
+### 1. The socket surface (`mcphp_connect`)
+
+**`mcphp_connect(int $ip, int $port): int`** opens a socket and suspends on the loop until it
+connects, returning the connected fd; the caller then awaits `mcphp_io_read` on it. Both are loop
+I/O. A connect is a new `FUT_CONNECT` slot the loop completes:
+- **kqueue / epoll:** a non-blocking `connect` (EINPROGRESS) armed for WRITABLE; on readiness the
+  loop checks `SO_ERROR` (0 = connected, else the future fails). `ph_ev_arm_w` / `ph_os_connect`
+  / `ph_os_sockerr` in `lib/rt_host_{macos,linux}.mc`.
+- **IOCP (Windows):** a **blocking** loopback connect on an overlapped socket (a loopback connects
+  at once), whose completion `ph_ev_arm_connect` posts to the port with
+  `PostQueuedCompletionStatus`, so the loop resumes the awaiter; the read is the step-5 IOCP
+  arm-and-go. WinSock is resolved at runtime through `GetProcAddress` (ws2_32 loaded, its names
+  bound by pointer), so no program's link line gains a ws2_32 import library -- only
+  `kernel32.def` gains `LoadLibraryA` and `PostQueuedCompletionStatus`.
+  **Deviation (risk 4):** the async `ConnectEx` form (a ws2 extension pointer via `WSAIoctl`) is
+  the documented upgrade; it is not needed for a loopback self-test and is left out to keep the
+  Windows connect testable through CI rather than an untested extension-pointer path. The read --
+  the loop I/O every target shares -- is IOCP on Windows.
+
+`mcphp_tcp_listen(int $port): int` (a blocking loopback listener, `listen_fd << 32 | the port`)
+and `mcphp_tcp_accept_send(int $lfd, string $data): void` (accept one, send, close) are test
+scaffolding, so a self-test's connect has a peer with no network.
+
+**`mcphp_io_read` is for sockets and pipes, not regular files.** A regular file is always
+"ready", and epoll refuses `EPOLL_CTL_ADD` on one (`EPERM`), so a file fd cannot be a uniform
+reactor arm across backends -- `mcphp_io_read` on a regular file throws `cannot submit the read`
+(it unconditionally arms). The loop's suspend/resume I/O is sockets and pipes; a file's bytes are
+read synchronously by the runtime (`file_get_contents`, as `awaitable\_read` does), never through
+the loop. A direct-read fast path for regular files is a possible future upgrade, not a feature
+today.
+
+### 2. The userland `await()` (`examples/awaitable`)
+
+`await()` is wired onto the primitive: where the loop may suspend
+(**`mcphp_can_suspend()`** -- no php engine on the stack, the program road or a compiled worker)
+it runs the callable on a fresh fiber and awaits the future through `mcphp_spawn` /
+`mcphp_await`; under a live engine it runs the callable inline, as step 6a did. The engine-live
+refusal (§ 6) is never tripped, and the `Intent` is the same either way. Verified byte for byte
+against `examples/awaitable/check.expect` on a real ZTS php (`php:8.5-zts-alpine`, opcache on).
+
+The example is an extension: its php callables always run under a live engine, so its own
+`await()` takes the inline branch. The loop's "many I/Os on one thread" shape -- a fiber per
+fetch, one `mcphp_loop_run`, replacing 6a's thread per fetch -- is demonstrated and gated on the
+program road by `tests/c/23-http.php` (N fibers each connect+read on one thread, every connect
+outstanding at once).
+
+### 3. Cross-thread future completion
+
+A future created on one thread can be completed (or failed) from another. `mcphp_future_complete`
+/ `_fail`, when the completing thread is not the future's creator (`FUT_OWNER`), route the
+completion to the creator's per-thread queue (`PHT_ph_xqh`/`xqt`) under the runtime lock, and wake
+the creator's loop out of `ph_ev_wait` over a **per-loop self-wake** -- a persistently-armed
+self-pipe on kqueue/epoll, `PostQueuedCompletionStatus` on IOCP (`LOOP_WAKE`). The creator's loop
+drains the queue at the top of every turn and **deep-copies** the value into its own arena with
+`php_tc_*`, exactly as a thread join copies a result; the producer's arena stays valid because the
+retention model keeps a worker's memory until the request/process ends (§ The memory retention
+ceiling).
+
+The **"complete vs the loop decides to sleep" race (risk 3)** is handled by draining the queue at
+the top of every turn (so a completion that arrived before the sleep is caught) and by blocking,
+not deadlocking, on a bare awaited future (one that may be completed cross-thread). The **step-5
+no-migration abort (risk 5)** is unchanged: a fiber is resumed only by its creating thread's loop,
+or the process aborts by name. `tests/c/21-xthread.php` (program road, every leg): a worker
+completes/fails the main thread's future and a nested array crosses the boundary.
+
+### 4. Fiber stack sizing (risk 1), measured
+
+Many awaits live at once is the N-connection server shape. Measured on macOS arm64 with a program
+that spawns N fibers all suspended on a timer at the same time (max RSS, `/usr/bin/time -l`):
+
+| outstanding awaits | max RSS |
+|---|---|
+| 0 | 1.61 MiB |
+| 1024 | 18.59 MiB |
+
+**~17.0 KiB committed per outstanding await** -- one 16 KiB page the shallow awaiter touches, the
+rest of the 128 KiB stack reserved but never committed (`MAP_NORESERVE` / a guard page). This
+matches the step-5 figure; the lazy commit is sufficient and the pooled/segmented-stack **ponytail
+upgrade is not needed** at the `PH_FIB_MAX` = 1024 ceiling (1024 live awaits cost ~17 MiB). On
+Windows the stack is committed up front (128 KiB each; the native idiom is a `PAGE_GUARD` grow
+region, the recorded upgrade).
+
+### 5. The gates
+
+- **C twins:** `tests/c/await.c` (step 5: timer + pipe read) and `tests/c/connect.c` (step 6b:
+  the loopback connect + read on raw kqueue/epoll + a pthread peer), each byte for byte its
+  `.php` and timed (`tests/examples.sh`). POSIX; the Windows legs run the `.php` (IOCP).
+- **llvm-mc sweep:** unchanged -- step 6b adds no `ph_ctx_swap` word (sockets are extern/runtime
+  calls), so `tests/sweep_sync.py` and the dump-machine check carry over.
+- **Per backend on its own leg:** `tests/c/18-await`, `21-xthread`, `22-connect`, `23-http` run
+  via the fixture harness on all five legs -- kqueue (macos/arm64), epoll (linux aarch64 +
+  x86_64), IOCP (windows x64 + arm64) -- so a wrong backend is red on its leg. Verified locally
+  on kqueue (macOS) and epoll (linux/arm64, Docker); the IOCP legs are CI.
+- **Leaks + ZTS:** `tests/leaks.sh` and `tests/frankenphp.sh` run `await_io` / `zts_await_io` -- a
+  compiled worker that drives the loop (a timer fiber and a pipe read) inside a request, its loop
+  torn down and every fiber stack unmapped at the worker's reap.
+- **Inert / 2%:** a program that never awaits allocates no loop and no fiber -- `php_fut_new` and
+  the loop are never reached, `examples/decimal` is unchanged.
+
+### 6. Known limits (on record)
+
+- **Windows connect is a blocking loopback connect**, not `ConnectEx` (§ 1 deviation); the read is
+  IOCP. `ConnectEx` is the async upgrade.
+- **A thread started inside a worker** (nested `mcphp_thread_start`) has its record in the worker's
+  arena, which request shutdown frees before the thread table reads it -- a pre-existing
+  nested-thread hazard, out of this step's scope. The cross-thread leak case therefore does not
+  nest a thread; cross-thread completion itself is gated by `tests/c/21-xthread` on the program
+  road.
