@@ -599,6 +599,7 @@ i64 ph_bi_async(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "mcphp_future"))   { rt = "php_fut_new"; lo = 0; hi = 0; }
     if (str_eq(name, "mcphp_timer"))    rt = "php_timer";
     if (str_eq(name, "mcphp_loop_run")) { rt = "php_loop_run"; lo = 0; hi = 0; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_can_suspend")) { rt = "php_can_suspend"; lo = 0; hi = 0; ety = PT_BOOL; }
     if (str_eq(name, "mcphp_await"))    { rt = "php_await"; ety = PT_MIXED; }
     if (str_eq(name, "mcphp_pipe"))     { rt = "php_test_pipe"; lo = 0; hi = 0; }
     if (str_eq(name, "mcphp_tcp_listen")) rt = "php_test_listen";

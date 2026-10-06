@@ -391,6 +391,46 @@ else
     skip "the C twin of await: no $CC here, or it would not build -- no C column"
 fi
 
+# --- connect (step 6b): a non-blocking TCP connect + read on the loop ----------
+# tests/c/22-connect.php connects to a blocking loopback peer on another thread
+# and reads its reply, both driven by the loop; its C twin (kqueue/epoll +
+# pthread, tests/c/connect.c) must reach the SAME output byte for byte, and the
+# two are timed. The .php is graded against 22-connect.out by the fixture
+# harness on all five legs (IOCP on Windows); here the twin proves the POSIX
+# backends' connect/read semantics independently.
+echo "  -- connect"
+cn=$tmp/connect
+MCPHP_BIN=$BIN MCPHP_OUT=$cn sh "$here/mcphp.sh" tests/c/22-connect.php > "$tmp/connect.raw" 2>&1; crc=$?
+cn_bin=$cn; [ -f "$cn.exe" ] && cn_bin=$cn.exe
+tr -d '\r' < tests/c/22-connect.out > "$tmp/connect.want"
+tr -d '\r' < "$tmp/connect.raw" > "$tmp/connect.got"
+if [ "$crc" = 0 ] && cmp -s "$tmp/connect.got" "$tmp/connect.want"; then
+    say "22-connect.php: a non-blocking connect and read driven by the loop"
+else
+    bad "22-connect.php: output differs from 22-connect.out (exit $crc)"
+fi
+if [ "$host" = windows ]; then
+    skip "the C twin of connect on Windows: kqueue/epoll and pthreads are POSIX (the .php uses IOCP)"
+elif command -v "$CC" >/dev/null 2>&1 && "$CC" -O2 -o "$tmp/connect-c" tests/c/connect.c 2>"$tmp/cc.err"; then
+    "$tmp/connect-c" > "$tmp/connect-c.raw"; ccrc=$?
+    tr -d '\r' < "$tmp/connect-c.raw" > "$tmp/connect-c.got"
+    { [ "$ccrc" = 0 ] && cmp -s "$tmp/connect-c.got" "$tmp/connect.want"; } \
+        && say "the C twin (kqueue/epoll + pthread): byte for byte the .php" \
+        || bad "the C twin of connect: output differs from the .php (exit $ccrc)"
+    crow=$("$PHP" -r '
+        $b = [INF, INF];
+        foreach ([$argv[1], $argv[2]] as $k => $x) {
+            for ($r = 0; $r < 3; $r++) {
+                $t = hrtime(true); exec(escapeshellarg($x)); $d = (hrtime(true) - $t) / 1e6;
+                if ($d < $b[$k]) $b[$k] = $d;
+            }
+        }
+        printf("mc-php %.0f ms, C %.0f ms (%.2fx)", $b[0], $b[1], $b[0] / $b[1]);' "$cn_bin" "$tmp/connect-c")
+    say "bench: $crow -- best of three; not gated"
+else
+    skip "the C twin of connect: no $CC here, or it would not build -- no C column"
+fi
+
 # --- awaitable -----------------------------------------------------------------
 # The compiled awaitable.src.php: a ZTS extension on native OS threads and native
 # sync (docs/threads.md steps 3 and 4). parallel() runs each php callable on an

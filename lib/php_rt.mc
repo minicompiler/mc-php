@@ -12245,6 +12245,16 @@ uptr ph_await_h(i64 h) {
 
 uptr php_await(i64 h) { return ph_await_h(h); }
 
+// 1 when the loop may suspend here (no php engine on the stack), 0 otherwise
+// (the extension road inside a request, § 6). Userland await() reads this to
+// wire onto the loop where it can and run the callable inline where it cannot,
+// so the engine-live refusal (§ 6) is never tripped. It does not throw.
+i64 php_can_suspend() {
+    uptr phT = ph_cur_phT();
+    if (ld64(phT + PHT_phx_depth)) return 0;
+    return 1;
+}
+
 // a timer: a future the loop completes after ms (§ Step 4b deadline rule)
 i64 php_timer(i64 ms) {
     if (ms < 0) ms = 0;
