@@ -49,6 +49,7 @@ extern i64  VirtualFree(uptr addr, i64 n, i64 type);
 extern i64  K32GetProcessMemoryInfo(uptr h, uptr pmc, i64 cb);
 extern uptr GetModuleHandleA(uptr name);
 extern uptr GetProcAddress(uptr h, uptr name);
+extern uptr LoadLibraryA(uptr name);
 extern i64  GetFileAttributesA(uptr name);
 extern i64  GetFileAttributesExA(uptr name, i64 level, uptr info);
 extern i64  SetFileAttributesA(uptr name, i64 attrs);
@@ -576,6 +577,97 @@ uptr ph_ev_wake_create(uptr ev, uptr marker) {
 void ph_ev_wake_post(uptr ev, uptr handle) { PostQueuedCompletionStatus(ev, 0, 0, handle); }
 void ph_ev_wake_drain(uptr handle) {}
 void ph_ev_wake_close(uptr ev, uptr handle) {}
+
+// --- non-blocking TCP, driven by the loop (docs/threads.md § Step 6b) --------
+// WinSock is resolved at RUNTIME through GetProcAddress (ws2_32 is loaded, its
+// names bound by pointer), so no program's link line needs a ws2_32 import
+// library -- the one place the Windows build would otherwise have to change.
+// A connect is a BLOCKING loopback connect on an overlapped socket (loopback
+// connects at once); the loop part is the READ, which the step-5 IOCP arm-and-go
+// drives. ph_ev_arm_connect posts the connect's completion to the port so the
+// loop resumes the awaiter. The async ConnectEx form (a ws2 extension pointer
+// via WSAIoctl) is the documented upgrade (docs/threads.md § Step 6b risk 4);
+// it is not needed for a loopback self-test and is left out to keep the Windows
+// path testable through CI. AF_INET 2, SOCK_STREAM 1, IPPROTO_TCP 6,
+// WSA_FLAG_OVERLAPPED 1, SO_REUSEADDR 4, SOL_SOCKET 0xffff.
+i64  ph_ws2_ready;
+i64  ph_ws2_lock;
+uptr ph_f_socket; uptr ph_f_bind; uptr ph_f_listen; uptr ph_f_accept;
+uptr ph_f_connect; uptr ph_f_closesocket; uptr ph_f_setsockopt;
+uptr ph_f_getsockname; uptr ph_f_send;
+void ph_ws2() {
+    ph_mx_lock(&ph_ws2_lock);
+    if (ld64(&ph_ws2_ready)) { ph_mx_unlock(&ph_ws2_lock); return; }
+    uptr lib = LoadLibraryA("ws2_32.dll");
+    uptr startup = GetProcAddress(lib, "WSAStartup");
+    u8 wsadata[512];
+    callp(startup, 0x0202, wsadata);                   // MAKEWORD(2,2)
+    ph_f_socket      = GetProcAddress(lib, "socket");
+    ph_f_bind        = GetProcAddress(lib, "bind");
+    ph_f_listen      = GetProcAddress(lib, "listen");
+    ph_f_accept      = GetProcAddress(lib, "accept");
+    ph_f_connect     = GetProcAddress(lib, "connect");
+    ph_f_closesocket = GetProcAddress(lib, "closesocket");
+    ph_f_setsockopt  = GetProcAddress(lib, "setsockopt");
+    ph_f_getsockname = GetProcAddress(lib, "getsockname");
+    ph_f_send        = GetProcAddress(lib, "send");
+    st64(&ph_ws2_ready, 1);
+    ph_mx_unlock(&ph_ws2_lock);
+}
+void ph_sa_in(uptr sa, i64 ip, i64 port) {
+    i64 i = 0; loop { if (i >= 16) break; st8(sa + i, 0); i = i + 1; }
+    st8(sa, 2);                                        // AF_INET (little-endian u16)
+    st8(sa + 2, (port >> 8) & 0xff); st8(sa + 3, port & 0xff);
+    st8(sa + 4, (ip >> 24) & 0xff);  st8(sa + 5, (ip >> 16) & 0xff);
+    st8(sa + 6, (ip >> 8) & 0xff);   st8(sa + 7, ip & 0xff);
+}
+uptr ph_sock_new() {                                   // socket(): overlapped by default on Windows
+    if (!ph_f_socket) return 0 - 1;
+    return callp(ph_f_socket, 2, 1, 6);
+}
+i64 ph_os_connect(i64 ip, i64 port) {
+    ph_ws2();
+    i64 fd = ph_sock_new();
+    if (fd + 1 == 0) return 0 - 1;                     // INVALID_SOCKET (~0)
+    u8 sa[16]; ph_sa_in(sa, ip, port);
+    if (callp(ph_f_connect, fd, sa, 16) != 0) { callp(ph_f_closesocket, fd); return 0 - 1; }
+    return fd;
+}
+// the connect already succeeded (blocking) -- never reached on this backend
+i64 ph_os_sockerr(i64 fd) { return 0; }
+// post the connect's completion to the port so the loop resumes the awaiter
+i64 ph_ev_arm_connect(uptr ev, i64 fd, uptr ud, i64 ip, i64 port) {
+    uptr ov = php_alloc(40);
+    i64 i = 0; loop { if (i >= 40) break; st8(ov + i, 0); i = i + 1; }
+    st64(ov + 32, ud);
+    PostQueuedCompletionStatus(ev, 0, 0, ov);
+    return 0;
+}
+// a readable interest is posted as an overlapped ReadFile by ph_ev_arm; the
+// writable-arm form POSIX uses is not a thing on IOCP (completion-shaped)
+i64 ph_ev_arm_w(uptr ev, i64 fd, uptr ud) { return ph_ev_arm_connect(ev, fd, ud, 0, 0); }
+// Test scaffolding: a blocking loopback listener and a one-shot accept-and-send
+i64 ph_os_listen(i64 port) {
+    ph_ws2();
+    i64 fd = ph_sock_new();
+    if (fd + 1 == 0) return 0 - 1;
+    u8 one[4]; st32(one, 1);
+    callp(ph_f_setsockopt, fd, 0xffff, 4, one, 4);     // SO_REUSEADDR
+    u8 sa[16]; ph_sa_in(sa, 0x7f000001, port);
+    if (callp(ph_f_bind, fd, sa, 16) != 0) { callp(ph_f_closesocket, fd); return 0 - 1; }
+    if (callp(ph_f_listen, fd, 16) != 0) { callp(ph_f_closesocket, fd); return 0 - 1; }
+    u8 na[16]; u8 nl[8]; st64(nl, 16);
+    callp(ph_f_getsockname, fd, na, nl);
+    i64 ap = ((ld8(na + 2) & 0xff) << 8) | (ld8(na + 3) & 0xff);
+    return (fd << 32) | (ap & 0xffffffff);
+}
+i64 ph_os_accept_send(i64 lfd, uptr buf, i64 len) {
+    i64 c = callp(ph_f_accept, lfd, 0, 0);
+    if (c + 1 == 0) return 0 - 1;
+    callp(ph_f_send, c, buf, len, 0);
+    callp(ph_f_closesocket, c);
+    return 0;
+}
 
 // the size of a thread's arena: committed up front, which the system charges: kept smaller
 i64 ph_os_arena() { return 67108864; }

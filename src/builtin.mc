@@ -601,7 +601,9 @@ i64 ph_bi_async(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "mcphp_loop_run")) { rt = "php_loop_run"; lo = 0; hi = 0; ety = PT_NULL; }
     if (str_eq(name, "mcphp_await"))    { rt = "php_await"; ety = PT_MIXED; }
     if (str_eq(name, "mcphp_pipe"))     { rt = "php_test_pipe"; lo = 0; hi = 0; }
+    if (str_eq(name, "mcphp_tcp_listen")) rt = "php_test_listen";
     if (str_eq(name, "mcphp_fd_close")) { rt = "php_test_fd_close"; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_tcp_close")) { rt = "php_test_fd_close"; ety = PT_NULL; }
     if (str_eq(name, "mcphp_test_migrate")) { rt = "php_test_migrate"; lo = 0; hi = 0; ety = PT_NULL; }
     if (rt) {
         u8 np[8];
@@ -622,6 +624,7 @@ i64 ph_bi_async(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "mcphp_future_complete")) r2 = "php_fut_complete";
     if (str_eq(name, "mcphp_future_fail"))     r2 = "php_fut_fail";
     if (str_eq(name, "mcphp_fd_write"))        { r2 = "php_test_fd_write"; e2 = PT_INT; }
+    if (str_eq(name, "mcphp_tcp_accept_send")) r2 = "php_test_accept_send";
     if (r2) {
         u8 np[8];
         uptr av = ph_read_args(2, fl, line, np);
@@ -642,6 +645,20 @@ i64 ph_bi_async(uptr name, i64 line, uptr fl) {
         i64 a1 = ph_to_int(ph_a(av, 1), ph_aty(av, 1));
         i64 c = ph_c2("php_io_read", a0, a1, ty_pzv);
         ph_ety = PT_MIXED;             // php_io_read returns a zval (a string), like mcphp_await
+        return c;
+    }
+    // mcphp_connect(int $ip, int $port): int -- a non-blocking TCP connect
+    // driven by the loop (docs/threads.md § Step 6b), returning the connected
+    // fd; it rethrows at the await if the connect failed.
+    if (str_eq(name, "mcphp_connect")) {
+        u8 np[8];
+        uptr av = ph_read_args(2, fl, line, np);
+        if (ld64(np) != 2) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        i64 a0 = ph_to_int(ph_a(av, 0), ph_aty(av, 0));
+        i64 a1 = ph_to_int(ph_a(av, 1), ph_aty(av, 1));
+        i64 c = ph_c2("php_connect", a0, a1, TY_I64);
+        ph_can_throw = 1;
+        ph_ety = PT_INT;
         return c;
     }
     // mcphp_spawn(callable $fn, mixed ...$args): int -- the single-thread

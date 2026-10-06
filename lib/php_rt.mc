@@ -11782,9 +11782,10 @@ void ph_ctx_bootstrap(uptr ctx, uptr top, uptr tramp);
 #define FUT_LEN       48              // its length
 #define FUT_SLOT      56              // the SY slot this future lives in (to set the done-state)
 #define FUT_IONEXT    64              // the loop's pending-I/O list link (a future is a timer XOR an I/O read)
-#define FUT_OWNER     72              // the thread that created it: cross-thread completion is refused until step 6b
-#define FUT_PRODUCER  80              // 1 = owned by a producer (timer/spawn/io): the public complete/fail refuse it
-#define FUT_SIZE      88
+#define FUT_OWNER     72              // the thread that created it (docs/threads.md § Step 6b cross-thread completion routes to its loop)
+#define FUT_PRODUCER  80              // 1 = owned by a producer (timer/spawn/io/connect): the public complete/fail refuse it
+#define FUT_CONNECT   88              // 1 = a pending TCP connect (the loop checks SO_ERROR on writable, it does not read)
+#define FUT_SIZE      96
 
 // a fiber: its saved context, its stack, and the callable it runs. It never
 // migrates threads (FIB_THR), which is what keeps the phT fast-path valid
@@ -12019,6 +12020,19 @@ void ph_fib_resume(uptr lp, uptr fib) {
 // readiness); on Windows the bytes are already in the buffer and nb is the
 // count.
 void ph_io_complete(uptr lp, uptr fut, i64 nb) {
+    // a pending TCP connect: the socket is writable (POSIX, nb < 0) or the
+    // overlapped connect completed (IOCP, nb >= 0). On POSIX read SO_ERROR;
+    // 0 means connected. The future completes with null on success and the fd
+    // is already the caller's (php_connect returns it); it fails otherwise.
+    if (ld64(fut + FUT_CONNECT)) {
+        i64 err = 0;
+        if (nb < 0) err = ph_os_sockerr(ld64(fut + FUT_FD));
+        st64(lp + LOOP_NPEND, ld64(lp + LOOP_NPEND) - 1);
+        ph_io_unlink(lp, fut);
+        if (err) ph_fut_done(lp, fut, 2, php_exc_obj(php_str_new("Error", 5), php_str_new("mc-php: the awaited connect failed", 34)));
+        else ph_fut_done(lp, fut, 1, 0);
+        return;
+    }
     if (nb < 0) {
         nb = ph_io_read_ready(ld64(fut + FUT_FD), ld64(fut + FUT_BUF), ld64(fut + FUT_LEN));
         if (nb == 0 - 2) {                     // EAGAIN: readiness was spurious, re-arm and stay pending
@@ -12363,6 +12377,43 @@ uptr php_io_read(i64 fd, i64 len) {
     st64(fut + FUT_IONEXT, ld64(lp + LOOP_IOLIST)); st64(lp + LOOP_IOLIST, fut);  // track for dup-reject / teardown
     st64(lp + LOOP_NPEND, ld64(lp + LOOP_NPEND) + 1);
     return ph_await_h(h);
+}
+
+// a non-blocking TCP connect driven by the loop (docs/threads.md § Step 6b):
+// the socket is submitted, suspended until the connect completes (writable on
+// POSIX, the overlapped completion on IOCP), and the connected fd returned. The
+// caller then awaits mcphp_io_read on it. A failed connect rethrows at the
+// await. The socket surface the http fetch needs.
+i64 php_connect(i64 ip, i64 port) {
+    uptr phT = ph_cur_phT();
+    if (ph_elive(phT)) return 0 - 1;               // refuse while php's engine is on the stack
+    uptr lp = ph_loop_ensure(phT);
+    i64 fd = ph_os_connect(ip, port);
+    if (fd < 0) { php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: cannot create a socket to connect", 42)); return 0 - 1; }
+    i64 h = php_fut_new();
+    uptr slot = ph_sy_slot(h, SY_FUTURE);
+    uptr fut = ld64(slot + SY_W1);
+    st64(fut + FUT_PRODUCER, 1);                   // the loop completes it
+    st64(fut + FUT_FD, fd);
+    st64(fut + FUT_CONNECT, 1);
+    if (ph_ev_arm_connect(ld64(lp + LOOP_EV), fd, fut, ip, port) != 0) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: cannot submit the connect", 33));
+        return 0 - 1;
+    }
+    st64(fut + FUT_IONEXT, ld64(lp + LOOP_IOLIST)); st64(lp + LOOP_IOLIST, fut);
+    st64(lp + LOOP_NPEND, ld64(lp + LOOP_NPEND) + 1);
+    ph_await_h(h);                                 // null on success, rethrows on failure
+    return fd;
+}
+
+// Test scaffolding (docs/threads.md § Step 6b): a blocking loopback listener
+// and a one-shot accept-and-send on another thread, so a self-test's connect
+// has a peer without touching the network. NOT the step surface.
+i64 php_test_listen(i64 port) { return ph_os_listen(port); }
+uptr php_test_accept_send(i64 lfd, uptr z) {
+    uptr s = ld64(z);                              // the zval's zend_string
+    ph_os_accept_send(lfd, s + ZS_HDR, ld64(s + 16));
+    return php_znull();
 }
 
 // Test scaffolding (docs/threads.md § Step 5): a non-blocking pipe, its two

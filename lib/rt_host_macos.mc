@@ -293,6 +293,86 @@ void ph_ev_wake_close(uptr ev, uptr handle) {
     close(handle & 0xffffffff);
 }
 
+// --- non-blocking TCP, driven by the loop (docs/threads.md § Step 6b) --------
+// A connect is submitted non-blocking and completed by the loop when the socket
+// becomes WRITABLE (then SO_ERROR says connected or why not). A read reuses the
+// readable arm-and-go of ph_ev_arm. The server side a self-test needs is one
+// blocking accept on another thread. macOS: AF_INET 2, SOCK_STREAM 1,
+// EINPROGRESS 36, SOL_SOCKET 0xffff, SO_ERROR 0x1007, SO_REUSEADDR 4,
+// EVFILT_WRITE -2.
+extern i64 socket(i64 dom, i64 type, i64 proto);
+extern i64 connect(i64 fd, uptr addr, i64 len);
+extern i64 bind(i64 fd, uptr addr, i64 len);
+extern i64 listen(i64 fd, i64 backlog);
+extern i64 accept(i64 fd, uptr addr, uptr alen);
+extern i64 setsockopt(i64 fd, i64 level, i64 opt, uptr val, i64 len);
+extern i64 getsockopt(i64 fd, i64 level, i64 opt, uptr val, uptr len);
+extern i64 getsockname(i64 fd, uptr addr, uptr alen);
+// a sockaddr_in for ip:port into sa[16]: sin_len, AF_INET, port and addr in
+// network (big-endian) order
+void ph_sa_in(uptr sa, i64 ip, i64 port) {
+    i64 i = 0; loop { if (i >= 16) break; st8(sa + i, 0); i = i + 1; }
+    st8(sa, 16);                                       // sin_len (macOS)
+    st8(sa + 1, 2);                                    // AF_INET
+    st8(sa + 2, (port >> 8) & 0xff); st8(sa + 3, port & 0xff);
+    st8(sa + 4, (ip >> 24) & 0xff);  st8(sa + 5, (ip >> 16) & 0xff);
+    st8(sa + 6, (ip >> 8) & 0xff);   st8(sa + 7, ip & 0xff);
+}
+// a non-blocking socket connecting to ip:port; the fd (>= 0) with the connect
+// in progress (or already done), -1 on a hard failure
+i64 ph_os_connect(i64 ip, i64 port) {
+    i64 fd = socket(2, 1, 0);
+    if (fd < 0) return 0 - 1;
+    fcntl(fd, 4, 4);                                   // O_NONBLOCK
+    u8 sa[16]; ph_sa_in(sa, ip, port);
+    if (connect(fd, sa, 16) == 0) return fd;           // loopback can connect at once
+    if (php_c_errno() == 36) return fd;                // EINPROGRESS
+    close(fd); return 0 - 1;
+}
+// the pending socket error once a connect's socket is writable: 0 = connected
+i64 ph_os_sockerr(i64 fd) {
+    u8 e[8]; u8 l[8]; st64(e, 0); st64(l, 4);
+    getsockopt(fd, 0xffff, 0x1007, e, l);              // SOL_SOCKET, SO_ERROR
+    return ld32(e) & 0xffffffff;
+}
+// arm a one-shot WRITABLE interest (a connect completion). EVFILT_WRITE = -2.
+i64 ph_ev_arm_w(uptr ev, i64 fd, uptr ud) {
+    u8 ke[32];
+    i64 i = 0; loop { if (i >= 32) break; st8(ke + i, 0); i = i + 1; }
+    st64(ke, fd);
+    st16(ke + 8, 0xFFFE);                              // EVFILT_WRITE (-2)
+    st16(ke + 10, 0x0011);                             // EV_ADD | EV_ONESHOT
+    st64(ke + 24, ud);
+    if (kevent(ev, ke, 1, 0, 0, 0) < 0) return 1;
+    return 0;
+}
+// a connect's socket is already associated to the port on Windows (IOCP); on
+// POSIX this is the writable arm-and-go. Keeps the loop core backend-neutral.
+i64 ph_ev_arm_connect(uptr ev, i64 fd, uptr ud, i64 ip, i64 port) { return ph_ev_arm_w(ev, fd, ud); }
+// Test scaffolding: a blocking loopback listener on 127.0.0.1:port (0 =
+// ephemeral); (listen_fd << 32 | the port actually bound), -1 on failure.
+i64 ph_os_listen(i64 port) {
+    i64 fd = socket(2, 1, 0);
+    if (fd < 0) return 0 - 1;
+    u8 one[4]; st32(one, 1);
+    setsockopt(fd, 0xffff, 4, one, 4);                 // SO_REUSEADDR
+    u8 sa[16]; ph_sa_in(sa, 0x7f000001, port);
+    if (bind(fd, sa, 16) != 0) { close(fd); return 0 - 1; }
+    if (listen(fd, 16) != 0) { close(fd); return 0 - 1; }
+    u8 na[16]; u8 nl[8]; st64(nl, 16);
+    getsockname(fd, na, nl);
+    i64 ap = ((ld8(na + 2) & 0xff) << 8) | (ld8(na + 3) & 0xff);
+    return (fd << 32) | (ap & 0xffffffff);
+}
+// Test scaffolding: accept ONE connection (blocking), write buf, close it.
+i64 ph_os_accept_send(i64 lfd, uptr buf, i64 len) {
+    i64 c = accept(lfd, 0, 0);
+    if (c < 0) return 0 - 1;
+    write(c, buf, len);
+    close(c);
+    return 0;
+}
+
 // the size of a thread's arena: reserved: pages are touched as used
 i64 ph_os_arena() { return 268435456; }
 // the process's virtual size in bytes, -1 when it cannot be read:
