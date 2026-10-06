@@ -22,10 +22,10 @@
 #     limactl shell mc-k7 -- sh "$PWD/tests/linux.sh" aarch64
 #
 # perl is what tests/lim.sh bounds every fixture with, and the php image does
-# not carry it; it is the one package this adds, so that the gate stays the
-# gate instead of a Linux fork of it. lld is the second, and it is the LINKER:
-# php loads a shared object and mc writes an ELF executable, so the [linker]
-# road is the only road here as it is on macOS (docs/php-extension.md).
+# not carry it. lld is the LINKER (ld.lld) and musl-dev the crt objects and
+# libc.so: mc-php writes an OBJECT on every host and the platform linker makes
+# the program against the platform libc -- the program road and the extension
+# road both link now, there is no one-step --exe (docs/php-extension.md).
 set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH= cd -- "$here/.." && pwd)
@@ -69,7 +69,10 @@ exec docker run --rm --platform "$plat" \
     "$img" sh -c '
 set -u
 mkdir -p /tmp/mcphp-linux
-apk add --no-cache perl lld >/dev/null 2>&1 || { echo "  cannot install perl and lld"; exit 2; }
+# perl bounds every fixture (tests/lim.sh); lld is the LINKER (ld.lld) and
+# musl-dev the crt objects and libc.so a program links against -- mc-php writes
+# an OBJECT on every host and the platform linker makes the program.
+apk add --no-cache perl lld musl-dev >/dev/null 2>&1 || { echo "  cannot install perl, lld and musl-dev"; exit 2; }
 # ZTS: a C compiler too, so the C twins and the layout gate are built against
 # the headers of THIS php -- the thread-safe reference the module is graded beside
 if [ "$ZTS" = 1 ]; then
@@ -87,7 +90,9 @@ cat > /tmp/hosts-smoke.php <<"EOF"
 echo PHP_OS, "|", PHP_OS_FAMILY, "|", DIRECTORY_SEPARATOR, "|", PATH_SEPARATOR, "\n";
 var_dump(is_dir("/tmp"), is_file("/etc/hosts"), filesize("/etc/hosts") > 0, strlen(getcwd()) > 0);
 EOF
-"$BIN" --exe /tmp/hosts-smoke.php -o /tmp/hosts-smoke || exit 1
+. tests/link.sh
+"$BIN" /tmp/hosts-smoke.php -o /tmp/hosts-smoke.o || exit 1
+mcphp_link /tmp/hosts-smoke.o /tmp/hosts-smoke || exit 1
 /tmp/hosts-smoke > /tmp/hosts-smoke.mc 2>&1; mrc=$?
 php -d display_errors=1 -d log_errors=1 -d html_errors=0 -d error_reporting=E_ALL \
     /tmp/hosts-smoke.php > /tmp/hosts-smoke.php.out 2>&1; prc=$?

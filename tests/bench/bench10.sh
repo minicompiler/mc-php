@@ -29,6 +29,9 @@ trap 'rm -rf "$tmp"' EXIT
 # so the run writes one; `--no-record` is for a scratch run.
 # the shared bounded runner (tests/lim.sh), which needs $tmp
 . "$(dirname -- "$0")/../lim.sh"
+# the per-host link command (mcphp_link): mc-php writes an object and the
+# platform linker makes the program -- there is no one-step --exe road
+. "$(dirname -- "$0")/../link.sh"
 LIM_SECS=${LIM_SECS:-120}
 
 stamp=$(date -u +%Y-%m-%d)
@@ -68,8 +71,12 @@ for prog in main.php heavy.php; do
     # BOUNDED like the two runs below it: a compiler regression that does not
     # TERMINATE would otherwise hang run.sh here, before the bounded gate or
     # the cleanup trap could run
-    if ! lim "$BIN" --exe "tests/bench/$prog" -o "$tmp/bench"; then
+    if ! lim "$BIN" "tests/bench/$prog" -o "$tmp/bench.obj"; then
         echo "bench: $prog does not compile"
+        exit 1
+    fi
+    if ! mcphp_link "$tmp/bench.obj" "$tmp/bench"; then
+        echo "bench: $prog does not link"
         exit 1
     fi
     # BYTE for byte and the exit status, both: `$(...)` strips every trailing

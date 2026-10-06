@@ -44,10 +44,17 @@ export BIN
 PHP=${PHP:-php}
 # the form the NATIVE programs read: MSYS's /d/a/... means nothing to them
 rootn=$(cygpath -m "$root" 2>/dev/null || echo "$root")
-if [ "$arch" = aarch64 ]; then
-    MCPHP_WINLINK=$rootn/build/win-aarch64
-    export MCPHP_WINLINK
-fi
+# A PROGRAM goes through the object + lld-link road on BOTH architectures: on
+# windows/aarch64 mc has no one-step PE writer, and on windows/x86_64 the bare
+# `--exe` (no CRT) cannot run mc-php's per-thread runtime -- so both link the
+# object against ucrtbase.lib. MCPHP_WINLINK names the import libraries and
+# MCPHP_WINMACHINE the lld-link -machine, per arch.
+MCPHP_WINLINK=$rootn/build/win-$arch
+case "$arch" in
+    aarch64) MCPHP_WINMACHINE=arm64 ;;
+    x86_64)  MCPHP_WINMACHINE=x64 ;;
+esac
+export MCPHP_WINLINK MCPHP_WINMACHINE
 fail=0
 
 echo "== windows/$arch: $BIN =="

@@ -18,6 +18,9 @@
 # this repository's.
 set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# the per-host link command (mcphp_link), shared with bench10.sh and the
+# linux smoke so the proven link lives in one place
+. "$here/link.sh"
 # the PRIVATE name first: probes/t0/phpt-run.py talks to this wrapper on
 # MCPHP__* so that a .phpt's own --ENV-- may use the public names, and a
 # standalone caller (fixtures.sh, run.sh, bench10.sh) still sets those.
@@ -52,11 +55,11 @@ out=$tmp.out
 # reach it. The caller's timeout kills this wrapper; without this the
 # compiler kept going, kept writing the binary, and left exactly the orphan
 # the temporary-directory bound exists to prevent.
-# Windows: an executable is a `.exe` or the loader will not start it, and on
-# windows/aarch64 mc has no one-step PE writer (its exe slot is 0), so there
-# the compiler writes an OBJECT and lld-link makes the program -- the road
-# tests/windows.sh asks for by setting MCPHP_WINLINK to the directory
-# tests/winsys.sh filled. windows/x86_64 keeps the one-step --exe.
+# mc-php writes an OBJECT on every host and the platform linker makes the
+# program (mcphp_link in tests/link.sh): there is no one-step `--exe` road any
+# more (docs/plan.md). Windows needs a `.exe` name or the loader will not
+# start it; tests/windows.sh sets MCPHP_WINLINK (the import-library directory
+# tests/winsys.sh filled) and MCPHP_WINMACHINE (the lld-link -machine).
 exe=$tmp
 case $(uname -s) in MINGW*|MSYS*|CYGWIN*) exe=$tmp.exe ;; esac
 # MCPHP__RC=check (tests/grid.sh's and tests/fixtures.sh's private name for
@@ -79,33 +82,27 @@ opt_proj=
 # the file's own tables plus a [project] this wrapper writes. The generated
 # file sits BESIDE the source and names the entry and the output by their
 # bare names, because mc resolves a relative path against the config's
-# directory and does not read a Windows drive path (D:/...) as absolute; the
-# output is moved to where the caller wants it once the build is done.
+# directory and does not read a Windows drive path (D:/...) as absolute. Both
+# roads produce an OBJECT (kind = "obj" for the project road); the object is
+# linked to the final program below, one road for the two.
 cfg=${src%.php}.toml
 pdir=$(dirname "$src")
 pnm=.mcphp.$$.$(basename "$src" .php)
 if [ -f "$cfg" ]; then
-    kind=exe; po=$pnm; pdest=$exe
-    [ "$exe" != "$tmp" ] && po=$pnm.exe
-    [ -n "${MCPHP_WINLINK:-}" ] && { kind=obj; po=$pnm.obj; pdest=$tmp.obj; }
-    { printf '[project]\nentry = "%s"\nout = "%s"\nkind = "%s"\n' "$(basename "$src")" "$po" "$kind"; [ -n "$opt_proj" ] && echo "$opt_proj"; printf '\n'; cat "$cfg"; } > "$pdir/$pnm.toml"
+    obj=$pdir/$pnm.obj
+    { printf '[project]\nentry = "%s"\nout = "%s"\nkind = "obj"\n' "$(basename "$src")" "$pnm.obj"; [ -n "$opt_proj" ] && echo "$opt_proj"; printf '\n'; cat "$cfg"; } > "$pdir/$pnm.toml"
     env $rc_env "$MCPHP" build "$pdir" --config "$pdir/$pnm.toml" > "$out" 2> "$err" &
-elif [ -n "${MCPHP_WINLINK:-}" ]; then
-    env $rc_env "$MCPHP" $opt_flag "$src" -o "$tmp.obj" > "$out" 2> "$err" &
 else
-    env $rc_env "$MCPHP" $opt_flag --exe "$src" -o "$exe" > "$out" 2> "$err" &
+    obj=$tmp.obj
+    env $rc_env "$MCPHP" $opt_flag "$src" -o "$obj" > "$out" 2> "$err" &
 fi
 mcpid=$!
-trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj" "$pdir/$pnm" "$pdir/$pnm".*; exit 143' TERM
-trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj" "$pdir/$pnm" "$pdir/$pnm".*; exit 130' INT
+trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$obj" "$pdir/$pnm" "$pdir/$pnm".*; exit 143' TERM
+trap 'kill -9 $mcpid 2>/dev/null; rm -f "$err" "$out" "$tmp" "$exe" "$obj" "$pdir/$pnm" "$pdir/$pnm".*; exit 130' INT
 wait $mcpid
 rc=$?
-# the project road prints its own step line on stdout; it is the build's, not the program's
-if [ -f "$cfg" ]; then
-    rm -f "$pdir/$pnm.toml"
-    [ "$rc" = 0 ] && { : > "$out"; mv -f "$pdir/$po" "$pdest"; }
-    rm -f "$pdir/$po"
-fi
+# the project road wrote its generated config beside the source; drop it
+[ -f "$cfg" ] && rm -f "$pdir/$pnm.toml"
 trap - TERM INT
 if [ "$rc" != 0 ]; then
     cat "$err" >&2
@@ -113,21 +110,25 @@ if [ "$rc" != 0 ]; then
     # 255 is a php compile-time fatal: php reports those while parsing too,
     # and exits 255. The text is already written; passing the code through is
     # what makes the grid compare it.
-    if [ "$rc" = 255 ]; then rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj"; exit 255; fi
-    if grep -q 'is refused by design' "$err"; then rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj"; exit 3; fi
-    rm -f "$err" "$out" "$tmp" "$exe" "$tmp.obj"
+    if [ "$rc" = 255 ]; then rm -f "$err" "$out" "$tmp" "$exe" "$obj"; exit 255; fi
+    if grep -q 'is refused by design' "$err"; then rm -f "$err" "$out" "$tmp" "$exe" "$obj"; exit 3; fi
+    rm -f "$err" "$out" "$tmp" "$exe" "$obj"
     exit 2
 fi
 
-if [ -n "${MCPHP_WINLINK:-}" ]; then
-    lld-link -machine:arm64 -subsystem:console -entry:mc_start -nodefaultlib \
-        -out:"$exe" "$tmp.obj" "$MCPHP_WINLINK/kernel32.lib" "$MCPHP_WINLINK/ucrtbase.lib" \
-        > "$out" 2> "$err"
-    lrc=$?
-    rm -f "$tmp.obj"
-    if [ "$lrc" != 0 ]; then cat "$err" >&2; cat "$out"; rm -f "$err" "$out" "$exe"; exit 2; fi
+# The project road prints its own `compile ... -> ....obj` step line on stdout;
+# it is the build's, not the program's, so clear it before the program runs.
+[ -f "$cfg" ] && : > "$out"
+
+# Link the object into the program with the host linker (tests/link.sh). A link
+# failure is an ordinary compile error for the grid (exit 2), never a refusal.
+if ! mcphp_link "$obj" "$exe" > "$out" 2> "$err"; then
+    cat "$err" >&2
+    cat "$out"
+    rm -f "$err" "$out" "$tmp" "$exe" "$obj"
+    exit 2
 fi
-rm -f "$err" "$out"
+rm -f "$err" "$out" "$obj"
 # The wrapper's own scratch name is not the PROGRAM's business: the oracle
 # runs without it, so a .phpt that reads getenv('MCPHP_OUT') or enumerates
 # its environment would see two different environments and be classified on

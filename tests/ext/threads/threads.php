@@ -114,8 +114,11 @@ function dtors(): string {
     return $r1 . " " . $r2->n . " " . $r3->n . " " . (($r3 === $a) ? "same" : "distinct");
 }
 // a detached thread the request does not wait for itself: RSHUTDOWN does,
-// so its line comes out before php ends
-function late(int $ms): int { usleep($ms * 1000); echo "the detached thread finished inside the request\n"; return 1; }
+// so its line comes out before php ends. The compiled worker AWAITS a timer
+// (not usleep), so it builds an event loop that ph_loop_destroy tears down on
+// the RSHUTDOWN reap path -- the unjoined counterpart of workers_await's
+// join-time teardown (docs/threads.md § Step 5).
+function late(int $ms): int { mcphp_await(mcphp_timer($ms)); echo "the detached thread finished inside the request\n"; return 1; }
 function detach_late(int $ms): string {
     mcphp_thread_detach(mcphp_thread_start(fn(int $m): int => late($m), $ms));
     return "detached, running " . mcphp_thread_running();
@@ -218,3 +221,22 @@ function sy_block(int $t): string {
     foreach ($hs as $h) mcphp_thread_join($h);
     return (mcphp_atomic_load($a) === $t ? "wg" : "WG") . " " . (mcphp_atomic_load($woke) === $t ? "bc" : "BC");
 }
+
+// docs/threads.md § Step 5: this runs with php's engine on the stack (the
+// engine called it), so the await inside must be refused by name -- suspending
+// with an EG frame open would corrupt the executor on resume. Never returns a
+// value; the await throws first.
+function engine_await(): int {
+    mcphp_await(mcphp_timer(1));
+    return 0;
+}
+
+// docs/threads.md § Step 5: a COMPILED worker has no php engine on its stack, so
+// its await SUCCEEDS where engine_await() is refused. mcphp_threads runs each
+// worker compiled (phx_depth == 0) and joins them; worker i awaits a timer and
+// returns i + 1, so the sum is n(n+1)/2. This exercises the worker thread-block
+// allocator, a real suspend/resume off the engine, and the loop teardown at the
+// worker's reap (php_thr_run's join -> ph_loop_destroy, the same teardown
+// RSHUTDOWN's reap runs for an unjoined worker).
+function await_timer(int $ms, int $id): int { mcphp_await(mcphp_timer($ms)); return $id + 1; }
+function workers_await(int $n, int $ms): int { return mcphp_threads('th\await_timer', $n, $ms); }

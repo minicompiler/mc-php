@@ -167,6 +167,95 @@ uptr ph_os_map(i64 n) {
     return p;
 }
 void ph_os_unmap(uptr p, i64 n) { munmap(p, n); }
+
+// --- the event loop's fiber stacks and reactor (docs/threads.md § Step 5) ---
+// A fiber's stack: n bytes, the lowest page PROT_NONE so a stack overflow
+// (the stack grows down) faults instead of corrupting the page below. Lazily
+// committed: MAP_NORESERVE, pages touched as used. 0 when the kernel says no.
+// The page is 16 KiB on Apple Silicon; mprotect one page is enough.
+extern i64 mprotect(uptr addr, i64 n, i64 prot);
+uptr ph_os_map_stack(i64 n) {
+    uptr p = mmap(0, n, 3, 0x1002, 0 - 1, 0);          // RW, PRIVATE|ANON
+    if (p + 1 == 0) return 0;
+    mprotect(p, 16384, 0);                             // PROT_NONE guard page
+    return p;
+}
+
+// kqueue is the macOS reactor. ph_ev_arm registers a one-shot readable
+// interest with udata = ud (the future to resume); the loop does the read on
+// readiness (ph_ev_wait returns nbytes = -1, the reactor-emulation sentinel).
+// struct kevent: ident 0, filter(i16) 8, flags(u16) 10, fflags 12, data 16,
+// udata 24 -- 32 bytes. EVFILT_READ -1, EV_ADD 1 | EV_ONESHOT 0x10.
+extern i64 kqueue();
+extern i64 kevent(i64 kq, uptr cl, i64 nc, uptr el, i64 ne, uptr ts);
+uptr ph_ev_create() { i64 k = kqueue(); if (k < 0) return 0; return k; }
+i64 ph_ev_arm(uptr ev, i64 fd, uptr ud, uptr buf, i64 len) {
+    u8 ke[32];
+    i64 i = 0; loop { if (i >= 32) break; st8(ke + i, 0); i = i + 1; }
+    st64(ke, fd);                                      // ident
+    st16(ke + 8, 0xFFFF);                              // filter = EVFILT_READ (-1)
+    st16(ke + 10, 0x0011);                             // EV_ADD | EV_ONESHOT
+    st64(ke + 24, ud);                                 // udata
+    if (kevent(ev, ke, 1, 0, 0, 0) < 0) return 1;
+    return 0;
+}
+// ph_ev_wait: up to `max` ready events into `out` as (ud, nbytes) 16-byte
+// pairs. ms < 0 blocks for ever, ms >= 0 waits that long. nbytes is -1 so the
+// loop core reads the fd itself (the completion-shaped surface's POSIX half).
+i64 ph_ev_wait(uptr ev, uptr out, i64 max, i64 ms) {
+    if (max > 64) max = 64;
+    u8 el[2048];                                       // 64 * 32
+    u8 ts[16];
+    uptr tsp = 0;
+    if (ms >= 0) { st64(ts, ms / 1000); st64(ts + 8, (ms % 1000) * 1000000); tsp = ts; }
+    i64 n = kevent(ev, 0, 0, el, max, tsp);
+    if (n < 0) n = 0;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        st64(out + i * 16, ld64(el + i * 32 + 24));    // udata
+        st64(out + i * 16 + 8, 0 - 1);                 // nbytes = -1: loop reads
+        i = i + 1;
+    }
+    return n;
+}
+// close the kqueue fd when its loop is torn down (docs/threads.md § Step 5)
+void ph_ev_close(uptr ev) { close(ev); }
+// kqueue holds no user buffer across the wait (the loop does the read itself), so
+// there is nothing the kernel can write after teardown: cancel/drain are no-ops.
+void ph_ev_cancel(uptr ev, i64 fd) {}
+void ph_ev_drain(uptr ev, i64 n) {}
+// read a ready fd for the loop's reactor emulation: retry EINTR (4), signal -2
+// on EAGAIN (35 on macOS: readiness was spurious, re-arm), -1 on any other
+// error (a real failure, not a false EOF).
+i64 ph_io_read_ready(i64 fd, uptr buf, i64 len) {
+    loop {
+        i64 n = read(fd, buf, len);
+        if (n >= 0) return n;
+        i64 e = php_c_errno();
+        if (e == 4) continue;
+        if (e == 35) return 0 - 2;
+        return 0 - 1;
+    }
+}
+
+// Test scaffolding (docs/threads.md § Step 5, the self-test): a pipe whose
+// read end is non-blocking. NOT part of the step-5 surface -- users await
+// file://sockets in 6b; the self-test needs a bare fd to await. [r, w] into
+// out2 (two i64). fcntl F_SETFL 4, O_NONBLOCK 4 on macOS.
+extern i64 pipe(uptr fds);
+extern i64 fcntl(i64 fd, i64 cmd, i64 arg);
+i64 ph_os_pipe(uptr out2) {
+    u8 fds[8];
+    if (pipe(fds) != 0) return 1;
+    i64 r = ld32(fds) & 0xffffffff;
+    i64 w = ld32(fds + 4) & 0xffffffff;
+    fcntl(r, 4, 4);                                    // F_SETFL O_NONBLOCK
+    st64(out2, r);
+    st64(out2 + 8, w);
+    return 0;
+}
+
 // the size of a thread's arena: reserved: pages are touched as used
 i64 ph_os_arena() { return 268435456; }
 // the process's virtual size in bytes, -1 when it cannot be read:

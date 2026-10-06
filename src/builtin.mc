@@ -579,6 +579,103 @@ i64 ph_bi_sync(uptr name, i64 line, uptr fl) {
     return c;
 }
 
+// The event loop and await (docs/threads.md § Step 5): cooperative fibers on
+// one thread, suspended at an await until a timer, a future or an fd is ready.
+// Eight published intrinsics, plus the self-test's pipe scaffolding (marked).
+//   mcphp_future(): int                          a pending future (a handle)
+//   mcphp_future_complete(int $f, mixed $v): void
+//   mcphp_future_fail(int $f, \Throwable $e): void
+//   mcphp_await(int $f): mixed                    suspend until $f is done
+//   mcphp_timer(int $ms): int                     a future done after $ms
+//   mcphp_loop_run(): void                        drive until nothing is pending
+//   mcphp_spawn(callable $fn, mixed ...$args): int  run $fn on a fresh fiber
+//   mcphp_io_read(int $fd, int $len): string      await a non-blocking read
+// Values cross an await as ordinary in-arena values (cooperative, one thread:
+// no deep copy within a thread; cross-thread completion is step 6b).
+i64 ph_bi_async(uptr name, i64 line, uptr fl) {
+    // the one-int and no-arg ones, by table
+    uptr rt = 0;
+    i64 lo = 1; i64 hi = 1; i64 ety = PT_INT;
+    if (str_eq(name, "mcphp_future"))   { rt = "php_fut_new"; lo = 0; hi = 0; }
+    if (str_eq(name, "mcphp_timer"))    rt = "php_timer";
+    if (str_eq(name, "mcphp_loop_run")) { rt = "php_loop_run"; lo = 0; hi = 0; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_await"))    { rt = "php_await"; ety = PT_MIXED; }
+    if (str_eq(name, "mcphp_pipe"))     { rt = "php_test_pipe"; lo = 0; hi = 0; }
+    if (str_eq(name, "mcphp_fd_close")) { rt = "php_test_fd_close"; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_test_migrate")) { rt = "php_test_migrate"; lo = 0; hi = 0; ety = PT_NULL; }
+    if (rt) {
+        u8 np[8];
+        uptr av = ph_read_args(2, fl, line, np);
+        i64 n = ld64(np);
+        if (n < lo || n > hi) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        i64 a0 = 0;
+        if (n > 0) a0 = ph_to_int(ph_a(av, 0), ph_aty(av, 0));
+        i64 ty = TY_I64;
+        if (ety == PT_NULL || ety == PT_MIXED) ty = ty_pzv;
+        i64 c = ph_call(rt, n, a0, 0, 0, 0, ty);
+        ph_ety = ety;
+        return c;
+    }
+    // (int, mixed): complete, fail, and the pipe-write scaffolding
+    uptr r2 = 0;
+    i64 e2 = PT_NULL;
+    if (str_eq(name, "mcphp_future_complete")) r2 = "php_fut_complete";
+    if (str_eq(name, "mcphp_future_fail"))     r2 = "php_fut_fail";
+    if (str_eq(name, "mcphp_fd_write"))        { r2 = "php_test_fd_write"; e2 = PT_INT; }
+    if (r2) {
+        u8 np[8];
+        uptr av = ph_read_args(2, fl, line, np);
+        if (ld64(np) != 2) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        i64 a0 = ph_to_int(ph_a(av, 0), ph_aty(av, 0));
+        i64 a1 = ph_to_mixed(ph_a(av, 1), ph_aty(av, 1));
+        i64 ty = ty_pzv; if (e2 == PT_INT) ty = TY_I64;
+        i64 c = ph_c2(r2, a0, a1, ty);
+        ph_ety = e2;
+        return c;
+    }
+    // mcphp_io_read(int $fd, int $len): string
+    if (str_eq(name, "mcphp_io_read")) {
+        u8 np[8];
+        uptr av = ph_read_args(2, fl, line, np);
+        if (ld64(np) != 2) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        i64 a0 = ph_to_int(ph_a(av, 0), ph_aty(av, 0));
+        i64 a1 = ph_to_int(ph_a(av, 1), ph_aty(av, 1));
+        i64 c = ph_c2("php_io_read", a0, a1, ty_pzv);
+        ph_ety = PT_MIXED;             // php_io_read returns a zval (a string), like mcphp_await
+        return c;
+    }
+    // mcphp_spawn(callable $fn, mixed ...$args): int -- the single-thread
+    // analog of mcphp_thread_start, the fiber entry point. Arguments by value.
+    if (str_eq(name, "mcphp_spawn")) {
+        u8 snp[8];
+        uptr sav = ph_read_args(6, fl, line, snp);
+        i64 sn = ld64(snp);
+        if (sn < 1) ph_todo2(fl, line, "the wrong number of arguments for", name);
+        if (sn > 6) ph_todo2(fl, line, "more than five arguments for a fiber in", name);
+        i64 c = node_new(N_CALL, line, fl);
+        set_nd_name(c, "php_fib_spawn");
+        set_nd_type(c, TY_I64);
+        i64 a0 = ph_to_mixed(ph_a(sav, 0), ph_aty(sav, 0));
+        set_nd_a(c, a0);
+        i64 cnt = ph_int(sn - 1);
+        set_nd_next(a0, cnt);
+        i64 prev = cnt;
+        i64 si = 1;
+        loop {
+            if (si > 5) break;
+            i64 arg = ph_int(0);
+            if (si < sn) arg = ph_to_mixed(ph_a(sav, si), ph_aty(sav, si));
+            set_nd_next(prev, arg);
+            prev = arg;
+            si = si + 1;
+        }
+        ph_can_throw = 1;
+        ph_ety = PT_INT;
+        return c;
+    }
+    return 0;
+}
+
 i64 ph_builtin(uptr name, i64 line, uptr fl) {
     // the name as written, resolved (src/ns.mc): as a function here, as a
     // constant where one is looked up, as a class before `::`. Outside a
@@ -892,6 +989,8 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     }
     i64 sy = ph_bi_sync(name, line, fl);
     if (sy) return sy;
+    i64 as = ph_bi_async(name, line, fl);
+    if (as) return as;
     // The thread API (docs/threads.md § Step 3), the primitive layer:
     //   mcphp_thread_start(callable $fn, mixed ...$args): int
     //   mcphp_thread_join(int $t): mixed

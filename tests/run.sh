@@ -44,6 +44,8 @@ cd "$root"
 MC=${MC:-mc}
 BIN=${BIN:-build/mc-php}
 export BIN
+# the macOS SDK path once, so tests/link.sh does not run xcrun per fixture
+[ "$(uname -s)" = Darwin ] && export MCPHP_SDK=${MCPHP_SDK:-$(xcrun --show-sdk-path)}
 fail=0
 
 "$MC" --version
@@ -84,6 +86,15 @@ if [ "$dm_plain" = 0xc8dffc00 ] && [ "$dm_x64" = 0x90078b48 ] && [ "$dm_win" = 0
     echo "  dump machine: --machine= selects the atomics words in a dump (arm64 / x86-64 / Win64)"
 else
     echo "  FAIL dump machine: plain $dm_plain, x86_64 $dm_x64, x86_64-win $dm_win"; fail=1
+fi
+# the fiber context switch (docs/threads.md § Step 5) follows --machine= too:
+# ph_ctx_swap's first word is the selected architecture's, not the host's.
+cs() { echo "<?php echo 1;" | "$BIN" --dump-asm ${1:+--machine=$1} /dev/stdin 2>&1 | awk '/_ph_ctx_swap:/{f=1} f&&/\.word/{print $2; exit}'; }
+cs_plain=$(cs); cs_x64=$(cs x86_64); cs_win=$(cs x86_64-win)
+if [ "$cs_plain" = 0xa9005013 ] && [ "$cs_x64" = 0x481f8948 ] && [ "$cs_win" = 0x48198948 ]; then
+    echo "  dump machine: --machine= selects the ph_ctx_swap words in a dump (arm64 / x86-64 / Win64)"
+else
+    echo "  FAIL dump machine (fiber): plain $cs_plain, x86_64 $cs_x64, x86_64-win $cs_win"; fail=1
 fi
 ls -l "$BIN" | awk '{ printf "  %s  %s bytes\n", "'"$BIN"'", $5 }'
 

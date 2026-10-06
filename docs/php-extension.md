@@ -17,8 +17,17 @@ On Windows the artefact is a `.dll` and the file is `examples/hello/mcphp.window
 
 There is no flag and there will not be one. The switch is the project file, exactly as
 `docs/mcphp-toml.md` says: **an `[extension]` table means an extension, and no `[extension]`
-table means the program road, unchanged.** `mc-php --exe x.php -o x` sees no project file at all
-and is what it always was.
+table means the program road.** `mc-php x.php -o x` sees no project file at all. On macOS and Linux
+it compiles to an object AND links it with the host linker in one step (there is no one-step
+`--exe`: `ld` on macOS, `ld.lld` on Linux). On **Windows** it writes the object only -- the import
+libraries `lld-link` needs are not on a fixed path (§ Windows) -- so there you link it yourself,
+exactly as README.md § On Windows shows:
+
+```sh
+mc-php x.php -o x.obj
+lld-link -machine:x64 -subsystem:console -entry:mc_start -nodefaultlib \
+    -out:x.exe x.obj kernel32.lib ucrtbase.lib
+```
 
 ## What a source may say today
 

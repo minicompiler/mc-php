@@ -927,3 +927,283 @@ number; a wrong handle names its actual kind against the wanted one.
 - `tests/run.sh`: a dump-machine check -- `--dump-asm --machine=x86_64` on an arm64 host must
   dump the x86-64 atomic words, not the arm64 ones (the atomics file follows the selected
   machine in a dump mode).
+
+## Step 5: the event loop and `await` of real I/O (BUILT)
+
+Steps 1-4 give threads and sync. Step 5 adds the other half of concurrency: one thread that
+does many I/Os at once, by suspending the php call at an `await` point until the I/O is ready,
+without blocking the OS thread. It is the base step 6b builds on (the awaitable example's
+non-blocking `file://`/socket fetches). The step-6a `await` in `examples/awaitable` is a
+placeholder -- it runs the callable to completion on the calling thread; step 5 makes `await`
+really suspend.
+
+### Built (as-built, and what the design under-scoped)
+
+The design below was approved before implementation and is accurate, with the following
+decisions the owner ruled during the build (and this is what shipped):
+
+- **The surface is EIGHT intrinsics, not six.** The six listed in § 4 could not *create* a fiber,
+  so `ph_ctx_swap` would have been dead code and the mandatory no-migration / stack-exhaustion
+  self-tests unreachable. Added as full published intrinsics:
+  - **`mcphp_spawn(callable $fn, mixed ...$args): int`** -- run `$fn` on a fresh fiber, returning
+    an `SY_FUTURE` that completes with its return value (or fails with its thrown exception). The
+    single-thread analog of `mcphp_thread_start`; the fiber entry point.
+  - **`mcphp_io_read(int $fd, int $len): string`** -- submit a non-blocking read via
+    `ph_io_submit`, suspend until the bytes are in (EOF -> empty string). The I/O trigger step 6b
+    extends to `file://`/sockets; step 5's fd is the self-test's own pipe/socket.
+- **Fibers are COOPERATIVE on one thread** (one runs at a time, yields at an await), so within a
+  thread there is NO data race and NO deep copy of a value crossing an await -- args and results
+  pass as ordinary in-arena values. Cross-thread future completion and its deep copy stay in
+  step 6b. (This supersedes the "deep-copied (`php_tc_*`)" note in § 4.)
+- Files: `lib/rt_fiber_{arm64,x86_64,win64}.mc` (`ph_ctx_swap` + `ph_ctx_bootstrap`, raw words,
+  arch-selected in `src/program.mc` like the atomics, swept by `tests/sweep_sync.py`); the loop
+  core, futures, timers, fibers and the eight runtime functions in `lib/php_rt.mc`
+  (`SY_FUTURE` = 6); the per-OS reactor `ph_ev_create`/`ph_ev_arm`/`ph_ev_wait` and
+  `ph_os_map_stack`/`ph_os_pipe` in `lib/rt_host_{macos,linux,windows}.mc`; the builtins in
+  `src/builtin.mc` (`ph_bi_async`); one lazy loop per thread in `lib/php_tls.mc` (`PHT_ph_loop`).
+- Fiber stacks are **128 KiB**, a guard page below (`PROT_NONE` / `PAGE_NOACCESS`), lazily
+  committed; the ceiling is **1024** outstanding awaits per loop (`PH_FIB_MAX`), past which
+  `mcphp_spawn` is the named refusal `mc-php: too many outstanding awaits`. Per-await reserved
+  cost is the 128 KiB stack plus one guard page; committed (RSS) is only the pages a shallow
+  awaiter touches -- measured at **~16.9 KiB per outstanding await** (one 16 KiB page on this
+  Apple-Silicon host: 1024 live fibers moved max RSS from 1.67 MiB to 18.97 MiB). The upgrade for
+  a server holding tens of thousands of connections is a pooled or segmented stack (a `ponytail:`
+  note in the fiber record).
+- The self-test is `tests/c/18-await.php` (a timer, a future completed/failed, fibers that await a
+  timer, a pipe read awaited on a fiber), `tests/c/19-await-migrate.php` (the no-migration abort,
+  condition 1) and `tests/c/20-await-exhaust.php` (the ceiling refusal, condition 2); the
+  engine-live refusal (condition 3) is exercised on the extension road. `mcphp_pipe` /
+  `mcphp_fd_write` / `mcphp_fd_close` / `mcphp_test_migrate` are test scaffolding, not the surface.
+
+Measured facts about the tree it builds on carry a `file:line`.
+
+### What exists to build on, and what does not
+
+- **No suspension machinery of any kind.** `grep` for `kqueue|epoll|iocp|ucontext|swapcontext|
+  setjmp|O_NONBLOCK|poll(|select(` over `src/`, `lib/` and `reference/` is empty. There is no
+  fiber, no coroutine, no event loop, no non-blocking I/O. The runtime has no `setjmp`
+  (docs/plan.md D7; stated at § 3b above). Step 5 writes all of it.
+- **A php call is a native call.** mc-php compiles each php function to a native function; a call
+  is a `bl`/`call`. There is no VM, no CPS, no state-machine transform. So the compiler stays
+  untouched by this step (the suspension lives entirely in the runtime, below).
+- **Raw per-arch `#opcode` word functions are the house mechanism for a primitive mc cannot
+  express.** `lib/rt_atomic_arm64.mc` (and the x86-64 and win64 halves) are five functions whose
+  bodies are assembled words, selected by the target architecture in `src/program.mc`, gated by
+  an llvm-mc sweep (`tests/sweep_sync.py`). The context switch step 5 needs is written exactly
+  this way.
+- **Native threads, the host sleep, and the monotonic clock are done.** `ph_thr_create`
+  (`lib/rt_host_linux.mc:168`, pthread/CreateThread), `ph_os_wait`/`ph_os_wake` (futex /
+  `__ulock` / `WaitOnAddress`, `lib/rt_host_linux.mc:104`), `ph_os_wait_ms` relative timeout and
+  `ph_os_now_ms` monotonic (`lib/rt_host_linux.mc:116`). Step 4b's timer rule -- a deadline from
+  the monotonic clock, the remainder recomputed after every wake (§ Step 4) -- is reused verbatim.
+- **The sync handle table is the model for every handle step 5 adds.** 32-byte slots, kinds
+  `SY_FREE`..`SY_COND` (`lib/php_rt.mc:11468`), `(generation << ...) | index` handles that are
+  never reused silently, named refusals, a request-scoped lifetime (§ Step 4). A future and a
+  timer are new kinds in this table, not a new table.
+- **I/O today is one blocking `read`.** `php_f_file_get_contents` (`lib/php_rt.mc:8636`) calls
+  `php_read_whole`, a blocking `read(2)`. There is no socket layer. Step 5 adds the non-blocking
+  path the loop drives; step 6b wires `file://`/sockets onto it.
+- **Intrinsics are compiled-only, with published wrappers.** `mcphp_*` exist only in compiled
+  code; interpreted php calls a module-published wrapper (§ The API, § 3b). Step 5's builtins
+  follow this to the letter.
+
+### 1. Suspension model: stackful fibers over a context-switch word (the crux)
+
+**DECISION: a stackful coroutine ("fiber") -- its own stack, swapped by a per-arch `#opcode`
+context-switch primitive -- is what `await` suspends.** Not a compiler transform, not threads.
+
+Weighed:
+
+| option | verdict |
+|---|---|
+| **stackful fiber + `ph_ctx_swap` word (chosen)** | no compiler change; `await` works at any call depth because the whole native stack is parked; no `setjmp`; reuses the arena, the handle table and the host map already built; the switch is 3 small files of raw words, gated like the atomics. Cost: one stack per outstanding await. |
+| php Fibers (8.1), compiled | a php `Fiber` IS a stackful coroutine; building it is the same switch primitive plus a class. Step 5 does not need the php-visible class, only the primitive. Deferred: publish `Fiber` later as a thin wrapper over the same word, if a consumer asks. |
+| stackless state-machine transform | rejected. A deep compiler change (CPS in `src/expr.mc`/`mach.mc`/`program.mc`); and "a function that can transitively reach `await`" is undecidable under php's dynamic dispatch (any `callable` might await), so it colours the whole call graph. Against the grain, large, fragile. |
+| thread-per-await | rejected as the model. It is what step 6a's `http_get_many` does today (a worker blocked per fetch, `awaitable.src.php:144`); it does not scale to thousands of in-flight I/Os, which is the loop's whole reason to exist. It stays the baseline the loop must beat. |
+
+**What has to be built (named):**
+- `ph_ctx_swap(from, to)` -- save the callee-saved registers, SP and return address into `from`,
+  load them from `to`. Three files, raw `#opcode` words: `lib/rt_fiber_arm64.mc`,
+  `rt_fiber_x86_64.mc`, `rt_fiber_win64.mc` (the atomics' split and arch selection, exactly:
+  AAPCS64 is one file for macOS/Linux/Windows-on-ARM; SysV and Windows x64 are two). Gated by
+  `tests/sweep_sync.py` (extended) and the dump-machine check (§ Step 4 gates).
+- a **fiber object**: a stack (`ph_os_map`, a guard page, lazily committed), the saved SP, the
+  callable and its state. A fiber never migrates threads -- it is created, suspended and resumed
+  only by its own thread's loop -- so the `phT` fast-path copy (`uptr phT = ph_tcur; ...`, § The
+  mechanism) stays valid across a swap (same OS thread, the thread block does not move). This is
+  the one invariant the whole model rests on; the self-test asserts it.
+- a **fiber/future handle** in the sync table (`SY_FUTURE`, a new kind), with the step-4 lifetime
+  and named refusals.
+
+Ponytail: the stack-per-await is the simplest thing that suspends an arbitrary call chain. Its
+ceiling (memory per outstanding await) is the one real cost vs a stackless transform; it is named
+under § 6 and § risks. A `ponytail:` in the fiber file will record the default stack size and the
+upgrade (a segmented or pooled stack) when a server holds tens of thousands of connections.
+
+### 2. Reactor vs proactor: a completion-shaped surface, readiness backends emulate it
+
+kqueue/epoll are readiness-based (tell me when the fd is readable; then I read). IOCP is
+completion-based (I post the read; you tell me when the bytes are in my buffer). These do not
+compose unless the common surface is chosen with care.
+
+**DECISION: the loop's internal I/O surface is completion-shaped --
+`ph_io_submit(fd, op, buf, len) -> resume with n`, not `await_readable(fd)`.** IOCP is then
+native. A reactor EMULATES it: arm the readiness interest (`EV_ADD` / `EPOLL_CTL_ADD`), and when
+the fd is ready the loop itself does the `read`/`write`/`accept` and resumes the fiber with the
+result. Rationale: readiness -> completion emulation is a few lines and one extra syscall on
+POSIX; completion -> readiness emulation is **impossible** on IOCP (it never reports mere
+readiness). Choosing the completion shape puts the unavoidable asymmetry on the cheaper side.
+This is the step's central design risk and this is its resolution.
+
+Three host functions, one loop core (in `lib/php_rt.mc`) written against them:
+- `ph_ev_create()` -- kqueue / epoll_create1 / CreateIoCompletionPort.
+- `ph_ev_arm(ev, fd, op, ud)` -- register interest (POSIX) or post the overlapped op (Windows).
+- `ph_ev_wait(ev, out, max, ms)` -- kevent / epoll_wait / GetQueuedCompletionStatus, with the
+  timeout the timer list computes. It returns the ready/completed events, each carrying its
+  user-data (`ud` = the fiber to resume).
+
+The per-OS bodies live in `lib/rt_host_{macos,linux,windows}.mc` beside `ph_os_wait`. The loop
+core never names a backend.
+
+### 3. Loop ownership and threads: one loop per thread, lazy
+
+**DECISION: one event loop per thread, created the first time that thread awaits, stored in the
+thread block (`lib/php_tls.mc`).** Not a dedicated loop thread.
+
+- A dedicated loop thread would marshal every I/O across threads and fight step 3's
+  shared-nothing model. Per-thread keeps each loop's I/O on its own thread.
+- **Lazy, so a program that never awaits pays nothing** -- no loop, no fiber stacks -- as the
+  step-1 fast path and the inertness bar require.
+- **A worker can await.** A compiled worker (§ 3a) gets its own loop on first await, like any
+  thread. A php worker (§ 3b) runs in a php request; `await` there is subject to the engine rule
+  below.
+- **Interaction with step 4.** A fiber that calls `mcphp_mutex_lock`/`_semaphore_acquire`/
+  `_cond_wait` blocks its whole OS thread, and therefore its loop. That is the developer's call
+  and is documented: `await` is for I/O, the sync primitives are for thread coordination. Mixing
+  them (await inside a held mutex) is legal and the developer's responsibility, as in C.
+- **Cross-thread wakeup is deferred to 6b.** In step 5 a future is completed only by its own
+  loop's I/O or timers, so the loop never needs waking from outside. Completing a future from
+  another thread (e.g. a worker finished) needs the loop woken out of `ph_ev_wait` -- an
+  eventfd/self-pipe registered in the loop (POSIX) or `PostQueuedCompletionStatus` (Windows).
+  Step 5 builds the hook but 6b is where a cross-thread completion is first used and gated.
+
+### 4. The await surface
+
+The php-visible builtins, compiled-only intrinsics in the `mcphp_` family, each a slot of kind
+`SY_FUTURE` in the step-4 table (generation+index handle, named refusals, request-scoped
+lifetime):
+
+```php
+$f = mcphp_future(): int;                        // a handle, kind FUTURE, not yet done
+mcphp_future_complete(int $f, mixed $v): void;   // mark done with a value
+mcphp_future_fail(int $f, \Throwable $e): void;  // mark done with a throwable
+$v = mcphp_await(int $f): mixed;                 // suspend until $f is done; rethrow on fail
+$t = mcphp_timer(int $ms): int;                  // a future the loop completes after $ms
+mcphp_loop_run(): void;                          // drive the loop until nothing is pending
+```
+
+- `mcphp_await($f)`: if the caller runs on a fiber, record "resume me when `$f` is done" and
+  `ph_ctx_swap` back to the loop; the loop resumes the fiber (on completion or timer) and
+  `await` returns the value, or rethrows `$f`'s throwable. **If there is no current fiber (a
+  top-level await, as `examples/awaitable` calls it from the request thread), run a nested loop
+  until `$f` is done** -- the drive-to-completion bridge every php userland loop uses. `$f`'s
+  value crosses as a value in the slot, deep-copied (`php_tc_*`, § 3a) if it came from another
+  thread.
+- The future reuses the sync slot's words: the primary word is the done-state (0 pending, 1 done,
+  2 failed), another holds the value or throwable, another the fiber to resume. A wrong handle
+  names its kind against `future` (`mc-php: handle N is a mutex, not a future`), as step 4 does.
+- The minimal set is deliberate. `mcphp_future_complete`/`_fail` are one line each and 6b needs
+  them (an application completes a future when its thread finishes). A php-visible `Fiber` class
+  is NOT published here -- skipped, add when a consumer asks (ponytail). The awaitable example's
+  `Intent`-returning `await(callable, ...)` stays userland and 6b wires it onto `mcphp_await`.
+
+### 5. Timers: step-4b monotonic deadlines in the loop
+
+**DECISION: reuse § Step 4b's deadline rule verbatim.** A timer is an `SY_FUTURE` plus a deadline
+`ph_os_now_ms() + ms` on the loop's sorted timer list. Each turn the loop computes the next
+timeout as `min(deadlines) - now` and passes it to `ph_ev_wait`; on wake it completes every
+expired timer's future (resuming its awaiting fibers) and recomputes the remainder for the rest
+-- the "a spurious wake never shortens the wait" rule (§ Step 4b). No new clock. kqueue's
+`EVFILT_TIMER` is not used: the sorted-list-plus-wait-timeout form is one implementation for all
+three backends.
+
+### 6. Both roads, five targets
+
+- **Program road (exe):** fibers and loop fully native, no Zend. All five targets.
+- **Extension road (NTS and ZTS):** a fiber runs compiled code with no engine, so a compiled
+  worker can await file/socket I/O. **`await` is refused when php's engine is live on the current
+  fiber's stack** -- suspending with an `EG` frame open would corrupt the executor on resume (the
+  same reason § 3b runs a php callable in a request of its own). The refusal is by name:
+  `mc-php: await cannot suspend while php's engine is on the stack`. Step 5's self-test touches
+  no engine, so this does not bite it; 6b respects it.
+- **Targets:** the context-switch word needs arm64 + x86-64-SysV + x86-64-Windows (3 files, the
+  atomics' split). The reactor needs kqueue (macos/arm64), epoll (linux aarch64 + x86_64) and
+  IOCP (windows x64 + arm64). Every one of the five CI legs has a backend, so each backend is
+  exercised on its own leg.
+- **What a target cannot do:** nothing fundamental. On Windows a fatal error inside a fiber has
+  the same no-`.pdata` unwind limit as § 3b (`docs/threads.md` § 3b, "Not on Windows"): a php
+  fatal error reached through a fiber may end the process. Step 5's compiled-only self-test does
+  not raise one.
+
+### 7. Scope: step 5 vs step 6b
+
+**Step 5 (this milestone) -- buildable and testable on its own:**
+- `ph_ctx_swap` (3 arch files) + the llvm-mc sweep and dump-machine gates.
+- the loop core + the three host backend functions (kqueue/epoll/IOCP) + the timer list.
+- `mcphp_future`, `_complete`, `_fail`, `mcphp_await`, `mcphp_timer`, `mcphp_loop_run`
+  intrinsics, as an `SY_FUTURE` kind in the step-4 table.
+- a self-contained test with a C twin: **await a timer** (the deadline is met, within a
+  tolerance) and **await a pipe/socket read** (the loop resumes the fiber when the pipe has
+  bytes). No http, no php engine. `tests/c/18-await.php` on the program road; `tests/ext.sh`
+  exercises the compiled-worker await on the extension road.
+
+**Step 6b (next) -- wiring onto the loop:**
+- `examples/awaitable`'s `http_get`/`http_get_many` on non-blocking `file://` and sockets
+  (connect/read as loop I/O, replacing the blocking worker of 6a).
+- the `Intent`-returning userland `await()` over the primitive.
+- cross-thread future completion (a worker completing a loop's future via the loop's self-wake
+  fd), and whatever socket surface (`connect`, `accept`) the http fetch needs.
+
+### 8. Gates (for when it is built)
+
+- **C twin for the loop.** `tests/c/18-await`'s twin is the same timer + pipe-read workload on
+  raw kqueue/epoll/IOCP and a context switch (`ucontext` or the twin's own swap): byte-for-byte
+  output and a wall-clock ratio, as `examples/sync` compares against `c/sync.c`.
+- **llvm-mc sweep** over the `ph_ctx_swap` words (extend `tests/sweep_sync.py`), and the
+  dump-machine check (`--dump-asm --machine=x86_64` on an arm64 host dumps the x86-64 switch, as
+  for the atomics, `tests/run.sh`).
+- **Each backend on its own leg.** kqueue on macos/arm64, epoll on linux aarch64 + x86_64, IOCP
+  on windows x64 + arm64 -- `tests/c/18-await.php` runs on all five, so a backend that is wrong is
+  red on its leg.
+- **Leaks and ZTS.** `tests/leaks.sh` (0 Zend blocks, fiber stacks unmapped at the end),
+  `tests/frankenphp.sh` for a compiled worker that awaits inside a ZTS request.
+- **The inert / 2% bar.** A program that never awaits allocates no loop and no fiber: measure
+  `examples/decimal` unchanged. The step adds runtime bytes (like step 3), so the NTS `cmp`
+  inertness does not apply, but the perf bar does.
+
+### The hardest open risks
+
+1. **Fiber stack count and size.** One stack per outstanding await; a server with N in-flight
+   connections holds N stacks. This is the real scaling cost a stackless transform would not
+   have. Mitigation: a small lazily-committed stack with a guard page, a documented ceiling, and
+   a `ponytail:` upgrade path (pooled or segmented stacks). Sized and measured in step 6b, where
+   many awaits are first live at once.
+2. **await inside php's engine (extension road).** Suspending with an `EG` frame open corrupts
+   the executor. Step 5 refuses it by name (§ 6); the risk is a path that reaches `await` through
+   the engine without tripping the guard. The guard is a flag set around every engine entry
+   (`phx_*`), checked by `mcphp_await`.
+3. **Cross-thread completion wakeup.** A future completed by thread B while thread A's loop sleeps
+   in `ph_ev_wait` needs A woken (eventfd/self-pipe / `PostQueuedCompletionStatus`). Step 5
+   confines completion to the loop's own I/O and timers and builds only the hook; 6b is where it
+   is first used, and where a race between "complete" and "the loop decides to sleep" must be got
+   right.
+4. **IOCP's connect/accept path.** The completion-shaped surface (§ 2) covers read/write cleanly;
+   `connect` on IOCP needs `ConnectEx` on an already-bound socket and `accept` needs `AcceptEx`,
+   which differ enough from the POSIX arm-and-go that 6b (not step 5) must design them. Step 5's
+   pipe-read test avoids them.
+5. **`phT` across a swap.** The whole model assumes a fiber never migrates threads, so the
+   `phT` fast-path copy stays valid across `ph_ctx_swap` (same OS thread, the block does not
+   move). `src/tls.mc` folds `phT` copies within a function; an `await` is an opaque call, so
+   `phT` held across it is still this thread's block -- but the no-migration invariant must be
+   enforced (a fiber is resumed only by its creating thread's loop) and asserted by the
+   self-test, because a violation is a silent wrong-arena bug, not a crash.

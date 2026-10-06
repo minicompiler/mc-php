@@ -18,8 +18,9 @@
 #   winstart.obj  mc's entry point, mc_start, for the compiler.
 #
 # A PROGRAM mc-php writes needs neither object -- its runtime defines its own
-# (lib/rt_host_windows*.mc) -- only kernel32.lib and ucrtbase.lib, and only on
-# the object road (windows/aarch64; windows/x86_64 has mc's one-step PE writer).
+# (lib/rt_host_windows*.mc) -- only kernel32.lib and ucrtbase.lib: both arches
+# take the object + lld-link road (windows/aarch64 has no one-step PE writer,
+# windows/x86_64's bare --exe has no CRT for the per-thread runtime).
 # An EXTENSION needs php8.lib (or php8ts.lib for a thread-safe php) as well.
 #
 # src/mc-php.windows-ARCH.toml and examples/hello/mcphp.windows.toml name

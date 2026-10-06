@@ -14,7 +14,7 @@ the checksum is `T*(T+1)/2` for `T = producers * items`, a number the program
 must reach exactly. No data crosses a thread; the synchronisation is the point.
 
 ```
-mc-php --exe sync.php -o sync
+mc-php sync.php -o sync       # compiles AND links (ld/ld.lld/lld-link + the platform libc)
 ./sync                       # checksum 80000200000 expected 80000200000 ok
 ```
 
