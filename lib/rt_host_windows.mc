@@ -626,6 +626,13 @@ uptr ph_sock_new() {                                   // socket(): overlapped b
     return callp(ph_f_socket, 2, 1, 6);
 }
 i64 ph_os_connect(i64 ip, i64 port) {
+    // ponytail: this backend does a BLOCKING connect (ConnectEx is the future
+    // upgrade), which would stall the only event-loop thread for the OS TCP
+    // timeout on an unreachable peer. Refuse anything but loopback (127.0.0.0/8)
+    // until the async path exists, rather than exposing a blocking connect
+    // through the non-blocking API (docs/threads.md § Step 6b). POSIX needs no
+    // such guard: there the connect is O_NONBLOCK and returns EINPROGRESS at once.
+    if (((ip >> 24) & 0xff) != 127) return 0 - 1;
     ph_ws2();
     i64 fd = ph_sock_new();
     if (fd + 1 == 0) return 0 - 1;                     // INVALID_SOCKET (~0)
@@ -668,6 +675,9 @@ i64 ph_os_accept_send(i64 lfd, uptr buf, i64 len) {
     callp(ph_f_closesocket, c);
     return 0;
 }
+// close a socket: a Winsock SOCKET needs closesocket, never close()/CloseHandle.
+// ws2 is already loaded wherever a socket was made (ph_os_connect/listen call it)
+void ph_os_sock_close(i64 fd) { if (ph_f_closesocket) callp(ph_f_closesocket, fd); }
 
 // the size of a thread's arena: committed up front, which the system charges: kept smaller
 i64 ph_os_arena() { return 67108864; }

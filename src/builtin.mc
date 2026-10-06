@@ -604,7 +604,7 @@ i64 ph_bi_async(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "mcphp_pipe"))     { rt = "php_test_pipe"; lo = 0; hi = 0; }
     if (str_eq(name, "mcphp_tcp_listen")) rt = "php_test_listen";
     if (str_eq(name, "mcphp_fd_close")) { rt = "php_test_fd_close"; ety = PT_NULL; }
-    if (str_eq(name, "mcphp_tcp_close")) { rt = "php_test_fd_close"; ety = PT_NULL; }
+    if (str_eq(name, "mcphp_tcp_close")) { rt = "php_sock_close"; ety = PT_NULL; }   // a Winsock SOCKET needs closesocket, not close()
     if (str_eq(name, "mcphp_test_migrate")) { rt = "php_test_migrate"; lo = 0; hi = 0; ety = PT_NULL; }
     if (rt) {
         u8 np[8];

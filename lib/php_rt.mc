@@ -11335,15 +11335,22 @@ i64 php_thr_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     return id;
 }
 
-// the record leaves the table: its thread is waited for, its block goes,
-// and its arena is kept on the root's list until the root ends
+// the record leaves the table: its thread is waited for, its block and its
+// arena are both kept on the root's list until the root ends (php_thr_endall)
 void php_thr_reap(uptr rec) {
     ph_thr_join(rec + PHA_H);
     uptr b = ld64(rec + PHA_BLOCK);
     ph_loop_destroy(ld64(b + PHT_ph_loop));   // close the worker's event loop (if it awaited), free its suspended fibers
+    st64(b + PHT_ph_loop, 0);                 // the loop is gone: ph_loop_wake(owner) through FUT_OWNER is now a no-op
     st64(rec + PHA_HB, ld64(b + PHT_ph_hbase));
     st64(rec + PHA_HL, ld64(b + PHT_ph_hlim));
-    ph_os_unmap(b, PHT_SIZE);
+    // the block is NOT unmapped here: a future this worker created can outlive
+    // it (a returned handle in the request-scoped SY table), and FUT_OWNER
+    // points at this block; a later cross-thread completion routes through it
+    // (ph_fut_xcomplete reads owner + PHT_ph_xqt / PHT_ph_loop). The block is
+    // freed with the arena at root end (php_thr_endall, free). ponytail: a
+    // completion to a reaped worker is enqueued and never drained (its loop is
+    // gone) -- bounded by the retained-arena ceiling, freed at root end.
     uptr root = ld64(rec + PHA_ROOT);
     ph_lock();
     st64(rec + PHA_NEXT, ld64(root + PHT_ph_tret));
@@ -11439,6 +11446,7 @@ uptr php_thr_endall(uptr root, i64 free, i64 skipdet) {
             if (!k) break;
             uptr nx = ld64(k + PHA_NEXT);
             php_arena_free(ld64(k + PHA_HB), ld64(k + PHA_HL));
+            ph_os_unmap(ld64(k + PHA_BLOCK), PHT_SIZE);   // the control block, retained past reap for FUT_OWNER routing
             k = nx;
         }
         st64(root + PHT_ph_tret, 0);
@@ -12029,7 +12037,10 @@ void ph_io_complete(uptr lp, uptr fut, i64 nb) {
         if (nb < 0) err = ph_os_sockerr(ld64(fut + FUT_FD));
         st64(lp + LOOP_NPEND, ld64(lp + LOOP_NPEND) - 1);
         ph_io_unlink(lp, fut);
-        if (err) ph_fut_done(lp, fut, 2, php_exc_obj(php_str_new("Error", 5), php_str_new("mc-php: the awaited connect failed", 34)));
+        if (err) {
+            ph_os_sock_close(ld64(fut + FUT_FD));   // the connect failed: the socket is this runtime's to close (php_connect returns a dead fd with a pending exception)
+            ph_fut_done(lp, fut, 2, php_exc_obj(php_str_new("Error", 5), php_str_new("mc-php: the awaited connect failed", 34)));
+        }
         else ph_fut_done(lp, fut, 1, 0);
         return;
     }
@@ -12407,6 +12418,7 @@ i64 php_connect(i64 ip, i64 port) {
     st64(fut + FUT_FD, fd);
     st64(fut + FUT_CONNECT, 1);
     if (ph_ev_arm_connect(ld64(lp + LOOP_EV), fd, fut, ip, port) != 0) {
+        ph_os_sock_close(fd);                      // the arm failed: nothing will complete this future, so the socket is leaked otherwise
         php_throw_str(php_str_new("Error", 5), php_str_new("mc-php: cannot submit the connect", 33));
         return 0 - 1;
     }
@@ -12421,10 +12433,21 @@ i64 php_connect(i64 ip, i64 port) {
 // has a peer without touching the network. NOT the step surface.
 i64 php_test_listen(i64 port) { return ph_os_listen(port); }
 uptr php_test_accept_send(i64 lfd, uptr z) {
+    // the declared contract is mcphp_tcp_accept_send(int, string): the lowering
+    // passes a raw mixed zval (ph_to_mixed), so enforce the string here before
+    // reading ld64(z) as a zend_string (an int zval would be dereferenced as a
+    // pointer -- type confusion / UAF)
+    if (php_zv_type(z) != IS_STRING) {
+        php_throw_str(php_str_new("TypeError", 9), php_str_new("mcphp_tcp_accept_send(): Argument #2 ($data) must be of type string", 67));
+        return php_znull();
+    }
     uptr s = ld64(z);                              // the zval's zend_string
     ph_os_accept_send(lfd, s + ZS_HDR, ld64(s + 16));
     return php_znull();
 }
+// close a socket (a listener or a connected fd): closesocket on Windows,
+// close on POSIX -- a Winsock SOCKET is not a CRT fd (docs/threads.md § Step 6b)
+uptr php_sock_close(i64 fd) { ph_os_sock_close(fd); return php_znull(); }
 
 // Test scaffolding (docs/threads.md § Step 5): a non-blocking pipe, its two
 // fds packed (read << 32 | write); a write; a close. NOT the step-5 surface --
@@ -12435,6 +12458,12 @@ i64 php_test_pipe() {
     return (ld64(fds) << 32) | (ld64(fds + 8) & 0xffffffff);
 }
 i64 php_test_fd_write(i64 fd, uptr z) {
+    // mcphp_fd_write(int, string): the lowering passes a raw mixed zval, so the
+    // string contract is enforced here before ld64(z) is read as a zend_string
+    if (php_zv_type(z) != IS_STRING) {
+        php_throw_str(php_str_new("TypeError", 9), php_str_new("mcphp_fd_write(): Argument #2 ($data) must be of type string", 60));
+        return 0 - 1;
+    }
     uptr s = ld64(z);                              // the zval's zend_string
     return write(fd, s + ZS_HDR, ld64(s + 16));    // val at ZS_HDR(24), len at 16
 }

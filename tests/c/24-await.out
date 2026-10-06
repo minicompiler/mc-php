@@ -1,0 +1,4 @@
+can_suspend: true
+ok done=true failed=false data=42
+throw done=true failed=true RuntimeException: boom
+done

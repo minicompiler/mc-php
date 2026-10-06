@@ -250,7 +250,8 @@ i64 ph_os_pipe(uptr out2) {
     if (pipe(fds) != 0) return 1;
     i64 r = ld32(fds) & 0xffffffff;
     i64 w = ld32(fds + 4) & 0xffffffff;
-    fcntl(r, 4, 4);                                    // F_SETFL O_NONBLOCK
+    fcntl(r, 4, 4);                                    // F_SETFL O_NONBLOCK (read end)
+    fcntl(w, 4, 4);                                    // ... and the WRITE end, so a burst of wakes never blocks a producer
     st64(out2, r);
     st64(out2 + 8, w);
     return 0;
@@ -275,10 +276,15 @@ uptr ph_ev_wake_create(uptr ev, uptr marker) {
     if (kevent(ev, ke, 1, 0, 0, 0) < 0) { close(r); close(w); return 0; }
     return (r << 32) | (w & 0xffffffff);
 }
-// post a wake from another thread: one byte on the write end (atomic)
+// post a wake from another thread: one byte on the (non-blocking) write end.
+// A 1-byte write is all-or-nothing, so retry EINTR (4); on EAGAIN (35, a full
+// pipe) a readable wake is already pending -- the self-pipe is already signaled.
 void ph_ev_wake_post(uptr ev, uptr handle) {
     u8 one[1]; st8(one, 1);
-    write(handle & 0xffffffff, one, 1);
+    loop {
+        if (write(handle & 0xffffffff, one, 1) != 0 - 1) break;
+        if (php_c_errno() != 4) break;
+    }
 }
 // drain the pending wake bytes with ONE read: kqueue only reports the read end
 // when it is readable, so this never blocks, and any bytes past the buffer
@@ -372,6 +378,8 @@ i64 ph_os_accept_send(i64 lfd, uptr buf, i64 len) {
     close(c);
     return 0;
 }
+// close a socket (a POSIX socket IS an fd: plain close, unlike Winsock)
+void ph_os_sock_close(i64 fd) { close(fd); }
 
 // the size of a thread's arena: reserved: pages are touched as used
 i64 ph_os_arena() { return 268435456; }

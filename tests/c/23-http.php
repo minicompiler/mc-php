@@ -25,7 +25,7 @@ $srv = mcphp_thread_start(function (int $lfd): int {
 $fetch = function (int $port): string {
     $fd = mcphp_connect(0x7f000001, $port);
     $b = mcphp_io_read($fd, 16);
-    mcphp_fd_close($fd);
+    mcphp_tcp_close($fd);                    // a connected socket: closesocket on Windows, not close()
     return $b;
 };
 

@@ -1235,10 +1235,13 @@ I/O. A connect is a new `FUT_CONNECT` slot the loop completes:
 and `mcphp_tcp_accept_send(int $lfd, string $data): void` (accept one, send, close) are test
 scaffolding, so a self-test's connect has a peer with no network.
 
-**`file://` is read directly, not armed.** A regular file is always "ready": epoll refuses
-`EPOLL_CTL_ADD` on a regular file (`EPERM`), so a file read cannot be a uniform reactor arm across
-backends. The loop orchestrates the fibers; a file read completes at once. The real
-suspend/resume of I/O is sockets.
+**`mcphp_io_read` is for sockets and pipes, not regular files.** A regular file is always
+"ready", and epoll refuses `EPOLL_CTL_ADD` on one (`EPERM`), so a file fd cannot be a uniform
+reactor arm across backends -- `mcphp_io_read` on a regular file throws `cannot submit the read`
+(it unconditionally arms). The loop's suspend/resume I/O is sockets and pipes; a file's bytes are
+read synchronously by the runtime (`file_get_contents`, as `awaitable\_read` does), never through
+the loop. A direct-read fast path for regular files is a possible future upgrade, not a feature
+today.
 
 ### 2. The userland `await()` (`examples/awaitable`)
 

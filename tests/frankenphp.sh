@@ -170,16 +170,20 @@ rm -f "/tmp/fp.sy.$$"
 # loop is torn down and every fiber stack unmapped (the memory bound below is
 # what proves nothing leaks).
 docker exec "$name" sh -c "seq 1 $reqs | awk '{print \$1 % 50}' | xargs -P $par -I{} curl -fs --max-time 30 'http://127.0.0.1:8080/awio.php?n={}'" > "/tmp/fp.aw.$$" 2>/dev/null
-set -- $(awk '{ n = $1 - 7; if (n < 0 || (n % 1) != 0) { bad++; if (shown++ < 3) print "      got  " $0 > "/dev/stderr" } ok++ }
-    END { print ok + 0, bad + 0 }' "/tmp/fp.aw.$$")
+# request i (1..reqs) asks n = i % 50 and the worker answers n+7, so the sorted
+# responses must EQUAL the sorted expected values -- not merely "every response
+# is some int >= 7" (which 4000 responses of "7" would satisfy while n+7 is broken)
+seq 1 "$reqs" | awk '{ print ($1 % 50) + 7 }' | sort -n > "/tmp/fp.awx.$$"
+sort -n "/tmp/fp.aw.$$" > "/tmp/fp.aws.$$"
 awl=$(wc -l < "/tmp/fp.aw.$$" | tr -d ' ')
-if [ "$awl" = "$reqs" ] && [ "$2" = 0 ]; then
-    say "step 6b: a compiled worker drives the loop (timer + pipe read): $reqs requests, $par at a time, every answer n+7"
+if [ "$awl" = "$reqs" ] && cmp -s "/tmp/fp.awx.$$" "/tmp/fp.aws.$$"; then
+    say "step 6b: a compiled worker drives the loop (timer + pipe read): $reqs requests, $par at a time, every answer its own n+7 (multiset exact)"
 else
-    bad "step 6b await_io: $awl answers of $reqs, $2 wrong"
+    bad "step 6b await_io: $awl answers of $reqs, response multiset mismatch"
+    diff "/tmp/fp.awx.$$" "/tmp/fp.aws.$$" | sed -n '1,6p' | sed 's/^/      /'
     docker logs "$name" 2>&1 | tail -10 | sed 's/^/      /'
 fi
-rm -f "/tmp/fp.aw.$$"
+rm -f "/tmp/fp.aw.$$" "/tmp/fp.awx.$$" "/tmp/fp.aws.$$"
 r2=$(rss)
 grow2=$(( (r2 - r1) / 1024 ))
 if [ "$grow2" -lt 64 ]; then say "resident memory after them: ${r2} KiB (+${grow2} MiB)"

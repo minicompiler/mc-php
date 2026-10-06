@@ -239,7 +239,12 @@ uptr ph_ev_wake_create(uptr ev, uptr marker) {
 }
 void ph_ev_wake_post(uptr ev, uptr handle) {
     u8 one[1]; st8(one, 1);
-    write(handle & 0xffffffff, one, 1);
+    // the wake MUST land: a 1-byte write is all-or-nothing, so retry EINTR (4);
+    // on EAGAIN (11, a full pipe) a readable wake is already pending -- stop
+    loop {
+        if (write(handle & 0xffffffff, one, 1) != 0 - 1) break;
+        if (php_c_errno() != 4) break;
+    }
 }
 // drain the pending wake bytes with ONE read: epoll only reports the read end
 // when it is readable, so this never blocks, and any bytes past the buffer
@@ -318,6 +323,8 @@ i64 ph_os_accept_send(i64 lfd, uptr buf, i64 len) {
     close(c);
     return 0;
 }
+// close a socket (a POSIX socket IS an fd: plain close, unlike Winsock)
+void ph_os_sock_close(i64 fd) { close(fd); }
 
 // the size of a thread's arena: reserved (MAP_NORESERVE): pages are touched as used
 i64 ph_os_arena() { return 268435456; }
