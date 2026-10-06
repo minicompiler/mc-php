@@ -1,0 +1,15 @@
+open ok
+create 0
+load 1000
+count 1000
+sum 499500
+max 996
+name row-777
+none -1
+bad 1 near "SELEKT": syntax error
+dup -1
+count 1000
+close 0
+file load 1000
+file count 1000
+nodir 0

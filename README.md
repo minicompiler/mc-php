@@ -53,6 +53,7 @@ and compared with something php produced on every host, by [`tests/ext.sh`](test
 |---|---|---|
 | [`hello`](examples/hello/) | compiled from PHP | seven scalar functions; `check.php` byte for byte the interpreted source, the wrong calls against a C extension of the same signatures |
 | [`decimal`](examples/decimal/) | compiled from PHP, **done** | exact fixed-point decimals, half-even; the differential, 1219 results against bcmath, and a bench row -- **2.19x** php interpreting the same source (1.52x to 2.99x on the five CI legs; 0.51x before batch E), with its C twin at 13.8x beside it |
+| [`db`](examples/db/) | compiled from PHP, **slice 1** | sqlite3's C API through `#[Extern('sqlite3')]` -- scalars only: open, DDL, a prepared bulk load, aggregate reads, error paths; graded against `check.expect` and php's own `SQLite3` class. Rows as arrays and the C twin are slice 2 |
 | [`two-extensions`](examples/two-extensions/) | **hand-written mc** | two extensions calling each other, loaded in both orders; two mc-php extensions in one php; and the refusal of `extB.php`, pinned |
 | [`awaitable`](examples/awaitable/) | **hand-written mc** | `await`, `parallel` over forked children, libcurl on pthreads under a semaphore; and the refusal of `awaitable.src.php`, pinned |
 | [`sync`](examples/sync/) | compiled from PHP | native sync on the program road -- a producer/consumer queue over a mutex, two condition variables, a semaphore, a wait group and atomics, with a C twin (pthreads + C11) it matches and a wall-clock ratio (~1.9x) |
