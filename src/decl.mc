@@ -22,6 +22,24 @@ void ph_bnd_set(i64 fi, i64 k, i64 pt) {
     st64(ph_fbnul + i * 8, nul);
 }
 
+// Does this statement guarantee control leaves the function (so the fall-off
+// guard the caller is about to append is unreachable)? Conservative: only an
+// unconditional return, or a block whose last statement is one. Anything else
+// -- an if without a guaranteed-returning else, a loop, a switch -- answers 0,
+// so the guard is still emitted. A wrong 0 only keeps dead code; a wrong 1
+// would drop a real TypeError, so the default errs toward keeping it.
+i64 ph_always_returns(i64 s) {
+    if (!s) return 0;
+    if (nd_kind(s) == N_RETURN) return 1;
+    if (nd_kind(s) == N_BLOCK) {
+        i64 t = nd_a(s);
+        if (!t) return 0;
+        loop { if (!nd_next(t)) break; t = nd_next(t); }
+        return ph_always_returns(t);
+    }
+    return 0;
+}
+
 i64 ph_function() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
@@ -324,6 +342,14 @@ i64 ph_function() {
     if (rt == PT_FLOAT)  rw = 2;
     if (rt == PT_STRING) rw = 3;
     if (rt == PT_BOOL)   rw = 4;
+    // The guard (and the name literal it hoists into a callee-saved register
+    // for the whole call) is dead when the body's last statement already
+    // leaves the function -- then the fall-off path does not exist. Every
+    // ctype predicate ends in `return false;`, so this drops a per-call
+    // register across the string path.
+    i64 blast = nd_a(body);
+    if (blast) { loop { if (!nd_next(blast)) break; blast = nd_next(blast); } }
+    if (ph_always_returns(blast)) rw = 0;
     if (rw) {
         i64 cl = ph_close_line;
         i64 ps = ph_posstmt(fl, cl);
