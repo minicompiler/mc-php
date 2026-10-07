@@ -585,6 +585,119 @@ i64 ph_rc_has_loop(i64 s) {
     return 0;
 }
 
+// ---- the pin pass: a global/static read-only in a function need not pin ----
+//
+// lib/php_rt.mc's php_gvar and php_static pin EVERY call: a pin keeps the
+// call's whole Zend chunk until the request ends, so that a value a write
+// escapes into the (persistent) global/static slot survives the call. On a
+// read-only access the pin keeps nothing that is needed and leaks the call's
+// transient zvals -- ~32 bytes a call, which is an OOM in a hot loop.
+//
+// This decides, per function, whether a global/static is PROVABLY read-only,
+// and if so rewrites its one php_gvar/php_static binding to the _ro variant
+// that pins only on the escaping path (creating a global entry; a static's
+// first-call init). It is the same shape as ph_rc_assigned above -- a walk of
+// the finished tree for how a name is used -- because a write to the slot is
+// built in many places (an assignment, a compound op, a [] store, a by-ref
+// call, a reference) and one missed write would free the escaped value under a
+// live slot. So the test is the SOUND direction: a global/static is read-only
+// only when EVERY occurrence of its pointer `v_x` is the first argument of a
+// call to a known READ accessor; anything else -- a write accessor, a bare
+// occurrence (returned, a mixed argument, a reference), a call this does not
+// recognise -- keeps the pin. A missed read over-pins (a leak at worst); only
+// a misclassified WRITE would be unsafe, so the list below is reads only.
+i64 ph_pin_isread(uptr fn) {
+    return str_eq(fn, "php_zv_str") || str_eq(fn, "php_zv_long") || str_eq(fn, "php_zv_double")
+        || str_eq(fn, "php_zv_bool") || str_eq(fn, "php_zv_arr_r") || str_eq(fn, "php_zv_dim_rd")
+        || str_eq(fn, "php_zv_pget") || str_eq(fn, "php_zv_pget_q") || str_eq(fn, "php_zv_pget_ns")
+        || str_eq(fn, "php_zv_isset") || str_eq(fn, "php_zv_is") || str_eq(fn, "php_zv_isnum")
+        || str_eq(fn, "php_zv_isscalar") || str_eq(fn, "php_zv_identical") || str_eq(fn, "php_zv_type")
+        || str_eq(fn, "php_zv_cmp") || str_eq(fn, "php_zv_val")
+        || str_eq(fn, "php_gread") || str_eq(fn, "php_gq") || str_eq(fn, "php_gdef")
+        || str_eq(fn, "php_zv_add") || str_eq(fn, "php_zv_sub") || str_eq(fn, "php_zv_mul")
+        || str_eq(fn, "php_zv_div") || str_eq(fn, "php_zv_mod") || str_eq(fn, "php_zv_pow")
+        || str_eq(fn, "php_zv_neg") || str_eq(fn, "php_zv_concat") || str_eq(fn, "php_zv_band")
+        || str_eq(fn, "php_zv_bor") || str_eq(fn, "php_zv_bxor") || str_eq(fn, "php_zv_shl")
+        || str_eq(fn, "php_zv_shr") || str_eq(fn, "php_zv_bnot")
+        || str_eq(fn, "php_zv_add_zi") || str_eq(fn, "php_zv_add_iz") || str_eq(fn, "php_zv_sub_zi")
+        || str_eq(fn, "php_zv_sub_iz") || str_eq(fn, "php_zv_mul_zi") || str_eq(fn, "php_zv_mul_iz")
+        || str_eq(fn, "php_zv_mod_zi");
+}
+
+// 1 when `v` is used anywhere in the tree `s` in a way that needs the pin --
+// i.e. not purely as the first argument of a read accessor. Inc/dec, stores
+// and reference accessors are deliberately NOT reads, so they return 1 here.
+i64 ph_pin_used(i64 s, uptr v) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_IDENT) {
+            if (str_eq(nd_name(s), v)) return 1;        // a bare occurrence: not a read-accessor arg0
+            s = nd_next(s);
+            continue;
+        }
+        if (k == N_CALL) {
+            i64 a0 = nd_a(s);
+            if (a0 && nd_kind(a0) == N_IDENT && str_eq(nd_name(a0), v) && ph_pin_isread(nd_name(s))) {
+                // v is read here as arg0; the arg is a bare ident with no
+                // children, so scan only the rest of the arguments and any
+                // other child slots for a further occurrence
+                if (ph_pin_used(nd_next(a0), v)) return 1;
+                if (ph_pin_used(nd_b(s), v)) return 1;
+                if (ph_pin_used(nd_c(s), v)) return 1;
+                if (ph_pin_used(nd_d(s), v)) return 1;
+                s = nd_next(s);
+                continue;
+            }
+            // v at arg0 of a write accessor or a call this does not recognise,
+            // or deeper: the generic recursion reaches it as a bare N_IDENT
+        }
+        if (ph_pin_used(nd_a(s), v)) return 1;
+        if (ph_pin_used(nd_b(s), v)) return 1;
+        if (ph_pin_used(nd_c(s), v)) return 1;
+        if (ph_pin_used(nd_d(s), v)) return 1;
+        s = nd_next(s);
+    }
+    return 0;
+}
+
+// walk the body; for each `v_x = php_gvar(...)` / `php_static(...)` binding
+// whose v_x is read-only in the whole body (root), rewrite the call to the
+// non-pinning variant
+void ph_pin_scan(i64 s, i64 root) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_ASSIGN) {
+            i64 v = nd_a(s);
+            if (v && nd_kind(v) == N_CALL) {
+                uptr cn = nd_name(v);
+                i64 g = str_eq(cn, "php_gvar");
+                i64 st = str_eq(cn, "php_static");
+                if ((g || st) && !ph_pin_used(root, nd_name(s))) {
+                    if (g) set_nd_name(v, "php_gvar_ro");
+                    if (st) set_nd_name(v, "php_static_ro");
+                }
+            }
+        }
+        ph_pin_scan(nd_a(s), root);
+        ph_pin_scan(nd_b(s), root);
+        ph_pin_scan(nd_c(s), root);
+        ph_pin_scan(nd_d(s), root);
+        s = nd_next(s);
+    }
+}
+
+// Only the extension road has a Zend chunk and therefore a pin; on the program
+// road php_pin is a no-op (there is no chunk), so the rewrite would change
+// nothing and is skipped.
+void ph_pin_fn(i64 f) {
+    if (!ph_ext) return;
+    i64 bl = nd_b(f);
+    if (!bl) return;
+    i64 stmts = nd_a(bl);
+    ph_pin_scan(stmts, stmts);
+}
+
 // A function with NO loop never drains before it returns, so every string it
 // or its callees built this call stays on the pool until then: a string local
 // may BORROW from the pool and needs no count at all. Only a function that
@@ -598,6 +711,9 @@ i64 ph_rc_counting;
 
 void ph_rc_fn(i64 f) {
     if (!ph_rc_on()) return;
+    // the pin pass runs on the plain lowered tree, before the rc rewrite cuts
+    // and relinks the statement lists below
+    ph_pin_fn(f);
     ph_rc_nslot = 0;
     ph_rc_fty = nd_type(f);
     ph_rc_fl = nd_file(f);
