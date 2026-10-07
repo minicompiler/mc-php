@@ -415,7 +415,6 @@ void ph_class(uptr fl, i64 line, i64 flags) {
             if (!ph_at("=", 1) && ph_is_typeword()) {
                 // `const TYPE NAME = ...`, but `const NAME = ...` is the common shape
                 uptr first = ph_tname;
-                i64 save = ph_tid;
                 ph_next();
                 if (ph_at("=", 1)) {
                     ph_want("=", 1, "expected = in a class constant");

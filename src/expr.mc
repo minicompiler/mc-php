@@ -1157,7 +1157,6 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
         i64 line = ph_tline;
         uptr fl = ph_tfile;
         ph_next();
-        i64 arop = ph_arith_op(t);
         // php SHORT-CIRCUITS && and ||: the right operand is not evaluated at
         // all when the left already decides the answer. An mc expression has
         // no branch, so the value is a u8 temporary and the right side is an
