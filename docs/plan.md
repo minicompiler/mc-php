@@ -1127,7 +1127,7 @@ interpreter on the same source), § 7 item 1. What already has code moves into
      needs a ZTS php with opcache, so it SKIPS on an NTS one (macOS) with the reason; CI's ZTS legs
      run it. Nothing deferred to 6b.
    - `database` -- **DONE** (2026-10-07, `examples/db`): a sqlite3 example compiled from PHP via
-     `#[Extern('c')]`, with a C twin and the triangular bench. Slice 1 (#53) was the scalar surface
+     `#[Extern('sqlite3')]`, with a C twin and the triangular bench. Slice 1 (#53) was the scalar surface
      (open/exec/prepared-statement load of 1000 rows, int/Ptr/string). Slice 2 (#58) added
      `db_rows($db, $sql): array` -- a query's rows pulled back as a PHP array of associative arrays,
      assembled in PHP over the scalar column reads, **no compiler change** (`array` is already a
@@ -1138,9 +1138,9 @@ interpreter on the same source), § 7 item 1. What already has code moves into
      bar**; `db_rows` alone is ~2.6x the twin (a row assembled in PHP copies each column name and
      value into a php string; a bulk-row-fetch `#[Extern]` that builds the array in C is a future
      slice). What it needed from the compiler, each measured:
-     * **calling a C library from PHP source** -- DONE: `#[Extern('c')]` with int/Ptr/string
+     * **calling a C library from PHP source** -- DONE: `#[Extern('sqlite3')]` with int/Ptr/string
        carries the sqlite3 core API; the row reads (`sqlite3_column_int/text/name/count`) are all
-       scalar. (The `#[Extern('lib')]` variadic form that `awaitable.src.php` used is unneeded here.)
+       scalar. (The variadic `#[Extern]` form that `awaitable.src.php` used is unneeded here.)
      * **a request lifecycle for the arena** -- DONE in batch A (§ 3 D7): a call's memory is Zend's
        and freed when it returns, RSHUTDOWN restores what a request changed.
      * **signatures past the scalars**: rows come back as PHP **arrays** (done, no compiler change).
@@ -1149,8 +1149,10 @@ interpreter on the same source), § 7 item 1. What already has code moves into
        compiles and is NOT published" premise is OUTDATED -- a module-declared top-level class IS
        published at MINIT (`class_exists` true, `new`, methods, scalar properties, and returning one
        from a function all work, verified on slice 2). The int/Ptr handle the example uses is fine.
-     * **module-private functions** -- DONE in batch A: a leading underscore is not published; a
-       class's methods, which are private, are dispatched by name and typed `mixed`.
+     * **module-private functions** -- DONE in batch A: a leading underscore is not published. A
+       published class's methods are registered at MINIT as internal methods with their declared
+       visibility, their handlers running the compiled bodies (`docs/php-extension.md` § published
+       classes).
 
    **Found while writing them**, and fixed at the root with a fixture each:
    - a STATIC method with parameters read its first argument out of the receiver slot, because
