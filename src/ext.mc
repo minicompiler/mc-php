@@ -487,6 +487,12 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     // (src/opt.mc's inliner: `dec_add` is a forwarder), then phx_enter/
     // phx_leave's fast paths written in place (src/opt.mc)
     ph_inl_fn(f, 0);
+    // The body copied in here is the php function's PRE-rewrite copy (the
+    // inline registry stored it before ph_rc_fn/ph_pin_fn ran on the internal
+    // f_ function), so the global/static read-only pin pass has to run again
+    // on the handler's own final body -- both the bare and the slow copy,
+    // which are still one chain here, before the split below.
+    ph_pin_fn(f);
     // the copy may have put declarations in front of it: unlinked where it is
     ph_ext_lazy = 0;
     if (bare && ph_ext_pure(nd_b(bare)) && ph_ext_lazy) {
