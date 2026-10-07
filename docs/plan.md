@@ -1126,21 +1126,33 @@ interpreter on the same source), § 7 item 1. What already has code moves into
      (`c/awaitable.c` + `c/twin.php`) is rebuilt on native pthreads and prints the same bytes. It
      needs a ZTS php with opcache, so it SKIPS on an NTS one (macOS) with the reason; CI's ZTS legs
      run it. Nothing deferred to 6b.
-   - **NEXT, not in that pull request: a large-volume "mission critical" DATABASE example.** What
-     it needs from the compiler, each measured by the examples above:
-     * **calling a C library from PHP source** -- sqlite3 or libpq, which is
-       `awaitable.src.php`'s `#[Extern('lib')]` with its `variadic:` field: where a C variadic
-       argument travels is the ABI's (on the stack after eight registers on Apple arm64, in the
-       next register on AAPCS64 and SysV x86-64 -- measured, `awaitable.mc` needs both forms);
-     * **a request lifecycle for the arena** -- DONE in batch A: D7 is superseded on the
-       extension road (§ 3 D7), a call's memory is Zend's and freed when it returns, and
-       RSHUTDOWN restores what a request changed (`docs/php-extension.md` § The memory);
-     * **signatures past the scalars**: rows come back as arrays or objects, and a connection is
-       a resource or an object the module declares -- today a class the source declares compiles
-       and is NOT published, with no refusal (measured on `awaitable.src.php`);
-     * **module-private functions** -- DONE in batch A: a leading underscore is not published
-       (`docs/php-extension.md` § What is published); a class's methods, which are private, are
-       still dispatched by name and typed `mixed`.
+   - `database` -- **DONE** (2026-10-07, `examples/db`): a sqlite3 example compiled from PHP via
+     `#[Extern('sqlite3')]`, with a C twin and the triangular bench. Slice 1 (#53) was the scalar surface
+     (open/exec/prepared-statement load of 1000 rows, int/Ptr/string). Slice 2 (#58) added
+     `db_rows($db, $sql): array` -- a query's rows pulled back as a PHP array of associative arrays,
+     assembled in PHP over the scalar column reads, **no compiler change** (`array` is already a
+     publishable return type). The C twin is `examples/db/c/db.c` (the same eight `db_*` functions
+     as an ordinary hand-written C Zend extension over the same libsqlite3, linking nothing --
+     symbols from php's process). Bench (macos/arm64, best of nine, three rounds interleaved):
+     interpreted 0.87 ms, compiled 0.82 ms, C twin 0.60 ms -- **module/C 1.37x, under the 2x DONE
+     bar**; `db_rows` alone is ~2.6x the twin (a row assembled in PHP copies each column name and
+     value into a php string; a bulk-row-fetch `#[Extern]` that builds the array in C is a future
+     slice). What it needed from the compiler, each measured:
+     * **calling a C library from PHP source** -- DONE: `#[Extern('sqlite3')]` with int/Ptr/string
+       carries the sqlite3 core API; the row reads (`sqlite3_column_int/text/name/count`) are all
+       scalar. (The variadic `#[Extern]` form that `awaitable.src.php` used is unneeded here.)
+     * **a request lifecycle for the arena** -- DONE in batch A (§ 3 D7): a call's memory is Zend's
+       and freed when it returns, RSHUTDOWN restores what a request changed.
+     * **signatures past the scalars**: rows come back as PHP **arrays** (done, no compiler change).
+       A connection surfaced as a **resource or an object** the module declares is an example-design
+       choice for a later slice, **not a compiler gap**: the earlier "a class the source declares
+       compiles and is NOT published" premise is OUTDATED -- a module-declared top-level class IS
+       published at MINIT (`class_exists` true, `new`, methods, scalar properties, and returning one
+       from a function all work, verified on slice 2). The int/Ptr handle the example uses is fine.
+     * **module-private functions** -- DONE in batch A: a leading underscore is not published. A
+       published class's methods are registered at MINIT as internal methods with their declared
+       visibility, their handlers running the compiled bodies (`docs/php-extension.md` § published
+       classes).
 
    **Found while writing them**, and fixed at the root with a fixture each:
    - a STATIC method with parameters read its first argument out of the receiver slot, because
