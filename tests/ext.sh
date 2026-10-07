@@ -928,7 +928,11 @@ fi
 cp tests/ext/threads/nest.php "$tmp/r.php"
 rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/nest.build" 2>&1; then
-    ng=$("$PHP" -d extension="$tmp/build/r.$sx" -r 'echo nest_run(41), "\n";' 2>&1 | tr -d '\r'); nr=$?
+    # nr must be PHP's exit, not a pipe's: pre-fix the process prints 42 and
+    # then SIGSEGVs at shutdown (exit 139), so the clean-shutdown claim is only
+    # tested if nr captures that 139
+    "$PHP" -d extension="$tmp/build/r.$sx" -r 'echo nest_run(41), "\n";' > "$tmp/nest.out" 2>&1; nr=$?
+    ng=$(tr -d '\r' < "$tmp/nest.out")
     if [ "$nr" = 0 ] && [ "$ng" = 42 ]; then
         say "a nested thread: a worker starts and joins a thread of its own; the request ends clean"
     else
