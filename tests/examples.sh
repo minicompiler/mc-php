@@ -12,6 +12,10 @@
 #                    on both streams and the exit), bcmath as a second oracle
 #                    where the host php has it, and the bench row against the
 #                    interpreted source -- whose ratio is printed, not gated.
+#   db               PHP compiled by mc-php, calling libsqlite3 through #[Extern]
+#                    (slice 1: scalars only). check.php against check.expect and
+#                    against php's own SQLite3 class as the oracle; SKIPPED by
+#                    name on Windows and on a php without sqlite3.
 #   two-extensions   PHP compiled by mc-php: extA and extB, where B calls A
 #                    through php's function table. The differential in BOTH
 #                    load orders and B alone, the C twins graded the same way,
@@ -188,6 +192,46 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
         row="interpreted $bi ms, compiled $bc ms $(awk -v i="$bi" -v c="$bc" 'BEGIN { printf "(%.2fx)", i / c }')"
         [ -n "$bt" ] && row="$row, C twin $bt ms $(awk -v i="$bi" -v c="$bt" 'BEGIN { printf "(%.2fx)", i / c }')"
         say "bench: $row -- best of nine, three rounds interleaved; not gated"
+    fi
+fi
+
+# --- db: sqlite3's C API called from PHP source (slice 1) --------------------
+# examples/db/db.php declares libsqlite3 with #[Extern('sqlite3')] -- scalars,
+# pointers and strings only; rows as arrays are slice 2. The extension road
+# resolves the symbols from php's own process, so it needs a php with sqlite3
+# loaded, and that is also what the oracle (oracle.php, php's SQLite3 class) uses.
+# Not a differential (running the interpreted db.php against the module):
+# interpreted, #[Extern] bodies are empty. The graded output is check.expect, and the oracle must print it too.
+echo "  -- db"
+EX=examples/db
+dbso=$rootn/$EX/build/db.$sx
+if [ "$host" = windows ]; then
+    skip "db: an #[Extern] function is refused on Windows by name (the link names no library for it)"
+elif ! "$PHP" -m | tr -d '\r' | grep -qix sqlite3; then
+    skip "db: this php has no sqlite3 extension, so php's process has no sqlite3_* symbols and there is no oracle"
+elif build "$EX" "$EX/mcphp$suf.toml" "db.$sx"; then
+    say "built: $(wc -c < "$dbso" | tr -d ' ') bytes from $EX/db.php"
+    "$PHP" -d extension="$dbso" "$EX/check.php" > "$tmp/db.out" 2> "$tmp/db.err"; drc=$?
+    if [ "$drc" = 0 ] && [ ! -s "$tmp/db.err" ] && tr -d '\r' < "$tmp/db.out" | cmp -s - "$EX/check.expect"; then
+        say "check.php: $(wc -l < "$tmp/db.out" | tr -d ' ') lines against check.expect, 1000 rows loaded through one prepared statement, in memory and on disk"
+    else
+        bad "db check.php: exit $drc, want check.expect"
+        tr -d '\r' < "$tmp/db.out" | diff -u "$EX/check.expect" - | sed -n '3,20p' | sed 's/^/      /'
+        sed 's/^/      /' "$tmp/db.err"
+    fi
+    "$PHP" "$EX/oracle.php" > "$tmp/dbo.out" 2> "$tmp/dbo.err"; orc=$?
+    if [ "$orc" = 0 ] && [ ! -s "$tmp/dbo.err" ] && tr -d '\r' < "$tmp/dbo.out" | cmp -s - "$EX/check.expect"; then
+        say "oracle.php: php's own SQLite3 class prints the same bytes, exit 0"
+    else
+        bad "db oracle.php: exit $orc, want check.expect and a quiet stderr"
+        tr -d '\r' < "$tmp/dbo.out" | diff -u "$EX/check.expect" - | sed -n '3,20p' | sed 's/^/      /'
+        sed 's/^/      /' "$tmp/dbo.err"
+    fi
+    vis=$("$PHP" -d extension="$dbso" -r '$f = get_extension_funcs("db"); sort($f); echo implode(" ", $f);' 2>&1 | tr -d '\r')
+    if [ "$vis" = "db_close db_error db_exec db_load db_open db_scalar db_text" ]; then
+        say "published: the seven db_* functions and none of the sqlite3_* declarations or _ helpers"
+    else
+        bad "db published: want the seven db_* functions, got: $vis"
     fi
 fi
 
