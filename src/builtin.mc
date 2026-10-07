@@ -1533,8 +1533,18 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     // strspn/strcspn over native strings and int offsets: no zval, and a
     // LITERAL set's byte map built once per run. Neither raises in php 8 (the
     // window is clamped), so the call is quiet.
+    //
+    // A MIXED subject or set (a `global`/`static` string, or a `mixed` the
+    // body never narrowed) is taken here too, coerced with ph_to_str -- which
+    // for a string zval is php_zv_str, the string BORROWED with no reference
+    // taken. The generic ph_lib fallthrough instead wraps the subject with
+    // php_zstr, which escapes it (php_str_esc: a reference taken, released only
+    // at the module-call boundary), so a hot loop inside one call leaked a
+    // zval per iteration. This path never escapes, so there is nothing to
+    // release -- the same shape strpos already uses.
     if ((str_eq(name, "strspn") || str_eq(name, "strcspn")) && na >= 2 && na <= 4
-        && t0 == PT_STRING && ph_aty(av, 1) == PT_STRING
+        && (t0 == PT_STRING || t0 == PT_MIXED)
+        && (ph_aty(av, 1) == PT_STRING || ph_aty(av, 1) == PT_MIXED)
         && (na < 3 || ph_aty(av, 2) == PT_INT) && (na < 4 || ph_aty(av, 3) == PT_INT)) {
         i64 want = 1;
         if (str_eq(name, "strcspn")) want = 0;
@@ -1543,9 +1553,11 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         i64 hasl = 0;
         if (na >= 3) so = ph_a(av, 2);
         if (na == 4) { sl = ph_a(av, 3); hasl = 1; }
-        i64 set = ph_a(av, 1);
+        // ph_to_str is identity on a PT_STRING, so a literal set stays a
+        // php_str_lit node and the byte-map/run branches below still see it.
+        i64 set = ph_to_str(ph_a(av, 1), ph_aty(av, 1));
         u8 sa[48];
-        st64(sa, a0);
+        st64(sa, ph_to_str(a0, t0));
         st64(sa + 16, so);
         st64(sa + 24, sl);
         st64(sa + 32, ph_int(hasl));

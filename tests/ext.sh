@@ -515,6 +515,36 @@ else
 fi
 rm -rf "$tmp/build"
 
+# --- 12c. strspn/strcspn against a non-frame-owned set does not leak ---------
+# The set is a `mixed` parameter (a global, a static or any refcounted string
+# the body never narrowed): strspn($s, $set) could not take the native path --
+# it needed BOTH arguments statically PT_STRING -- and fell through to the
+# generic php_f_strspn, which wraps the SUBJECT with php_zstr (php_str_esc: a
+# reference taken, released only at the module-call boundary). 100 000 calls in
+# one loop then held 100 000 zvals and grew php's peak ~5 MB -- a
+# whole-string strspn() scan in a hot loop exhausted the heap. The native path
+# now takes a mixed argument too, borrowing the string with php_zv_str and
+# escaping nothing, so the peak does not move.
+# every path the fix now admits: a mixed SUBJECT and a mixed SET, for strspn
+# AND strcspn (the leak was php_str_esc on the subject, so a mixed subject must
+# be covered too). Per iteration: strspn(s,set)=4 + strspn(mixedS,set)=4 +
+# strcspn(s,other)=4 + strcspn(mixedS,other)=4 = 16.
+printf '<?php\nfunction spn(mixed $s, mixed $set, mixed $other, int $n): int { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strspn($s, $set) + strspn("0123", $set) + strcspn($s, $other) + strcspn("0123", $other); } return $t; }\n' > "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/sp.build" 2>&1; then
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" \
+        -r 'spn("0123", "0123456789", "abc", 10); $p = memory_get_peak_usage(); $t = spn("0123", "0123456789", "abc", 100000); printf("%d %d", $t, memory_get_peak_usage() - $p);' 2>&1 | tr -d '\r')
+    set -- $got
+    if [ "${1:-}" = 1600000 ] && [ "${2:-999999}" -lt 8192 ]; then
+        say "strspn/strcspn: 100000 calls each over a mixed subject and a mixed set in one call, php's peak moved $2 bytes"
+    else
+        bad "strspn/strcspn: want 1600000 and a peak that moved under 8 KiB, got $got"
+    fi
+else
+    bad "strspn set: it would not build"; sed 's/^/      /' "$tmp/sp.build"
+fi
+rm -rf "$tmp/build"
+
 # --- 13. the ownership shapes, in the module as interpreted ----------------
 # tests/g/111-string-ownership.php's functions compiled into a module and
 # called from php, several times, against the same source interpreted: a
