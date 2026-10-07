@@ -77,47 +77,39 @@ non-int/non-string types — and compares each `cty_X` against the built-in
 
 `bench.php` times `cty_*` against php's own compiled-in `ctype_*` in one
 process, best of nine interleaved. The reference is the C extension itself, so
-the printed ratio is **`cty_*` / `ctype.so`**. The measured ratio is **~10x**
-(macOS, Apple M4, `-O`): over the **< 2.0** DONE bar.
+the printed ratio is **`cty_*` / `ctype.so`**.
 
-Why, and what it would take to close it. `ctype.c`'s loop indexes a rune table
-per byte — no function call. This port **calls** `isalnum()` per byte, and each
-`cty_X` crosses the php call boundary into `_ctype_chk` and `_ctype_is`. That
-per-byte libc call plus the php boundary is the whole ~10x; a fully-inlined
-single-predicate variant (no helpers, the extern in-line) measures ~4.9x — still
-not < 2x. The only thing that reaches ctype.c's order is to classify a **whole
-string in one pass** with `strspn($s, $set)` against a per-predicate byte set
-built once from libc — the same table-driven shape ctype.c has. That version was
-written, measured correct (0 mismatches) and is in the git history of this
-branch; it is **blocked by a compiler leak** and not shipped.
+The port is **leak-free** (both compiler leaks it first exposed are fixed: the
+`strspn` subject escape, and the per-call read of a module-persistent `global`
+or `static`). It is **correct** (the 3322-case differential is 0 mismatches).
+But it does **not** reach the < 2.0 bar, and no faithful form does — the ratio
+is **~22x** on short tokens (the typical ctype input), falling to ~2.2x only on
+512-byte strings.
 
-Two leaks are in play, and only the first is fixed:
+Why `ctype` is unlike `examples/db`. `db`'s bench is dominated by `libsqlite3`,
+shared by the module and the C twin, so the thin mc-php glue measures 1.37x.
+`ctype` has **no** heavy shared component: `ctype.so` is a trivial inlined C
+loop (~17 ns for an 8-byte string), and the whole cost is the one thing mc-php
+cannot make free — crossing the php↔module call boundary and doing per-call
+work. Three faithful, leak-free forms were measured; none is < 2x:
 
-1. `strspn($s, $set)` with a `$set` that is not a frame-owned literal used to
-   escape the subject on the generic path and leak ~48 bytes/call. That is
-   **fixed** (the native path borrows a mixed/global set with no reference
-   taken); a one-frame `strspn` loop over a mixed set now moves php's peak 0
-   bytes.
-2. A table-driven `cty_X` must read its per-predicate set once **per call**, and
-   the set is module-persistent (built at MINIT). Reading any module-persistent
-   refcounted string per call — through `global`, a `static` class property, or
-   a `static` local — **retains ~32 bytes/call** (released only at request end),
-   which exhausts the heap in a hot loop *and* thrashes the allocator (the
-   table-driven bench measured *slower* than the per-byte form while leaking).
-   `$GLOBALS[...]` is refused by design, so there is no escape. This second leak
-   is what still blocks < 2x, and it is independent of `strspn`:
+- **per-byte libc** (`isalnum()` per byte via `#[Extern]`): ~10x on short
+  input. One extern call per byte.
+- **table-driven `strspn`** (this file): a whole-string `strspn($s, $SET)` over
+  a per-predicate set built once from libc. php's `strspn` rebuilds a 256-entry
+  charmask from the set on **every** call, and the sets that include the
+  high-byte (128..255) classes are large (`alnum`/`alpha`/`print`/`graph`/`cntrl`
+  run to ~60–250 bytes), so the rebuild dominates: ~22x at 8 bytes, 13.8x at 32,
+  4.9x at 128, 2.2x at 512. It wins only once the subject is long enough to
+  amortize the rebuild — which realistic ctype calls are not.
+- **256-byte flag table, index per byte** (closest to `ctype.c`): ~24x and
+  worsening with length — per-byte php string indexing is itself expensive.
 
-```php
-$M = "0123456789abcdef";
-function f(mixed $v): int { global $M; return strlen($M); }   // no strspn at all
-// f() called in a hot loop retains ~32 bytes/call (peak +6.4 MB over 200k).
-// A `static` class property and a function `static` local leak the same way.
-```
-
-Per the port's rules a faithful port needs no compiler change, so this one ships
-the **correct, leak-free, per-byte** form (~10x) and reports the gap rather than
-fixing `src/*.mc`. When the per-call persistent-string read stops retaining, the
-table-driven `strspn` form drops straight in for < 2x.
+This file ships the **table-driven `strspn`** form: the "classify a whole string
+in one pass" shape `ctype.c` has, now that it is leak-free. The < 2.0 bar is a
+property of a port with a heavy shared cost (db); a pure per-byte classifier
+against an inlined C extension does not have one, so < 2x is not reachable here
+on any faithful form.
 
 ## Files
 
