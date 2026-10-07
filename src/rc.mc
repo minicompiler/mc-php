@@ -606,14 +606,25 @@ i64 ph_rc_has_loop(i64 s) {
 // occurrence (returned, a mixed argument, a reference), a call this does not
 // recognise -- keeps the pin. A missed read over-pins (a leak at worst); only
 // a misclassified WRITE would be unsafe, so the list below is reads only.
+//
+// The READ accessors here return a VALUE that cannot reach a write of module
+// state: a scalar, the global's own IMMUTABLE string (D10 -- a byte write
+// makes a new string through a write accessor on v_x, never through this
+// result), a freshly boxed copy, or a boolean. A sub-structure POINTER is
+// NOT here: `php_zv_pget` is the accessor ph_lv_walk uses for the intermediate
+// step of a nested lvalue too (`$g->child->data = str_repeat(...)` is
+// php_zv_pset(php_zv_pget(v_g, "child"), ...)), so its result can be the base
+// of a write; `php_zv_arr_r`/`php_zv_dim_rd` likewise return a pointer into the
+// global's structure. Treating any of those as read-only was unsound (a nested
+// write through a global object would not pin -- found in review). They are
+// excluded, so a global/static reached through a property or an element keeps
+// the pin, even for a pure read. Over-pinning is a leak at worst.
 i64 ph_pin_isread(uptr fn) {
     return str_eq(fn, "php_zv_str") || str_eq(fn, "php_zv_long") || str_eq(fn, "php_zv_double")
-        || str_eq(fn, "php_zv_bool") || str_eq(fn, "php_zv_arr_r") || str_eq(fn, "php_zv_dim_rd")
-        || str_eq(fn, "php_zv_pget") || str_eq(fn, "php_zv_pget_q") || str_eq(fn, "php_zv_pget_ns")
+        || str_eq(fn, "php_zv_bool")
         || str_eq(fn, "php_zv_isset") || str_eq(fn, "php_zv_is") || str_eq(fn, "php_zv_isnum")
         || str_eq(fn, "php_zv_isscalar") || str_eq(fn, "php_zv_identical") || str_eq(fn, "php_zv_type")
         || str_eq(fn, "php_zv_cmp") || str_eq(fn, "php_zv_val")
-        || str_eq(fn, "php_gread") || str_eq(fn, "php_gq") || str_eq(fn, "php_gdef")
         || str_eq(fn, "php_zv_add") || str_eq(fn, "php_zv_sub") || str_eq(fn, "php_zv_mul")
         || str_eq(fn, "php_zv_div") || str_eq(fn, "php_zv_mod") || str_eq(fn, "php_zv_pow")
         || str_eq(fn, "php_zv_neg") || str_eq(fn, "php_zv_concat") || str_eq(fn, "php_zv_band")
