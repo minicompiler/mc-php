@@ -13,6 +13,8 @@
 // sides do identical work, so the ratio is the thin glue the port adds over a
 // per-byte libc loop that both already share.
 declare(strict_types=1);
+// The port targets the C locale; set it so the reference ctype_* matches it.
+setlocale(LC_CTYPE, "C");
 
 $tokens = ['Name', 'hello_world', 'deadBEEF', '0123456789', 'Mixed123',
            'has space', 'UPPER', 'lower', 'a', 'Z9', 'tab	here', '42'];

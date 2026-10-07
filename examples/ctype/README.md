@@ -52,16 +52,21 @@ verified against the host extension before it was trusted (php 8.5.10).
   the 8.5 **return** semantics, and `check.php`/`bench.php` run with
   `E_DEPRECATED` off. It is not replicated.
 
-## The per-byte predicate is libc's, exactly as ctype.c's is
+## How it classifies, and the locale it targets
 
-`ctype.c` delegates each byte to `<ctype.h>`'s `isalnum()` etc. This port
-declares those with `#[Extern('c', name: 'isalnum')]` and calls them: the symbol
-`isalnum` is **exported** by libSystem (and by glibc) and resolves from php's
-own process at load, like db's `sqlite3_*`. The exported function is the same
-classification `ctype.c` inlines, so the module agrees with php's ctype on all
-256 bytes — **including 128…255**, whose answers come from the host's locale
-tables — on whatever libc the host runs, with **no hardcoded locale table** in
-the PHP. The int-argument quirk is written in the PHP; the byte test is libc's.
+`ctype.c` indexes a static classification table per byte. This port carries the
+same table as a **compile-time string literal** per predicate, inline at the
+`strspn` call so mc-php precomputes the scan (see *The bench*). The sets are the
+**C locale's** classification — the standard 7-bit ASCII classes; no byte
+128…255 is in any class. The port therefore matches ctype under the C locale,
+which is what `check.php` and `bench.php` set with `setlocale(LC_CTYPE, "C")`
+for both the module and the reference. A program that selects a different
+`LC_CTYPE` at run time would see `ctype.so` adapt its 128…255 answers and this
+port not — the one documented difference. An int argument is turned into the
+one-byte string it denotes and runs the same scan, so the int-quirk path uses
+the same literal; the `(allow_digits, allow_minus)` constants are inlined per
+function as the `> 255` and `< -128` results. No libc call and no byte-by-byte
+loop: a whole string is one `strspn`.
 
 ## The differential
 
@@ -76,45 +81,66 @@ non-int/non-string types — and compares each `cty_X` against the built-in
 ## The bench
 
 `bench.php` times `cty_*` against php's own compiled-in `ctype_*` in one
-process, best of nine interleaved. The reference is the C extension itself, so
-the printed ratio is **`cty_*` / `ctype.so`**.
+process, best of nine interleaved, both in the C locale. The reference is the C
+extension itself, so the printed ratio is **`cty_*` / `ctype.so`**.
 
-The port is **leak-free** (both compiler leaks it first exposed are fixed: the
-`strspn` subject escape, and the per-call read of a module-persistent `global`
-or `static`). It is **correct** (the 3322-case differential is 0 mismatches).
-But it does **not** reach the < 2.0 bar, and no faithful form does — the ratio
-is **~22x** on short tokens (the typical ctype input), falling to ~2.2x only on
-512-byte strings.
+The string path is now table-driven the way `ctype.c` is: each `cty_X` scans a
+whole string in one pass with `strspn($s, "<literal>")`, and because the set is
+a **compile-time string literal** mc-php precomputes the scan — a contiguous
+class (`digit`, `upper`, `lower`, `print`, `graph`) lowers to a run test
+(`php_spn_r`, `lo <= c <= hi`), and a non-contiguous one (`alnum`, `alpha`,
+`xdigit`, `punct`, `space`, `cntrl`) to `php_spn` over a byte map built **once
+at compile time** (`ph_bmap_of`). There is no per-call charmask rebuild and no
+module-global read: the hot loop moves php's peak **0 bytes/call**. This removed
+the earlier ~22x (a per-call rebuild of the mask from a non-literal global set).
 
-Why `ctype` is unlike `examples/db`. `db`'s bench is dominated by `libsqlite3`,
-shared by the module and the C twin, so the thin mc-php glue measures 1.37x.
-`ctype` has **no** heavy shared component: `ctype.so` is a trivial inlined C
-loop (~17 ns for an 8-byte string), and the whole cost is the one thing mc-php
-cannot make free — crossing the php↔module call boundary and doing per-call
-work. Three faithful, leak-free forms were measured; none is < 2x:
+Per-predicate ratio, best of nine, 8-byte all-pass input (the realistic case):
 
-- **per-byte libc** (`isalnum()` per byte via `#[Extern]`): ~10x on short
-  input. One extern call per byte.
-- **table-driven `strspn`** (this file): a whole-string `strspn($s, $SET)` over
-  a per-predicate set built once from libc. php's `strspn` rebuilds a 256-entry
-  charmask from the set on **every** call, and the sets that include the
-  high-byte (128..255) classes are large (`alnum`/`alpha`/`print`/`graph`/`cntrl`
-  run to ~60–250 bytes), so the rebuild dominates: ~22x at 8 bytes, 13.8x at 32,
-  4.9x at 128, 2.2x at 512. It wins only once the subject is long enough to
-  amortize the rebuild — which realistic ctype calls are not.
-- **256-byte flag table, index per byte** (closest to `ctype.c`): ~24x and
-  worsening with length — per-byte php string indexing is itself expensive.
+| predicate | cty / ctype.so | predicate | cty / ctype.so |
+|---|---|---|---|
+| alnum | 2.49x | print | 2.45x |
+| alpha | 2.40x | punct | 2.45x |
+| cntrl | 2.42x | space | 2.44x |
+| digit | 2.42x | upper | 2.39x |
+| graph | 2.50x | xdigit | 2.55x |
+| lower | 2.45x | | |
 
-This file ships the **table-driven `strspn`** form: the "classify a whole string
-in one pass" shape `ctype.c` has, now that it is leak-free. The < 2.0 bar is a
-property of a port with a heavy shared cost (db); a pure per-byte classifier
-against an inlined C extension does not have one, so < 2x is not reachable here
-on any faithful form.
+All eleven land ~2.4–2.6x — **not** under the 2.0 bar, and uniformly so,
+because what is left is **not** the scan (it is precomputed) but the fixed
+per-call cost of a compiled-PHP function that takes a `mixed` parameter. The
+floor, measured on this compiler:
+
+| function body | param | ratio to `ctype_digit` |
+|---|---|---|
+| `return true;` | `mixed` | **1.70x** |
+| `return true;` | `string` | 0.78x |
+| `strlen` + `strspn(literal)` | `string` | **1.17x** |
+| `strlen` + `strspn(literal)` | `mixed` | 2.14x |
+
+An **empty** `mixed`-parameter function already costs **1.70x** an internal
+`ctype` call — binding a `mixed` (a zval) on entry is the whole gap. The same
+body behind a `string` parameter is **1.17x**, comfortably under 2.0. But a
+faithful ctype port **must** take `mixed`: `ctype_digit(48)` is the char-code
+quirk (true), not the string `"48"`, so an int argument has to reach the
+function un-coerced, and `ctype_digit(1.5 / null / [])` must return `false`, not
+raise a `TypeError`. A `string` parameter gives neither. So < 2.0x is reachable
+only by (a) lowering mc-php's `mixed`-parameter call overhead — a compiler
+change, not an example change — or (b) abandoning the quirk with a `string`-only
+signature, which would no longer be ext/ctype. The port keeps the faithful
+`mixed` signature; its floor is the `mixed` call cost, and every predicate sits
+just above it.
+
+A note on `bench.php`'s own aggregate (it prints ~7.6x): it calls eight
+predicates over a mix of tokens, several of which **fail** mid-string. On a
+failing input `ctype.so` returns on the first bad byte while `cty_X` still pays
+the full `mixed` entry, so the aggregate is harsher than the per-predicate
+all-pass figure above. Either way it is over 2.0, for the one reason: the
+`mixed`-parameter call floor.
 
 ## Files
 
-- `ctype.php` — the port: eleven `cty_*`, the private `#[Extern]` `is*()` and
-  `_ctype_chk`/`_ctype_is` helpers.
+- `ctype.php` — the port: eleven self-contained `cty_*`, each inlining its
+  C-locale set literal at the `strspn` call (no libc call, no helper, no global).
 - `check.php` / `check.expect` — the differential against the built-in ctype.
 - `bench.php` — `cty_*` vs `ctype.so`, best of nine.
 - `mcphp.toml` / `mcphp.linux.toml` — the build (macOS bundle road; Linux

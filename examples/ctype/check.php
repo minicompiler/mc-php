@@ -13,6 +13,9 @@
 // what a ctype port is. The notice is noted in README.md, not replicated.
 declare(strict_types=1);
 error_reporting(E_ALL & ~E_DEPRECATED);
+// The port targets the C locale (7-bit ASCII classes); set it so both the
+// module and the reference ctype_* classify 128..255 the same way (README.md).
+setlocale(LC_CTYPE, "C");
 
 $fns = ['alnum', 'alpha', 'cntrl', 'digit', 'graph', 'lower', 'print', 'punct', 'space', 'upper', 'xdigit'];
 

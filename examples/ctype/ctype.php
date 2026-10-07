@@ -4,156 +4,89 @@
 //     mc-php build examples/ctype --config examples/ctype/mcphp.toml
 //
 // and build/ctype.so is what `php -d extension=...` loads. The eleven
-// functions reproduce ext/ctype/ctype.c exactly, including the int-argument
-// quirk, and are graded byte for byte against php's own ctype_* (check.php).
+// functions reproduce ext/ctype/ctype.c, including the int-argument quirk, and
+// are graded byte for byte against php's own ctype_* (check.php).
 //
 // Why cty_* and not ctype_*: ctype is COMPILED IN to the php this is graded on
-// (it is not a loadable .so -- `php -n` still has it), and php refuses to
-// redeclare an internal function. So the port publishes cty_* and check.php
-// compares each cty_X against the built-in ctype_X in the same process -- the
-// built-in ctype IS the reference, no twin needed.
+// (php -n still has it), and php refuses to redeclare an internal function. So
+// the port publishes cty_* and check.php compares each cty_X against the
+// built-in ctype_X in the same process -- the built-in ctype IS the reference.
 //
-// How it classifies, and why it is fast: ext/ctype.c is table-driven -- for an
-// ASCII byte it indexes the C locale's rune table, not a function call. This
-// port is table-driven the same way. At MINIT (this file's top level runs once,
-// when the extension loads) it asks the C library's is*() -- the very functions
-// ctype.c delegates to, resolved from php's own process like db's sqlite3_*
-// (docs/php-extension.md) -- for every one of the 256 bytes, and keeps, per
-// predicate, the SET of bytes that pass. A whole string is then one binary-safe
-// strspn() over that set -- one pass, the shape ctype.c's loop has, with no
-// per-byte call. Building the sets from the live libc is what makes the module
-// agree with php's ctype on every byte, including 128..255, on whatever libc
-// the host runs -- no hardcoded locale table.
+// How it is fast, and the locale it targets. ext/ctype.c is table-driven: for
+// each byte it indexes a static classification table, never rebuilt. This port
+// is table-driven the same way, and the table is the one thing mc-php can
+// precompute: a STRING LITERAL set. strspn($s, "<literal>") lowers to a run
+// test (php_spn_r, lo <= c <= hi) for a contiguous class, or to php_spn over a
+// byte map built ONCE at compile time (src/builtin.mc, ph_bmap_of) for a
+// non-contiguous one -- so there is no per-call charmask rebuild and no
+// module-global read. The sets are the C locale's classification (the
+// standard 7-bit ASCII classes; no byte 128..255 is in any class). The port
+// therefore matches ctype under the C locale, which is what check.php and
+// bench.php set (setlocale(LC_CTYPE, "C")) for both the module and the
+// reference. A program that selects a different LC_CTYPE at run time would see
+// ctype.so adapt its 128..255 answers and this port not -- the one documented
+// difference (README.md).
 //
-// A leading underscore is module-private: the is*() declarations, the sets and
-// the helper are never published, only the eleven cty_*.
+// Each cty_X inlines its literal at the strspn call (a literal handed to a
+// variable or across a call is no longer a literal to mc-php, and loses the
+// precompute). An int argument becomes the one-byte string it denotes and runs
+// the same scan: ctype.c's fallback is an int in 0..255 as that byte, -128..-1
+// as that byte + 256, > 255 as allow_digits, < -128 as allow_minus; a non-int
+// non-string is false. allow_digits / allow_minus are ctype_impl()'s two
+// constants, inlined per function as the >255 and <-128 results.
 
-#[Extern('c', name: 'isalnum')]  function _isalnum(int $c): int {}
-#[Extern('c', name: 'isalpha')]  function _isalpha(int $c): int {}
-#[Extern('c', name: 'iscntrl')]  function _iscntrl(int $c): int {}
-#[Extern('c', name: 'isdigit')]  function _isdigit(int $c): int {}
-#[Extern('c', name: 'isgraph')]  function _isgraph(int $c): int {}
-#[Extern('c', name: 'islower')]  function _islower(int $c): int {}
-#[Extern('c', name: 'isprint')]  function _isprint(int $c): int {}
-#[Extern('c', name: 'ispunct')]  function _ispunct(int $c): int {}
-#[Extern('c', name: 'isspace')]  function _isspace(int $c): int {}
-#[Extern('c', name: 'isupper')]  function _isupper(int $c): int {}
-#[Extern('c', name: 'isxdigit')] function _isxdigit(int $c): int {}
-
-// which=0..10 selects the C predicate; $c is a byte 0..255. Called 256 times
-// per predicate at MINIT to build the sets, and once per int argument (the rare
-// non-string path) -- never on the hot string path.
-function _ctype_is(int $which, int $c): int {
-    if ($which === 0)  return _isalnum($c);
-    if ($which === 1)  return _isalpha($c);
-    if ($which === 2)  return _iscntrl($c);
-    if ($which === 3)  return _isdigit($c);
-    if ($which === 4)  return _isgraph($c);
-    if ($which === 5)  return _islower($c);
-    if ($which === 6)  return _isprint($c);
-    if ($which === 7)  return _ispunct($c);
-    if ($which === 8)  return _isspace($c);
-    if ($which === 9)  return _isupper($c);
-    return _isxdigit($c);
-}
-
-// The eleven SETs, built once at MINIT: _ctype_set($w) is the string of every
-// byte that passes predicate $w. Kept as named scalar globals (one per
-// predicate) so the hot path reads a plain string, not an array element.
-function _ctype_set(int $which): string {
-    $set = '';
-    for ($b = 0; $b < 256; $b++) {
-        if (_ctype_is($which, $b) !== 0) { $set .= chr($b); }
-    }
-    return $set;
-}
-$_cs_alnum  = _ctype_set(0);
-$_cs_alpha  = _ctype_set(1);
-$_cs_cntrl  = _ctype_set(2);
-$_cs_digit  = _ctype_set(3);
-$_cs_graph  = _ctype_set(4);
-$_cs_lower  = _ctype_set(5);
-$_cs_print  = _ctype_set(6);
-$_cs_punct  = _ctype_set(7);
-$_cs_space  = _ctype_set(8);
-$_cs_upper  = _ctype_set(9);
-$_cs_xdigit = _ctype_set(10);
-
-// The ctype.c algorithm, once. A string: non-empty AND every byte is in the
-// predicate's SET -- strspn() over the whole subject, one pass (the empty
-// string is false). A non-string: ctype.c's fallback -- an int in 0..255 is
-// that byte, an int in -128..-1 is that byte + 256, an int > 255 is
-// $allow_digits, an int < -128 is $allow_minus; anything that is not an int
-// (float, bool, null, array) is false. $allow_digits / $allow_minus are the
-// two per-function constants ctype.c passes. $set is the predicate's set, read
-// from the module-persistent global by the public function. It must read the
-// global and run strspn() in the SAME frame as the published function, so each
-// cty_X below inlines the string path rather than passing $set across a call:
-// reading a module-persistent string and using it in place is leak-free, but
-// handing one to another function as an argument is not. The non-string path
-// needs no set, so it delegates here -- passing only the value and two ints.
-function _ctype_nonstr(mixed $v, int $which, int $allow_digits, int $allow_minus): bool {
-    if (is_int($v)) {
-        $c = (int) $v;
-        if ($c >= 0 && $c <= 255) {
-            return _ctype_is($which, $c) !== 0;
-        }
-        if ($c >= -128 && $c < 0) {
-            return _ctype_is($which, $c + 256) !== 0;
-        }
-        if ($c >= 0) {
-            return $allow_digits !== 0;
-        }
-        return $allow_minus !== 0;
-    }
+function cty_alnum(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return true; if ($c < -128) return false; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a") === 1; }
     return false;
 }
-
-// The eleven published functions. A string is non-empty and strspn() over the
-// predicate's SET covers the whole subject -- one pass, the set read in this
-// frame. Anything else is _ctype_nonstr, whose (which, allow_digits,
-// allow_minus) are ext/ctype/ctype.c's ctype_impl() arguments, verbatim.
-function cty_alnum(mixed $text): bool {
-    if (is_string($text)) { global $_cs_alnum; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_alnum) === $n; }
-    return _ctype_nonstr($text, 0, 1, 0);
+function cty_alpha(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return false; if ($c < -128) return false; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a") === 1; }
+    return false;
 }
-function cty_alpha(mixed $text): bool {
-    if (is_string($text)) { global $_cs_alpha; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_alpha) === $n; }
-    return _ctype_nonstr($text, 1, 0, 0);
+function cty_cntrl(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return false; if ($c < -128) return false; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f") === 1; }
+    return false;
 }
-function cty_cntrl(mixed $text): bool {
-    if (is_string($text)) { global $_cs_cntrl; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_cntrl) === $n; }
-    return _ctype_nonstr($text, 2, 0, 0);
+function cty_digit(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return true; if ($c < -128) return false; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39") === 1; }
+    return false;
 }
-function cty_digit(mixed $text): bool {
-    if (is_string($text)) { global $_cs_digit; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_digit) === $n; }
-    return _ctype_nonstr($text, 3, 1, 0);
+function cty_graph(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f\x40\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f\x60\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return true; if ($c < -128) return true; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f\x40\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f\x60\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e") === 1; }
+    return false;
 }
-function cty_graph(mixed $text): bool {
-    if (is_string($text)) { global $_cs_graph; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_graph) === $n; }
-    return _ctype_nonstr($text, 4, 1, 1);
+function cty_lower(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return false; if ($c < -128) return false; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a") === 1; }
+    return false;
 }
-function cty_lower(mixed $text): bool {
-    if (is_string($text)) { global $_cs_lower; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_lower) === $n; }
-    return _ctype_nonstr($text, 5, 0, 0);
+function cty_print(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f\x40\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f\x60\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return true; if ($c < -128) return true; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f\x40\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f\x60\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e") === 1; }
+    return false;
 }
-function cty_print(mixed $text): bool {
-    if (is_string($text)) { global $_cs_print; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_print) === $n; }
-    return _ctype_nonstr($text, 6, 1, 1);
+function cty_punct(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x3a\x3b\x3c\x3d\x3e\x3f\x40\x5b\x5c\x5d\x5e\x5f\x60\x7b\x7c\x7d\x7e") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return false; if ($c < -128) return false; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x3a\x3b\x3c\x3d\x3e\x3f\x40\x5b\x5c\x5d\x5e\x5f\x60\x7b\x7c\x7d\x7e") === 1; }
+    return false;
 }
-function cty_punct(mixed $text): bool {
-    if (is_string($text)) { global $_cs_punct; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_punct) === $n; }
-    return _ctype_nonstr($text, 7, 0, 0);
+function cty_space(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x09\x0a\x0b\x0c\x0d\x20") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return false; if ($c < -128) return false; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x09\x0a\x0b\x0c\x0d\x20") === 1; }
+    return false;
 }
-function cty_space(mixed $text): bool {
-    if (is_string($text)) { global $_cs_space; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_space) === $n; }
-    return _ctype_nonstr($text, 8, 0, 0);
+function cty_upper(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return false; if ($c < -128) return false; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a") === 1; }
+    return false;
 }
-function cty_upper(mixed $text): bool {
-    if (is_string($text)) { global $_cs_upper; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_upper) === $n; }
-    return _ctype_nonstr($text, 9, 0, 0);
-}
-function cty_xdigit(mixed $text): bool {
-    if (is_string($text)) { global $_cs_xdigit; $s = (string) $text; $n = strlen($s); return $n !== 0 && strspn($s, $_cs_xdigit) === $n; }
-    return _ctype_nonstr($text, 10, 1, 0);
+function cty_xdigit(mixed $t): bool {
+    if (is_string($t)) { $n = strlen($t); return $n !== 0 && strspn($t, "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x41\x42\x43\x44\x45\x46\x61\x62\x63\x64\x65\x66") === $n; }
+    if (is_int($t)) { $c = (int) $t; if ($c > 255) return true; if ($c < -128) return false; if ($c < 0) { $c = $c + 256; } return strspn(chr($c), "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x41\x42\x43\x44\x45\x46\x61\x62\x63\x64\x65\x66") === 1; }
+    return false;
 }
