@@ -345,11 +345,14 @@ void ph_rc_fb_walk(i64 s, uptr name) {
         i64 skip = 0;
         if (k == N_ASSIGN && str_eq(nd_name(s), name)) {
             i64 v = nd_a(s);
-            if (nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_repeat")) {
-            } else if (nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_setb") && ph_rc_arg0_is(v, name)) {
-                ph_rc_fb_walk(nd_next(nd_a(v)), name);
-                skip = 1;
-            } else ph_rc_fb_bad = 1;
+            // php_str_repeat into `name` needs no fallback walk; any other
+            // call into it is walked (php_str_setb) or is a leak
+            if (!(nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_repeat"))) {
+                if (nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_setb") && ph_rc_arg0_is(v, name)) {
+                    ph_rc_fb_walk(nd_next(nd_a(v)), name);
+                    skip = 1;
+                } else ph_rc_fb_bad = 1;
+            }
         }
         if (!skip && k == N_CALL && (ph_rc_pfx(nd_name(s), "php_str_byte") || ph_rc_pfx(nd_name(s), "php_str_off"))
             && ph_rc_arg0_is(s, name)) {

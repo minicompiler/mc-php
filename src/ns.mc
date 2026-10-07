@@ -213,7 +213,7 @@ void ph_ns_use_stmt(uptr fl, i64 line) {
         ph_next();
         if (ph_at("{", 1) || (ld8(t) && ph_at("\\", 1))) {
             // the group form: the prefix, then its members
-            if (ph_accept("\\", 1)) {}
+            ph_accept("\\", 1);
             ph_want("{", 1, "expected { in a group use");
             uptr pre = t;
             i64 n = cstrlen(pre);
