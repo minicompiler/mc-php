@@ -920,6 +920,23 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
 else
     bad "threads: it would not build"; sed 's/^/      /' "$tmp/t.build"
 fi
+
+# a nested thread: a worker starts and joins a thread of its own. Its record
+# used to live in the worker's arena, which the request's free loop releases
+# before the record is read -- a use-after-free at shutdown (SIGSEGV). The
+# record now lives in its own arena (lib/php_rt.mc php_thr_start).
+cp tests/ext/threads/nest.php "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/nest.build" 2>&1; then
+    ng=$("$PHP" -d extension="$tmp/build/r.$sx" -r 'echo nest_run(41), "\n";' 2>&1 | tr -d '\r'); nr=$?
+    if [ "$nr" = 0 ] && [ "$ng" = 42 ]; then
+        say "a nested thread: a worker starts and joins a thread of its own; the request ends clean"
+    else
+        bad "a nested thread: exit $nr, got '$ng' (want 42 and a clean shutdown)"
+    fi
+else
+    bad "a nested thread: it would not build"; sed 's/^/      /' "$tmp/nest.build"
+fi
 rm -rf "$tmp/build"
 
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }
