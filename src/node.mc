@@ -72,8 +72,54 @@ i64 ph_rt_pure(uptr name) {
     return 0;
 }
 
+// A runtime leaf that pushes NOTHING onto the per-call temporary pool: it
+// builds no pooled zend_string (php_str_alloc, the thing php_rc_drain frees).
+// Checked against lib/php_rt.mc: a type-tag read, a byte scan, the cached
+// chr() string (php_str_ch, interned, never pooled), an explicit integer cast
+// (php_zv_long -> php_stoi/php_count, no allocation), and ld64 (the narrowed
+// borrow of a zval's embedded string/long, src/types.mc). php_argcount builds
+// its error message only on the THROW path and those temporaries are covered
+// by the caller's drain or by RSHUTDOWN (the pool is a stack); it never loops,
+// so it accumulates nothing. Default is NOT no-push: a name absent here keeps
+// the drain, so a wrong omission only keeps a redundant drain; a wrong
+// inclusion of a pooling leaf in a hot loop would grow the pool unbounded, so
+// this is the audited set, nothing speculative.
+i64 ph_rt_nopush(uptr name) {
+    if (str_eq(name, "ld64"))           return 1;
+    if (str_eq(name, "ld32"))           return 1;
+    // a literal string / byte map: module memory (php_str_mod / a cached
+    // php_alloc), built once and cached, never pooled
+    if (str_eq(name, "php_str_lit"))    return 1;
+    if (str_eq(name, "php_bmap_lit"))   return 1;
+    // the by-value parameter copy: php_zv_dup + a copy of the zval fields, no
+    // pooled string (a shared string is escaped, not pooled -- php_zv_cp). It
+    // is built during parameter setup and often dropped by the borrow pass, so
+    // it must not by itself keep the drain; a body that truly pushes sets the
+    // flag through its own call.
+    if (str_eq(name, "php_zv_val"))     return 1;
+    if (str_eq(name, "php_zv_is"))      return 1;
+    if (str_eq(name, "php_zv_long"))    return 1;
+    if (str_eq(name, "php_zv_bool"))    return 1;
+    if (str_eq(name, "php_zv_type"))    return 1;
+    if (str_eq(name, "php_chr"))        return 1;
+    if (str_eq(name, "php_argcount"))   return 1;
+    if (str_eq(name, "php_spn"))        return 1;
+    if (str_eq(name, "php_spn_r"))      return 1;
+    if (str_eq(name, "php_spn_o"))      return 1;
+    if (str_eq(name, "php_spn_r_slow")) return 1;
+    if (str_eq(name, "php_spn_s"))      return 1;
+    return 0;
+}
+
+// set while lowering a function body: 1 once any call that MAY push a pooled
+// temporary has been lowered. A function that stays 0 leaves the pool exactly
+// as it found it, so its return-path refcount drain is a no-op and src/rc.mc
+// omits it (and the watermark and result-across-drain it forces).
+i64 ph_fn_pushes;
+
 i64 ph_call(uptr name, i64 nargs, i64 a0, i64 a1, i64 a2, i64 a3, i64 ty) {
     if (!ph_rt_pure(name)) ph_can_throw = 1;
+    if (!ph_rt_nopush(name)) ph_fn_pushes = 1;
     i64 c = node_new(N_CALL, ph_tline, ph_tfile);
     set_nd_name(c, name);
     if (nargs >= 1) set_nd_a(c, a0);

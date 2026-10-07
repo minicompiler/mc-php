@@ -425,6 +425,16 @@ i64 ph_rc_return(i64 r) {
         t = h;
         e = 0;
     }
+    // a push-free function (ph_rc_nodrain): no drain, no result-across-drain
+    // temporary -- the answer is returned straight. str is 0 here by
+    // construction (ph_rc_nodrain excludes a string return), so h is at most
+    // the void side-effect built just above.
+    if (ph_rc_nodrain) {
+        i64 rt = node_new(N_RETURN, ph_rc_ln, ph_rc_fl);
+        if (e) set_nd_a(rt, e);
+        if (t) { set_nd_next(t, rt); return ph_rc_block(h); }
+        return rt;
+    }
     // no counted slot to release: the answer and the drain in one routine
     if (e && str && ph_rc_nslot == 0) {
         h = ph_rc_set("ph_rv", e);
@@ -620,7 +630,14 @@ i64 ph_rc_has_loop(i64 s) {
 // excluded, so a global/static reached through a property or an element keeps
 // the pin, even for a pure read. Over-pinning is a leak at worst.
 i64 ph_pin_isread(uptr fn) {
-    return str_eq(fn, "php_zv_str") || str_eq(fn, "php_zv_long") || str_eq(fn, "php_zv_double")
+    // ld64(v_x): the narrowed read of a guarded variable (src/types.mc) loads
+    // the zval's first word -- its embedded string or long -- exactly as
+    // php_zv_str/php_zv_long do, borrowing with no reference taken and never
+    // writing or escaping the zval. So it is a read, like php_zv_str: without
+    // this a narrowed `if (is_string($t))` body would look like an escape and
+    // keep the by-value parameter copy (php_zv_val), the opposite of the point.
+    return str_eq(fn, "ld64")
+        || str_eq(fn, "php_zv_str") || str_eq(fn, "php_zv_long") || str_eq(fn, "php_zv_double")
         || str_eq(fn, "php_zv_bool")
         || str_eq(fn, "php_zv_isset") || str_eq(fn, "php_zv_is") || str_eq(fn, "php_zv_isnum")
         || str_eq(fn, "php_zv_isscalar") || str_eq(fn, "php_zv_identical") || str_eq(fn, "php_zv_type")
@@ -719,6 +736,14 @@ void ph_pin_fn(i64 f) {
 // string, because nothing says the pool's reference is the only one (a
 // straight-line function appends a bounded number of times).
 i64 ph_rc_counting;
+// 1 when this function pushed nothing to the temporary pool (ph_fn_pushes is 0)
+// and has no counted slot or loop: its return-path drain would be a no-op
+// (ph_pn == ph_pm always), so it is omitted along with the entry watermark and
+// the result-across-drain temporary it forces. A non-string return only, so the
+// string-answer push path (ph_rc_push) is untouched. Sound because the function
+// leaves the pool exactly as it found it; anything a cold throw path (argcount)
+// pushed is above the CALLER's watermark and drained there or at RSHUTDOWN.
+i64 ph_rc_nodrain;
 
 void ph_rc_fn(i64 f) {
     if (!ph_rc_on()) return;
@@ -732,6 +757,7 @@ void ph_rc_fn(i64 f) {
     i64 body = nd_b(f);
     if (!body) return;
     ph_rc_counting = ph_rc_has_loop(nd_a(body));
+    ph_rc_nodrain = !ph_fn_pushes && !ph_rc_counting && ph_rc_fty != ty_pstr;
     // the borrowed ones, decided before the rewrite cuts and relinks the list
     ph_rc_nbor = 0;
     ph_rc_bor = xalloc(12 * 8 + 8);
@@ -766,7 +792,7 @@ void ph_rc_fn(i64 f) {
     // falling off the end is a return too
     i64 tl = nb;
     if (tl) { loop { if (!nd_next(tl)) break; tl = nd_next(tl); } }
-    if (!tl || nd_kind(tl) != N_RETURN) {
+    if ((!tl || nd_kind(tl) != N_RETURN) && !ph_rc_nodrain) {
         u8 tb[8];
         i64 rel = ph_rc_releases(tb);
         i64 d = ph_rc_drain();
@@ -775,29 +801,39 @@ void ph_rc_fn(i64 f) {
         if (tl) set_nd_next(tl, rel);
         if (!tl) nb = rel;
     }
-    // the entry mark and the answer's temporary, declared ahead of everything
-    i64 pm = node_new(N_VAR, ph_rc_ln, ph_rc_fl);
-    set_nd_name(pm, "ph_pm");
-    set_nd_type(pm, TY_I64);
-    set_nd_a(pm, ph_rc_id("ph_pn", TY_I64));
-    i64 head = pm;
-    i64 tail = pm;
-    // the value a store is taking, held while the old one is released
-    i64 sn = node_new(N_VAR, ph_rc_ln, ph_rc_fl);
-    set_nd_name(sn, "ph_sn");
-    set_nd_type(sn, ty_pstr);
-    set_nd_a(sn, 0);
-    set_nd_next(tail, sn);
-    tail = sn;
-    if (ph_rc_fty != TY_VOID) {
-        i64 rv = node_new(N_VAR, ph_rc_ln, ph_rc_fl);
-        set_nd_name(rv, "ph_rv");
-        set_nd_type(rv, ph_rc_fty);
-        set_nd_a(rv, 0);
-        set_nd_next(tail, rv);
-        tail = rv;
+    // A push-free function (ph_rc_nodrain) needs none of the per-function
+    // temporaries: no entry watermark (ph_pm), no store-holder (ph_sn) and no
+    // result-across-drain (ph_rv), so the body stands as its own statement
+    // list. ph_rc_return returned each answer straight, referencing none of
+    // them, so nothing is left dangling.
+    i64 head = 0;
+    i64 tail = 0;
+    if (!ph_rc_nodrain) {
+        // the entry mark and the answer's temporary, declared ahead of all
+        i64 pm = node_new(N_VAR, ph_rc_ln, ph_rc_fl);
+        set_nd_name(pm, "ph_pm");
+        set_nd_type(pm, TY_I64);
+        set_nd_a(pm, ph_rc_id("ph_pn", TY_I64));
+        head = pm;
+        tail = pm;
+        // the value a store is taking, held while the old one is released
+        i64 sn = node_new(N_VAR, ph_rc_ln, ph_rc_fl);
+        set_nd_name(sn, "ph_sn");
+        set_nd_type(sn, ty_pstr);
+        set_nd_a(sn, 0);
+        set_nd_next(tail, sn);
+        tail = sn;
+        if (ph_rc_fty != TY_VOID) {
+            i64 rv = node_new(N_VAR, ph_rc_ln, ph_rc_fl);
+            set_nd_name(rv, "ph_rv");
+            set_nd_type(rv, ph_rc_fty);
+            set_nd_a(rv, 0);
+            set_nd_next(tail, rv);
+            tail = rv;
+        }
     }
-    if (entry) { set_nd_next(tail, entry); tail = etail; }
-    set_nd_next(tail, nb);
+    if (entry) { if (tail) set_nd_next(tail, entry); if (!tail) head = entry; tail = etail; }
+    if (tail) set_nd_next(tail, nb);
+    if (!tail) head = nb;
     set_nd_a(body, head);
 }

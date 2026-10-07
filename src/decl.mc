@@ -51,6 +51,11 @@ i64 ph_function() {
     // assigns by value copies as it always did.
     i64 retref = 0;
     if (ph_at("&", 1)) { ph_next(); retref = 1; }
+    // reset per function (restored at the end for a nested declaration): 1 once
+    // the body lowers a call that may push a pool temporary. src/rc.mc reads it
+    // to decide whether the drain is needed.
+    i64 sfp = ph_fn_pushes;
+    ph_fn_pushes = 0;
     if (ph_tid != T_IDENT) ph_todo(fl, line, "an anonymous function or closure");
     uptr name = ph_ns_decl(ph_tname);                // `ns\name` inside a namespace
     uptr xab = ph_ext_ab;
@@ -406,6 +411,7 @@ i64 ph_function() {
     ph_rope_fn(f);
     ph_rc_fn(f);
     ph_opt_fn(f);
+    ph_fn_pushes = sfp;
     return f;
 }
 
