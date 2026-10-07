@@ -1315,8 +1315,11 @@ region, the recorded upgrade).
 
 - **Windows connect is a blocking loopback connect**, not `ConnectEx` (§ 1 deviation); the read is
   IOCP. `ConnectEx` is the async upgrade.
-- **A thread started inside a worker** (nested `mcphp_thread_start`) has its record in the worker's
-  arena, which request shutdown frees before the thread table reads it -- a pre-existing
-  nested-thread hazard, out of this step's scope. The cross-thread leak case therefore does not
-  nest a thread; cross-thread completion itself is gated by `tests/c/21-xthread` on the program
-  road.
+- **A thread started inside a worker** (nested `mcphp_thread_start`) is supported: its record lives
+  in its own arena, not the caller's, so the request's free loop (`php_thr_endall`) never releases
+  a worker arena while a nested thread's record still points into it. This was once a hazard --
+  the record was allocated in the worker's arena and the free loop unmapped it before reading the
+  nested record, a use-after-free at shutdown -- fixed by allocating the record in the new thread's
+  own arena (`php_thr_start`). Gated by `tests/ext/threads/nest.php` (a worker that starts and
+  joins a thread of its own; the request ends clean) on the NTS and ZTS extension legs, and
+  cross-thread completion by `tests/c/21-xthread` on the program road.

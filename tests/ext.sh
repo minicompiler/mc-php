@@ -920,6 +920,27 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
 else
     bad "threads: it would not build"; sed 's/^/      /' "$tmp/t.build"
 fi
+
+# a nested thread: a worker starts and joins a thread of its own. Its record
+# used to live in the worker's arena, which the request's free loop releases
+# before the record is read -- a use-after-free at shutdown (SIGSEGV). The
+# record now lives in its own arena (lib/php_rt.mc php_thr_start).
+cp tests/ext/threads/nest.php "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/nest.build" 2>&1; then
+    # nr must be PHP's exit, not a pipe's: pre-fix the process prints 42 and
+    # then SIGSEGVs at shutdown (exit 139), so the clean-shutdown claim is only
+    # tested if nr captures that 139
+    "$PHP" -d extension="$tmp/build/r.$sx" -r 'echo nest_run(41), "\n";' > "$tmp/nest.out" 2>&1; nr=$?
+    ng=$(tr -d '\r' < "$tmp/nest.out")
+    if [ "$nr" = 0 ] && [ "$ng" = 42 ]; then
+        say "a nested thread: a worker starts and joins a thread of its own; the request ends clean"
+    else
+        bad "a nested thread: exit $nr, got '$ng' (want 42 and a clean shutdown)"
+    fi
+else
+    bad "a nested thread: it would not build"; sed 's/^/      /' "$tmp/nest.build"
+fi
 rm -rf "$tmp/build"
 
 [ "$fail" = 0 ] || { echo "  ext: something failed"; exit 1; }

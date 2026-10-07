@@ -11291,9 +11291,7 @@ i64 php_thr_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     if (!ph_globals) ph_globals = php_arr_new(16);
     if (!ph_consts) ph_consts = php_arr_new(16);
     st64(phT + PHT_ph_shared, 1);
-    uptr rec = php_alloc(PHA_SIZE);
     i64 i = 0;
-    loop { if (i >= PHA_SIZE) break; st64(rec + i, 0); i = i + 8; }
     ph_lock();
     ph_tnext = ph_tnext + 1;
     i64 id = ph_tnext;
@@ -11314,13 +11312,20 @@ i64 php_thr_start(uptr fn, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     uptr b = php_thr_block(phT, id);
     uptr root = ld64(phT + PHT_ph_troot);
     if (!root) root = phT;
+    // the record AND the copies are made in the new thread's own arena, not
+    // the caller's: a nested thread (started from inside a worker) would
+    // otherwise keep its record in the worker's arena, which the request's
+    // free loop (php_thr_endall) releases before this record is read -- a
+    // use-after-free at shutdown. Each record now lives in the arena its own
+    // reap entry frees, so the free order cannot dangle one.
+    ph_tset(b);
+    uptr rec = php_alloc(PHA_SIZE);
+    i = 0;
+    loop { if (i >= PHA_SIZE) break; st64(rec + i, 0); i = i + 8; }
     st64(rec + PHA_ID, id);
     st64(rec + PHA_BLOCK, b);
     st64(rec + PHA_ROOT, root);
     st64(rec + PHA_N, n);
-    // the copies, made in the new thread's arena: allocation follows the
-    // host's slot while the fast path is off
-    ph_tset(b);
     st64(rec + PHA_FN, php_tc_val(fn));
     if (n > 0) st64(rec + PHA_ARG, php_tc_val(a1));
     if (n > 1) st64(rec + PHA_ARG + 8, php_tc_val(a2));
@@ -11444,9 +11449,12 @@ uptr php_thr_endall(uptr root, i64 free, i64 skipdet) {
         uptr k = ld64(root + PHT_ph_tret);
         loop {
             if (!k) break;
+            // the record lives in its own arena (php_thr_start): read every
+            // field off it before that arena is released
             uptr nx = ld64(k + PHA_NEXT);
+            uptr kb = ld64(k + PHA_BLOCK);
             php_arena_free(ld64(k + PHA_HB), ld64(k + PHA_HL));
-            ph_os_unmap(ld64(k + PHA_BLOCK), PHT_SIZE);   // the control block, retained past reap for FUT_OWNER routing
+            ph_os_unmap(kb, PHT_SIZE);   // the control block, retained past reap for FUT_OWNER routing
             k = nx;
         }
         st64(root + PHT_ph_tret, 0);
