@@ -47,8 +47,33 @@ i64 ph_raw(uptr bytes, i64 len) {
     return k;
 }
 
+// A runtime leaf that provably sets no pending exception: it reads a zval's
+// type tag, scans bytes, allocates, or performs an explicit cast -- none of
+// which raises. Checked against lib/php_rt.mc: no body here reaches php_throw,
+// php_throw_str/cls, php_warn or a *_error, so EG(exception) (PHT_ph_exc) is
+// unchanged across the call. (php_fatal is exit(255), never a return, so it is
+// not a throw.) Default is NOT pure: a name absent here keeps the per-call
+// unwinding check, so a wrong omission only leaves a redundant check, never a
+// skipped one. A wrong INCLUSION would skip a real check -- so this list is the
+// audited set, nothing speculative.
+//   php_zv_is      is_int/is_string/... -> a type-tag compare
+//   php_zv_long    (int) cast -> php_stoi/php_count, both pure loads
+//   php_chr        chr() -> php_str_ch, an allocation
+//   php_spn*       strspn/strcspn -> byte scans over the subject
+i64 ph_rt_pure(uptr name) {
+    if (str_eq(name, "php_zv_is"))      return 1;
+    if (str_eq(name, "php_zv_long"))    return 1;
+    if (str_eq(name, "php_chr"))        return 1;
+    if (str_eq(name, "php_spn"))        return 1;
+    if (str_eq(name, "php_spn_r"))      return 1;
+    if (str_eq(name, "php_spn_o"))      return 1;
+    if (str_eq(name, "php_spn_r_slow")) return 1;
+    if (str_eq(name, "php_spn_s"))      return 1;
+    return 0;
+}
+
 i64 ph_call(uptr name, i64 nargs, i64 a0, i64 a1, i64 a2, i64 a3, i64 ty) {
-    ph_can_throw = 1;
+    if (!ph_rt_pure(name)) ph_can_throw = 1;
     i64 c = node_new(N_CALL, ph_tline, ph_tfile);
     set_nd_name(c, name);
     if (nargs >= 1) set_nd_a(c, a0);
