@@ -75,6 +75,12 @@ i64 ph_function() {
     i64 np = 0;
     i64 pre = 0;
     i64 pret = 0;
+    // a mixed parameter's by-value copy node and its mc name, one slot per
+    // parameter: after the body is parsed, a parameter the body only READS
+    // drops the copy and borrows the caller's zval (see below)
+    u8 bvn[96];
+    u8 bvm[96];
+    i64 nbv = 0;
     loop {
         if (ph_at(")", 1)) break;
         i64 variadic = 0;
@@ -136,6 +142,7 @@ i64 ph_function() {
         if (pt == PT_MIXED) {
             if (!byref) {
                 i64 bv = ph_byval(d, line, fl);
+                if (nbv < 12) { st64(bvn + nbv * 8, bv); st64(bvm + nbv * 8, ph_mangle(d, "v_")); nbv = nbv + 1; }
                 if (pret) set_nd_next(pret, bv);
                 if (!pret) pre = bv;
                 pret = bv;
@@ -248,6 +255,49 @@ i64 ph_function() {
     ph_in_try = sit;
     ph_frv = sfv;
     ph_frf = sff;
+    // A mixed parameter the body only READS needs no by-value copy: it can
+    // borrow the caller's zval for the whole call, which the caller holds like
+    // php holds an argument. ph_pin_used (src/rc.mc) is the same "is this name
+    // ever written or escaped" walk the global/static pin uses -- it is 1 for
+    // any occurrence of v_x that is not the first argument of a known READ
+    // accessor: a write (through a write accessor), a return, a mixed argument,
+    // a container store, a by-reference pass, a by-ref closure capture. When it
+    // is 0 the body cannot mutate the caller's value through $x and cannot keep
+    // it past the call, so php_zv_val is pure cost and the copy is dropped.
+    // Default = keep: a missed write would be a use-after-free, so the walk
+    // errs toward binding; a plain rebind `$x = ...` rebinds the pointer and
+    // never touches the caller, which is why it is not a blocking use. Scanned
+    // over the REAL body only (nd_a(body)); the copy node's own `if (truthy
+    // ($x))` would otherwise read as a use of $x.
+    i64 bj = 0;
+    loop {
+        if (bj >= nbv) break;
+        if (ph_pin_used(nd_a(body), ld64(bvm + bj * 8))) st64(bvn + bj * 8, 0);  // keep: body writes/escapes
+        bj = bj + 1;
+    }
+    i64 ndrp = 0;
+    bj = 0;
+    loop { if (bj >= nbv) break; if (ld64(bvn + bj * 8)) ndrp = ndrp + 1; bj = bj + 1; }
+    if (ndrp) {
+        i64 nh = 0;
+        i64 nt = 0;
+        i64 s = pre;
+        loop {
+            if (!s) break;
+            i64 nx = nd_next(s);
+            i64 drop = 0;
+            i64 j = 0;
+            loop { if (j >= nbv) break; if (ld64(bvn + j * 8) == s) drop = 1; j = j + 1; }
+            if (!drop) {
+                set_nd_next(s, 0);
+                if (nt) set_nd_next(nt, s);
+                if (!nt) nh = s;
+                nt = s;
+            }
+            s = nx;
+        }
+        pre = nh;
+    }
     if (pre) {
         i64 t = pre;
         loop { if (!nd_next(t)) break; t = nd_next(t); }
