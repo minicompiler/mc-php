@@ -525,16 +525,20 @@ rm -rf "$tmp/build"
 # whole-string strspn() scan in a hot loop exhausted the heap. The native path
 # now takes a mixed argument too, borrowing the string with php_zv_str and
 # escaping nothing, so the peak does not move.
-printf '<?php\nfunction spn(string $s, mixed $set, int $n): int { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strspn($s, $set); } return $t; }\n' > "$tmp/r.php"
+# every path the fix now admits: a mixed SUBJECT and a mixed SET, for strspn
+# AND strcspn (the leak was php_str_esc on the subject, so a mixed subject must
+# be covered too). Per iteration: strspn(s,set)=4 + strspn(mixedS,set)=4 +
+# strcspn(s,other)=4 + strcspn(mixedS,other)=4 = 16.
+printf '<?php\nfunction spn(mixed $s, mixed $set, mixed $other, int $n): int { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strspn($s, $set) + strspn("0123", $set) + strcspn($s, $other) + strcspn("0123", $other); } return $t; }\n' > "$tmp/r.php"
 rm -f "$tmp/build/r.$sx"
 if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/sp.build" 2>&1; then
     got=$("$PHP" -d extension="$tmp/build/r.$sx" \
-        -r 'spn("0123", "0123456789", 10); $p = memory_get_peak_usage(); $t = spn("0123", "0123456789", 100000); printf("%d %d", $t, memory_get_peak_usage() - $p);' 2>&1 | tr -d '\r')
+        -r 'spn("0123", "0123456789", "abc", 10); $p = memory_get_peak_usage(); $t = spn("0123", "0123456789", "abc", 100000); printf("%d %d", $t, memory_get_peak_usage() - $p);' 2>&1 | tr -d '\r')
     set -- $got
-    if [ "${1:-}" = 400000 ] && [ "${2:-999999}" -lt 8192 ]; then
-        say "strspn set: 100000 strspn() against a mixed set in one call, php's peak moved $2 bytes"
+    if [ "${1:-}" = 1600000 ] && [ "${2:-999999}" -lt 8192 ]; then
+        say "strspn/strcspn: 100000 calls each over a mixed subject and a mixed set in one call, php's peak moved $2 bytes"
     else
-        bad "strspn set: want 400000 and a peak that moved under 8 KiB, got $got"
+        bad "strspn/strcspn: want 1600000 and a peak that moved under 8 KiB, got $got"
     fi
 else
     bad "strspn set: it would not build"; sed 's/^/      /' "$tmp/sp.build"
