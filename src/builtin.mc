@@ -1441,8 +1441,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             u8 mm[96];
             i64 k = 0;
             st64(mm, ph_int(want));
-            i64 first = 0;
-            if (res) { st64(mm + 16, res); k = 1; first = 1; }
+            if (res) { st64(mm + 16, res); k = 1; }
             loop {
                 if (k >= 10) break;
                 if (q >= na) break;
@@ -1464,7 +1463,6 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             ph_ety = PT_MIXED;
             ph_can_throw = 1;
             res = ph_calln("php_maxmin", mm, 12, ty_pzv);
-            if (first) { }
         }
         ph_ety = PT_MIXED;
         ph_can_throw = 1;
