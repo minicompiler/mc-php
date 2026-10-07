@@ -82,7 +82,9 @@ PHP_FUNCTION(db_load)
     ZEND_PARSE_PARAMETERS_END();
     void *d = (void *) (intptr_t) db;
     if (sqlite3_exec(d, "BEGIN", 0, 0, 0) != 0) RETURN_LONG(-1);
-    char sql[256];
+    /* size to the table name so a long name is not truncated: db.php builds
+       the same query as a PHP string, which has no fixed limit */
+    char sql[ZSTR_LEN(table) + 64];
     snprintf(sql, sizeof sql, "INSERT INTO %s(id, name, v) VALUES (?, ?, ?)", ZSTR_VAL(table));
     void *st = NULL;
     if (sqlite3_prepare_v2(d, sql, -1, &st, 0) != 0) {
