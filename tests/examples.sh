@@ -16,6 +16,11 @@
 #                    (slice 1: scalars only). check.php against check.expect and
 #                    against php's own SQLite3 class as the oracle; SKIPPED by
 #                    name on Windows and on a php without sqlite3.
+#   ctype            php-src's ext/ctype ported to PHP and compiled by mc-php.
+#                    The eleven cty_* graded byte for byte against php's own
+#                    (compiled-in) ctype_* over all 256 bytes, the int quirk and
+#                    the non-string types; the bench is cty_*/ctype_*, printed.
+#                    SKIPPED on Windows (#[Extern] is refused there by name).
 #   two-extensions   PHP compiled by mc-php: extA and extB, where B calls A
 #                    through php's function table. The differential in BOTH
 #                    load orders and B alone, the C twins graded the same way,
@@ -288,6 +293,53 @@ elif build "$EX" "$EX/mcphp$suf.toml" "db.$sx"; then
         row="interpreted $bi ms, compiled $bc ms $(awk -v i="$bi" -v c="$bc" 'BEGIN { printf "(%.2fx)", i / c }')"
         [ -n "$bt" ] && row="$row, C twin $bt ms, module/C $(awk -v m="$bc" -v c="$bt" 'BEGIN { printf "%.2fx", m / c }') (DONE < 2.0)"
         say "bench: $row -- best of nine, three rounds interleaved; not gated"
+    fi
+fi
+
+# --- ctype: php-src's ext/ctype ported to PHP --------------------------------
+# examples/ctype/ctype.php reproduces ext/ctype/ctype.c -- the eleven functions,
+# the per-byte predicate delegated to the C library's is*() exactly as ctype.c
+# does, and the int-argument quirk verbatim. ctype is COMPILED IN to this php
+# (php -n still has it), so a redeclaration is impossible: the port publishes
+# cty_* and check.php compares each against the built-in ctype_X over all 256
+# bytes, the empty string, multi-character strings, ints across and outside the
+# -128..255 window, and the non-int/non-string types -- byte for byte. The
+# reference IS php's own ctype, so there is no twin and no oracle. Not a
+# differential (interpreted, the #[Extern] is*() bodies are empty, like db).
+# Then the bench, cty_* over php's own ctype_*, printed. SKIPPED on Windows,
+# where an #[Extern] function is refused by name (the link names no library).
+echo "  -- ctype"
+EX=examples/ctype
+ctso=$rootn/$EX/build/ctype.$sx
+if [ "$host" = windows ]; then
+    skip "ctype: an #[Extern] function is refused on Windows by name (the link names no library for it)"
+elif build "$EX" "$EX/mcphp$suf.toml" "ctype.$sx"; then
+    say "built: $(wc -c < "$ctso" | tr -d ' ') bytes from $EX/ctype.php"
+    "$PHP" -d extension="$ctso" "$EX/check.php" > "$tmp/ct.out" 2> "$tmp/ct.err"; crc=$?
+    if [ "$crc" = 0 ] && [ ! -s "$tmp/ct.err" ] && tr -d '\r' < "$tmp/ct.out" | cmp -s - "$EX/check.expect"; then
+        say "check.php: $(sed -n 's/^cases //p' "$tmp/ct.out") cases against php's own ctype_*, byte for byte (all 256 bytes, the empty string, the int -128..255 quirk, the non-string types), exit 0"
+    else
+        bad "ctype check.php: exit $crc, want check.expect and a quiet stderr"
+        tr -d '\r' < "$tmp/ct.out" | diff -u "$EX/check.expect" - | sed -n '3,20p' | sed 's/^/      /'
+        sed 's/^/      /' "$tmp/ct.err"
+    fi
+    vis=$("$PHP" -d extension="$ctso" -r '$f = get_extension_funcs("ctype_port"); sort($f); echo implode(" ", $f);' 2>&1 | tr -d '\r')
+    if [ "$vis" = "cty_alnum cty_alpha cty_cntrl cty_digit cty_graph cty_lower cty_print cty_punct cty_space cty_upper cty_xdigit" ]; then
+        say "published: the eleven cty_* functions and none of the is*() declarations or _ helpers"
+    else
+        bad "ctype published: want the eleven cty_*, got: $vis"
+    fi
+    # the bench: cty_* against php's own compiled-in ctype_* in the same process,
+    # best of nine interleaved. The reference is the C extension itself, so the
+    # ratio is cty_* / ctype_*. It is over 2.0 -- a per-byte is*() call cannot
+    # reach ctype.c's inlined rune-table loop, and the whole-string strspn() that
+    # would close the gap hits an mc-php refcounting leak (README.md § The bench).
+    # Printed, not gated, like every bench here.
+    set -- $("$PHP" -d extension="$ctso" "$EX/bench.php" | tr -d '\r')
+    if [ "$1" = cty ]; then
+        say "bench: cty $2 ms, ctype $4 ms, module/ctype.so $6 -- best of nine interleaved; over 2.0, see README.md § The bench; not gated"
+    else
+        bad "ctype bench.php: $*"
     fi
 fi
 
