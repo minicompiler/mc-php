@@ -25,6 +25,18 @@ echo "sum ", scalar($d, "SELECT SUM(v) FROM t"), "\n";
 echo "max ", scalar($d, "SELECT MAX(v) FROM t WHERE id <= 500"), "\n";
 echo "name ", $d->querySingle("SELECT name FROM t WHERE id = 777"), "\n";
 echo "none ", scalar($d, "SELECT id FROM t WHERE id = -1"), "\n";
+
+// the same three rows through SQLite3::query / fetchArray(SQLITE3_ASSOC):
+// the oracle for db_rows()
+$res = $d->query("SELECT id, name, v FROM t WHERE id IN (1, 2, 500) ORDER BY id");
+$rows = [];
+while ($r = $res->fetchArray(SQLITE3_ASSOC)) $rows[] = $r;
+echo "rows ", count($rows), "\n";
+foreach ($rows as $r) echo "row ", $r["id"], " ", $r["name"], " ", $r["v"], "\n";
+$e = $d->query("SELECT id FROM t WHERE id = -1");
+$empty = 0; while ($e->fetchArray(SQLITE3_ASSOC)) $empty++;
+echo "empty ", $empty, "\n";
+
 $bad = @$d->exec("SELEKT 1") === false ? 1 : 0;
 echo "bad ", $bad, " ", $d->lastErrorMsg(), "\n";
 echo "dup ", load($d, 3), "\n";

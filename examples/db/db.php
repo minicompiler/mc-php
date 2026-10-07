@@ -6,7 +6,9 @@
 // int, a pointer-sized int (Ptr) or a string, which is all #[Extern] carries
 // today. On the extension road the symbols resolve from php's own process, so a
 // php with sqlite3 loaded (`php -m`) is all the module needs -- no -lsqlite3 in
-// the link. Rows do NOT come back as arrays yet; that is slice 2.
+// the link. Slice 2 adds db_rows(): a query's rows come back as a php array of
+// associative arrays (column name => value), built in php over the scalar
+// column reads -- no new #[Extern] return type, the array is a core type.
 //
 // sqlite3_open and sqlite3_prepare_v2 return their handle through an out
 // parameter (`sqlite3 **`). php has no pointer-to-pointer, so the out parameter
@@ -30,6 +32,8 @@
 #[Extern('sqlite3')] function sqlite3_bind_text(Ptr $stmt, int $i, string $v, int $n, Ptr $destructor): int {}
 #[Extern('sqlite3')] function sqlite3_column_int(Ptr $stmt, int $i): int {}
 #[Extern('sqlite3')] function sqlite3_column_text(Ptr $stmt, int $i): string {}
+#[Extern('sqlite3')] function sqlite3_column_count(Ptr $stmt): int {}
+#[Extern('sqlite3')] function sqlite3_column_name(Ptr $stmt, int $i): string {}
 
 const _SQLITE_ROW = 100;
 const _SQLITE_DONE = 101;
@@ -117,4 +121,29 @@ function db_text(int $db, string $sql): string {
     if (sqlite3_step($st) === _SQLITE_ROW) $s = sqlite3_column_text($st, 0);
     sqlite3_finalize($st);
     return $s;
+}
+
+// Every row of a query as an associative array, column name => value, in
+// column order; a php array of those arrays, built here from the scalar
+// column reads. Each value is the text sqlite coerces the column to
+// (sqlite3_column_text) -- a generic row reader is text in, text out, which
+// is C semantics and keeps the result the same shape whatever the column's
+// declared type. An empty array when the statement does not prepare or there
+// are no rows. The array is a php value: the module holds a reference to the
+// engine's array while it fills it and hands it back by copy (docs/php-extension.md).
+function db_rows(int $db, string $sql): array {
+    $rows = [];
+    $out = _out8();
+    if (sqlite3_prepare_v2($db, $sql, -1, $out, 0) !== 0) return $rows;
+    $st = _ptr($out);
+    $cols = sqlite3_column_count($st);
+    while (sqlite3_step($st) === _SQLITE_ROW) {
+        $row = [];
+        for ($i = 0; $i < $cols; $i++) {
+            $row[sqlite3_column_name($st, $i)] = sqlite3_column_text($st, $i);
+        }
+        $rows[] = $row;
+    }
+    sqlite3_finalize($st);
+    return $rows;
 }

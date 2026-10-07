@@ -195,13 +195,17 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
     fi
 fi
 
-# --- db: sqlite3's C API called from PHP source (slice 1) --------------------
+# --- db: sqlite3's C API called from PHP source ------------------------------
 # examples/db/db.php declares libsqlite3 with #[Extern('sqlite3')] -- scalars,
-# pointers and strings only; rows as arrays are slice 2. The extension road
-# resolves the symbols from php's own process, so it needs a php with sqlite3
-# loaded, and that is also what the oracle (oracle.php, php's SQLite3 class) uses.
-# Not a differential (running the interpreted db.php against the module):
-# interpreted, #[Extern] bodies are empty. The graded output is check.expect, and the oracle must print it too.
+# pointers and strings; slice 2 adds db_rows(), which assembles each row into a
+# php associative array over those scalar reads (no new extern return type). The
+# extension road resolves the symbols from php's own process, so it needs a php
+# with sqlite3 loaded, and that is also what the oracle (oracle.php, php's
+# SQLite3 class) uses. Not a differential (running the interpreted db.php against
+# the module): interpreted, #[Extern] bodies are empty. The graded output is
+# check.expect, and the oracle must print it too. Then the C twin (c/db.c),
+# graded the same way, and the bench whose module/C ratio is the DONE bar
+# (README.md) -- printed, as every bench here, not gated.
 echo "  -- db"
 EX=examples/db
 dbso=$rootn/$EX/build/db.$sx
@@ -213,7 +217,7 @@ elif build "$EX" "$EX/mcphp$suf.toml" "db.$sx"; then
     say "built: $(wc -c < "$dbso" | tr -d ' ') bytes from $EX/db.php"
     "$PHP" -d extension="$dbso" "$EX/check.php" > "$tmp/db.out" 2> "$tmp/db.err"; drc=$?
     if [ "$drc" = 0 ] && [ ! -s "$tmp/db.err" ] && tr -d '\r' < "$tmp/db.out" | cmp -s - "$EX/check.expect"; then
-        say "check.php: $(wc -l < "$tmp/db.out" | tr -d ' ') lines against check.expect, 1000 rows loaded through one prepared statement, in memory and on disk"
+        say "check.php: $(wc -l < "$tmp/db.out" | tr -d ' ') lines against check.expect, 1000 rows loaded through one prepared statement, pulled back as associative arrays (db_rows), in memory and on disk"
     else
         bad "db check.php: exit $drc, want check.expect"
         tr -d '\r' < "$tmp/db.out" | diff -u "$EX/check.expect" - | sed -n '3,20p' | sed 's/^/      /'
@@ -228,10 +232,62 @@ elif build "$EX" "$EX/mcphp$suf.toml" "db.$sx"; then
         sed 's/^/      /' "$tmp/dbo.err"
     fi
     vis=$("$PHP" -d extension="$dbso" -r '$f = get_extension_funcs("db"); sort($f); echo implode(" ", $f);' 2>&1 | tr -d '\r')
-    if [ "$vis" = "db_close db_error db_exec db_load db_open db_scalar db_text" ]; then
-        say "published: the seven db_* functions and none of the sqlite3_* declarations or _ helpers"
+    if [ "$vis" = "db_close db_error db_exec db_load db_open db_rows db_scalar db_text" ]; then
+        say "published: the eight db_* functions and none of the sqlite3_* declarations or _ helpers"
     else
-        bad "db published: want the seven db_* functions, got: $vis"
+        bad "db published: want the eight db_* functions, got: $vis"
+    fi
+    # the C twin (c/db.c): the same eight db_* functions written the ordinary
+    # way, graded by the same check.php against check.expect, and the reference
+    # the bench's DONE ratio is measured against. Like db.php it declares its own
+    # sqlite3 symbols and links none, so it needs no sqlite3 dev package -- only
+    # php-config and a C compiler; without them this says so and the bench has no
+    # C column (and no DONE ratio).
+    cso=
+    CC=${CC:-cc}
+    if command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; then
+        inc=$(php-config --includes)
+        if "$CC" -O2 -bundle -undefined dynamic_lookup -o "$tmp/c-db.so" "$EX/c/db.c" $inc 2>"$tmp/c.err" ||
+           "$CC" -O2 -shared -fPIC -o "$tmp/c-db.so" "$EX/c/db.c" $inc 2>>"$tmp/c.err"; then
+            cso=$tmp/c-db.so
+            "$PHP" -d extension="$cso" "$EX/check.php" > "$tmp/dbc.out" 2> "$tmp/dbc.err"; dcrc=$?
+            if [ "$dcrc" = 0 ] && [ ! -s "$tmp/dbc.err" ] && tr -d '\r' < "$tmp/dbc.out" | cmp -s - "$EX/check.expect"; then
+                say "the C twin (c/db.c): check.php byte for byte check.expect, exit 0"
+            else
+                bad "the C twin check.php: exit $dcrc, want check.expect"
+                tr -d '\r' < "$tmp/dbc.out" | diff -u "$EX/check.expect" - | sed -n '3,20p' | sed 's/^/      /'
+                sed 's/^/      /' "$tmp/dbc.err"
+            fi
+        else
+            bad "the C twin would not build:"; sed 's/^/      /' "$tmp/c.err"
+        fi
+    else
+        skip "the C twin: no php-config or no $CC here -- the bench has no C column"
+    fi
+    # the bench row: the example's own workload (a 1000-row prepared bulk load,
+    # three aggregates, a 200-row db_rows page), three rounds, the processes
+    # interleaved, minimums. The module/C ratio is the DONE bar (README.md),
+    # printed with the row; DONE is module/C < 2.0.
+    bi=; bc=; bt=; ai=; ac=
+    for r in 1 2 3; do
+        set -- $("$PHP" "$EX/bench.php" | tr -d '\r')
+        [ "$1" = interpreted ] || { bad "bench.php (interpreted): $*"; break; }
+        bi=$(awk -v a="$bi" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2; ai=$*
+        set -- $("$PHP" -d extension="$dbso" "$EX/bench.php" | tr -d '\r')
+        [ "$1" = compiled ] || { bad "bench.php (compiled): $*"; break; }
+        bc=$(awk -v a="$bc" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2; ac=$*
+        [ "$ai" = "$ac" ] || bad "bench.php: the two answers differ: $ai / $ac"
+        if [ -n "$cso" ]; then
+            set -- $("$PHP" -d extension="$cso" "$EX/bench.php" c | tr -d '\r')
+            [ "$1" = c ] || { bad "bench.php (the C twin): $*"; break; }
+            bt=$(awk -v a="$bt" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2
+            [ "$ai" = "$*" ] || bad "bench.php: the C twin's answer differs: $*"
+        fi
+    done
+    if [ -n "$bc" ]; then
+        row="interpreted $bi ms, compiled $bc ms $(awk -v i="$bi" -v c="$bc" 'BEGIN { printf "(%.2fx)", i / c }')"
+        [ -n "$bt" ] && row="$row, C twin $bt ms, module/C $(awk -v m="$bc" -v c="$bt" 'BEGIN { printf "%.2fx", m / c }') (DONE < 2.0)"
+        say "bench: $row -- best of nine, three rounds interleaved; not gated"
     fi
 fi
 

@@ -6,6 +6,11 @@ sum 499500
 max 996
 name row-777
 none -1
+rows 3
+row 1 row-1 7
+row 2 row-2 14
+row 500 row-500 500
+empty 0
 bad 1 near "SELEKT": syntax error
 dup -1
 count 1000
