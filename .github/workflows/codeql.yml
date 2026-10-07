@@ -36,3 +36,80 @@ jobs:
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:${{ matrix.language }}"
+
+  # mc-php's real sources are .mc. github/codeql-action does not support custom
+  # languages (issue #3015), so this independent job drives the CodeQL CLI
+  # directly with the minicompiler/codeql-mc extractor and uploads the SARIF via
+  # the (language-agnostic) upload-sarif action. It is separate from `analyze`
+  # above, so a failure here never affects the actions/c-cpp jobs — and it fails
+  # loudly (no continue-on-error) if the extractor build or scan breaks.
+  mc:
+    name: Analyze (mc)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    env:
+      CODEQL_VERSION: "2.27.1"
+      # pin of minicompiler/codeql-mc (public satellite tooling)
+      CODEQL_MC_REF: "c1247a5a798e5151dbd68b766a4dbc0182338532"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout mc-php
+        uses: actions/checkout@v4
+
+      - name: Checkout codeql-mc
+        uses: actions/checkout@v4
+        with:
+          repository: minicompiler/codeql-mc
+          ref: ${{ env.CODEQL_MC_REF }}
+          path: .codeql-mc
+
+      - name: Install Rust 1.96.0
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .codeql-mc/extractor/target
+          key: codeql-mc-cargo-${{ hashFiles('.codeql-mc/extractor/Cargo.lock') }}
+
+      - name: Install CodeQL CLI ${{ env.CODEQL_VERSION }}
+        run: |
+          set -euxo pipefail
+          gh release download "v${CODEQL_VERSION}" -R github/codeql-cli-binaries -p codeql-linux64.zip
+          unzip -q codeql-linux64.zip
+          echo "$PWD/codeql" >> "$GITHUB_PATH"
+
+      - name: Build mc extractor pack
+        working-directory: .codeql-mc
+        run: bash scripts/create-extractor-pack.sh
+
+      - name: Install mc query-pack dependencies
+        working-directory: .codeql-mc
+        run: |
+          codeql pack install ql/lib
+          codeql pack install ql/src
+
+      - name: Create mc database over src/
+        run: |
+          codeql database create mc-db --language=mc --overwrite \
+            --search-path "$PWD/.codeql-mc/extractor-pack" \
+            --source-root src
+
+      - name: Analyze with mc queries
+        run: |
+          codeql database analyze mc-db \
+            --additional-packs "$PWD/.codeql-mc" \
+            --format=sarif-latest --output=mc.sarif --sarif-category=mc \
+            .codeql-mc/ql/src/EmptyControlBody.ql \
+            .codeql-mc/ql/src/UnusedLocal.ql
+
+      - name: Upload mc SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: mc.sarif
+          category: mc
