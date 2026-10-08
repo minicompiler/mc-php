@@ -1132,6 +1132,23 @@ i64 phi_cast_use(i64 s, uptr name) {
     return 0;
 }
 
+// is `name` an operand of a division, a remainder or a shift in s? mc folds
+// those over constants, and refuses one by zero even on a road that never
+// runs (`if (b > 0) return a - (a / b) * b;` with b := 0)
+i64 phi_div_use(i64 s, uptr name) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_BINARY) {
+            i64 op = nd_op(s);
+            if ((op == ph_tok("/", 1) || op == ph_tok("%", 1) || op == ph_tok("<<", 2) || op == ph_tok(">>", 2))
+                && (aset_n(nd_a(s), name) || aset_n(nd_b(s), name))) return 1;
+        }
+        if (phi_div_use(nd_a(s), name) || phi_div_use(nd_b(s), name) || phi_div_use(nd_c(s), name) || phi_div_use(nd_d(s), name)) return 1;
+        s = nd_next(s);
+    }
+    return 0;
+}
+
 // may an argument be substituted for every read of its parameter? Read once
 // (the rule above), or, when it is small, read at most twice where it is hot
 // -- `n - 1 - k`, a string offset's index the copied fast path both tests and
@@ -1146,7 +1163,11 @@ i64 phi_reads_ok(i64 a, uptr pn, i64 body) {
     if (phi_noid(a) && phi_cast_use(body, pn)) return 0;
     i64 uses = phi_uses(body, pn);
     if (uses == 1) return 1;
-    if (uses > 4 || nd_kind(a) == N_INT || nd_kind(a) == N_IDENT) return 0;
+    if (uses > 4 || nd_kind(a) == N_IDENT) return 0;
+    // an integer literal costs nothing where it is read, and a local held
+    // for it is a register for the whole of the caller (a handler's
+    // `phx_zarg_rov(ex, 0)` kept one for its 0)
+    if (nd_kind(a) == N_INT) return !phi_div_use(body, pn);
     if (!phi_pure(a) || phi_pure_n > 6) return 0;
     i64 hot = phi_uses_hot(body, pn);
     if (phi_pure_div) return hot <= 1;
