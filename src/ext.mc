@@ -219,6 +219,28 @@ i64 ph_ext_plain(i64 fi, i64 k) {
     return ph_ext_scalar(ld64(ph_fpt + (fi * PH_MAXP + k) * 8));
 }
 
+// is parameter k a plain, unconstrained `mixed` -- declared `mixed`, no default,
+// not by-reference, not variadic? Such a parameter has NOTHING for phx_chk2 to
+// do: there is no type to reject (mixed accepts every value), and phx_zarg
+// already dereferences a reference, maps undef to null, and proxies arrays and
+// objects on the way in (lib/php_ext.mc phx_e2r_into). The arity guard has
+// already ensured the argument was passed. So the per-parameter phx_chk2 call
+// is pure overhead and the handler may omit it. A `?int`/`int`/array/object/
+// nullable parameter is NOT this (ph_bd_pt carries the constraint), so it keeps
+// its check. Default is keep the check -- this fires only for a bare `mixed`.
+i64 ph_ext_anymixed(i64 fi, i64 k) {
+    i64 np = ld64(ph_fnp + fi * 8);
+    if (ld64(ph_fvar + fi * 8) && k == np - 1) return 0;          // variadic
+    if (ld64(ph_fpr + fi * 8) & (1 << k)) return 0;               // by-reference
+    if (ld64(ph_fpd + (fi * PH_MAXP + k) * 8)) return 0;          // has a default
+    if (ld64(ph_fpt + (fi * PH_MAXP + k) * 8) != PT_MIXED) return 0;
+    if (ph_bd_pt(fi, k) != PT_MIXED) return 0;                    // declared mixed, not ?int
+    if (ph_bd_k(fi, k) != BK_ANY) return 0;                       // no class/callable bound
+    // nul is 1 for `mixed` (it admits null); phx_chk2 with dpt == PT_MIXED and
+    // bk == BK_ANY returns 1 for every value, null included, so nul is moot
+    return 1;
+}
+
 // the count of arguments a call must pass: every parameter before the first
 // with a default, the variadic one not counted
 i64 ph_ext_nreq(i64 fi) {
@@ -309,7 +331,15 @@ i64 ph_ext_write(i64 rt, i64 call) {
     if (rt == PT_STRING) return ph_stmt_of(ph_c2("phx_ret_str", rv, call, TY_VOID));
     if (rt == PT_ARR)    return ph_stmt_of(ph_c2("phx_ret_arr", rv, call, TY_VOID));
     if (rt == PT_MIXED)  return ph_stmt_of(ph_c2("phx_ret_zv", rv, call, TY_VOID));
-    return ph_stmt_of(ph_c2("phx_ret_bool", rv, call, TY_VOID));
+    // RETURN_BOOL in place, like RETURN_LONG above: IZ_FALSE is 2 and IZ_TRUE 3,
+    // so the type word is 2 + (answer != 0) (normalised, since php's bool is 0/1
+    // but a truthy byte must still map to IZ_TRUE) and the value word is 0. This
+    // is exactly phx_ret_bool, without the call.
+    i64 tw = ph_bin(ph_tok("+", 1), ph_int(2), ph_bin(ph_tok("!=", 2), call, ph_int(0), TY_U8), TY_I64);
+    i64 bt = ph_stmt_of(ph_c2("st32", ph_bin(ph_tok("+", 1), ph_ext_ident("rv", TY_UPTR), ph_int(8), TY_UPTR),
+                              tw, TY_VOID));
+    set_nd_next(bt, ph_stmt_of(ph_c2("st64", ph_ext_ident("rv", TY_UPTR), ph_int(0), TY_VOID)));
+    return ph_ext_block(bt);
 }
 
 // ---- the bare road ------------------------------------------------------
@@ -377,6 +407,77 @@ i64 ph_ext_body(i64 fi, uptr name, i64 np, i64 rt) {
     return ph_ext_write(rt, ph_calln(ph_mangle(name, "f_"), av, np, ph_mcty(rt)));
 }
 
+// 1 iff every occurrence of `v` in `s` is the base of an ld32/ld64 field read
+// (v or v + const). A bare occurrence, or v as any other call's argument, or
+// an array/object access, returns 0 -- so v's zval is only ever inspected
+// (type and value word), never carried out as a value, array-accessed or
+// object-accessed. That is exactly what phx_zarg_ro (lib/php_ext.mc) needs to
+// borrow the engine zval in place instead of copying it.
+i64 ph_borrow_scan(i64 s, uptr v) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_IDENT) {
+            if (str_eq(nd_name(s), v)) return 0;
+            s = nd_next(s);
+            continue;
+        }
+        // `!v` is mc's pointer-nullness test (node.mc ph_truthy's `!!x`): it
+        // reads whether the zval pointer is 0, never the zval's memory, so a
+        // borrowed engine zval is as safe here as a copied one. Only `!` -- a
+        // `-`/`~` would read the value word.
+        if (k == N_UNARY && nd_op(s) == ph_tok("!", 1) && nd_a(s) && nd_kind(nd_a(s)) == N_IDENT && str_eq(nd_name(nd_a(s)), v)) {
+            s = nd_next(s);
+            continue;
+        }
+        if (k == N_CALL && (str_eq(nd_name(s), "ld32") || str_eq(nd_name(s), "ld64")) && ph_pin_fieldarg(nd_a(s), v)) {
+            // the field-read base (nd_a) is v or v + const: do not descend into
+            // it (a bare v there is the allowed read, not an escape)
+            if (!ph_borrow_scan(nd_next(nd_a(s)), v)) return 0;
+            if (!ph_borrow_scan(nd_b(s), v)) return 0;
+            if (!ph_borrow_scan(nd_c(s), v)) return 0;
+            if (!ph_borrow_scan(nd_d(s), v)) return 0;
+            s = nd_next(s);
+            continue;
+        }
+        if (!ph_borrow_scan(nd_a(s), v)) return 0;
+        if (!ph_borrow_scan(nd_b(s), v)) return 0;
+        if (!ph_borrow_scan(nd_c(s), v)) return 0;
+        if (!ph_borrow_scan(nd_d(s), v)) return 0;
+        s = nd_next(s);
+    }
+    return 1;
+}
+
+// Over the handler's final (inlined, pinned) body: a `vn = phx_zarg(ex, k)`
+// binding whose parameter is a plain mixed (ph_ext_anymixed) and whose temp vn
+// is only field-read (ph_borrow_scan) becomes a borrow, phx_zarg_ro. Every
+// other binding keeps the full marshalling phx_zarg. The two body copies (bare
+// and slow) carry their own vn, so each is judged on its own.
+void ph_borrow_rewrite(i64 s, i64 fi, i64 root) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_ASSIGN) {
+            i64 r = nd_a(s);
+            if (r && nd_kind(r) == N_CALL && str_eq(nd_name(r), "phx_zarg")) {
+                i64 a0 = nd_a(r);
+                i64 a1 = 0;
+                if (a0) a1 = nd_next(a0);
+                if (a1 && nd_kind(a1) == N_INT) {
+                    i64 k = nd_val(a1);
+                    if (ph_ext_anymixed(fi, k) && ph_borrow_scan(root, nd_name(s)))
+                        set_nd_name(r, "phx_zarg_ro");
+                }
+            }
+        }
+        ph_borrow_rewrite(nd_a(s), fi, root);
+        ph_borrow_rewrite(nd_b(s), fi, root);
+        ph_borrow_rewrite(nd_c(s), fi, root);
+        ph_borrow_rewrite(nd_d(s), fi, root);
+        s = nd_next(s);
+    }
+}
+
 void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     uptr name = ld64(ph_fname + fi * 8);
     i64 np = ld64(ph_fnp + fi * 8);
@@ -393,6 +494,9 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
         k = k - 1;
         uptr pn = ld64(ph_fpn + (fi * PH_MAXP + k) * 8);
         if (!pn) pn = "";                      // ph_fpn already holds the bare name
+        // a plain `mixed` parameter needs no guard: phx_zarg in the body does
+        // the whole conversion and the arity guard already required it
+        if (ph_ext_anymixed(fi, k)) continue;
         if (!ph_ext_plain(fi, k)) {
             // declared beyond a scalar, or with a default, or variadic
             u8 dv[64];
@@ -487,6 +591,15 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     // (src/opt.mc's inliner: `dec_add` is a forwarder), then phx_enter/
     // phx_leave's fast paths written in place (src/opt.mc)
     ph_inl_fn(f, 0);
+    // The body copied in here is the php function's PRE-rewrite copy (the
+    // inline registry stored it before ph_rc_fn/ph_pin_fn ran on the internal
+    // f_ function), so the global/static read-only pin pass has to run again
+    // on the handler's own final body -- both the bare and the slow copy,
+    // which are still one chain here, before the split below.
+    ph_pin_fn(f);
+    // a plain mixed parameter whose temp is only ever field-read borrows the
+    // engine zval in place (phx_zarg -> phx_zarg_ro) rather than copying it
+    ph_borrow_rewrite(nd_a(nd_b(f)), fi, nd_a(nd_b(f)));
     // the copy may have put declarations in front of it: unlinked where it is
     ph_ext_lazy = 0;
     if (bare && ph_ext_pure(nd_b(bare)) && ph_ext_lazy) {

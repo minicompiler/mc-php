@@ -539,6 +539,11 @@ void ph_class(uptr fl, i64 line, i64 flags) {
 // ArgumentCountError both expressible without the caller knowing the arity.
 void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 line, uptr fl, i64 abstract) {
     uptr savenv = ph_scope_save();
+    // a method parsed inside a guarded branch starts with clean narrowing
+    uptr snn = ph_narrow_name;
+    i64 snt = ph_narrow_ty;
+    ph_narrow_name = 0;
+    ph_narrow_ty = 0;
     i64 hh = ph_hoist_head;
     i64 ht = ph_hoist_tail;
     i64 sret = ph_fn_ret;
@@ -743,6 +748,8 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     ph_in_method = sm;
     ph_toplevel = stl;
     ph_nls = sls;
+    ph_narrow_name = snn;
+    ph_narrow_ty = snt;
     ph_mb_np = np;
     ph_mb_nreq = mbreq;
     i64 q = 0;

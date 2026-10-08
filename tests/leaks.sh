@@ -118,6 +118,18 @@ else
     bad "decimal: it would not build"; sed "s/^/      /" "$t/b.out"
 fi
 
+# ctype: every cty_* borrows its mixed argument from the engine in place
+# (phx_zarg_ro), so the leak matrix drives each shape -- reference, resource,
+# array, object, string, scalar -- and the debug allocator must end empty.
+cp -R examples/ctype "$t/ctype"
+dbg examples/ctype/mcphp.linux.toml > "$t/ctype/dbg.toml"
+rm -rf "$t/ctype/build"
+if "$BIN" build "$t/ctype" --config "$t/ctype/dbg.toml" > "$t/b.out" 2>&1; then
+    leakfree "ctype leakmatrix.php (the borrowed argument, every shape)" -d extension="$t/ctype/build/ctype.so" "$t/ctype/leakmatrix.php"
+else
+    bad "ctype: it would not build"; sed "s/^/      /" "$t/b.out"
+fi
+
 mkdir -p "$t/own"
 { printf "<?php\n"; awk "/^echo /{exit} /^function /{p=1} p" tests/g/111-string-ownership.php
   printf "%s\n" \

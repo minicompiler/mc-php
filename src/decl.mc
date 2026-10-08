@@ -22,6 +22,24 @@ void ph_bnd_set(i64 fi, i64 k, i64 pt) {
     st64(ph_fbnul + i * 8, nul);
 }
 
+// Does this statement guarantee control leaves the function (so the fall-off
+// guard the caller is about to append is unreachable)? Conservative: only an
+// unconditional return, or a block whose last statement is one. Anything else
+// -- an if without a guaranteed-returning else, a loop, a switch -- answers 0,
+// so the guard is still emitted. A wrong 0 only keeps dead code; a wrong 1
+// would drop a real TypeError, so the default errs toward keeping it.
+i64 ph_always_returns(i64 s) {
+    if (!s) return 0;
+    if (nd_kind(s) == N_RETURN) return 1;
+    if (nd_kind(s) == N_BLOCK) {
+        i64 t = nd_a(s);
+        if (!t) return 0;
+        loop { if (!nd_next(t)) break; t = nd_next(t); }
+        return ph_always_returns(t);
+    }
+    return 0;
+}
+
 i64 ph_function() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
@@ -33,6 +51,18 @@ i64 ph_function() {
     // assigns by value copies as it always did.
     i64 retref = 0;
     if (ph_at("&", 1)) { ph_next(); retref = 1; }
+    // reset per function (restored at the end for a nested declaration): 1 once
+    // the body lowers a call that may push a pool temporary. src/rc.mc reads it
+    // to decide whether the drain is needed.
+    i64 sfp = ph_fn_pushes;
+    ph_fn_pushes = 0;
+    // a function body parsed inside a guarded branch (`if (is_string($t)) {
+    // function g(...) ... }`) starts with clean narrowing and restores the
+    // enclosing branch's on the way out -- both exits below
+    uptr snn = ph_narrow_name;
+    i64 snt = ph_narrow_ty;
+    ph_narrow_name = 0;
+    ph_narrow_ty = 0;
     if (ph_tid != T_IDENT) ph_todo(fl, line, "an anonymous function or closure");
     uptr name = ph_ns_decl(ph_tname);                // `ns\name` inside a namespace
     uptr xab = ph_ext_ab;
@@ -54,7 +84,9 @@ i64 ph_function() {
         ph_nfn = ph_nfn + 1;
     }
     ph_last_fn = fi;
-    if (xab) { ph_ext_ab = xab; return ph_extern_fn(name, fi, fwd, fl, line); }
+    // the #[Extern] path returns here, before the normal end's restore: put the
+    // enclosing state back on this exit too (ph_fn_pushes was reset at the top)
+    if (xab) { ph_ext_ab = xab; ph_fn_pushes = sfp; ph_narrow_name = snn; ph_narrow_ty = snt; return ph_extern_fn(name, fi, fwd, fl, line); }
     st64(ph_fname + fi * 8, name);
     st64(ph_fret + fi * 8, PT_MIXED);
     st64(ph_fnp + fi * 8, 0);
@@ -75,6 +107,12 @@ i64 ph_function() {
     i64 np = 0;
     i64 pre = 0;
     i64 pret = 0;
+    // a mixed parameter's by-value copy node and its mc name, one slot per
+    // parameter: after the body is parsed, a parameter the body only READS
+    // drops the copy and borrows the caller's zval (see below)
+    u8 bvn[96];
+    u8 bvm[96];
+    i64 nbv = 0;
     loop {
         if (ph_at(")", 1)) break;
         i64 variadic = 0;
@@ -136,6 +174,7 @@ i64 ph_function() {
         if (pt == PT_MIXED) {
             if (!byref) {
                 i64 bv = ph_byval(d, line, fl);
+                if (nbv < 12) { st64(bvn + nbv * 8, bv); st64(bvm + nbv * 8, ph_mangle(d, "v_")); nbv = nbv + 1; }
                 if (pret) set_nd_next(pret, bv);
                 if (!pret) pre = bv;
                 pret = bv;
@@ -248,6 +287,49 @@ i64 ph_function() {
     ph_in_try = sit;
     ph_frv = sfv;
     ph_frf = sff;
+    // A mixed parameter the body only READS needs no by-value copy: it can
+    // borrow the caller's zval for the whole call, which the caller holds like
+    // php holds an argument. ph_pin_used (src/rc.mc) is the same "is this name
+    // ever written or escaped" walk the global/static pin uses -- it is 1 for
+    // any occurrence of v_x that is not the first argument of a known READ
+    // accessor: a write (through a write accessor), a return, a mixed argument,
+    // a container store, a by-reference pass, a by-ref closure capture. When it
+    // is 0 the body cannot mutate the caller's value through $x and cannot keep
+    // it past the call, so php_zv_val is pure cost and the copy is dropped.
+    // Default = keep: a missed write would be a use-after-free, so the walk
+    // errs toward binding; a plain rebind `$x = ...` rebinds the pointer and
+    // never touches the caller, which is why it is not a blocking use. Scanned
+    // over the REAL body only (nd_a(body)); the copy node's own `if (truthy
+    // ($x))` would otherwise read as a use of $x.
+    i64 bj = 0;
+    loop {
+        if (bj >= nbv) break;
+        if (ph_pin_used(nd_a(body), ld64(bvm + bj * 8))) st64(bvn + bj * 8, 0);  // keep: body writes/escapes
+        bj = bj + 1;
+    }
+    i64 ndrp = 0;
+    bj = 0;
+    loop { if (bj >= nbv) break; if (ld64(bvn + bj * 8)) ndrp = ndrp + 1; bj = bj + 1; }
+    if (ndrp) {
+        i64 nh = 0;
+        i64 nt = 0;
+        i64 s = pre;
+        loop {
+            if (!s) break;
+            i64 nx = nd_next(s);
+            i64 drop = 0;
+            i64 j = 0;
+            loop { if (j >= nbv) break; if (ld64(bvn + j * 8) == s) drop = 1; j = j + 1; }
+            if (!drop) {
+                set_nd_next(s, 0);
+                if (nt) set_nd_next(nt, s);
+                if (!nt) nh = s;
+                nt = s;
+            }
+            s = nx;
+        }
+        pre = nh;
+    }
     if (pre) {
         i64 t = pre;
         loop { if (!nd_next(t)) break; t = nd_next(t); }
@@ -274,6 +356,14 @@ i64 ph_function() {
     if (rt == PT_FLOAT)  rw = 2;
     if (rt == PT_STRING) rw = 3;
     if (rt == PT_BOOL)   rw = 4;
+    // The guard (and the name literal it hoists into a callee-saved register
+    // for the whole call) is dead when the body's last statement already
+    // leaves the function -- then the fall-off path does not exist. Every
+    // ctype predicate ends in `return false;`, so this drops a per-call
+    // register across the string path.
+    i64 blast = nd_a(body);
+    if (blast) { loop { if (!nd_next(blast)) break; blast = nd_next(blast); } }
+    if (ph_always_returns(blast)) rw = 0;
     if (rw) {
         i64 cl = ph_close_line;
         i64 ps = ph_posstmt(fl, cl);
@@ -330,6 +420,9 @@ i64 ph_function() {
     ph_rope_fn(f);
     ph_rc_fn(f);
     ph_opt_fn(f);
+    ph_fn_pushes = sfp;
+    ph_narrow_name = snn;
+    ph_narrow_ty = snt;
     return f;
 }
 

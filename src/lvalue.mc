@@ -1863,9 +1863,21 @@ i64 ph_if(uptr fl, i64 line) {
     i64 pret = ph_pend_tail;
     ph_pend_head = 0;
     ph_pend_tail = 0;
+    // `if (is_string($v))` / `is_int($v)`: $v is that type on the taken branch,
+    // so a coercion of $v inside it borrows (ld64) instead of calling
+    // php_zv_str, which might push. Narrowing is set for the THEN branch only
+    // and restored before the else; a nested if saves and restores its own.
+    u8 gty[8];
+    st64(gty, 0);
+    uptr gv = ph_guard_of(c, gty);
+    uptr snn = ph_narrow_name;
+    i64 snt = ph_narrow_ty;
+    if (gv) { ph_narrow_name = gv; ph_narrow_ty = ld64(gty); }
     i64 t = 0;
     if (alt) t = ph_alt_body("endif", 1);
     if (!alt) t = ph_block_or_stmt();
+    ph_narrow_name = snn;
+    ph_narrow_ty = snt;
     i64 e = 0;
     if (ph_is("elseif")) e = ph_if(ph_tfile, ph_tline);
     if (!e) {

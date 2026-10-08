@@ -96,6 +96,87 @@ i64 ph_type_word(i64 must) {
     return -1;
 }
 
+// ---- type narrowing in a guarded branch ------------------------------------
+// Inside `if (is_string($v)) { ... }` (and is_int), $v IS that type on the
+// taken branch. mc-php's D4 gives each variable ONE static type, so it does
+// not narrow -- a mixed $v stays mixed, and strlen($v)/strspn($v, ...) coerce
+// it with php_zv_str, which MIGHT push a pool temporary for a non-string
+// argument (it builds a string from an int/float/array). That possibility is
+// the whole reason the refcount-drain machinery exists on the return path.
+//
+// But in the taken branch $v is provably a string, so the coercion is a
+// BORROW: php_zv_str for a string returns the embedded zend_string, ld64(z),
+// with no allocation and no push. ph_narrow_name/ph_narrow_ty record the one
+// variable a guard narrowed, active only on the branch (ph_if saves/restores
+// it). The coercions below consult it by the var's own v_NAME: a bare
+// occurrence of the narrowed variable lowers to ld64(z) -- the embedded value,
+// exactly what php_zv_str/php_zv_long return for that type -- so no call, no
+// push. The IDENTIFIER's own lowering is untouched (it stays the zval), so
+// every OTHER use of $v in the branch -- echo, assignment, a zval argument --
+// is unchanged and correct. Only a coercion of the bare variable narrows.
+// Conservative: default is no narrowing; only a bare N_IDENT of the recorded
+// name and type is narrowed, and only `is_string`/`is_int` set it.
+uptr ph_narrow_name;
+i64  ph_narrow_ty;
+
+// Drop the narrowing when the narrowed variable is written -- reassigned,
+// mutated, aliased or bound by reference. `vname` is the mc name (v_NAME) of
+// the variable being written; after the write its value (hence its type) can
+// be anything, so a later bare coercion of it must NOT take the ld64 string/
+// int borrow. Called from ph_set (every value write) and ph_set_ref (an
+// alias/by-ref binding), so every write form routes through it.
+void ph_narrow_clear(uptr vname) {
+    if (ph_narrow_name && str_eq(vname, ph_narrow_name)) ph_narrow_name = 0;
+}
+
+// c is a type guard `is_string($v)`/`is_int($v)` on a mixed variable iff it is
+// the exact shape ph_isof lowers. Two shapes, both `cast(u8, ...)`: the inlined
+// tag compare `(ld32(IDENT + 8) & 255) == k` (ph_isof's fast path) and the
+// `php_zv_is(IDENT, k)` call it keeps for other tags. k = 6 (string) or 4
+// (long). Returns the variable's v_NAME and sets *pty to PT_STRING/PT_INT; 0
+// otherwise. A compound condition (&&, ||, anything else) is a different top
+// node, so it does not narrow.
+uptr ph_guard_ret(i64 kv, i64 vnode, uptr pty) {
+    if (!vnode || nd_kind(vnode) != N_IDENT) return 0;
+    if (kv == 6) { st64(pty, PT_STRING); return nd_name(vnode); }
+    if (kv == 4) { st64(pty, PT_INT); return nd_name(vnode); }
+    return 0;
+}
+uptr ph_guard_of(i64 c, uptr pty) {
+    if (!c || nd_kind(c) != N_CAST) return 0;
+    i64 inner = nd_a(c);
+    if (!inner) return 0;
+    // inlined: (ld32(v + 8) & 255) == k
+    if (nd_kind(inner) == N_BINARY && nd_op(inner) == ph_tok("==", 2)) {
+        i64 lo = nd_a(inner);
+        i64 kn = nd_b(inner);
+        if (!lo || !kn || nd_kind(kn) != N_INT) return 0;
+        if (nd_kind(lo) != N_BINARY || nd_op(lo) != ph_tok("&", 1)) return 0;
+        i64 call = nd_a(lo);
+        if (!call || nd_kind(call) != N_CALL || !str_eq(nd_name(call), "ld32")) return 0;
+        i64 sum = nd_a(call);
+        if (!sum || nd_kind(sum) != N_BINARY || nd_op(sum) != ph_tok("+", 1)) return 0;
+        return ph_guard_ret(nd_val(kn), nd_a(sum), pty);
+    }
+    // call: php_zv_is(IDENT, k)
+    if (nd_kind(inner) == N_CALL && str_eq(nd_name(inner), "php_zv_is")) {
+        i64 v = nd_a(inner);
+        i64 k = 0;
+        if (v) k = nd_next(v);
+        if (!k || nd_kind(k) != N_INT) return 0;
+        return ph_guard_ret(nd_val(k), v, pty);
+    }
+    return 0;
+}
+
+// is n a bare occurrence of the narrowed variable, at the narrowed type?
+i64 ph_is_narrowed(i64 n, i64 want) {
+    if (!ph_narrow_name) return 0;
+    if (ph_narrow_ty != want) return 0;
+    if (nd_kind(n) != N_IDENT) return 0;
+    return str_eq(nd_name(n), ph_narrow_name);
+}
+
 // ---- conversions between the static types ----------------------------------
 // mixed is a zval: the one type every other one converts into, which is what
 // makes an array element, an untyped parameter and `int / int` expressible.
@@ -119,6 +200,10 @@ i64 ph_zkey(i64 n, i64 t) { return ph_to_mixed(n, t); }
 
 i64 ph_to_str(i64 n, i64 t) {
     if (t == PT_STRING) return n;
+    // a narrowed string: the zval's embedded zend_string, borrowed (ld64(z)),
+    // which is exactly what php_zv_str returns for a string -- no call, no push
+    if ((t == PT_MIXED || t == PT_NULL) && ph_is_narrowed(n, PT_STRING))
+        return ph_quiet("ld64", 1, n, 0, 0, 0, ty_pstr);
     // quiet: an int's digits raise nothing
     if (t == PT_INT)    return ph_quiet("php_itos", 1, n, 0, 0, 0, ty_pstr);
     if (t == PT_IFALSE) return ph_quiet("php_itos", 1, n, 0, 0, 0, ty_pstr);
@@ -132,6 +217,11 @@ i64 ph_to_str(i64 n, i64 t) {
 
 i64 ph_to_int(i64 n, i64 t) {
     if (t == PT_INT || t == PT_IFALSE) return n;
+    // a narrowed int: the zval's embedded long (ld64(z)), what php_zv_long
+    // returns for a long -- no call (php_zv_long never pushes, but this is the
+    // cheaper load and keeps the narrowed shape uniform with ph_to_str)
+    if ((t == PT_MIXED || t == PT_NULL) && ph_is_narrowed(n, PT_INT))
+        return ph_quiet("ld64", 1, n, 0, 0, 0, TY_I64);
     if (t == PT_BOOL)   return ph_cast(TY_I64, n);
     if (t == PT_FLOAT)  return ph_cast(TY_I64, n);
     if (t == PT_STRING) return ph_c1("php_stoi", n, TY_I64);

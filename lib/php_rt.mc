@@ -6773,6 +6773,30 @@ uptr php_gvar(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     return z;
 }
 
+// `global $x` where the compiler PROVED $x is only read in the function
+// (src/rc.mc's ph_pin_fn, the read-path walk). A read returns the global's
+// own persistent entry and allocates nothing, so it need not pin -- which is
+// what stops a hot read loop retaining each call's transient zvals. The pin
+// stays on the one path that escapes a call-local value into module state:
+// CREATING the entry (the null zval below) or the global table itself. The
+// compiler uses this only when NO write to $x is reachable in the function,
+// so the store paths (php_zv_store, php_zv_arr_w, ...) never run against it.
+uptr php_gvar_ro(uptr name) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (ph_globals) {
+        uptr b = php_ht_find(ph_globals, php_str_hash(name), name);
+        if (b) {
+            uptr e = ld64(b);
+            if (php_zv_type(e) == IS_UNDEF) php_zv_settype(e, IS_NULL);
+            return e;
+        }
+    }
+    php_pin();                                // creating the table/entry escapes
+    if (!ph_globals) ph_globals = php_arr_new(16);
+    uptr z = php_znull();
+    php_zv_cp(php_arr_sslot(ph_globals, name), php_zlong(z));
+    return z;
+}
+
 // The top level's scope IS the global table: a top-level name some function
 // declares `global` is bound to its entry once, when the program's (or
 // MINIT's) top-level code starts. An entry no one has assigned is IS_UNDEF,
@@ -6828,6 +6852,30 @@ uptr php_static(uptr slot, uptr init) { uptr phT = ph_tcur; if (!phT) phT = ph_t
     php_pin();
     uptr z = ld64(slot);
     if (z) return z;
+    z = php_zv_val(init);
+    st64(slot, z);
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) {
+        uptr r = php_alloc(16);
+        st64(r, slot);
+        st64(r + 8, ph_rsl);
+        ph_rsl = r;
+    }
+    return z;
+}
+
+// A function `static` the compiler PROVED is only read after its init
+// (src/rc.mc's ph_pin_fn). The init stores a call-local zval into the slot, so
+// it MUST pin -- but only on the first call (z == 0). Every later call only
+// reads the slot and returns it, so it does not pin and a hot read loop
+// retains nothing. This is safe ONLY because the compiler never emits it for a
+// static that is reassigned or mutated: a later `$x = v` would store through
+// php_zv_store with no pin on that call, which is the use-after-free that made
+// an unconditional init-only pin wrong. The read-path walk is what rules that
+// out, so the reassignment path is never reached here.
+uptr php_static_ro(uptr slot, uptr init) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr z = ld64(slot);
+    if (z) return z;
+    php_pin();                                // the init zval escapes into the slot
     z = php_zv_val(init);
     st64(slot, z);
     if (((uptr) ld64(phT + PHT_ph_zalloc))) {

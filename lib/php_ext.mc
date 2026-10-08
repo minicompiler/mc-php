@@ -1866,6 +1866,31 @@ uptr phx_zarg(uptr ex, i64 k) {
     return phx_e2r(phx_argz(ex, k));
 }
 
+// Argument k borrowed in place: the engine zval itself, after a reference is
+// followed, with no runtime zval allocated and no array/object proxy. Used
+// only where the body reads the zval's WORDS (the type word, and the value
+// word only under a type guard) and never the zval as a value, never
+// array/object-accessed -- src/ext.mc's ph_borrow_scan proves it per
+// parameter, so the engine owns the zval for the whole call and nothing here
+// outlives it, and a resource is as safe to expose as any scalar.
+//
+// Unlike the full phx_zarg, this does NOT refuse a resource. phx_zarg refuses
+// it because it REPRESENTS the value as a runtime zval and a resource cannot
+// be one; the borrow represents nothing -- it exposes the engine words in
+// place, which the body only type-reads -- so the resource reaches the body as
+// its own type (IZ_RESOURCE, neither string nor int) and the function answers
+// exactly what php's own does for a resource (for ctype, false), rather than
+// throwing. A string is still escaped (php_str_esc takes a reference, kept to
+// the chunk's end), so should the body carry it out it stays alive.
+uptr phx_zarg_ro(uptr ex, i64 k) {
+    if (k >= phx_nargs(ex)) { uptr z = php_alloc(ZV_SIZE); st64(z, 0); st32(z + 8, IZ_NULL); return z; }
+    uptr ez = phx_argz(ex, k);
+    i64 t = phx_type(ez);
+    if (t == IZ_REFERENCE) { ez = ld64(ez) + ZRX_VAL; t = phx_type(ez); }
+    if (t == IZ_STRING) php_str_esc(ld64(ez));
+    return ez;
+}
+
 uptr phx_aarg(uptr ex, i64 k) { return ld64(phx_zarg(ex, k)); }
 
 // the arguments from k on, a runtime array: a variadic parameter

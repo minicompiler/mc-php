@@ -543,6 +543,32 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/sp.build" 2>&1; then
 else
     bad "strspn set: it would not build"; sed 's/^/      /' "$tmp/sp.build"
 fi
+
+# --- 12d. a global or a function static READ in a hot loop does not leak ----
+# php_gvar and php_static used to pin EVERY call -- a pin keeps the whole
+# call's Zend chunk until the request ends -- so a function that only READS a
+# global or a static retained each call's transient zvals (the mixed
+# parameter's own copy here, ~32 bytes a call), ~6.4 MB over 200 000 calls: an
+# OOM in a hot loop. src/rc.mc's ph_pin_fn now proves a global/static is
+# read-only in the function and uses php_gvar_ro/php_static_ro, which pin only
+# on the escaping path (creating a global entry, a static's first-call init),
+# so a read-only access in a loop retains nothing. Both the exact repro (a
+# global read behind a mixed parameter) and a function static are measured; a
+# written global/static still pins and is covered by step 13 and tests/leaks.sh.
+printf '<?php\n$M = "0123456789abcdef";\nfunction rg(mixed $v): int { global $M; return strlen($M); }\nfunction rs(): int { static $s = "abcdefgh"; return strlen($s); }\n' > "$tmp/r.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/pin.build" 2>&1; then
+    got=$("$PHP" -d extension="$tmp/build/r.$sx" \
+        -r 'rg(0); rs(); $pg = memory_get_peak_usage(); $t = 0; for ($i = 0; $i < 200000; $i++) $t += rg($i); $g = memory_get_peak_usage() - $pg; $ps = memory_get_peak_usage(); $u = 0; for ($i = 0; $i < 200000; $i++) $u += rs(); $s = memory_get_peak_usage() - $ps; printf("%d %d %d %d", $t, $g, $u, $s);' 2>&1 | tr -d '\r')
+    set -- $got
+    if [ "${1:-}" = 3200000 ] && [ "${3:-}" = 1600000 ] && [ "${2:-999999}" -lt 8192 ] && [ "${4:-999999}" -lt 8192 ]; then
+        say "pin: 200000 read-only calls of a global and a function static in a hot loop, php's peak moved $2 and $4 bytes"
+    else
+        bad "pin: want sums 3200000/1600000 and peaks under 8 KiB, got $got"
+    fi
+else
+    bad "pin: it would not build"; sed 's/^/      /' "$tmp/pin.build"
+fi
 rm -rf "$tmp/build"
 
 # --- 13. the ownership shapes, in the module as interpreted ----------------
