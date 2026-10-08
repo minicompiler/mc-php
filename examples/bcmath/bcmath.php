@@ -527,9 +527,10 @@ function bc_comp(string $num1, string $num2, ?int $scale = null): int {
 
 // ---- scale ------------------------------------------------------------------
 // bcscale: read and (optionally) set the request default scale. php keeps it in
-// BCG(bc_precision): per request, and per php thread under ZTS. Here it is a
-// `global`, which mc-php keeps the same way (docs/threads.md, "What each
-// request starts from"): per php thread, copied fresh at each request. The
+// BCG(bc_precision): per request, and per php thread under ZTS. Here it is
+// _bc_dscale's `static`, which mc-php keeps the same way (docs/threads.md,
+// "What each request starts from"): per php thread, put back to MINIT's at
+// each request -- an int-only static is a native slot, no zval. The
 // module's OWN worker threads would share it, but this file starts none, and
 // another module's worker reaches bc_scale only through php's engine -- refused
 // on a worker, or under ZTS a php request of its own with its own copy

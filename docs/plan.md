@@ -1203,8 +1203,8 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    the host php 8.5. The C twin is `examples/bcmath/c/bcmath.c` -- bcmath.php's algorithm function
    by function.
 
-   The differential: `check.php` (module vs interpreted) **130 lines byte for byte**, the C twin
-   graded the same way; `bccheck.php` against the built-in **10511 results, 0 wrong** for the
+   The differential: `check.php` (module vs interpreted) **133 lines byte for byte**, the C twin
+   graded the same way; `bccheck.php` against the built-in **10546 results, 0 wrong** for the
    module AND the twin AND interpreted; `leakmatrix.php` under the ZTS debug allocator
    **leak-free** over every function, argument shape and error path (`tests/leaks.sh`).
 
@@ -1214,13 +1214,27 @@ interpreter on the same source), § 7 item 1. What already has code moves into
 
    | function | module/C | function | module/C | function | module/C |
    |---|---|---|---|---|---|
-   | add | 1.60x | div | 1.31x | sqrt | 1.05x |
-   | sub | 1.59x | mod | 1.16x | comp | 1.63x |
-   | mul | 1.82x | pow | 1.95x | floor | 1.62x |
-   | round | 1.86x | powmod | 1.42x | ceil | 1.66x |
+   | add | 1.52x | div | 1.32x | sqrt | 1.08x |
+   | sub | 1.60x | mod | 1.17x | comp | 1.60x |
+   | mul | 1.83x | pow | 1.97x | floor | 1.62x |
+   | round | 1.86x | powmod | 1.43x | ceil | 1.73x |
+   | scale | 1.91x | | | | |
 
-   The mixed workload: interpreted 10.38 ms, compiled 0.77 ms (13.5x), the twin 0.54 ms --
-   module/C **1.42x** (it was 3.54x at the first cut). The same batch took every OTHER example
+   The mixed workload: interpreted 10.44 ms, compiled 0.76 ms (13.7x), the twin 0.53 ms --
+   module/C **1.44x** (it was 3.54x at the first cut).
+
+   **The review of #65** (seven findings, each reproduced before it was fixed and each with a test
+   that fails on the commit before): a native `?int` parameter's null flag went stale after a
+   write, and its READS were just as wrong -- `$y = $x`, `$x < -1`, `$x === 0`, `return $x` from
+   an `: int` function, a `= 5` default -- so the lowering became a PROOF over the body
+   (`ph_opt_scan`, the packed lexer's tokens), with every write clearing the flag
+   (`tests/g/146`); `x === null` over a statically non-null CALL was folded without the call, its
+   output and its exception, and so was the mixed-type strict fold (`ph_pure`, `tests/g/147`);
+   `bc_round`'s guard negated `PHP_INT_MIN` in the port and the twin (`bccheck.php`'s extremes);
+   `bc_scale`'s default is per request and per php thread by mc-php's model, and no worker can
+   write it (`tests/ext.sh` step 20d measures it); `bc_scale` got its bench row -- 5.3x, which
+   took the three changes below to bring under the bar; and the leak matrix passes the
+   Stringable object itself, which the strict handler rejects (`docs/php-extension.md`). The same batch took every OTHER example
    under 2.0 per function too, and that was the bar: `examples/decimal` add 1.48, sub 1.57, mul
    1.75, div 1.38, cmp 1.82, round 1.81 (loan workload 1.55x); `examples/ctype` 1.44-1.91x called
    directly and 1.06-1.16x called dynamically, all eleven predicates on passing AND failing input
@@ -1252,11 +1266,15 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    | a call that allocates nothing does not set the arena's cursor | `lib/php_ext.mc` | ctype direct on failing input 1.81-2.01 -> 1.70-1.88 |
    | a rope piece of up to sixteen bytes copied with no call | `lib/php_rt.mc` | decimal round 1.96 -> 1.86 |
    | int and bool locals whose ranges never overlap share one local (mc gives a local one register for the whole function) | `src/opt.mc` | pow 17.0 -> 16.7 ms, decimal round 2.81 -> 2.71 ms |
+   | a native `?int` argument takes the handler's call-free bare road (IS_LONG or IS_NULL), and a native-`?int` default no longer stops the inliner | `src/ext.mc`, `src/decl.mc` | a do-nothing `bc_scale` 1.72x -> 1.0x |
+   | a function `static` proved to hold only ints is a native slot of `phsi` (no `php_static`, pin or zval), per php thread and reset per request like a zval static | `src/decl.mc`, `src/lvalue.mc`, `src/tls.mc`, `lib/php_ext.mc` | scale 5.3 -> 1.91 (with the `_bc_dscale` static in `bcmath.php`) |
 
    Measured and not kept: the fixed array's buffer pointer hoisted out of `_bc_umul`'s loop is 4%
    slower (the new local takes a register the outer loops held). What is left closest to the bar is
-   `pow` (1.95x): 43% of it is `_bc_umul`'s inner loop, thirteen scalar instructions an element
-   against a twin whose digit loads clang vectorises.
+   `pow` (1.97x; 1.92-1.99x across this session's runs, the same with the compiler before the
+   review's changes): 43% of it is `_bc_umul`'s inner loop, thirteen scalar instructions an
+   element against a twin whose digit loads clang vectorises. Then `scale` (1.91x), which stays on
+   the handler's slow road because its `ValueError` branch calls.
 5. **Port json.** `ext/json` cannot be built shared at all (T1), so this port is the only way a
    json extension exists outside php's own binary.
 6. **Distribution -- Composer, Packagist, PIE. To be designed with the owner**: the owner stops

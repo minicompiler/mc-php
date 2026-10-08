@@ -73,7 +73,7 @@ between 0 and 2147483647")` -- the same class and message text as the built-in
 - `check.php` -- the byte-for-byte differential: the same script run with the
   module loaded and with `bcmath.php` required must print identical bytes.
 - `bccheck.php` -- the second oracle: every `bc_X` against the built-in `bcX`
-  over a large random corpus plus the quirk edge cases, **10511 results, 0
+  over a large random corpus plus the quirk edge cases, **10546 results, 0
   wrong**.
 - `leakmatrix.php` -- the leak gate: every function over every argument and
   error shape for 120 rounds, leak-free under the debug allocator.
@@ -82,9 +82,9 @@ between 0 and 2147483647")` -- the same class and message text as the built-in
 
 ## Correctness
 
-- `check.php` differential: **130 lines, byte for byte** (module vs
+- `check.php` differential: **133 lines, byte for byte** (module vs
   interpreted), and the C twin graded the same way.
-- `bccheck.php` against php's own bcmath: **10511 results, 0 wrong** -- the
+- `bccheck.php` against php's own bcmath: **10546 results, 0 wrong** -- the
   module, the interpreted source, and the C twin all agree with the built-in.
 - `leakmatrix.php` under the ZTS debug allocator (`tests/leaks.sh`): every
   function, every argument shape, every error path, **no block left at the end
@@ -103,23 +103,32 @@ interleaved:
 
 | function | module (ms) | C twin (ms) | module/C |
 |---|---|---|---|
-| add    |   4.135 |   2.586 | **1.60x** |
-| sub    |   4.172 |   2.616 | **1.59x** |
-| mul    |   6.180 |   3.388 | **1.82x** |
-| div    |  14.570 |  11.136 | **1.31x** |
-| mod    |  12.093 |  10.414 | **1.16x** |
-| pow    |  16.707 |   8.560 | **1.95x** |
-| powmod | 165.687 | 116.843 | **1.42x** |
-| sqrt   | 153.833 | 146.436 | **1.05x** |
-| comp   |   2.781 |   1.708 | **1.63x** |
-| floor  |   2.393 |   1.477 | **1.62x** |
-| ceil   |   3.054 |   1.840 | **1.66x** |
-| round  |   4.738 |   2.554 | **1.86x** |
+| add    |   4.004 |   2.638 | **1.52x** |
+| sub    |   4.124 |   2.571 | **1.60x** |
+| mul    |   6.160 |   3.372 | **1.83x** |
+| div    |  14.541 |  11.031 | **1.32x** |
+| mod    |  12.104 |  10.327 | **1.17x** |
+| pow    |  16.867 |   8.560 | **1.97x** |
+| powmod | 166.696 | 116.524 | **1.43x** |
+| sqrt   | 156.068 | 144.892 | **1.08x** |
+| comp   |   2.737 |   1.712 | **1.60x** |
+| floor  |   2.370 |   1.459 | **1.62x** |
+| ceil   |   3.082 |   1.777 | **1.73x** |
+| round  |   4.727 |   2.548 | **1.86x** |
+| scale  |   0.897 |   0.470 | **1.91x** |
 
-Mixed workload (`tests/examples.sh`): interpreted 10.38 ms, compiled 0.77 ms
-(13.5x faster than interpreted), C twin 0.54 ms -- module/C **1.42x**.
+Mixed workload (`tests/examples.sh`): interpreted 10.44 ms, compiled 0.76 ms
+(13.7x faster than interpreted), C twin 0.53 ms -- module/C **1.44x**.
 
-The closest are `pow` (1.95x) and `round` (1.86x). `pow`'s time is `_bc_umul`'s
+The `scale` row came with the review of #65 and started at 5.3x: the default
+scale was a `global` (a by-name lookup and a zval per call), and a `bc_scale`
+that did nothing was already 1.72x because a `?int` argument kept the handler
+off its call-free road. Now the default is `_bc_dscale`'s `static`, which the
+compiler proves holds only ints and keeps in a native slot, and a `?int`
+argument may take the bare road (`docs/plan.md` item 4). It stays on the slow
+road -- its `ValueError` branch calls -- so 1.91x is that road's floor.
+
+The closest are `pow` (1.97x), `scale` (1.91x) and `round` (1.86x). `pow`'s time is `_bc_umul`'s
 inner loop (43% of a call): the twin's is the same algorithm, and clang
 vectorises its digit loads while mc's loop is thirteen scalar instructions an
 element (`examples/decimal/README.md` has the same loop measured). Hoisting the
