@@ -45,7 +45,7 @@ env:
   # BYTE FOR BYTE what php prints. The minor is pinned; the patch is not, so a
   # diagnostic reworded in an 8.5.x can fail a fixture -- that is the gate
   # working, and the fix is to re-measure, never to loosen the comparison.
-  PHP_VERSION: "8.5"
+  PHP_VERSION: "8.5.11"
 
 jobs:
   check:

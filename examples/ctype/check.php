@@ -2,9 +2,8 @@
 // The gate: run with ctype.so loaded, each of the eleven cty_* is compared
 // against php's own ctype_* (the compiled-in reference) over a thorough corpus,
 // and the output is deterministic -- tests/examples.sh grades it against
-// check.expect. It is NOT a module-vs-interpreted differential: interpreted,
-// the #[Extern] is*() bodies are empty, so the port only runs compiled (like
-// examples/db). The reference here is the built-in ctype extension itself.
+// check.expect. The reference here is the built-in ctype extension itself (the
+// port is pure runtime: strspn over compile-time literal sets, chr, strlen).
 //
 // E_DEPRECATED is off: php 8.5 emits "Argument of type int will be interpreted
 // as string in the future" for every non-string argument to ctype_*. That is a
@@ -47,6 +46,13 @@ $inputs[] = false;
 $inputs[] = null;
 $inputs[] = [1, 2, 3];
 $inputs[] = 1e300;
+// the types the argument borrow (phx_zarg_ro) exposes in place without a copy
+// or a proxy: a resource and an object reach the body as their own type (never
+// string or int) and must answer exactly as php's ctype does -- false, not a
+// throw. A __toString object is NOT stringified (ctype never calls it).
+$inputs[] = fopen('php://memory', 'r');
+$inputs[] = new stdClass;
+$inputs[] = new class { function __toString(): string { return '42'; } };
 
 $cases = 0;
 $mismatches = 0;

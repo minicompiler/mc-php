@@ -430,6 +430,7 @@ void ph_local(uptr name, i64 mcty) {
 }
 
 i64 ph_set(uptr name, i64 val) {
+    ph_narrow_clear(name);                        // a write ends the narrowing
     i64 a = node_new(N_ASSIGN, ph_tline, ph_tfile);
     set_nd_name(a, name);
     set_nd_a(a, val);

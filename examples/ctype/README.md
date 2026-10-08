@@ -98,44 +98,35 @@ Per-predicate ratio, best of nine, 8-byte all-pass input (the realistic case):
 
 | predicate | cty / ctype.so | predicate | cty / ctype.so |
 |---|---|---|---|
-| alnum | 2.49x | print | 2.45x |
-| alpha | 2.40x | punct | 2.45x |
-| cntrl | 2.42x | space | 2.44x |
-| digit | 2.42x | upper | 2.39x |
-| graph | 2.50x | xdigit | 2.55x |
-| lower | 2.45x | | |
+| alnum | 1.88x | print | 1.87x |
+| alpha | 1.88x | punct | 1.95x |
+| cntrl | 1.88x | space | 1.92x |
+| digit | 1.87x | upper | 1.91x |
+| graph | 1.85x | xdigit | 1.96x |
+| lower | 1.89x | | |
 
-All eleven land ~2.4–2.6x — **not** under the 2.0 bar, and uniformly so,
-because what is left is **not** the scan (it is precomputed) but the fixed
-per-call cost of a compiled-PHP function that takes a `mixed` parameter. The
-floor, measured on this compiler:
+All eleven land **1.85–1.96x — under the 2.0 bar**, uniformly. What is left is
+**not** the scan (it is precomputed) but the fixed per-call cost of a
+compiled-PHP function that takes a `mixed` parameter. A faithful ctype port
+**must** take `mixed`: `ctype_digit(48)` is the char-code quirk (true), not the
+string `"48"`, so an int argument has to reach the function un-coerced, and
+`ctype_digit(1.5 / null / [] / a resource)` must return `false`, not raise a
+`TypeError`. A `string` parameter gives neither.
 
-| function body | param | ratio to `ctype_digit` |
-|---|---|---|
-| `return true;` | `mixed` | **1.70x** |
-| `return true;` | `string` | 0.78x |
-| `strlen` + `strspn(literal)` | `string` | **1.17x** |
-| `strlen` + `strspn(literal)` | `mixed` | 2.14x |
+An earlier version of this port sat at ~2.4–2.6x, above the bar: binding a
+`mixed` on entry built a runtime zval, copied the value and escaped/proxied it
+for every call. mc-php now **borrows** such an argument in place when the body
+only ever type-tests and coerces it (`phx_zarg_ro`, `lib/php_ext.mc`; the
+read-only proof is `ph_borrow_scan`, `src/ext.mc`) — no allocation, no copy, no
+proxy — which is what brings the eleven under 2.0. That is a change in **mc-php's
+own** `src/`/`lib/`, not in the mc compiler (`mini_compiler` is untouched), and
+it is inert for any parameter the borrow cannot prove safe.
 
-An **empty** `mixed`-parameter function already costs **1.70x** an internal
-`ctype` call — binding a `mixed` (a zval) on entry is the whole gap. The same
-body behind a `string` parameter is **1.17x**, comfortably under 2.0. But a
-faithful ctype port **must** take `mixed`: `ctype_digit(48)` is the char-code
-quirk (true), not the string `"48"`, so an int argument has to reach the
-function un-coerced, and `ctype_digit(1.5 / null / [])` must return `false`, not
-raise a `TypeError`. A `string` parameter gives neither. So < 2.0x is reachable
-only by (a) lowering mc-php's `mixed`-parameter call overhead — a compiler
-change, not an example change — or (b) abandoning the quirk with a `string`-only
-signature, which would no longer be ext/ctype. The port keeps the faithful
-`mixed` signature; its floor is the `mixed` call cost, and every predicate sits
-just above it.
-
-A note on `bench.php`'s own aggregate (it prints ~7.6x): it calls eight
+A note on `bench.php`'s own aggregate (it prints ~4.5x): it calls eight
 predicates over a mix of tokens, several of which **fail** mid-string. On a
 failing input `ctype.so` returns on the first bad byte while `cty_X` still pays
-the full `mixed` entry, so the aggregate is harsher than the per-predicate
-all-pass figure above. Either way it is over 2.0, for the one reason: the
-`mixed`-parameter call floor.
+the full per-call entry, so the aggregate is harsher than the per-predicate
+all-pass figure above. The all-pass per-predicate ratio is the comparable one.
 
 ## Files
 

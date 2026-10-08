@@ -119,6 +119,16 @@ i64 ph_type_word(i64 must) {
 uptr ph_narrow_name;
 i64  ph_narrow_ty;
 
+// Drop the narrowing when the narrowed variable is written -- reassigned,
+// mutated, aliased or bound by reference. `vname` is the mc name (v_NAME) of
+// the variable being written; after the write its value (hence its type) can
+// be anything, so a later bare coercion of it must NOT take the ld64 string/
+// int borrow. Called from ph_set (every value write) and ph_set_ref (an
+// alias/by-ref binding), so every write form routes through it.
+void ph_narrow_clear(uptr vname) {
+    if (ph_narrow_name && str_eq(vname, ph_narrow_name)) ph_narrow_name = 0;
+}
+
 // c is a type guard `is_string($v)`/`is_int($v)` on a mixed variable iff it is
 // the exact shape ph_isof lowers. Two shapes, both `cast(u8, ...)`: the inlined
 // tag compare `(ld32(IDENT + 8) & 255) == k` (ph_isof's fast path) and the

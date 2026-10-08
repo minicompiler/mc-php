@@ -304,15 +304,15 @@ fi
 # cty_* and check.php compares each against the built-in ctype_X over all 256
 # bytes, the empty string, multi-character strings, ints across and outside the
 # -128..255 window, and the non-int/non-string types -- byte for byte. The
-# reference IS php's own ctype, so there is no twin and no oracle. Not a
-# differential (interpreted, the #[Extern] is*() bodies are empty, like db).
-# Then the bench, cty_* over php's own ctype_*, printed. SKIPPED on Windows,
-# where an #[Extern] function is refused by name (the link names no library).
+# reference IS php's own ctype, so there is no twin and no oracle. The port is
+# pure runtime -- strspn over compile-time literal sets, chr, strlen -- with no
+# #[Extern] and no dylib. Then the bench, cty_* over php's own ctype_*, printed.
+# SKIPPED on Windows only because it ships no mcphp.windows.toml build config.
 echo "  -- ctype"
 EX=examples/ctype
 ctso=$rootn/$EX/build/ctype.$sx
 if [ "$host" = windows ]; then
-    skip "ctype: an #[Extern] function is refused on Windows by name (the link names no library for it)"
+    skip "ctype: no mcphp.windows.toml build config (the port is pure runtime and would build; a Windows config is simply not shipped)"
 elif build "$EX" "$EX/mcphp$suf.toml" "ctype.$sx"; then
     say "built: $(wc -c < "$ctso" | tr -d ' ') bytes from $EX/ctype.php"
     "$PHP" -d extension="$ctso" "$EX/check.php" > "$tmp/ct.out" 2> "$tmp/ct.err"; crc=$?

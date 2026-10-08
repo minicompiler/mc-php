@@ -238,6 +238,7 @@ i64 ph_brf_has(uptr n) {
 }
 
 void ph_set_ref(uptr d) {
+    ph_narrow_clear(ph_mangle(d, "v_"));          // an alias/by-ref ends the narrowing
     i64 i = ph_var_find(d);
     if (i >= 0) st64(ph_vref + i * 8, 1);
 }

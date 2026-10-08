@@ -56,6 +56,13 @@ i64 ph_function() {
     // to decide whether the drain is needed.
     i64 sfp = ph_fn_pushes;
     ph_fn_pushes = 0;
+    // a function body parsed inside a guarded branch (`if (is_string($t)) {
+    // function g(...) ... }`) starts with clean narrowing and restores the
+    // enclosing branch's on the way out -- both exits below
+    uptr snn = ph_narrow_name;
+    i64 snt = ph_narrow_ty;
+    ph_narrow_name = 0;
+    ph_narrow_ty = 0;
     if (ph_tid != T_IDENT) ph_todo(fl, line, "an anonymous function or closure");
     uptr name = ph_ns_decl(ph_tname);                // `ns\name` inside a namespace
     uptr xab = ph_ext_ab;
@@ -77,7 +84,9 @@ i64 ph_function() {
         ph_nfn = ph_nfn + 1;
     }
     ph_last_fn = fi;
-    if (xab) { ph_ext_ab = xab; return ph_extern_fn(name, fi, fwd, fl, line); }
+    // the #[Extern] path returns here, before the normal end's restore: put the
+    // enclosing state back on this exit too (ph_fn_pushes was reset at the top)
+    if (xab) { ph_ext_ab = xab; ph_fn_pushes = sfp; ph_narrow_name = snn; ph_narrow_ty = snt; return ph_extern_fn(name, fi, fwd, fl, line); }
     st64(ph_fname + fi * 8, name);
     st64(ph_fret + fi * 8, PT_MIXED);
     st64(ph_fnp + fi * 8, 0);
@@ -412,6 +421,8 @@ i64 ph_function() {
     ph_rc_fn(f);
     ph_opt_fn(f);
     ph_fn_pushes = sfp;
+    ph_narrow_name = snn;
+    ph_narrow_ty = snt;
     return f;
 }
 

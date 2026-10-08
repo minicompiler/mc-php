@@ -50,6 +50,7 @@ void ph_const_add(uptr cn, i64 v, i64 t, uptr fl, i64 line);
 i64  ph_array_lit(uptr close);
 void ph_local(uptr name, i64 mcty);
 i64  ph_set(uptr name, i64 val);
+void ph_narrow_clear(uptr vname);
 void ph_pending_stmt(i64 s);
 i64  ph_expr(i64 minp);
 i64  ph_expr_tail(i64 lhs, i64 lt, i64 minp);

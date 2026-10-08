@@ -84,6 +84,12 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     if (ph_ext_ab) { ph_ext_ab = 0; err_at(ph_ext_file, ph_ext_line, "mc-php: #[Extern] on something that is not a function"); }
     ph_nonce = ph_nonce + 1;
     uptr cn = p_cat("cl_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+    // a closure parsed inside a guarded branch starts with clean narrowing,
+    // restored before the one success return below
+    uptr snn = ph_narrow_name;
+    i64 snt = ph_narrow_ty;
+    ph_narrow_name = 0;
+    ph_narrow_ty = 0;
 
     // the parameters, read in the ENCLOSING scope's tokens but bound in the new one
     u8 pnames[64];
@@ -351,6 +357,8 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     // an arrow function's creation site, now that its body said what it names
     if (arrow) ph_pending_stmt(ph_cap_site(an, unames, urefs, nu, used, line, fl));
     ph_ety = PT_MIXED;
+    ph_narrow_name = snn;
+    ph_narrow_ty = snt;
     return made;
 }
 
