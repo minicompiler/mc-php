@@ -512,6 +512,49 @@ void ph_borrow_rewrite(i64 s, i64 fi, i64 root) {
     }
 }
 
+// May a borrowed string argument go without its escape reference
+// (phx_zarg_ro -> phx_zarg_rov)? ph_borrow_scan proved the body only reads
+// the argument's words; what a string read from them can still reach is a
+// call. When every call in the handler is one that neither keeps a string it
+// is handed nor answers one of its arguments -- the handler's own machinery
+// (phx_*, whose return writers take their own reference), mc's loads and
+// stores, and the few readers below (strspn's scans answer a count) -- the
+// string cannot outlive the call
+// nor be released by it, and the engine's reference holds it throughout.
+i64 ph_ext_pfx(uptr s, uptr p) {
+    i64 i = 0;
+    loop { i64 c = ld8(p + i); if (!c) return 1; if (ld8(s + i) != c) return 0; i = i + 1; }
+    return 0;
+}
+i64 ph_ext_noretain(i64 s) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_CALL) {
+            uptr c = nd_name(s);
+            i64 ok = phi_intrinsic(c) || ph_ext_pfx(c, "phx_") || str_eq(c, "ph_tslow")
+                || ph_ext_pfx(c, "php_spn") || str_eq(c, "php_strlen")
+                || str_eq(c, "php_chr") || str_eq(c, "php_argcount") || str_eq(c, "php_rc_drain")
+                || str_eq(c, "php_str_byte_c") || str_eq(c, "php_str_byte_d") || str_eq(c, "php_str_byte")
+                || str_eq(c, "php_str_lit") || str_eq(c, "php_bmap_lit");
+            if (!ok) return 0;
+        }
+        if (!ph_ext_noretain(nd_a(s)) || !ph_ext_noretain(nd_b(s)) || !ph_ext_noretain(nd_c(s)) || !ph_ext_noretain(nd_d(s))) return 0;
+        s = nd_next(s);
+    }
+    return 1;
+}
+void ph_ext_rov(i64 s) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_CALL && str_eq(nd_name(s), "phx_zarg_ro")) set_nd_name(s, "phx_zarg_rov");
+        ph_ext_rov(nd_a(s));
+        ph_ext_rov(nd_b(s));
+        ph_ext_rov(nd_c(s));
+        ph_ext_rov(nd_d(s));
+        s = nd_next(s);
+    }
+}
+
 void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     uptr name = ld64(ph_fname + fi * 8);
     i64 np = ld64(ph_fnp + fi * 8);
@@ -634,6 +677,7 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     // a plain mixed parameter whose temp is only ever field-read borrows the
     // engine zval in place (phx_zarg -> phx_zarg_ro) rather than copying it
     ph_borrow_rewrite(nd_a(nd_b(f)), fi, nd_a(nd_b(f)));
+    if (ph_ext_noretain(nd_a(nd_b(f)))) ph_ext_rov(nd_a(nd_b(f)));
     // the copy may have put declarations in front of it: unlinked where it is
     ph_ext_lazy = 0;
     if (bare && ph_ext_pure(nd_b(bare)) && ph_ext_lazy) {

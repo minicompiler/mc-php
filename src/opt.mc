@@ -1584,6 +1584,7 @@ void phr_init() {
     phr_add("php_rc_ret");
     phr_add("phx_enter");
     phr_add("phx_leave");
+    phr_add("phx_zarg_rov");
 }
 
 // ---- the position and the unwinding check go where a call can raise ---------

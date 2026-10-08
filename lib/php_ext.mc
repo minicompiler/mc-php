@@ -989,7 +989,8 @@ void phx_leave_slow();
 void phx_leave() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (!ld64(phT + PHT_ph_outn) && !((uptr) ld64(phT + PHT_ph_exc)) && ld64(phT + PHT_phx_depth) == 1 && !ld64(phT + PHT_ph_nob) && !ld64(phT + PHT_ph_pin) && ld64(phT + PHT_ph_en) == ld64(phT + PHT_phx_efloor) && ld64(phT + PHT_phx_cn) == ld64(phT + PHT_phx_keep) && !((uptr) ld64(phT + PHT_phx_zmirror))) {
         st64(phT + PHT_phx_depth, 0);
-        php_rc_drain(0);
+        // most calls leave nothing on the pool: no drain call for them
+        if (ld64(phT + PHT_ph_pn)) php_rc_drain(0);
         st64(phT + PHT_ph_zalloc, 0);
         st64(phT + PHT_ph_zcur, 0);
         st64(phT + PHT_ph_zlim, 0);
@@ -1940,6 +1941,20 @@ uptr phx_zarg_ro(uptr ex, i64 k) {
     i64 t = phx_type(ez);
     if (t == IZ_REFERENCE) { ez = ld64(ez) + ZRX_VAL; t = phx_type(ez); }
     if (t == IZ_STRING) php_str_esc(ld64(ez));
+    return ez;
+}
+
+// The same borrow without the escape, for a handler src/ext.mc proved can
+// neither keep a string it reads nor hand one back (ph_ext_noretain): the
+// engine's own reference on the argument holds it for the whole call, so the
+// reference php_str_esc takes, and the call's slow leave that gives it back,
+// buy nothing. Its fast half reads the frame in place and calls nothing
+// (src/opt.mc copies it into the handler).
+uptr phx_znull_arg() { uptr z = php_alloc(ZV_SIZE); st64(z, 0); st32(z + 8, IZ_NULL); return z; }
+uptr phx_zarg_rov(uptr ex, i64 k) {
+    if (k >= ld32(ex + EXX_NUM_ARGS)) return phx_znull_arg();
+    uptr ez = ex + EXX_ARG1 + k * ZVX_SIZE;
+    if (ld8(ez + ZVX_TYPE_INFO) == IZ_REFERENCE) ez = ld64(ez) + ZRX_VAL;
     return ez;
 }
 
