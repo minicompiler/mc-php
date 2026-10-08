@@ -954,6 +954,11 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         ph_ety = PT_INT;
         uptr sf = "php_shl_i";
         if (op == ph_tok(">>", 2)) sf = "php_shr_i";
+        // a count the source spells as a literal 0..63 is neither negative
+        // (php's ArithmeticError) nor 64 or more (php's 0 or -1): mc's own
+        // shift, arithmetic for >> on an int, is exactly php's
+        if (nd_kind(rhs) == N_INT && nd_val(rhs) >= 0 && nd_val(rhs) < 64)
+            return ph_bin(op, ph_to_int(lhs, lt), rhs, TY_I64);
         ph_can_throw = 1;
         return ph_c2(sf, ph_to_int(lhs, lt), ph_to_int(rhs, rt), TY_I64);
     }
