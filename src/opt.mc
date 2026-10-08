@@ -849,6 +849,7 @@ i64 phi_decl_ty(uptr name) {
 // copy reads it instead of before the copy moves nothing observable: it reads
 // no memory and calls nothing, and the copy cannot assign a caller's local.
 i64 phi_pure_n;
+i64 phi_pure_div;
 i64 phi_pure1(i64 a) {
     phi_pure_n = phi_pure_n + 1;
     if (phi_pure_n > 16 || nd_next(a)) return 0;
@@ -861,13 +862,77 @@ i64 phi_pure1(i64 a) {
     }
     if (k == N_BINARY) {
         i64 o = nd_op(a);
+        // a division or remainder by a positive literal cannot trap on any
+        // host (no zero, no INT_MIN / -1), so moving it is as pure as `*`
+        if ((o == ph_tok("/", 1) || o == ph_tok("%", 1)) && nd_kind(nd_b(a)) == N_INT && nd_val(nd_b(a)) > 0) {
+            phi_pure_div = 1;
+            return phi_pure1(nd_a(a));
+        }
         if (o != ph_tok("+", 1) && o != ph_tok("-", 1) && o != ph_tok("*", 1) && o != ph_tok("&", 1)
             && o != ph_tok("|", 1) && o != ph_tok("^", 1) && o != ph_tok("<<", 2) && o != ph_tok(">>", 2)) return 0;
         return phi_pure1(nd_a(a)) && phi_pure1(nd_b(a));
     }
     return 0;
 }
-i64 phi_pure(i64 a) { phi_pure_n = 0; return phi_pure1(a); }
+i64 phi_pure(i64 a) { phi_pure_n = 0; phi_pure_div = 0; return phi_pure1(a); }
+
+// the reads of `name` outside any call's arguments: a runtime fast path's
+// (`if (i < len) { st8(...); return s; } return slow(s, i, c);`) -- the
+// reads the slow call's arguments make run only when the fast one did not
+i64 phi_uses_hot(i64 s, uptr name) {
+    i64 u = 0;
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_IDENT && str_eq(nd_name(s), name)) u = u + 1;
+        if (!(k == N_CALL && !phi_intrinsic(nd_name(s))))
+            u = u + phi_uses_hot(nd_a(s), name) + phi_uses_hot(nd_b(s), name) + phi_uses_hot(nd_c(s), name) + phi_uses_hot(nd_d(s), name);
+        s = nd_next(s);
+    }
+    return u;
+}
+
+// does the expression read no variable at all (a constant mc may fold)?
+i64 phi_noid(i64 n) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_IDENT || nd_kind(n) == N_CALL) return 0;
+        if (!phi_noid(nd_a(n)) || !phi_noid(nd_b(n))) return 0;
+        n = nd_next(n);
+    }
+    return 1;
+}
+// is `name` read as the operand of a cast anywhere in s?
+i64 phi_cast_use(i64 s, uptr name) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_CAST && nd_a(s) && nd_kind(nd_a(s)) == N_IDENT && str_eq(nd_name(nd_a(s)), name)) return 1;
+        if (phi_cast_use(nd_a(s), name) || phi_cast_use(nd_b(s), name) || phi_cast_use(nd_c(s), name) || phi_cast_use(nd_d(s), name)) return 1;
+        s = nd_next(s);
+    }
+    return 0;
+}
+
+// may an argument be substituted for every read of its parameter? Read once
+// (the rule above), or, when it is small, read at most twice where it is hot
+// -- `n - 1 - k`, a string offset's index the copied fast path both tests and
+// uses -- plus reads in a slow call's arguments: computing it again is
+// cheaper than a local of its own that the frame holds. A division is
+// computed again only where it is cold.
+i64 phi_reads_ok(i64 a, uptr pn, i64 body) {
+    // A constant put under a cast is folded by mc into a plain literal, which
+    // is an i64 again (mc's rule for a literal), so `(u64) i < (u64) n` with
+    // i := -1 would compare SIGNED and take a fast path meant for 0 <= i < n:
+    // a constant keeps its local wherever the parameter is cast.
+    if (phi_noid(a) && phi_cast_use(body, pn)) return 0;
+    i64 uses = phi_uses(body, pn);
+    if (uses == 1) return 1;
+    if (uses > 4 || nd_kind(a) == N_INT || nd_kind(a) == N_IDENT) return 0;
+    if (!phi_pure(a) || phi_pure_n > 6) return 0;
+    i64 hot = phi_uses_hot(body, pn);
+    if (phi_pure_div) return hot <= 1;
+    return hot <= 2;
+}
 
 // A LOAD of a pure address is pure too when the body it is copied into can
 // write no memory: it calls nothing but mc's loads. A handler's argument read,
@@ -986,7 +1051,7 @@ i64 phi_expand(i64 c) {
             && !ph_rc_assigned(body, pn)) {
             phi_rn_add(pn, nd_name(a));
         } else if (nd_kind(a) != N_IDENT && phi_same_ty(nd_type(a), nd_type(p)) && (phi_pure(a) || phi_pure_load(a, body))
-            && !ph_rc_assigned(body, pn) && phi_uses(body, pn) == 1) {
+            && !ph_rc_assigned(body, pn) && phi_reads_ok(a, pn, body)) {
             // renamed to a name of this copy's own, then replaced by the argument
             uptr ln = phi_local(pn);
             phi_rn_add(pn, ln);
