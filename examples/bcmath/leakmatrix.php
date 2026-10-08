@@ -54,7 +54,13 @@ for ($r = 0; $r < 120; $r++) {
     $acc += tally(fn() => bc_add($alias, '1', 2));
     $acc += tally(fn() => bc_mul($big, $big, 4));
     $acc += tally(fn() => bc_scale($r % 5));
-    $acc += tally(fn() => bc_add((new Stringy)->__toString(), '2', 1));
+    // a Stringable OBJECT, not its string: the module's argument check is php's
+    // strict rule for every caller (docs/php-extension.md, "strict by
+    // definition"), so the handler inspects the object and rejects it with a
+    // TypeError -- and must keep nothing of it -- as php does from this strict
+    // file; its string, through the method, is the borrowed-string path above
+    $acc += tally(fn() => bc_add(new Stringy, '2', 1));
+    $acc += tally(fn() => bc_comp('1', new Stringy, 0));
     foreach ([$res, [1, 2], $obj, 3.5, true, null] as $bad) {
         $acc += tally(fn() => bc_add($bad, '1', 0));   // string param, wrong type
     }
