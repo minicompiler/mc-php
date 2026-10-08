@@ -344,13 +344,12 @@ elif build "$EX" "$EX/mcphp$suf.toml" "ctype.$sx"; then
     fi
     # the bench: cty_* against php's own compiled-in ctype_* in the same process,
     # best of nine interleaved. The reference is the C extension itself, so the
-    # ratio is cty_* / ctype_*. It is over 2.0 -- a per-byte is*() call cannot
-    # reach ctype.c's inlined rune-table loop, and the whole-string strspn() that
-    # would close the gap hits an mc-php refcounting leak (README.md § The bench).
-    # Printed, not gated, like every bench here.
+    # ratio is cty_* / ctype_*, under 2.0 for every predicate (README.md
+    # § The bench has the per-predicate table). Printed, not gated, like every
+    # bench here.
     set -- $("$PHP" -d extension="$ctso" "$EX/bench.php" | tr -d '\r')
     if [ "$1" = cty ]; then
-        say "bench: cty $2 ms, ctype $4 ms, module/ctype.so $6 -- best of nine interleaved; over 2.0, see README.md § The bench; not gated"
+        say "bench: cty $2 ms, ctype $4 ms, module/ctype.so $6 (DONE < 2.0) -- best of nine interleaved; not gated"
     else
         bad "ctype bench.php: $*"
     fi

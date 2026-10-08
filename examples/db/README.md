@@ -58,19 +58,27 @@ measures.
 Measured on macos/arm64 (Apple M4, php 8.5.10, best of nine, three rounds interleaved):
 
 ```
-interpreted ~0.87 ms, compiled ~0.80 ms (1.09x), C twin ~0.60 ms, module/C 1.34x
+interpreted ~0.88 ms, compiled ~0.66 ms (1.33x), C twin ~0.59 ms, module/C 1.12x
 ```
 
-**1.34x < 2.0, so the example is DONE.** The compiled module beats php's interpreted `SQLite3`
-on this workload and runs within a third of the C twin.
+**1.12x < 2.0, so the example is DONE** -- and so is each function on its own
+(2026-10-08, best of three rounds, each the best of a timed loop, module and
+twin interleaved):
 
-One honest caveat: `db_rows` **on its own**, over thousands of rows, is about **2.6x** the C
-twin. A row assembled in PHP over the scalar column reads copies each column name and value into
-a php string before it goes into the array, where the twin writes the engine's array directly in
-one C routine. On a realistic DB task that cost is a thin slice next to the load and the queries
-(hence 1.34x); a row-fetch-dominated task would sit near 2.6x. Closing that would take a bulk
-row-reading `#[Extern]` return (an array built in C), which is a future slice, not needed for
-DONE.
+| call | module/C | call | module/C |
+|---|---|---|---|
+| `db_open` + `db_close` | 1.02x | `db_scalar` | 1.07x |
+| `db_exec` | 1.02x | `db_text` | 1.20x |
+| `db_error` | 1.29x | `db_rows`, 200 rows | **1.78x** |
+| 1000-row prepared load | 1.04x | `db_rows`, 1 row | 1.29x |
+
+`db_rows` over a page of rows is the closest, and it was **2.6x** before: a row
+assembled in PHP moves into the result array instead of being copied into it
+twice, an array's element is set without a zval box, and the finished array is
+handed to php as php's own hash table (`php_arr_mv`, `php_arr_set_*`,
+`phx_r2e_arr` in `lib/php_rt.mc` and `lib/php_ext.mc`). A bulk row-reading
+`#[Extern]` return (an array built in C) would still close the rest; it is not
+needed for DONE.
 
 ## The out parameters
 

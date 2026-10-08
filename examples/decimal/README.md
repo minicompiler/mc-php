@@ -488,6 +488,30 @@ over per-call overheads, and none of it moved when attacked directly:
 * The code's layout: an unrelated change moves a hot loop and the result by 2-7%, which is also
   why several changes that remove instructions measured slower.
 
+**Per function, under 2x every one** (2026-10-08, the bcmath port's batch; macOS/arm64, each
+row the best of five rounds, each round `bench.php`'s own best of nine with `MCPHP_EACH=1`,
+module and twin interleaved):
+
+| function | module (ms) | C twin (ms) | module/C |
+|---|---|---|---|
+| `dec_add`   |  3.940 |  2.661 | **1.48x** |
+| `dec_sub`   |  4.080 |  2.600 | **1.57x** |
+| `dec_mul`   |  5.888 |  3.357 | **1.75x** |
+| `dec_div`   | 15.892 | 11.516 | **1.38x** |
+| `dec_cmp`   |  2.975 |  1.635 | **1.82x** |
+| `dec_round` |  2.711 |  1.496 | **1.81x** |
+
+The loan workload (`tests/examples.sh`): compiled 0.373 ms against the twin's 0.240 (1.55x).
+`decimal.php` is unchanged; the gains are the compiler's and the runtime's, made for
+`examples/bcmath` and general: views for a `substr()` local and windows counted along paths
+(`src/opt.mc`), fresh buffers written in place (`src/rc.mc`), string blocks kept per size class
+and the drain's push inline (`lib/php_ext.mc`), integer literals substituted into a copied
+routine, a store keeping its folded offset (`src/mach.mc`), a rope piece of up to sixteen bytes
+copied with no call, and -- what the carry loop above was waiting for -- int locals that are never
+live at once sharing one local (`lc_fn`, `src/opt.mc`), so a later loop's counters get the
+registers an earlier loop's dead ones held. `docs/plan.md` § item 4 has each change with what it
+bought.
+
 ## What it cannot do yet
 
 * **A wrong TYPE** is an internal function's message in the module and a userland one

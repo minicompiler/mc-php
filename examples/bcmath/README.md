@@ -94,94 +94,52 @@ between 0 and 2147483647")` -- the same class and message text as the built-in
 
 `bench.php` times a mixed workload (loan schedules plus a batch of powers,
 roots and moduli) and, with `MCPHP_EACH=1`, each function on its own
-(steady-state, best of nine, interleaved). DONE is module / C-twin < 2.0.
+(steady-state, best of nine, interleaved). DONE is module / C-twin < 2.0, for
+EVERY function -- not an average.
 
-Measured on this host (macOS/arm64, best of nine, three rounds interleaved),
-after the define-before-use source fix below:
+**DONE (2026-10-08).** Measured on this host (macOS/arm64), each row the best
+of five rounds, each round `bench.php`'s own best of nine, module and C twin
+interleaved:
 
-| function | module (ms) | C twin (ms) | module/C |      |
-|---|---|---|---|---|
-| floor  |   1.36 |  0.77 | **1.76x** | under 2.0 |
-| ceil   |   1.77 |  0.97 | **1.82x** | under 2.0 |
-| mod    |  12.49 |  5.53 | 2.26x | |
-| sqrt   | 173.48 | 76.37 | 2.27x | |
-| add    |   3.54 |  1.38 | 2.57x | |
-| sub    |   3.63 |  1.40 | 2.60x | |
-| pow    |  12.03 |  4.50 | 2.67x | |
-| mul    |   4.88 |  1.81 | 2.70x | |
-| div    |  16.06 |  5.89 | 2.73x | |
-| comp   |   2.56 |  0.93 | 2.75x | |
-| powmod | 208.15 | 61.39 | 3.39x | |
-| round  |   5.95 |  1.36 | 4.38x | |
+| function | module (ms) | C twin (ms) | module/C |
+|---|---|---|---|
+| add    |   4.135 |   2.586 | **1.60x** |
+| sub    |   4.172 |   2.616 | **1.59x** |
+| mul    |   6.180 |   3.388 | **1.82x** |
+| div    |  14.570 |  11.136 | **1.31x** |
+| mod    |  12.093 |  10.414 | **1.16x** |
+| pow    |  16.707 |   8.560 | **1.95x** |
+| powmod | 165.687 | 116.843 | **1.42x** |
+| sqrt   | 153.833 | 146.436 | **1.05x** |
+| comp   |   2.781 |   1.708 | **1.63x** |
+| floor  |   2.393 |   1.477 | **1.62x** |
+| ceil   |   3.054 |   1.840 | **1.66x** |
+| round  |   4.738 |   2.554 | **1.86x** |
 
-Mixed workload: interpreted 5.41 ms, compiled 0.70 ms (**7.8x faster than
-interpreted**), C twin 0.28 ms -- module/C **2.45x** (was 3.54x before the fix
-below).
+Mixed workload (`tests/examples.sh`): interpreted 10.38 ms, compiled 0.77 ms
+(13.5x faster than interpreted), C twin 0.54 ms -- module/C **1.42x**.
 
-**floor and ceil are under the 2.0 bar; the other ten are not.** The whole
-table fell ~1.5x from a single source change (below). What remains over 2.0 is
-two things -- one a pure-source lever (add/sub/comp), one a compiler floor the
-hand-tuned `examples/decimal` hits too (the rest).
+The closest are `pow` (1.95x) and `round` (1.86x). `pow`'s time is `_bc_umul`'s
+inner loop (43% of a call): the twin's is the same algorithm, and clang
+vectorises its digit loads while mc's loop is thirteen scalar instructions an
+element (`examples/decimal/README.md` has the same loop measured). Hoisting the
+array's buffer pointer out of it was tried and is 4% SLOWER (the new local takes
+a register the outer loops held), so it was not kept.
 
-### The one source fix already applied: define-before-use
+### What got it there
 
-mc-php is single-pass. A call to a function **declared later in the file** (PHP
-hoists declarations, so this is legal and common) is lowered against a forward
-*stub* whose parameters are `PT_MIXED` -- and when the real declaration is seen,
-`src/decl.mc` forces its parameters to `PT_MIXED` to match the stub
-(`if (fwd && !variadic) pt = PT_MIXED;`). That **poisons the function for every
-caller**, not just the forward one, and -- because the poisoned helper is then
-inlined into other functions -- it cascades.
-
-In the first cut `_bc_intonly` (defined before `_bc_skip0`) called `_bc_skip0`,
-so `_bc_skip0`'s declared `string $d` was forced to a zval. `_bc_skip0` is
-inlined into `_bc_fmt` and `_bc_ucmp`, which are inlined into `_bc_addsub` and
-every arithmetic function, so **the whole module did its digit work on zvals**:
-`f__bc_addsub` was 2064 instructions with ~20 `php_zv_*` calls where the same
-source in isolation is 1759 instructions with none. Reordering so every helper
-is defined before its first use removed it: `bc_add` 4.14 -> 2.20 ms, the mixed
-workload 3.54x -> 2.45x, floor/ceil under 2.0. Pure source, `bccheck.php` still
-10511/0, `leakmatrix.php` still leak-free. (The general fix is in mc-php, not
-this file: a forward-referenced function with declared scalar parameters should
-keep them -- a two-pass signature collection, or re-typing the stub when the
-definition is seen. Reported for the compiler; it would help every taught
-module, teko included, and remove the ordering constraint on source.)
-
-### What is left, measured
-
-1. **The optional, nullable scale (add, sub, comp).** bcmath's exact signature
-   is `?int $scale = null` -- the one thing a faithful port cannot drop. mc-php
-   lowers *any* optional or nullable parameter to a zval (`src/decl.mc` forces
-   `PT_MIXED` so "not passed" is expressible), and the handler marshals it per
-   call (`phx_zarg` heap allocation + `php_param_coerce` + `phx_chk2` +
-   `phx_arity2`) where a required scalar is read in place. Measured here, same
-   source, scale required `int` instead of `?int`: **add 2.50x -> 1.80x,
-   sub 2.59x -> 1.84x, comp 2.55x -> 1.54x** -- all under 2.0. A minimal
-   reproducer: a trivial `f(string, string, ?int $s = null)` body is ~4.9x the
-   same body with `int $s` (8.5 ms vs 1.7 ms over 200k calls). There is no
-   source workaround (the nullable scale is bcmath's contract); it is a mc-php
-   change -- a nullable/optional declared-scalar parameter carried as a native
-   value, not a heap zval, in the parameter-lowering path shared with the
-   program road. With it, add/sub/comp go under 2.0.
-
-2. **The compiler floor (mul, div, mod, sqrt, pow, powmod, round).** These do
-   not reach 2.0 even with the scale required, because every intermediate digit
-   string is a heap-allocated, reference-counted `zend_string` where the C twin
-   uses a stack buffer. `examples/decimal` -- the same digit core, hand-tuned,
-   required-`int` scale, no forward references -- is itself **over 2.0 per
-   function on the current compiler**: dec_mul 2.09x, dec_div 2.60x, dec_cmp
-   2.04x, dec_round 2.21x (dec_add 1.71x, dec_sub 1.76x are under). So the
-   bignum-string shape is bounded above 2.0 for these operations with the
-   current back end; `examples/decimal`'s widely-cited **1.80x** is the *mixed
-   workload* average, not a per-function figure. Closing this needs a general
-   compiler optimization -- non-escaping intermediate strings on a stack/arena
-   with no refcount (escape analysis) -- reported for mc-php, not reachable by
-   tuning this file. `round` (4.35x) is additionally the most string-heavy
-   function (str_pad, several str_repeat/concat) and carries a defaulted
-   `int $precision = 0` (a zval like the scale).
-
-`mini_compiler` (the mc compiler) is untouched; every change and every
-limitation above is in mc-php and this file.
+All of it is in mc-php's own compiler (`src/*.mc`) and runtime
+(`lib/php_rt.mc`, `lib/php_ext.mc`), general, and gated like everything else;
+`mini_compiler` is untouched. `docs/plan.md` § item 4 lists each change with
+what it bought. In short: the nullable `?int $scale = null` is carried as a
+native value (it was a heap zval per call); a function called before its
+declaration keeps its declared scalar parameters (so the define-before-use
+order this file still has is no longer needed); intermediate strings shrank --
+views for `substr()` locals, ropes built in place, fresh buffers written in
+place, `$s[$i] = $t[$j]` as a byte write; string blocks are kept per size
+class; a small pure argument and an integer literal are substituted into a
+copied routine; and the register pressure of a long function fell (locals that
+are never live at once share one; constant offsets fold into the load).
 
 ## Not for this port
 

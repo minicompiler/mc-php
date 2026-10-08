@@ -1188,48 +1188,75 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    with a minimal `.mc` reproducer; a shrink-wrapped prologue is an mc-side optimization). Two
    compiler leaks ctype exposed were fixed on the way: `strspn` over a mixed set and the
    `global`/`static` read pin leak.
-4. **Port bcmath -- correctness DONE, the < 2x bench NOT YET** (`examples/bcmath`):
-   php-src's `ext/bcmath` (libbcmath) written in PHP and compiled by mc-php, graded against php's
-   own built-in bcmath. Published as `bc_*` (`bc_add`..`bc_scale`, thirteen functions incl. 8.4's
-   `bc_floor`/`bc_ceil`/`bc_round`) because php refuses to redeclare an internal name. Faithful to
-   libbcmath's EXACT semantics: **TRUNCATION** at the scale (not half-even -- that is
-   `examples/decimal`), the permissive parse (`""`, `"."`, `"5."`, `".5"` all valid), the
-   per-function scale rules (`bc_mul`'s `min(scale, s1+s2)`, `bc_div`/`bc_mod` truncate toward
-   zero, `bc_mod`'s sign follows the dividend, `bc_pow`'s negative/zero exponent and `'2.0'`
-   integer check, `bc_powmod`, `bc_sqrt`'s integer-sqrt-at-scale, `bc_comp` truncating to the
-   scale before judging sign, `bc_round` HalfAwayFromZero with negative precision), the request
-   default scale (`bc_scale`), and the exact exception class and message (`DivisionByZeroError`,
-   `ValueError` "is not well-formed" / "must be between 0 and 2147483647" / "cannot have a
-   fractional part"), each confirmed against the host php 8.5. The C twin is
-   `examples/bcmath/c/bcmath.c` -- bcmath.php's algorithm function by function. Gates GREEN:
-   the `check.php` differential (module vs interpreted) **130 lines byte for byte**, the C twin
+4. **Port bcmath -- DONE** (2026-10-08, `examples/bcmath`): php-src's `ext/bcmath` (libbcmath)
+   written in PHP and compiled by mc-php, graded against php's own built-in bcmath. Published as
+   `bc_*` (`bc_add`..`bc_scale`, thirteen functions incl. 8.4's `bc_floor`/`bc_ceil`/`bc_round`)
+   because php refuses to redeclare an internal name. Faithful to libbcmath's EXACT semantics:
+   **TRUNCATION** at the scale (not half-even -- that is `examples/decimal`), the permissive parse
+   (`""`, `"."`, `"5."`, `".5"` all valid), the per-function scale rules (`bc_mul`'s
+   `min(scale, s1+s2)`, `bc_div`/`bc_mod` truncate toward zero, `bc_mod`'s sign follows the
+   dividend, `bc_pow`'s negative/zero exponent and `'2.0'` integer check, `bc_powmod`, `bc_sqrt`'s
+   integer-sqrt-at-scale, `bc_comp` truncating to the scale before judging sign, `bc_round`
+   HalfAwayFromZero with negative precision), the request default scale (`bc_scale`), and the
+   exact exception class and message (`DivisionByZeroError`, `ValueError` "is not well-formed" /
+   "must be between 0 and 2147483647" / "cannot have a fractional part"), each confirmed against
+   the host php 8.5. The C twin is `examples/bcmath/c/bcmath.c` -- bcmath.php's algorithm function
+   by function.
+
+   The differential: `check.php` (module vs interpreted) **130 lines byte for byte**, the C twin
    graded the same way; `bccheck.php` against the built-in **10511 results, 0 wrong** for the
-   module AND the twin AND interpreted; `leakmatrix.php` under the ZTS debug allocator **leak-free**
-   over every function, argument shape and error path (`tests/leaks.sh`); wired into
-   `tests/examples.sh`. No `src/*.mc` or `lib/*.mc` touched (so no CodeQL surface), and
-   `mini_compiler` untouched.
-   **The DONE bar is module/C < 2.0, and it is NOT met: per-function 2.51x-6.12x, mixed 3.54x**
-   (macos/arm64; the module is 5.47x the interpreter). The cause is optimization work, NOT the
-   port's algorithm -- and `examples/decimal` is module/C **1.80x** on the identical loan workload
-   with the current compiler, so < 2x is reachable for this exact shape (the digit helpers ARE
-   decimal's own; `bc_div`, the compute-heavy one, is the closest at 3.18x). The gap is two
-   measured parts, both in mc-php's source, not the math, and `mini_compiler` untouched:
-   (1) **bcmath.php is a first cut; decimal.php was hand-tuned.** On the identical loan workload the
-   bcmath module runs ~2.6x the decimal module (0.49 ms vs 0.23 ms) and builds ~1.5x the strings
-   per call (add 600 vs 400, mul 700 vs 500, `MCPHP_STATS=1`). decimal.php had its "same-algorithm
-   2x batch" (§ 7) rewriting it function by function against the optimizer; bcmath.php has not. Pure
-   source work, safe, the owner's first lever. (2) **The optional nullable `?int $scale = null`
-   adds the rest.** It is bcmath's exact signature (the omitted and the explicit-null cases both use
-   the request default) and a faithful port cannot drop it; mc-php lowers ANY optional/nullable
-   parameter to a heap zval (`src/decl.mc` forces `PT_MIXED` for a defaulted param), which the
-   extension handler marshals per call (`phx_zarg` alloc + `php_param_coerce` + `phx_chk2` +
-   `phx_arity2`) where a required scalar is read in place. Measured on the loan workload: the
-   required-`int $scale` variant is ~4.1x and `?int $scale = null` is ~4.9x -- so the optional path
-   is the smaller ~0.8x and the per-call tuning (part 1) is the larger. Minimal reproducer:
-   `f(string, string, ?int $s = null)` is ~2.5x `f(string, string, int $s)`, same body, argument
-   passed. Part 1 is source tuning; part 2 has no source workaround and is a mc-php change of its
-   own (a nullable/optional scalar carried as a raw value, not a heap zval -- the parameter-lowering
-   path shared with the program road). `examples/bcmath/README.md` § The bench has the table.
+   module AND the twin AND interpreted; `leakmatrix.php` under the ZTS debug allocator
+   **leak-free** over every function, argument shape and error path (`tests/leaks.sh`).
+
+   **The bench, per function, every one under 2.0** (macOS/arm64; each row the best of five
+   rounds, each round `bench.php`'s best of nine with `MCPHP_EACH=1`, module and twin
+   interleaved):
+
+   | function | module/C | function | module/C | function | module/C |
+   |---|---|---|---|---|---|
+   | add | 1.60x | div | 1.31x | sqrt | 1.05x |
+   | sub | 1.59x | mod | 1.16x | comp | 1.63x |
+   | mul | 1.82x | pow | 1.95x | floor | 1.62x |
+   | round | 1.86x | powmod | 1.42x | ceil | 1.66x |
+
+   The mixed workload: interpreted 10.38 ms, compiled 0.77 ms (13.5x), the twin 0.54 ms --
+   module/C **1.42x** (it was 3.54x at the first cut). The same batch took every OTHER example
+   under 2.0 per function too, and that was the bar: `examples/decimal` add 1.48, sub 1.57, mul
+   1.75, div 1.38, cmp 1.82, round 1.81 (loan workload 1.55x); `examples/ctype` 1.44-1.91x called
+   directly and 1.06-1.16x called dynamically, all eleven predicates on passing AND failing input
+   (`bench.php`'s aggregate 4.49 -> 1.62); `examples/db` every call 1.02-1.29x but `db_rows` over
+   200 rows, 2.8 -> **1.78x** (workload 1.12x); two-extensions 1.06-1.07x; threads 1.00x, sync
+   1.64x, await 1.07x, connect 1.09x. Each example's README § The bench has its table.
+
+   What each change bought (module/C, the function it moved most; every change general -- in
+   mc-php's own `src/*.mc`, `lib/php_rt.mc`, `lib/php_ext.mc` -- and each gated by `fixtures.sh`,
+   `examples.sh`, `ext.sh`, `leaks.sh` aarch64 and ZTS, and CodeQL-mc with no alert of its own;
+   `mini_compiler` untouched, not one line):
+
+   | change | where | bought |
+   |---|---|---|
+   | a nullable scalar parameter (`?int $scale = null`) is a native value, not a zval; `=== null` a tag compare | `src/decl.mc`, `src/ext.mc`, `src/expr.mc` | add 2.59 -> 1.89, sub 2.52 -> 1.95, comp 2.72 -> 1.73 |
+   | an int parameter with an int-literal default is a native int | `src/decl.mc` | round 4.40 -> 2.66 |
+   | a call before the declaration passes a bare scalar parameter natively (php hoists the declaration; the scan types `int`/`float`/`string`/`bool $x` exactly) | `src/program.mc`, `src/tables.mc`, `src/decl.mc` | the define-before-use order bcmath.php needed (floor 4.0 -> 1.75) is no longer needed by anyone |
+   | `$s[$i] = $t[$j]` is a byte write; a throwing return's temporary counts as a return for the fresh buffer | `src/lvalue.mc`, `src/rc.mc` | div 2.52 -> 1.96, mod 2.06 -> 1.55, sqrt 2.19 -> 1.67 |
+   | a function's rope is built before its inline copy is kept | `src/opt.mc` | add 1.87 -> 1.72, sub 1.97 -> 1.81 |
+   | freed string blocks kept per size class; the drain pushes in the loop | `lib/php_ext.mc` | mul 2.01 -> 1.93, round 2.51 -> 2.36; decimal cmp 2.00 -> 1.79 |
+   | `$s = substr($s, ...)` on a counted slot shortened in place; a shift by a literal is mc's own | `src/rc.mc`, `src/expr.mc` | pow 2.19 -> 2.08 |
+   | bc_powmod squares and multiplies on magnitudes, as the twin does | `bcmath.php` | powmod 2.31 -> 1.88 |
+   | a borrowed string argument goes without its escape; leave drains only a non-empty pool | `lib/php_ext.mc` | ctype dynamic 1.83-2.02 -> 1.05-1.19 |
+   | a `substr()` local of a function that does not loop is a window | `src/opt.mc` | round 2.39 -> 2.05, pow 2.08 -> 2.00 |
+   | windows counted along paths; fresh buffers written in place where nothing loops | `src/opt.mc`, `src/rc.mc` | round 2.09 -> 1.89; decimal round 2.06 -> 1.93 |
+   | a db row moved into its array, set without boxes, handed to php as Buckets | `lib/php_rt.mc`, `lib/php_ext.mc`, `src/lvalue.mc`, `src/opt.mc` | db_rows 2.8 -> 1.76 |
+   | two string offsets compared with `===` are two bytes | `src/expr.mc` | div 1.95 -> 1.32, mod 1.50 -> 1.17, powmod 1.88 -> 1.45, sqrt 1.66 -> 1.05 |
+   | an integer literal argument of a copied routine is substituted; a store keeps its folded offset | `src/opt.mc`, `src/mach.mc` | pow, mul a few percent |
+   | a call that allocates nothing does not set the arena's cursor | `lib/php_ext.mc` | ctype direct on failing input 1.81-2.01 -> 1.70-1.88 |
+   | a rope piece of up to sixteen bytes copied with no call | `lib/php_rt.mc` | decimal round 1.96 -> 1.86 |
+   | int and bool locals whose ranges never overlap share one local (mc gives a local one register for the whole function) | `src/opt.mc` | pow 17.0 -> 16.7 ms, decimal round 2.81 -> 2.71 ms |
+
+   Measured and not kept: the fixed array's buffer pointer hoisted out of `_bc_umul`'s loop is 4%
+   slower (the new local takes a register the outer loops held). What is left closest to the bar is
+   `pow` (1.95x): 43% of it is `_bc_umul`'s inner loop, thirteen scalar instructions an element
+   against a twin whose digit loads clang vectorises.
 5. **Port json.** `ext/json` cannot be built shared at all (T1), so this port is the only way a
    json extension exists outside php's own binary.
 6. **Distribution -- Composer, Packagist, PIE. To be designed with the owner**: the owner stops
