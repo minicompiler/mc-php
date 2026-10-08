@@ -325,6 +325,19 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
             // and chr(c) as its byte
             if (cvt == PT_STRING && nd_kind(cv) == N_CALL && str_eq(nd_name(cv), "php_chr"))
                 return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_c3("php_str_setb", sb, ix, nd_a(cv), ty_pstr)));
+            // `$s[$i] = $t[$j]`: C's read (php_str_off_c) or the checked one
+            // (php_str_off_d, which traps outside) is always ONE byte, so the
+            // write is that byte -- read as php_str_byte_c/_d, with no
+            // one-byte string between, and a byte write src/rc.mc can prove
+            // in place. php_str_off (a negative literal) may answer "" and
+            // keeps the string write, whose refusal of "" is php's.
+            if (cvt == PT_STRING && nd_kind(cv) == N_CALL
+                && (str_eq(nd_name(cv), "php_str_off_c") || str_eq(nd_name(cv), "php_str_off_d"))) {
+                if (str_eq(nd_name(cv), "php_str_off_c")) set_nd_name(cv, "php_str_byte_c");
+                else set_nd_name(cv, "php_str_byte_d");
+                set_nd_type(cv, TY_I64);
+                return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_c3("php_str_setb", sb, ix, cv, ty_pstr)));
+            }
             if (cvt == PT_STRING)
                 return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_c3("php_str_sets", sb, ix, cv, ty_pstr)));
             return ph_wrap(ph_set(ph_mangle(d, "v_"),
