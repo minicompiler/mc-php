@@ -1936,10 +1936,10 @@ uptr php_arr_copy(uptr src) {
 
 uptr php_pk_new(i64 cap) {
     if (cap < 8) cap = 8;
-    uptr p = php_alloc(32);
+    uptr p = php_alloc(32 + cap * 8);
     st64(p, 0);
     st64(p + 8, cap);
-    st64(p + 16, php_alloc(cap * 8));
+    st64(p + 16, p + 32);
     st64(p + 24, 0);
     return p;
 }
@@ -1965,7 +1965,8 @@ i64 php_fill_count_ok(i64 n) {
 
 // array_fill(0, n, v)
 uptr php_pk_fill(i64 n, i64 v) {
-    if (!php_fill_count_ok(n)) return php_pk_new(8);
+    // the count's two refusals, out of line: one unsigned test in front
+    if (n < 0 || n >= 2147483648) { php_fill_count_ok(n); return php_pk_new(8); }
     uptr p = php_pk_new(n);
     uptr d = ld64(p + 16);
     i64 i = 0;
@@ -3052,7 +3053,7 @@ uptr php_str_repeat(uptr s, i64 times) {
         return php_str_short("", 0);
     }
     if (times == 0) return php_str_short("", 0);
-    i64 n = php_strlen(s);
+    i64 n = ld64(s + 16);
     if (n == 1 && times == 1) return php_str_short(s + ZS_HDR, 1);
     uptr o = php_str_alloc(n * times);
     i64 i = 0;
