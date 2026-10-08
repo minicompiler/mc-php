@@ -74,7 +74,7 @@ jobs:
           echo "$RUNNER_TEMP/mc" >> "$GITHUB_PATH"
 
       - name: Install PHP ${{ env.PHP_VERSION }}
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@bc12f5cef4c73a871331e196ff380d38232ba293 # 2.40.0-beta: PHP 8.5 macos/arm64 fix (setup-php#1125, awaiting-release); revert to @v2 when 2.40.0 ships
         with:
           php-version: ${{ env.PHP_VERSION }}
           coverage: none
@@ -182,7 +182,7 @@ jobs:
           cp -R "$RUNNER_TEMP/mc/lib/mc" "$HOME/.mc/libs/mc"
 
       - name: Install PHP ${{ env.PHP_VERSION }} (ZTS)
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@bc12f5cef4c73a871331e196ff380d38232ba293 # 2.40.0-beta: PHP 8.5 macos/arm64 fix (setup-php#1125, awaiting-release); revert to @v2 when 2.40.0 ships
         env:
           phpts: ts
         with:
