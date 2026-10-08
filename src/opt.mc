@@ -475,6 +475,250 @@ void ph_opt_fn(i64 f) {
     // is a copy by now, so the right side is still one expression
     ph_sc_fn(f);
     if (!phi_noac) ph_ac_walk(nd_b(f));
+    if (nd_b(f)) lc_fn(nd_b(f));
+}
+
+// ---- locals that are never live at once share one ---------------------------------
+// mc gives a local one register for the whole function (ten of them), so a
+// function whose loops come one after the other spills the second loop's
+// counters while the first loop's, dead by then, still hold registers. Two
+// int (or bool) locals whose ranges do not overlap become one local here, and
+// the register goes to whichever loop runs.
+//
+// A local's range is the span, in tree order, from its first occurrence to
+// its last, widened to every loop it touches (a loop's back edge makes a value
+// live over the whole body) -- except a loop that cannot go round: its body
+// ends in a return or a break, and no continue names it (the unwinding
+// wrappers src/rc.mc and the runtime's copies are). Only a local whose first
+// occurrence is an assignment that dominates all the others -- a statement
+// whose later siblings hold every other one, its own value not reading the
+// local -- joins another, so it never reads what the other left behind. A
+// local named anywhere but as a read, a store or its declaration (an address
+// taken, an index) is left alone.
+#define LC_MAX 128
+#define LC_MAXLP 256
+i64  lc_n;
+i64  lc_idx;
+i64  lc_lid;
+i64  lc_nlp;
+uptr lc_tab;                          // LC_MAX rows of LC_ROW bytes
+uptr lc_lp;                           // LC_MAXLP loops: lo, hi
+#define LC_ROW 72
+#define LC_NM   0
+#define LC_LO   8
+#define LC_HI  16
+#define LC_BAD 24
+#define LC_FST 32                     // the first occurrence's node, or -1 when it is no assignment
+#define LC_FL  40                     // the list that first assignment sits in
+#define LC_END 48                     // where that list ends
+#define LC_TY  56
+#define LC_RHI 64                     // the last occurrence itself, before any loop widened it
+
+uptr lc_r(i64 v) { return lc_tab + v * LC_ROW; }
+
+i64 lc_find(uptr nm) {
+    i64 v = 0;
+    loop {
+        if (v >= lc_n) break;
+        if (str_eq(ld64(lc_r(v) + LC_NM), nm)) return v;
+        v = v + 1;
+    }
+    return 0 - 1;
+}
+
+void lc_decls(i64 n) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_VAR && !nd_val(n) && (nd_type(n) == TY_I64 || nd_type(n) == TY_U8)
+            && lc_n < LC_MAX && lc_find(nd_name(n)) < 0) {
+            uptr r = lc_r(lc_n);
+            st64(r + LC_NM, nd_name(n));
+            st64(r + LC_LO, 0 - 1);
+            st64(r + LC_HI, 0 - 1);
+            st64(r + LC_BAD, 0);
+            st64(r + LC_FST, 0);
+            st64(r + LC_FL, 0 - 1);
+            st64(r + LC_END, 0 - 1);
+            st64(r + LC_TY, nd_type(n));
+            if (nd_a(n)) st64(r + LC_FST, 0 - 1);   // a declaration's value is a first occurrence
+            lc_n = lc_n + 1;
+        }
+        lc_decls(nd_a(n));
+        lc_decls(nd_b(n));
+        lc_decls(nd_c(n));
+        lc_decls(nd_d(n));
+        n = nd_next(n);
+    }
+}
+
+// does the list end in a statement that leaves (a return, a break)?
+i64 lc_leaves(i64 s) {
+    if (!s) return 0;
+    loop { if (!nd_next(s)) break; s = nd_next(s); }
+    if (nd_kind(s) == N_RETURN || nd_kind(s) == N_BREAK) return 1;
+    if (nd_kind(s) == N_BLOCK) return lc_leaves(nd_a(s));
+    return 0;
+}
+
+// a continue that names the loop d levels out
+i64 lc_cont(i64 n, i64 d) {
+    loop {
+        if (!n) break;
+        i64 k = nd_kind(n);
+        if (k == N_CONTINUE) {
+            i64 lv = nd_val(n);
+            if (lv < 1) lv = 1;
+            if (lv == d) return 1;
+        }
+        i64 dd = d;
+        if (k == N_LOOP) dd = d + 1;
+        if (lc_cont(nd_a(n), dd) || lc_cont(nd_b(n), dd) || lc_cont(nd_c(n), dd) || lc_cont(nd_d(n), dd)) return 1;
+        n = nd_next(n);
+    }
+    return 0;
+}
+
+i64 lc_has(i64 n, uptr nm) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) != N_INT && nd_kind(n) != N_STR && nd_name(n) && str_eq(nd_name(n), nm)) return 1;
+        if (lc_has(nd_a(n), nm) || lc_has(nd_b(n), nm) || lc_has(nd_c(n), nm) || lc_has(nd_d(n), nm)) return 1;
+        n = nd_next(n);
+    }
+    return 0;
+}
+
+void lc_walk(i64 n) {
+    lc_lid = lc_lid + 1;
+    i64 lid = lc_lid;
+    loop {
+        if (!n) break;
+        i64 me = lc_idx;
+        lc_idx = lc_idx + 1;
+        i64 k = nd_kind(n);
+        if (k != N_INT && k != N_STR && nd_name(n)) {
+            i64 v = lc_find(nd_name(n));
+            if (v >= 0) {
+                uptr r = lc_r(v);
+                if (k != N_IDENT && k != N_ASSIGN && k != N_VAR) st64(r + LC_BAD, 1);
+                if (k != N_VAR || nd_a(n)) {
+                    if (ld64(r + LC_LO) < 0) {
+                        st64(r + LC_LO, me);
+                        if (k == N_ASSIGN && ld64(r + LC_FST) == 0) { st64(r + LC_FST, n); st64(r + LC_FL, lid); }
+                        else st64(r + LC_FST, 0 - 1);
+                    }
+                    st64(r + LC_HI, me);
+                    st64(r + LC_RHI, me);
+                }
+            }
+        }
+        lc_walk(nd_a(n));
+        lc_walk(nd_b(n));
+        lc_walk(nd_c(n));
+        lc_walk(nd_d(n));
+        if (k == N_LOOP && !(lc_leaves(nd_a(nd_a(n))) && nd_kind(nd_a(n)) == N_BLOCK && !lc_cont(nd_a(n), 1))) {
+            if (lc_nlp < LC_MAXLP) {
+                st64(lc_lp + lc_nlp * 16, me);
+                st64(lc_lp + lc_nlp * 16 + 8, lc_idx);
+                lc_nlp = lc_nlp + 1;
+            } else lc_n = 0;                 // too many loops to reason about: share nothing
+        }
+        n = nd_next(n);
+    }
+    i64 v = 0;
+    loop {
+        if (v >= lc_n) break;
+        if (ld64(lc_r(v) + LC_FL) == lid) st64(lc_r(v) + LC_END, lc_idx);
+        v = v + 1;
+    }
+}
+
+void lc_rename(i64 n, uptr from, uptr to) {
+    loop {
+        if (!n) break;
+        i64 k = nd_kind(n);
+        if ((k == N_IDENT || k == N_ASSIGN) && str_eq(nd_name(n), from)) set_nd_name(n, to);
+        lc_rename(nd_a(n), from, to);
+        lc_rename(nd_b(n), from, to);
+        lc_rename(nd_c(n), from, to);
+        lc_rename(nd_d(n), from, to);
+        n = nd_next(n);
+    }
+}
+
+void lc_fn(i64 body) {
+    if (!lc_tab) { lc_tab = xalloc(LC_MAX * LC_ROW); lc_lp = xalloc(LC_MAXLP * 16); }
+    lc_n = 0;
+    lc_idx = 0;
+    lc_lid = 0;
+    lc_nlp = 0;
+    lc_decls(nd_a(body));
+    if (lc_n < 2) return;
+    lc_walk(nd_a(body));
+    // every range widened to the loops it touches, until none widens it
+    i64 v = 0;
+    loop {
+        if (v >= lc_n) break;
+        uptr r = lc_r(v);
+        i64 lo = ld64(r + LC_LO);
+        i64 hi = ld64(r + LC_HI);
+        if (lo >= 0) {
+            i64 moved = 1;
+            loop {
+                if (!moved) break;
+                moved = 0;
+                i64 j = 0;
+                loop {
+                    if (j >= lc_nlp) break;
+                    i64 a = ld64(lc_lp + j * 16);
+                    i64 b = ld64(lc_lp + j * 16 + 8);
+                    if (a <= hi && lo <= b && (a < lo || b > hi)) {
+                        if (a < lo) lo = a;
+                        if (b > hi) hi = b;
+                        moved = 1;
+                    }
+                    j = j + 1;
+                }
+            }
+            st64(r + LC_LO, lo);
+            st64(r + LC_HI, hi);
+        }
+        v = v + 1;
+    }
+    // in order of where each range starts, a local that may join takes the
+    // first earlier local of its type whose range (with every local that
+    // already joined it) ended before its own begins
+    loop {
+        // the unplaced joiner that starts first
+        i64 best = 0 - 1;
+        v = 0;
+        loop {
+            if (v >= lc_n) break;
+            uptr r = lc_r(v);
+            if (ld64(r + LC_LO) >= 0 && !ld64(r + LC_BAD) && ld64(r + LC_FST) > 0
+                && (best < 0 || ld64(r + LC_LO) < ld64(lc_r(best) + LC_LO))) best = v;
+            v = v + 1;
+        }
+        if (best < 0) break;
+        uptr br = lc_r(best);
+        i64 fst = ld64(br + LC_FST);
+        st64(br + LC_FST, 0 - 2);            // placed (or refused): looked at once
+        if (ld64(br + LC_RHI) >= ld64(br + LC_END) || lc_has(nd_a(fst), ld64(br + LC_NM))) continue;
+        // a host: a local of the same type, not bad, whose range ends first
+        i64 h = 0;
+        loop {
+            if (h >= lc_n) break;
+            uptr hr = lc_r(h);
+            if (h != best && !ld64(hr + LC_BAD) && ld64(hr + LC_LO) >= 0 && ld64(hr + LC_TY) == ld64(br + LC_TY)
+                && ld64(hr + LC_HI) < ld64(br + LC_LO)) break;
+            h = h + 1;
+        }
+        if (h >= lc_n) continue;
+        uptr hr = lc_r(h);
+        lc_rename(nd_a(body), ld64(br + LC_NM), ld64(hr + LC_NM));
+        st64(hr + LC_HI, ld64(br + LC_HI));
+        st64(br + LC_LO, 0 - 1);              // gone: its occurrences are the host's now
+    }
 }
 
 // ---- small php functions are inlined -----------------------------------------
