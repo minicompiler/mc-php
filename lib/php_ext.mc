@@ -1462,6 +1462,8 @@ i64 phx_fcall_l2(uptr c, i64 v1, i64 v2, i64 lazy) { uptr phT = ph_tcur; if (!ph
 extern uptr _zend_new_array(i64 size);
 extern uptr zend_hash_update(uptr ht, uptr key, uptr zv);
 extern uptr zend_hash_index_update(uptr ht, i64 h, uptr zv);
+extern void zend_hash_real_init_mixed(uptr ht);
+extern void zend_hash_rehash(uptr ht);
 extern void zend_hash_internal_pointer_reset_ex(uptr ht, uptr pos);
 extern i32  zend_hash_get_current_key_ex(uptr ht, uptr sk, uptr nk, uptr pos);
 extern uptr zend_hash_get_current_data_ex(uptr ht, uptr pos);
@@ -1628,21 +1630,43 @@ void phx_r2e(uptr z, uptr ez) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (t > IZ_OBJECT) { st64(ez, 0); st32(ez + ZVX_TYPE_INFO, IZ_NULL); }
 }
 
+// A runtime array is php's zend_array field for field, its Buckets
+// included (lib/php_rt.mc § the ordered hash); only the hash slots in front
+// of them are indexed another way. So the engine's array is made at the
+// runtime one's size, its Buckets written in order -- each value made the
+// engine's (phx_r2e), each key the engine's reference -- and its hash slots
+// and collision links built by the engine itself (zend_hash_rehash, which
+// also closes the holes a deleted element left), where an insert per
+// element looked every key up again.
 uptr phx_r2e_arr(uptr a) {
     i64 used = php_ht_used(a);
-    uptr ht = _zend_new_array(php_count(a));
+    uptr ht = _zend_new_array(used);
+    if (!php_count(a)) return ht;
+    zend_hash_real_init_mixed(ht);
+    uptr d = ld64(ht + 16);
+    i64 dyn = 0;                        // a key the array must release
     i64 i = 0;
     loop {
         if (i >= used) break;
         uptr b = php_ht_bkt(a, i);
+        if (php_zv_type(b) == IZ_UNDEF) st32(d + ZVX_TYPE_INFO, IZ_UNDEF);
+        else {
+            phx_r2e(b, d);
+            uptr k = ld64(b + 24);
+            if (k && !(ld32(k + 4) & ZSX_INTERNED)) { st32(k, ld32(k) + 1); dyn = 1; }
+            st64(d + 24, k);
+        }
+        st64(d + 16, ld64(b + 16));
+        d = d + 32;
         i = i + 1;
-        if (php_zv_type(b) == IZ_UNDEF) continue;
-        u8 ez[16];
-        phx_r2e(b, ez);
-        uptr k = ld64(b + 24);
-        if (k) zend_hash_update(ht, k, ez);
-        else zend_hash_index_update(ht, ld64(b + 16), ez);
     }
+    st32(ht + 24, used);
+    st32(ht + 28, php_count(a));
+    st64(ht + 40, ld64(a + 40));
+    // HASH_FLAG_STATIC_KEYS (1 << 4) says no key needs releasing: off as soon
+    // as one does, as the engine's own insert of such a key turns it off
+    if (dyn) st32(ht + 8, ld32(ht + 8) & (0 - 17));
+    zend_hash_rehash(ht);
     return ht;
 }
 

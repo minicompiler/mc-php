@@ -153,7 +153,9 @@ i64 ph_lv_walk(uptr d, uptr fl, i64 line, uptr pkey, i64 hoist) {
 i64 ph_store(i64 cur, i64 k, i64 zv, uptr prop) {
     if (prop) return ph_c4("php_zv_pset", cur, ph_strlit(prop, cstrlen(prop)), zv, ph_scope(), TY_VOID);
     if (k) return ph_c3("php_arr_set", cur, k, zv, TY_VOID);
-    return ph_c2("php_arr_push", cur, zv, TY_VOID);
+    // zv is the caller's own (ph_own), as php_arr_set takes it: an array
+    // value was copied there, and php_arr_push would copy it again
+    return ph_c2("php_arr_pushv", cur, zv, TY_VOID);
 }
 
 // ph_store with the key native when `ik` says it is an int

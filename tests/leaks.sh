@@ -168,6 +168,19 @@ if "$BIN" build "$t/own" --config "$t/own/r.toml" > "$t/o.out" 2>&1; then
 else
     bad "the ownership shapes: it would not build"; sed "s/^/      /" "$t/o.out"
 fi
+# arrays a module builds and hands to php (tests/ext.sh step 19b): rows moved
+# into a list, a row copied, holes, nested arrays, handed over Bucket by
+# Bucket -- every key and string value the engine now holds must be released
+# with the array
+mkdir -p "$t/arr"
+cp tests/ext/arrays/arrays.php "$t/arr/r.php"
+sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.so\"|" examples/hello/mcphp.linux.toml | dbg /dev/stdin > "$t/arr/r.toml"
+cp tests/ext/arrays/check.php tests/ext/arrays/arrays.php "$t/arr/"
+if "$BIN" build "$t/arr" --config "$t/arr/r.toml" > "$t/o.out" 2>&1; then
+    leakfree "arrays handed to php (moved rows, holes, nested)" -d extension="$t/arr/build/r.so" "$t/arr/check.php"
+else
+    bad "arrays: it would not build"; sed "s/^/      /" "$t/o.out"
+fi
 cp -R examples/two-extensions "$t/two"
 rm -rf "$t/two/build"
 dbg examples/two-extensions/extA.linux.toml > "$t/two/dbgA.toml"

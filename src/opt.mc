@@ -265,7 +265,210 @@ void ph_sc_fn(i64 f) {
 void phr_fn(i64 f);
 void ph_ac_walk(i64 n);
 
+// ---- an array local's last read is a move, not a copy ----------------------
+// `$row = []; ...fill $row...; $rows[] = $row;` in a loop copied the row into
+// the list (ph_own's php_arr_copy) and then dropped the original when the
+// next iteration made a new one: a copy per row of something no one reads
+// again. A copy whose source is an array local that is dead after it -- every
+// mention of the local is inside one loop's body, the body's first mention
+// is a store of a value that does not read it (so the next iteration never
+// sees the old array), the copy's statement mentions it once and none after
+// it in the body does -- hands the array itself over (php_arr_mv). Runtime
+// arrays have no free (D7), so the one array now has one name.
+i64 vw_isparam(i64 f, uptr name);
+i64 mv_cnt(i64 n, uptr v) {
+    i64 c = 0;
+    loop {
+        if (!n) break;
+        i64 k = nd_kind(n);
+        if ((k == N_IDENT || k == N_ASSIGN) && str_eq(nd_name(n), v)) c = c + 1;
+        if (k == N_ADDR) c = c + 1000;          // its address taken: never moved
+        c = c + mv_cnt(nd_a(n), v) + mv_cnt(nd_b(n), v) + mv_cnt(nd_c(n), v) + mv_cnt(nd_d(n), v);
+        n = nd_next(n);
+    }
+    return c;
+}
+i64 mv_cnt1(i64 n, uptr v) {
+    i64 nx = nd_next(n);
+    set_nd_next(n, 0);
+    i64 c = mv_cnt(n, v);
+    set_nd_next(n, nx);
+    return c;
+}
+// the loop body's statements in order, blocks opened
+uptr mv_seq;
+i64  mv_n;
+i64  mv_cap;
+void mv_flat(i64 s) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_BLOCK) mv_flat(nd_a(s));
+        else {
+            if (mv_n == mv_cap) {
+                i64 cap = mv_cap * 2 + 32;
+                uptr nb = xalloc(cap * 8);
+                i64 i = 0;
+                loop { if (i >= mv_n) break; st64(nb + i * 8, ld64(mv_seq + i * 8)); i = i + 1; }
+                mv_seq = nb;
+                mv_cap = cap;
+            }
+            st64(mv_seq + mv_n * 8, s);
+            mv_n = mv_n + 1;
+        }
+        s = nd_next(s);
+    }
+}
+// php_arr_copy(IDENT v) inside n (not its siblings): renamed php_arr_mv
+i64 mv_mark(i64 n, uptr v) {
+    if (!n) return 0;
+    if (nd_kind(n) == N_CALL && str_eq(nd_name(n), "php_arr_copy")) {
+        i64 a = nd_a(n);
+        if (a && nd_kind(a) == N_IDENT && str_eq(nd_name(a), v) && !nd_next(a)) { set_nd_name(n, "php_arr_mv"); return 1; }
+    }
+    i64 c = nd_a(n);
+    loop { if (!c) break; if (mv_mark(c, v)) return 1; c = nd_next(c); }
+    c = nd_b(n);
+    loop { if (!c) break; if (mv_mark(c, v)) return 1; c = nd_next(c); }
+    c = nd_c(n);
+    loop { if (!c) break; if (mv_mark(c, v)) return 1; c = nd_next(c); }
+    c = nd_d(n);
+    loop { if (!c) break; if (mv_mark(c, v)) return 1; c = nd_next(c); }
+    return 0;
+}
+// a copy of `v` in statement n?
+i64 mv_hascopy(i64 n, uptr v) {
+    if (!n) return 0;
+    if (nd_kind(n) == N_CALL && str_eq(nd_name(n), "php_arr_copy")) {
+        i64 a = nd_a(n);
+        if (a && nd_kind(a) == N_IDENT && str_eq(nd_name(a), v) && !nd_next(a)) return 1;
+    }
+    i64 c = nd_a(n);
+    loop { if (!c) break; if (mv_hascopy(c, v)) return 1; c = nd_next(c); }
+    c = nd_b(n);
+    loop { if (!c) break; if (mv_hascopy(c, v)) return 1; c = nd_next(c); }
+    c = nd_c(n);
+    loop { if (!c) break; if (mv_hascopy(c, v)) return 1; c = nd_next(c); }
+    c = nd_d(n);
+    loop { if (!c) break; if (mv_hascopy(c, v)) return 1; c = nd_next(c); }
+    return 0;
+}
+void mv_loops(i64 s, uptr v, i64 total) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_LOOP && nd_a(s) && mv_cnt(nd_a(s), v) == total) {
+            mv_n = 0;
+            mv_flat(nd_a(s));
+            // the body's first mention: a store whose value does not read v
+            i64 i = 0;
+            i64 ok = 0;
+            loop {
+                if (i >= mv_n) break;
+                i64 e = ld64(mv_seq + i * 8);
+                if (mv_cnt1(e, v)) {
+                    ok = nd_kind(e) == N_ASSIGN && str_eq(nd_name(e), v) && mv_cnt(nd_a(e), v) == 0;
+                    break;
+                }
+                i = i + 1;
+            }
+            if (ok) {
+                // the last statement that mentions v, a copy and nothing else of v
+                i64 j = mv_n - 1;
+                loop {
+                    if (j < 0) break;
+                    i64 e = ld64(mv_seq + j * 8);
+                    if (mv_cnt1(e, v)) {
+                        if (j > i && mv_cnt1(e, v) == 1 && mv_hascopy(e, v)) mv_mark(e, v);
+                        break;
+                    }
+                    j = j - 1;
+                }
+                return;
+            }
+            // not this loop's shape: an inner loop may hold every mention
+            mv_loops(nd_a(s), v, total);
+            return;
+        }
+        mv_loops(nd_a(s), v, total);
+        mv_loops(nd_b(s), v, total);
+        mv_loops(nd_c(s), v, total);
+        mv_loops(nd_d(s), v, total);
+        s = nd_next(s);
+    }
+}
+void ph_mv_fn(i64 f) {
+    i64 body = nd_b(f);
+    if (!body) return;
+    i64 v = nd_a(body);
+    loop {
+        if (!v || nd_kind(v) != N_VAR) break;
+        if (nd_type(v) == ty_parr && !nd_a(v) && !vw_isparam(f, nd_name(v))) {
+            uptr nm = nd_name(v);
+            i64 t = mv_cnt(nd_next(v), nm);
+            if (t > 0 && t < 1000) mv_loops(nd_next(v), nm, t);
+        }
+        v = nd_next(v);
+    }
+}
+
+// ---- `$a[k] = v` with a string key or value boxes neither -------------------
+// src/lvalue.mc writes the key into a zval temporary (phk_N = php_zstr(K))
+// and the value as php_zstr(V); php_arr_set then copies the two words out of
+// each box. A key temporary read only by the set that follows it, and a
+// string value, go to the slot directly (php_arr_set_k/_s/_ks).
+uptr aset_fn;
+i64 aset_n(i64 n, uptr name) {
+    i64 c = 0;
+    loop {
+        if (!n) break;
+        if ((nd_kind(n) == N_IDENT || nd_kind(n) == N_ASSIGN) && str_eq(nd_name(n), name)) c = c + 1;
+        c = c + aset_n(nd_a(n), name) + aset_n(nd_b(n), name) + aset_n(nd_c(n), name) + aset_n(nd_d(n), name);
+        n = nd_next(n);
+    }
+    return c;
+}
+i64 ph_ext_pfx(uptr s, uptr p);
+void ph_opt_aset(i64 s) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        i64 nx = nd_next(s);
+        // the key's box, then the set reading it
+        if (k == N_ASSIGN && ph_ext_pfx(nd_name(s), "phk_") && ph_opt_is(nd_a(s), "php_zstr") && nx
+            && nd_kind(nx) == N_EXPRSTMT && ph_opt_is(nd_a(nx), "php_arr_set")) {
+            i64 c = nd_a(nx);
+            i64 ka = nd_next(nd_a(c));
+            if (nd_kind(ka) == N_IDENT && str_eq(nd_name(ka), nd_name(s)) && aset_n(nd_b(aset_fn), nd_name(s)) == 2) {
+                i64 key = nd_a(nd_a(s));
+                set_nd_next(key, nd_next(ka));
+                set_nd_next(nd_a(c), key);
+                set_nd_name(c, "php_arr_set_k");
+                // the box's statement goes: the set is in its place
+                set_nd_kind(s, N_BLOCK);
+                set_nd_a(s, 0);
+            }
+        }
+        if (k == N_EXPRSTMT && (ph_opt_is(nd_a(s), "php_arr_set") || ph_opt_is(nd_a(s), "php_arr_set_k"))) {
+            i64 c = nd_a(s);
+            i64 v = nd_next(nd_next(nd_a(c)));
+            if (ph_opt_is(v, "php_zstr")) {
+                i64 y = nd_a(v);
+                set_nd_next(nd_next(nd_a(c)), y);
+                if (str_eq(nd_name(c), "php_arr_set")) set_nd_name(c, "php_arr_set_s");
+                else set_nd_name(c, "php_arr_set_ks");
+            }
+        }
+        if (k == N_BLOCK) ph_opt_aset(nd_a(s));
+        if (k == N_IF) { ph_opt_aset(nd_b(s)); ph_opt_aset(nd_c(s)); }
+        if (k == N_LOOP) ph_opt_aset(nd_a(s));
+        s = nd_next(s);
+    }
+}
+
 void ph_opt_fn(i64 f) {
+    ph_mv_fn(f);
+    aset_fn = f;
+    if (nd_b(f)) ph_opt_aset(nd_a(nd_b(f)));
     ph_opt_walk(nd_b(f));
     phr_fn(f);
     // after the runtime's copies: a read the short circuit's right side made
@@ -1803,7 +2006,6 @@ void vw_flow(i64 s) {
 // `if (c) phq = A; else phq = B; $v = phq;`. Where the copy is the
 // temporary's only read and the two are strings, each branch stores the
 // local itself -- a cut in a branch is then the local's own.
-i64 ph_ext_pfx(uptr s, uptr p);
 i64 vw_nread(i64 n, uptr name) {
     i64 c = 0;
     loop {
@@ -2088,6 +2290,7 @@ void phr_init() {
     phr_add("php_str_setb_own");
     phr_add("php_str_setb_f");
     phr_add("php_str_setb_n");
+    phr_add("php_arr_mv");
     phr_add("php_str_byte_c");
     phr_add("php_str_byte_d");
     phr_add("php_pk_get_c");

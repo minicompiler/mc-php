@@ -1372,9 +1372,18 @@ i64 php_echo_null() { return 0; }
 #define PHE_USER_DEPR   16384
 
 i64 php_cstrlen(uptr s) {
-    i64 n = 0;
-    loop { if (!ld8(s + n)) break; n = n + 1; }
-    return n;
+    // bytes up to an 8-byte boundary, then a word at a time with the
+    // has-a-zero-byte test (an aligned word never crosses into another
+    // page), then the bytes of the word that has the NUL
+    uptr p = s;
+    loop { if ((p & 7) == 0) break; if (!ld8(p)) return p - s; p = p + 1; }
+    loop {
+        u64 x = ld64(p);
+        if (((x - 0x0101010101010101) & (x ^ 0xffffffffffffffff) & 0x8080808080808080) != 0) break;
+        p = p + 8;
+    }
+    loop { if (!ld8(p)) break; p = p + 1; }
+    return p - s;
 }
 
 // the label php prints for a level
@@ -1705,7 +1714,7 @@ u64 php_str_hash(uptr s) {
     u64 h = ld64(s + 8);
     if (h) return h;
     h = 5381;
-    i64 n = php_strlen(s);
+    i64 n = ld64(s + 16);
     i64 i = 0;
     loop {
         if (i >= n) break;
@@ -1720,7 +1729,7 @@ u64 php_str_hash(uptr s) {
 // php's ZEND_HANDLE_NUMERIC: "123" is the integer key 123, but "0123", "1.0",
 // " 1" and "+1" are not, and neither is anything past the i64 range.
 i64 php_key_numeric(uptr s, uptr pout) {
-    i64 n = php_strlen(s);
+    i64 n = ld64(s + 16);
     if (n == 0 || n > 20) return 0;
     uptr v = s + ZS_HDR;
     i64 i = 0;
@@ -1781,11 +1790,15 @@ void php_ht_grow(uptr a) {
     }
 }
 
+// (php_ht_slot, _hget and _bkt written out: these two run for every
+// element an array is given or asked for, and each accessor was a call)
 uptr php_ht_find(uptr a, u64 h, uptr key) {
-    i64 idx = php_ht_hget(a, php_ht_slot(a, h));
+    i64 n = ld32(a + 32);
+    uptr d = ld64(a + 16);
+    i64 idx = ld32(d + ((h & (n - 1)) - n) * 4);
     loop {
         if (idx == HT_INVAL) break;
-        uptr b = php_ht_bkt(a, idx);
+        uptr b = d + idx * BKT;
         if (ld64(b + 16) == h && ld8(b + 8) != IS_UNDEF) {
             uptr k = ld64(b + 24);
             if (!key && !k) return b;
@@ -1802,14 +1815,17 @@ uptr php_ht_slotfor(uptr a, u64 h, uptr key) {
     if (b) return b;
     if (ld32(a + 24) >= ld32(a + 32)) php_ht_grow(a);
     i64 i = ld32(a + 24);
-    b = php_ht_bkt(a, i);
+    uptr d = ld64(a + 16);
+    b = d + i * BKT;
     st64(b, 0);
-    php_zv_settype(b, IS_NULL);
+    st8(b + 8, IS_NULL);
+    st8(b + 9, 0);
     st64(b + 16, h);
     st64(b + 24, php_str_esc(key));        // a bucket counts nothing: the key is escaped
-    i64 si = php_ht_slot(a, h);
-    st32(b + 12, php_ht_hget(a, si));
-    php_ht_hset(a, si, i);
+    i64 n = ld32(a + 32);
+    uptr hs = d + ((h & (n - 1)) - n) * 4;
+    st32(b + 12, ld32(hs));
+    st32(hs, i);
     st32(a + 24, i + 1);
     st32(a + 28, ld32(a + 28) + 1);
     return b;
@@ -1950,11 +1966,26 @@ void php_arr_unset(uptr a, uptr k) {
 // php_zv_cpv is the copy an assignment makes, and it costs nothing at all
 // for a value that is not an array.
 void php_arr_push(uptr a, uptr v) { php_zv_cpv(php_arr_nextslot(a), v); }
+// the append of a value the caller already owns (src/lvalue.mc's ph_store:
+// the right side of `$a[] = $v` is the copy ph_own made): stored as it is,
+// as php_arr_set stores, not copied a second time
+void php_arr_pushv(uptr a, uptr v) { php_zv_cp(php_arr_nextslot(a), v); }
 void php_arr_set(uptr a, uptr k, uptr v) { php_zv_cp(php_arr_zslot(a, k), v); }
 void php_arr_iset(uptr a, i64 k, uptr v) { php_zv_cp(php_arr_islot(a, k), v); }
+// `$a[S] = T` with string S and T (src/opt.mc's ph_opt_aset): the value as
+// php_zstr would box it -- escaped, so it outlives the pool -- but written
+// straight into the slot, and the key as php_arr_sslot takes it (a new
+// bucket escapes its key itself), with no box made for either
+void php_arr_set_k(uptr a, uptr k, uptr v) { php_zv_cp(php_arr_sslot(a, k), v); }
+void php_arr_set_s(uptr a, uptr k, uptr v) { uptr d = php_arr_zslot(a, k); st64(d, php_str_esc(v)); st32(d + 8, IS_STRING); }
+void php_arr_set_ks(uptr a, uptr k, uptr v) { uptr d = php_arr_sslot(a, k); st64(d, php_str_esc(v)); st32(d + 8, IS_STRING); }
 
 // php arrays are VALUES: an assignment makes an independent array. There is no
 // free (D7), so the separation is eager when the refcount says it is shared.
+// an array handed over, not copied: the local it came from is dead after
+// it (src/opt.mc's ph_mv_fn)
+uptr php_arr_mv(uptr a) { return a; }
+
 uptr php_arr_copy(uptr src) {
     uptr a = php_arr_new(ld32(src + 32));
     i64 used = php_ht_used(src);

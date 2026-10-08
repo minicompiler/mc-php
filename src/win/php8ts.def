@@ -22,6 +22,8 @@ zend_fetch_function_str == zend_fetch_function_str@@16
 _zend_new_array == _zend_new_array@@8
 zend_hash_update == zend_hash_update@@24
 zend_hash_index_update == zend_hash_index_update@@24
+zend_hash_real_init_mixed == zend_hash_real_init_mixed@@8
+zend_hash_rehash == zend_hash_rehash@@8
 zend_hash_internal_pointer_reset_ex == zend_hash_internal_pointer_reset_ex@@16
 zend_hash_get_current_key_ex == zend_hash_get_current_key_ex@@32
 zend_hash_get_current_data_ex == zend_hash_get_current_data_ex@@16

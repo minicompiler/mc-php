@@ -837,6 +837,27 @@ else
 fi
 rm -rf "$tmp/build"
 
+# --- 19b. arrays a module builds and hands to php, as interpreted ------------
+# tests/ext/arrays: rows moved into a list, a row copied because it is read
+# again, a numeric string key, holes, nested arrays -- the answer made the
+# engine's by its Buckets (lib/php_ext.mc's phx_r2e_arr)
+cp tests/ext/arrays/arrays.php "$tmp/r.php"
+sed "s#__DIR__ . '/arrays.php'#__DIR__ . '/r.php'#" tests/ext/arrays/check.php > "$tmp/ac.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/a.build" 2>&1; then
+    "$PHP" -d extension="$tmp/build/r.$sx" "$tmp/ac.php" > "$tmp/a.m" 2>&1; am=$?
+    "$PHP" "$tmp/ac.php" > "$tmp/a.i" 2>&1; ai=$?
+    if [ "$am" = "$ai" ] && cmp -s "$tmp/a.m" "$tmp/a.i"; then
+        say "arrays: rows moved and copied, holes, nested arrays -- $(wc -l < "$tmp/a.m" | tr -d ' ') lines, the interpreted source's"
+    else
+        bad "arrays: the module (exit $am) and the interpreted source (exit $ai) differ"
+        diff "$tmp/a.i" "$tmp/a.m" | sed -n '1,20p' | sed 's/^/      /'
+    fi
+else
+    bad "arrays: it would not build"; sed 's/^/      /' "$tmp/a.build"
+fi
+rm -rf "$tmp/build"
+
 # php's compile-time Fatal errors about a closure's captures are the same on
 # this road: a parameter named like a use-list variable, and a use list that
 # names one variable twice. Both forms, php's words, exit 255, no module.
