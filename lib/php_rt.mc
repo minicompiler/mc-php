@@ -2986,6 +2986,41 @@ uptr php_substr(uptr s, i64 start, i64 len, i64 haslen) {
     return php_str_short(s + ZS_HDR + start, want);
 }
 
+// `$s = substr($s, ...)` on a counted slot (src/rc.mc), php_str_append's
+// contract: the answer replaces the slot's reference. A string nobody else
+// holds (php_str_mine) is shortened where it lies -- the window moved to the
+// front, the length, the NUL, the hash forgotten -- with no new string and
+// nothing freed; anything else is copied into a string whose one reference
+// the slot keeps, and the old one is released. Bounds are php_substr's.
+uptr php_substr_own(uptr s, i64 start, i64 len, i64 haslen) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 n = ld64(s + 16);
+    if (start < 0) { start = n + start; if (start < 0) start = 0; }
+    i64 want = 0;
+    if (start <= n) {
+        want = n - start;
+        if (haslen) {
+            if (len < 0) { want = n - start + len; } else { want = len; }
+        }
+        if (want < 0) want = 0;
+        if (start + want > n) want = n - start;
+    }
+    if (php_str_mine(s)) {
+        st64(phT + PHT_ph_rc_inplace, ld64(phT + PHT_ph_rc_inplace) + 1);
+        // a forward copy is right for an overlap with the source after the
+        // destination (php_memcpy)
+        if (start && want) php_memcpy(s + ZS_HDR, s + ZS_HDR + start, want);
+        st64(s + 8, 0);
+        st64(s + 16, want);
+        st8(s + ZS_HDR + want, 0);
+        return s;
+    }
+    st64(phT + PHT_ph_rc_copied, ld64(phT + PHT_ph_rc_copied) + 1);
+    uptr o = php_str_mk(want, 0);
+    if (want) php_memcpy(o + ZS_HDR, s + ZS_HDR + start, want);
+    php_str_release(s);
+    return o;
+}
+
 // (int) substr($s, ...): the same window, read as an int in place -- the
 // compiler fuses the two (ph_to_int), so the substring is never built
 i64 php_substr_i(uptr s, i64 start, i64 len, i64 haslen) {
