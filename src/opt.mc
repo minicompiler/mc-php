@@ -384,6 +384,12 @@ i64 phi_denied(uptr c) {
     return 0;
 }
 
+i64 rp_pfx(uptr s, uptr p) {
+    i64 i = 0;
+    loop { i64 c = ld8(p + i); if (!c) return 1; if (ld8(s + i) != c) return 0; i = i + 1; }
+    return 0;
+}
+
 void phi_scan(i64 f, i64 s) {
     loop {
         if (!s) break;
@@ -391,7 +397,10 @@ void phi_scan(i64 f, i64 s) {
         i64 k = nd_kind(s);
         if (k == N_LOOP || k == N_BREAK || k == N_CONTINUE || k == N_ADDR || k == N_HOLE
             || k == N_FUNC || k == N_GLOBAL || k == N_BLOB || k == N_INDEX) phi_bad = 1;
-        if (k == N_VAR && nd_val(s)) phi_bad = 1;
+        // a local array is not copied -- except the rope's (ph_rope_fn), whose
+        // every slot is stored before the return reads it, so a copy declared
+        // once at the caller's head is the same array on every pass
+        if (k == N_VAR && nd_val(s) && (nd_a(s) || !rp_pfx(nd_name(s), "ph_rope_"))) phi_bad = 1;
         if (k == N_ASSIGN && !phi_rt && !str_eq(nd_name(s), "ph_dfile") && !str_eq(nd_name(s), "ph_dline")
             && !phi_decl_in(f, nd_name(s))) phi_bad = 1;
         if (k == N_CALL && phi_denied(nd_name(s))) phi_bad = 1;
@@ -472,6 +481,7 @@ i64 phi_hoist(i64 s) {
         i64 keep = s;
         if (k == N_VAR) {
             phi_declare(nd_name(s), nd_type(s), nd_line(s), nd_file(s));
+            set_nd_val(phi_vt, nd_val(s));          // an array keeps its size
             keep = 0;
             if (nd_a(s)) {
                 keep = node_new(N_ASSIGN, nd_line(s), nd_file(s));
@@ -1211,6 +1221,8 @@ i64 phi_list(i64 s) {
 // calls to candidates are copied in, then `f` becomes a candidate itself when
 // `ok` (no by-reference, default or variadic parameter, no func_num_args) and
 // it is small and loop-free.
+i64 ph_rope_early = 1;
+void ph_rope_fn(i64 f);
 void ph_inl_fn(i64 f, i64 ok) {
     if (phi_off) return;
     i64 body = nd_b(f);
@@ -1221,6 +1233,11 @@ void ph_inl_fn(i64 f, i64 ok) {
     set_nd_a(body, phi_list(nd_a(body)));
     if (phi_vh) { set_nd_next(phi_vt, nd_a(body)); set_nd_a(body, phi_vh); }
     phi_cf = 0;
+    // the rope (below) before the copy is kept, so a function that builds its
+    // answer by appends is copied into its callers as ONE allocation: once
+    // copied, its return is the caller's `ret = ...; break` and the caller
+    // may loop, and the rope could no longer be found there
+    if (ph_rope_early) ph_rope_fn(f);
     if (!ok) return;
     phi_size = 0;
     phi_bad = 0;
@@ -1259,6 +1276,20 @@ void ph_inl_fn(i64 f, i64 ok) {
 i64 rp_bad;
 i64 rp_first;
 i64 rp_npc;
+i64 rp_fn;
+
+// is `name` a string parameter or local of rp_fn?
+i64 rp_isstr(uptr name) {
+    i64 p = nd_a(rp_fn);
+    loop { if (!p) break; if (str_eq(nd_name(p), name)) return nd_type(p) == ty_pstr; p = nd_next(p); }
+    p = nd_a(nd_b(rp_fn));
+    loop {
+        if (!p || nd_kind(p) != N_VAR) break;
+        if (str_eq(nd_name(p), name)) return nd_type(p) == ty_pstr;
+        p = nd_next(p);
+    }
+    return 0;
+}
 
 i64 rp_ment(i64 n, uptr name) {
     loop {
@@ -1291,6 +1322,13 @@ void rp_check(i64 s, uptr name, i64 top) {
     loop {
         if (!s || rp_bad) break;
         i64 k = nd_kind(s);
+        // A piece is a window of a string that has to stay as it was until the
+        // return builds the answer. In this function nothing is counted, but
+        // once it is copied into a caller that loops (ph_inl_fn) its locals
+        // are that caller's counted slots, and a string reassigned after it
+        // became a piece would be released under the window. So after the
+        // first store no other string is stored to at all.
+        if (k == N_ASSIGN && rp_first && !str_eq(nd_name(s), name) && rp_isstr(nd_name(s))) { rp_bad = 1; return; }
         if (k == N_ASSIGN && str_eq(nd_name(s), name)) {
             if (!rp_first) {
                 if (!top || rp_ment(nd_a(s), name)) { rp_bad = 1; return; }
@@ -1315,6 +1353,7 @@ void rp_check(i64 s, uptr name, i64 top) {
 }
 
 uptr rp_arr;
+uptr rp_ptr;                        // where the next piece goes
 i64  rp_j;
 
 i64 rp_id(uptr name, i64 ty, i64 line, uptr fl) {
@@ -1329,12 +1368,12 @@ i64 rp_int(i64 v, i64 line, uptr fl) {
     set_nd_type(n, TY_I64);
     return n;
 }
-// st64(rope + off, v);
-i64 rp_st(i64 off, i64 v, i64 line, uptr fl) {
+// st64(base + off, v);
+i64 rp_stb(uptr base, i64 off, i64 v, i64 line, uptr fl) {
     i64 ad = node_new(N_BINARY, line, fl);
     set_nd_op(ad, ph_tok("+", 1));
     set_nd_type(ad, TY_UPTR);
-    set_nd_a(ad, rp_id(rp_arr, TY_UPTR, line, fl));
+    set_nd_a(ad, rp_id(base, TY_UPTR, line, fl));
     set_nd_b(ad, rp_int(off, line, fl));
     set_nd_next(ad, v);
     i64 c = node_new(N_CALL, line, fl);
@@ -1345,9 +1384,25 @@ i64 rp_st(i64 off, i64 v, i64 line, uptr fl) {
     set_nd_a(st, c);
     return st;
 }
-// the three stores of piece j: a substr() is its own window, anything else whole
+// `name = name + k;` / `name = from + k;`
+i64 rp_bump(uptr name, uptr from, i64 k, i64 line, uptr fl) {
+    i64 ad = node_new(N_BINARY, line, fl);
+    set_nd_op(ad, ph_tok("+", 1));
+    set_nd_type(ad, TY_UPTR);
+    set_nd_a(ad, rp_id(from, TY_UPTR, line, fl));
+    set_nd_b(ad, rp_int(k, line, fl));
+    i64 as = node_new(N_ASSIGN, line, fl);
+    set_nd_name(as, name);
+    set_nd_a(as, ad);
+    return as;
+}
+// The three stores of a piece: a substr() is its own window, anything else
+// whole. The first store's piece is the array's first; every later one goes
+// where rp_ptr points and moves it on, so the rope holds only the pieces
+// whose append ran and costs nothing for one that did not.
 i64 rp_piece(i64 y, i64 line, uptr fl) {
-    i64 o = rp_j * 24;
+    uptr base = rp_ptr;
+    if (rp_j == 0) base = rp_arr;
     rp_j = rp_j + 1;
     i64 s = y;
     i64 st = rp_int(0, line, fl);
@@ -1363,11 +1418,13 @@ i64 rp_piece(i64 y, i64 line, uptr fl) {
         if (!(nd_kind(has) == N_INT && nd_val(has) == 0)) ln = l2;
     }
     set_nd_next(s, 0);
-    i64 a = rp_st(o, s, line, fl);
-    i64 b = rp_st(o + 8, st, line, fl);
-    i64 c = rp_st(o + 16, ln, line, fl);
+    i64 a = rp_stb(base, 0, s, line, fl);
+    i64 b = rp_stb(base, 8, st, line, fl);
+    i64 c = rp_stb(base, 16, ln, line, fl);
     set_nd_next(a, b);
     set_nd_next(b, c);
+    if (base == rp_arr) set_nd_next(c, rp_bump(rp_ptr, rp_arr, 24, line, fl));
+    else set_nd_next(c, rp_bump(rp_ptr, rp_ptr, 24, line, fl));
     return a;
 }
 
@@ -1384,17 +1441,8 @@ i64 rp_xform(i64 s, uptr name) {
         i64 r = s;
         if (k == N_ASSIGN && str_eq(nd_name(s), name)) {
             if (rp_j == 0) {
-                // the first store: piece 0, and every later piece empty
+                // the first store: the first piece, and the pointer past it
                 r = rp_piece(nd_a(s), line, fl);
-                i64 lt = phi_last(r);
-                i64 q = 1;
-                loop {
-                    if (q >= rp_npc) break;
-                    i64 z = rp_st(q * 24, rp_int(0, line, fl), line, fl);
-                    set_nd_next(lt, z);
-                    lt = z;
-                    q = q + 1;
-                }
             } else {
                 i64 y = nd_next(nd_a(nd_a(s)));
                 r = 0;
@@ -1412,7 +1460,9 @@ i64 rp_xform(i64 s, uptr name) {
             }
         } else if (k == N_RETURN && nd_a(s) && nd_kind(nd_a(s)) == N_IDENT && str_eq(nd_name(nd_a(s)), name)) {
             i64 a0 = rp_id(rp_arr, TY_UPTR, line, fl);
-            set_nd_next(a0, rp_int(rp_npc, line, fl));
+            // the pieces that ran: (rp_ptr - rope) / 24
+            set_nd_next(a0, ph_bin(ph_tok("/", 1), ph_bin(ph_tok("-", 1), rp_id(rp_ptr, TY_UPTR, line, fl),
+                                   rp_id(rp_arr, TY_UPTR, line, fl), TY_I64), rp_int(24, line, fl), TY_I64));
             i64 c = node_new(N_CALL, line, fl);
             set_nd_name(c, "php_str_rope");
             set_nd_type(c, ty_pstr);
@@ -1454,6 +1504,7 @@ void ph_rope_fn(i64 f) {
         if (!v) break;
         if (nd_kind(v) == N_VAR && nd_type(v) == ty_pstr && !nd_val(v)) {
             uptr name = nd_name(v);
+            rp_fn = f;
             rp_bad = 0;
             rp_first = 0;
             rp_npc = 0;
@@ -1461,14 +1512,19 @@ void ph_rope_fn(i64 f) {
             if (!rp_bad && rp_first && rp_npc > 1 && rp_npc <= RP_MAX) {
                 ph_nonce = ph_nonce + 1;
                 rp_arr = p_cat("ph_rope_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+                rp_ptr = p_cat("ph_ropep_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+                i64 dp = node_new(N_VAR, nd_line(v), nd_file(v));
+                set_nd_name(dp, rp_ptr);
+                set_nd_type(dp, TY_UPTR);
                 i64 d = node_new(N_VAR, nd_line(v), nd_file(v));
                 set_nd_name(d, rp_arr);
                 set_nd_type(d, TY_I64);
                 set_nd_val(d, rp_npc * 3);
+                set_nd_next(dp, d);
                 rp_j = 0;
                 set_nd_a(body, rp_xform(nd_a(body), name));
                 set_nd_next(d, nd_a(body));
-                set_nd_a(body, d);
+                set_nd_a(body, dp);
             }
         }
         v = nd_next(v);
