@@ -362,6 +362,33 @@ void ph_scan_brf(uptr src, i64 len) {
     }
 }
 
+// One parameter's text, src[a..b): its native type when it is exactly a type
+// word the parser maps to one -- `int`, `float`, `string`, `bool` -- then a
+// `$name` and nothing else; PT_MIXED for anything more (a `?`, a union, a
+// namespace, a default, `&`, `...`, an attribute, a comment).
+uptr ph_sptn;                           // the name ph_scan_ptype read, without its `$`
+i64 ph_scan_ptype(uptr src, i64 a, i64 b) {
+    loop { if (a >= b) break; if (!ph_space(ld8(src + a))) break; a = a + 1; }
+    loop { if (b <= a) break; if (!ph_space(ld8(src + b - 1))) break; b = b - 1; }
+    i64 w = a;
+    loop { if (w >= b) break; i64 c = ld8(src + w); if (c < 97 || c > 122) break; w = w + 1; }
+    i64 t = PT_MIXED;
+    if (w - a == 3 && mem_eq(src + a, "int", 3)) t = PT_INT;
+    if (w - a == 5 && mem_eq(src + a, "float", 5)) t = PT_FLOAT;
+    if (w - a == 6 && mem_eq(src + a, "string", 6)) t = PT_STRING;
+    if (w - a == 4 && mem_eq(src + a, "bool", 4)) t = PT_BOOL;
+    ph_sptn = "";
+    if (t == PT_MIXED || w >= b || !ph_space(ld8(src + w))) return PT_MIXED;
+    loop { if (w >= b) break; if (!ph_space(ld8(src + w))) break; w = w + 1; }
+    if (w >= b || ld8(src + w) != 36) return PT_MIXED;           // `$`
+    w = w + 1;
+    i64 n0 = w;
+    loop { if (w >= b) break; if (!ph_nmb(ld8(src + w), w == n0)) break; w = w + 1; }
+    if (w == n0 || w != b) return PT_MIXED;
+    ph_sptn = xstrdup(src + n0, w - n0);
+    return t;
+}
+
 // The declaration shape of every `function NAME (...)` in the source, so a
 // call that comes BEFORE it can be built (php hoists a global function).
 // This is ph_scan_brf's walk with the parameter list counted rather than only
@@ -415,18 +442,33 @@ void ph_scan_decl(uptr src, i64 len) {
             i64 seen = 0;
             i64 prb = 0;
             i64 vrd = 0;
+            i64 ps = j + 1;                               // where this parameter's text starts
+            u8 pty[96];                                   // PH_MAXP scanned types
+            u8 ptn[96];                                   // and the names of the typed ones
+            i64 pi = 0;
+            loop { if (pi >= PH_MAXP) break; st64(pty + pi * 8, PT_MIXED); st64(ptn + pi * 8, ""); pi = pi + 1; }
             loop {
                 if (k >= len) break;
                 i64 h2 = ph_scan_hop(src, len, k);
-                if (h2 != k) { k = h2; continue; }
+                // a string or a comment inside the list: the parameter it is
+                // in is not a bare one (the hop jumped over its text)
+                if (h2 != k) { if (np < PH_MAXP) ps = 0 - 1; k = h2; continue; }
                 i64 c = ld8(src + k);
                 if (c == 40 || c == 91 || c == 123) d = d + 1;
                 if (c == 41 || c == 93 || c == 125) {
                     d = d - 1;
-                    if (!d) break;
+                    if (!d) {
+                        if (seen && np < PH_MAXP && ps >= 0) { st64(pty + np * 8, ph_scan_ptype(src, ps, k)); st64(ptn + np * 8, ph_sptn); }
+                        break;
+                    }
                 }
                 if (d == 1 && k > j) {                    // not the `(` itself
-                    if (c == 44) { np = np + 1; seen = 0; }
+                    if (c == 44) {
+                        if (np < PH_MAXP && ps >= 0) { st64(pty + np * 8, ph_scan_ptype(src, ps, k)); st64(ptn + np * 8, ph_sptn); }
+                        np = np + 1;
+                        seen = 0;
+                        ps = k + 1;
+                    }
                     if (c == 38 && k + 1 < len && ld8(src + k + 1) == 36 && np < 63) prb = prb | (1 << np);
                     if (c == 46 && k + 2 < len && ld8(src + k + 1) == 46 && ld8(src + k + 2) == 46) vrd = 1;
                     if (!ph_space(c) && c != 44) seen = 1;
@@ -435,11 +477,21 @@ void ph_scan_decl(uptr src, i64 len) {
             }
             if (seen) np = np + 1;
             if (!seen && !np) np = 0;
-            if (ph_ndecl < PH_MAXDECL && ph_decl_find(nm) < 0) {
+            i64 dx = ph_decl_find(nm);
+            if (dx >= 0) st64(ph_ddup + dx * 8, 1);       // a second header: types unknown
+            if (ph_ndecl < PH_MAXDECL && dx < 0) {
                 st64(ph_dn + ph_ndecl * 8, nm);
                 st64(ph_dnp + ph_ndecl * 8, np);
                 st64(ph_dpr + ph_ndecl * 8, prb);
                 st64(ph_dvar + ph_ndecl * 8, vrd);
+                st64(ph_ddup + ph_ndecl * 8, 0);
+                pi = 0;
+                loop {
+                    if (pi >= PH_MAXP) break;
+                    st64(ph_dpt + (ph_ndecl * PH_MAXP + pi) * 8, ld64(pty + pi * 8));
+                    st64(ph_dpnm + (ph_ndecl * PH_MAXP + pi) * 8, ld64(ptn + pi * 8));
+                    pi = pi + 1;
+                }
                 ph_ndecl = ph_ndecl + 1;
             }
             i = k;

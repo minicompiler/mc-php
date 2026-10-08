@@ -190,8 +190,19 @@ i64 ph_function() {
         if (variadic) pt = PT_ARR;
         // reached by a call before the declaration: the row the call was
         // built against says zval, so the definition has to agree
-        if (fwd && !variadic && pt != PT_MIXED) st64(ph_fwid + fi * 8, 1);
-        if (fwd && !variadic) pt = PT_MIXED;
+        if (fwd && !variadic) {
+            i64 rowt = PT_MIXED;
+            if (np < PH_MAXP) rowt = ld64(ph_fpt + (fi * PH_MAXP + np) * 8);
+            if (rowt != PT_MIXED) {
+                // the scan typed this parameter from the same text: it is the
+                // native one the calls were built against (src/tables.mc)
+                if (rowt != pt || isopt || byref)
+                    err_at2(fl, line, "mc-php: internal error: a call before this declaration was built with another parameter type", name);
+            } else {
+                if (pt != PT_MIXED) st64(ph_fwid + fi * 8, 1);
+                pt = PT_MIXED;
+            }
+        }
         // a by-reference parameter IS the caller's zval: the callee writes
         // through it (php_zv_store), which is the same mechanism `$a = &$b`
         // and `global $x` already use

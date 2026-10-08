@@ -97,13 +97,15 @@ i64 ph_fn_find0(uptr n) {
 // parameters, which are `&$x`, whether the last is variadic -- so a call that
 // arrives first can be built against it.
 //
-// A function reached this way is compiled with a ZVAL signature: every
-// parameter and the return are PT_MIXED, whatever the declaration says. A
-// zval holds any php value, so the call is correct; a native `int $n` on such
-// a function costs a box and nothing else, and it costs it only for the
-// functions a program really does call before declaring. That is what lets
-// the scan record no TYPES at all -- there is no second type table to
-// disagree with the parser's.
+// A function reached this way is compiled with a ZVAL signature for its
+// return, and for every parameter the scan cannot type exactly: a zval holds
+// any php value, so the call is correct, and a native `int $n` costs a box.
+// The scan types a parameter only where the text leaves no doubt -- a bare
+// `int $x`, `float $x`, `string $x` or `bool $x`, with no `?`, union,
+// namespace, default, `&` or `...` -- and only for a name that heads ONE
+// declaration in the source (a method of the same name would be a second),
+// so the parser reads the same type from the same text; src/decl.mc refuses
+// a definition that does not agree.
 #define PH_MAXDECL 256
 uptr ph_dn[PH_MAXDECL];
 i64  ph_dnp[PH_MAXDECL];
@@ -111,6 +113,9 @@ i64  ph_dpr[PH_MAXDECL];
 i64  ph_dvar[PH_MAXDECL];
 i64  ph_ndecl;
 i64  ph_ffwd[PH_MAXFN];                 // 1: the row came from the scan
+i64  ph_dpt[PH_MAXDECL * PH_MAXP];     // each parameter's scanned type (ph_scan_ptype)
+i64  ph_ddup[PH_MAXDECL];               // 1: the name heads more than one declaration
+uptr ph_dpnm[PH_MAXDECL * PH_MAXP];     // a typed parameter's name, for php's TypeError
 
 i64 ph_decl_find(uptr n) {
     i64 i = 0;
@@ -140,9 +145,16 @@ i64 ph_fwd_reg(uptr n) {
     i64 j = 0;
     loop {
         if (j >= ld64(ph_dnp + di * 8)) break;
-        st64(ph_fpt + (fi * PH_MAXP + j) * 8, PT_MIXED);
+        // the scanned type where the scan could read one -- a bare `int $x`,
+        // `float $x`, `string $x` or `bool $x` of a name declared once -- and
+        // a zval otherwise (src/decl.mc holds the definition to it)
+        i64 pt = PT_MIXED;
+        if (j < PH_MAXP && !ld64(ph_ddup + di * 8)) pt = ld64(ph_dpt + (di * PH_MAXP + j) * 8);
+        st64(ph_fpt + (fi * PH_MAXP + j) * 8, pt);
         st64(ph_fpd + (fi * PH_MAXP + j) * 8, 0);
-        st64(ph_fpn + (fi * PH_MAXP + j) * 8, "");
+        uptr pnm = "";
+        if (pt != PT_MIXED) pnm = ld64(ph_dpnm + (di * PH_MAXP + j) * 8);
+        st64(ph_fpn + (fi * PH_MAXP + j) * 8, pnm);
         j = j + 1;
     }
     return fi;
