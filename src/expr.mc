@@ -995,6 +995,23 @@ i64 ph_cmp_zv(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt) {
     return ph_cast(TY_U8, ph_bin(op2, c, ph_int(0), TY_U8));
 }
 
+// n can be dropped unevaluated: it runs no code and raises nothing -- a
+// variable, a literal, a cast of one. A strict comparison whose answer the
+// static types already know is folded to a constant only over such operands;
+// anything else (a call, an arithmetic that can throw) is still EVALUATED,
+// for its side effects and its exception (`side() === null` must call side()).
+i64 ph_pure(i64 n) {
+    if (!n) return 1;
+    i64 k = nd_kind(n);
+    if (k == N_IDENT || k == N_INT || k == N_STR) return 1;
+    if (k == N_CAST) return ph_pure(nd_a(n));
+    if (k == N_CALL && str_eq(nd_name(n), "php_str_lit")) return 1;
+    // a float literal: php_stof(ld64(<its cached string>))
+    if (k == N_CALL && (str_eq(nd_name(n), "php_stof") || str_eq(nd_name(n), "ld64"))
+        && nd_a(n) && !nd_next(nd_a(n))) return ph_pure(nd_a(n));
+    return 0;
+}
+
 i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
     i64 strict = 0;
     if (t == ph_tok("===", 3) || t == ph_tok("!==", 3)) strict = 1;
@@ -1013,7 +1030,8 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         if (lt == PT_NULL && rt == PT_NULL) { nt = PT_NULL; }
         if (lt == PT_NULL && rt != PT_NULL) { nt = rt; nn = rhs; }   // lhs is null: rhs decides
         ph_ety = PT_BOOL;
-        if (nt == PT_NULL) { i64 r0 = 1; if (neg) r0 = 0; return ph_bool(r0); }  // null === null
+        i64 pure = ph_pure(lhs) && ph_pure(rhs);
+        if (nt == PT_NULL && pure) { i64 r0 = 1; if (neg) r0 = 0; return ph_bool(r0); }  // null === null
         // a native nullable scalar (src/decl.mc): its null-ness is its u8 flag,
         // not its value's tag -- the value is a native scalar with no tag
         if (nn && nd_kind(nn) == N_IDENT) {
@@ -1026,7 +1044,7 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
                 return fr;                             // the flag is 1 iff null
             }
         }
-        if (nt != PT_MIXED) { i64 r1 = 0; if (neg) r1 = 1; return ph_bool(r1); } // a static non-null type
+        if (nt != PT_MIXED && nt != PT_NULL && pure) { i64 r1 = 0; if (neg) r1 = 1; return ph_bool(r1); } // a static non-null type
         i64 a = ph_to_mixed(nn, nt);
         i64 tag = ph_quiet("ld8", 1, ph_bin(ph_tok("+", 1), a, ph_int(8), TY_UPTR), 0, 0, 0, TY_I64);
         i64 op = ph_tok("==", 2);
@@ -1048,6 +1066,7 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
     if (rt == PT_STRING && lt != PT_STRING) return ph_cmp_zv(t, lhs, lt, rhs, rt);
     if (strict && lt != rt) {
         if (lt == PT_IFALSE && rt == PT_INT) { lt = PT_INT; }
+        else if (!ph_pure(lhs) || !ph_pure(rhs)) return ph_cmp_zv(t, lhs, lt, rhs, rt);   // evaluated
         else {
             ph_ety = PT_BOOL;
             if (neg) return ph_bool(1);

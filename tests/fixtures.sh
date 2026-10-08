@@ -205,6 +205,18 @@ else
     echo "  FAIL  nullable: native $nwa / $nwn, zval $nwb / $nwz in g/146"
     fail=1
 fi
+# g/147: a strict comparison the static types decide is still FOLDED when its
+# operands are a variable or a literal (pure_cmp: no php_zv_identical), while
+# every call operand elsewhere in the file is evaluated (the differential).
+"$MCPHP_BIN" --dump-ast $P/g/147-strict-fold-eval.php > "$tmp/sf.ast" 2>&1
+sfp=$(awk '/^FUNC/ { f = ($NF ~ /name=f_pure_cmp$/) } f && /name=php_zv_identical$/ { n++ } END { print n + 0 }' "$tmp/sf.ast")
+sfn=$(grep -c '^FUNC.* name=f_pure_cmp$' "$tmp/sf.ast")
+if [ "$sfn" = 1 ] && [ "$sfp" = 0 ]; then
+    echo "  strict fold: g/147's pure comparisons folded, its calls evaluated"
+else
+    echo "  FAIL  strict fold: pure_cmp kept $sfp php_zv_identical call(s)"
+    fail=1
+fi
 # g/128's globals: every top-level name some function declares `global` is
 # bound to its table entry ONCE, as the top level's first statements, and
 # nowhere else -- not per read, not inside the loop (src/vars.mc ph_gtop_bind)
