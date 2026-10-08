@@ -652,6 +652,20 @@ i64 ph_pin_isread(uptr fn) {
         || str_eq(fn, "php_zv_mod_zi");
 }
 
+// is a0 a pure field read of v's zval -- the ident `v`, or `v + <const>`
+// (ld32/ld64 of the type word or the value word)? Such a read touches v's
+// memory but never writes or escapes the zval, so it does not need the pin.
+i64 ph_pin_fieldarg(i64 a0, uptr v) {
+    if (!a0) return 0;
+    if (nd_kind(a0) == N_IDENT) return str_eq(nd_name(a0), v);
+    if (nd_kind(a0) == N_BINARY && nd_op(a0) == ph_tok("+", 1)) {
+        i64 l = nd_a(a0);
+        i64 r = nd_b(a0);
+        if (l && r && nd_kind(l) == N_IDENT && str_eq(nd_name(l), v) && nd_kind(r) == N_INT) return 1;
+    }
+    return 0;
+}
+
 // 1 when `v` is used anywhere in the tree `s` in a way that needs the pin --
 // i.e. not purely as the first argument of a read accessor. Inc/dec, stores
 // and reference accessors are deliberately NOT reads, so they return 1 here.
@@ -666,6 +680,13 @@ i64 ph_pin_used(i64 s, uptr v) {
         }
         if (k == N_CALL) {
             i64 a0 = nd_a(s);
+            // a pure field read, ld32/ld64 of v or v + const: reads the zval,
+            // never writes or escapes it (the is_string tag test, src/builtin.mc)
+            if ((str_eq(nd_name(s), "ld32") || str_eq(nd_name(s), "ld64")) && ph_pin_fieldarg(a0, v)) {
+                if (ph_pin_used(nd_next(a0), v)) return 1;
+                s = nd_next(s);
+                continue;
+            }
             if (a0 && nd_kind(a0) == N_IDENT && str_eq(nd_name(a0), v) && ph_pin_isread(nd_name(s))) {
                 // v is read here as arg0; the arg is a bare ident with no
                 // children, so scan only the rest of the arguments and any

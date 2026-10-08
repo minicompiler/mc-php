@@ -240,6 +240,17 @@ uptr ph_alit(uptr av, i64 i) { return ld64(av + i * 24 + 16); }
 i64 ph_isof(i64 na, i64 t0, i64 a0, i64 want, i64 ztype, uptr fl, i64 line, uptr name) {
     if (na != 1) ph_todo2(fl, line, "the wrong number of arguments for", name);
     ph_ety = PT_BOOL;
+    // is_int/is_float/is_string of a zval is a plain tag compare: the low byte
+    // of the type_info u32 at +8 equals the tag (php_zv_type, lib/php_rt.mc),
+    // inlined here -- no php_zv_is call -- for those three tags (4 long, 5
+    // double, 6 string). is_bool (3) and is_null (1) keep the call, since
+    // php_zv_is folds true/false together for a bool. ph_guard_of (src/types.mc)
+    // matches this exact shape so `if (is_string($t))` still narrows.
+    if ((t0 == PT_MIXED || t0 == PT_NULL) && (ztype == 4 || ztype == 5 || ztype == 6)) {
+        i64 ty = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), a0, ph_int(8), TY_UPTR), 0, 0, 0, TY_I64);
+        i64 lo = ph_bin(ph_tok("&", 1), ty, ph_int(255), TY_I64);
+        return ph_cast(TY_U8, ph_bin(ph_tok("==", 2), lo, ph_int(ztype), TY_U8));
+    }
     if (t0 == PT_MIXED || t0 == PT_NULL) return ph_cast(TY_U8, ph_c2("php_zv_is", a0, ph_int(ztype), TY_I64));
     if (t0 == want) return ph_bool(1);
     if (want == PT_INT && t0 == PT_IFALSE) return ph_bool(1);

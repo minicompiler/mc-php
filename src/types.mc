@@ -120,22 +120,42 @@ uptr ph_narrow_name;
 i64  ph_narrow_ty;
 
 // c is a type guard `is_string($v)`/`is_int($v)` on a mixed variable iff it is
-// the exact shape ph_isof lowers: cast(u8, php_zv_is(IDENT v_v, INT k)), with
-// k = 6 (string) or 4 (long). Returns the variable's v_NAME and sets *pty to
-// PT_STRING/PT_INT; 0 otherwise. A compound condition (&&, ||, anything else)
-// is not this shape, so it does not narrow.
+// the exact shape ph_isof lowers. Two shapes, both `cast(u8, ...)`: the inlined
+// tag compare `(ld32(IDENT + 8) & 255) == k` (ph_isof's fast path) and the
+// `php_zv_is(IDENT, k)` call it keeps for other tags. k = 6 (string) or 4
+// (long). Returns the variable's v_NAME and sets *pty to PT_STRING/PT_INT; 0
+// otherwise. A compound condition (&&, ||, anything else) is a different top
+// node, so it does not narrow.
+uptr ph_guard_ret(i64 kv, i64 vnode, uptr pty) {
+    if (!vnode || nd_kind(vnode) != N_IDENT) return 0;
+    if (kv == 6) { st64(pty, PT_STRING); return nd_name(vnode); }
+    if (kv == 4) { st64(pty, PT_INT); return nd_name(vnode); }
+    return 0;
+}
 uptr ph_guard_of(i64 c, uptr pty) {
     if (!c || nd_kind(c) != N_CAST) return 0;
-    i64 call = nd_a(c);
-    if (!call || nd_kind(call) != N_CALL) return 0;
-    if (!str_eq(nd_name(call), "php_zv_is")) return 0;
-    i64 v = nd_a(call);
-    if (!v || nd_kind(v) != N_IDENT) return 0;
-    i64 k = nd_next(v);
-    if (!k || nd_kind(k) != N_INT) return 0;
-    i64 kv = nd_val(k);
-    if (kv == 6) { st64(pty, PT_STRING); return nd_name(v); }
-    if (kv == 4) { st64(pty, PT_INT); return nd_name(v); }
+    i64 inner = nd_a(c);
+    if (!inner) return 0;
+    // inlined: (ld32(v + 8) & 255) == k
+    if (nd_kind(inner) == N_BINARY && nd_op(inner) == ph_tok("==", 2)) {
+        i64 lo = nd_a(inner);
+        i64 kn = nd_b(inner);
+        if (!lo || !kn || nd_kind(kn) != N_INT) return 0;
+        if (nd_kind(lo) != N_BINARY || nd_op(lo) != ph_tok("&", 1)) return 0;
+        i64 call = nd_a(lo);
+        if (!call || nd_kind(call) != N_CALL || !str_eq(nd_name(call), "ld32")) return 0;
+        i64 sum = nd_a(call);
+        if (!sum || nd_kind(sum) != N_BINARY || nd_op(sum) != ph_tok("+", 1)) return 0;
+        return ph_guard_ret(nd_val(kn), nd_a(sum), pty);
+    }
+    // call: php_zv_is(IDENT, k)
+    if (nd_kind(inner) == N_CALL && str_eq(nd_name(inner), "php_zv_is")) {
+        i64 v = nd_a(inner);
+        i64 k = 0;
+        if (v) k = nd_next(v);
+        if (!k || nd_kind(k) != N_INT) return 0;
+        return ph_guard_ret(nd_val(k), v, pty);
+    }
     return 0;
 }
 
