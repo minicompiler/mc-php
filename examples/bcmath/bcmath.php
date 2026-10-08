@@ -76,16 +76,23 @@ function _bc_digits(string $s, int $sc): string {
     $i = ($s !== '' && ($s[0] === '-' || $s[0] === '+')) ? 1 : 0;
     $dot = strpos($s, '.');
     if ($dot === false) {
-        $d = substr($s, $i);
-    } else {
-        $d = substr($s, $i, $dot - $i) . substr($s, $dot + 1);
+        return $i >= strlen($s) ? '0' : substr($s, $i);
     }
-    return $d === '' ? '0' : $d;
+    if ($dot === $i) {                                  // no integer digits: ".5", "+.5", "."
+        return $dot + 1 >= strlen($s) ? '0' : substr($s, $dot + 1);
+    }
+    return substr($s, $i, $dot - $i) . substr($s, $dot + 1);
 }
 
 // negative, and not zero (a zero is never negative in bcmath)
 function _bc_neg(string $s, string $d): bool {
     return $s !== '' && $s[0] === '-' && strspn($d, '0') < strlen($d);
+}
+
+// a magnitude is zero: all its digits are '0'. A strspn, no substr -- cheaper
+// than _bc_ucmp($d, '0'), which skip0's both sides into new strings.
+function _bc_iszero(string $d): bool {
+    return strspn($d, '0') === strlen($d);
 }
 
 // an integer argument: its fraction must be all zeros (trailing zeros carry no
@@ -266,7 +273,7 @@ function _bc_addsub(string $fn, string $a, string $b, ?int $scale, bool $minus):
     $yd = _bc_digits($b, $ys);
     $xn = _bc_neg($a, $xd);
     $yn = _bc_neg($b, $yd);
-    if ($minus) { $yn = !$yn && _bc_ucmp($yd, '0') !== 0; }
+    if ($minus) { $yn = !$yn && !_bc_iszero($yd); }
     $m = $xs > $ys ? $xs : $ys;
     $cx = _bc_at($xd, $xs, $m);
     $cy = _bc_at($yd, $ys, $m);
@@ -312,7 +319,7 @@ function bc_div(string $num1, string $num2, ?int $scale = null): string {
     $ys = _bc_parse($num2, 'bc_div', 2, 'num2');
     $xd = _bc_digits($num1, $xs);
     $yd = _bc_digits($num2, $ys);
-    if (_bc_ucmp($yd, '0') === 0) {
+    if (_bc_iszero($yd)) {
         throw new DivisionByZeroError("Division by zero");
     }
     $nn = strlen($xd) + $ys + $s;
@@ -332,7 +339,7 @@ function bc_mod(string $num1, string $num2, ?int $scale = null): string {
     $ys = _bc_parse($num2, 'bc_mod', 2, 'num2');
     $xd = _bc_digits($num1, $xs);
     $yd = _bc_digits($num2, $ys);
-    if (_bc_ucmp($yd, '0') === 0) {
+    if (_bc_iszero($yd)) {
         throw new DivisionByZeroError("Modulo by zero");
     }
     $m = $xs > $ys ? $xs : $ys;
@@ -379,7 +386,7 @@ function bc_pow(string $num, string $exponent, ?int $scale = null): string {
         return _bc_fmt(false, '1', 0, $s);
     }
     $xd = _bc_digits($num, $xs);
-    if (_bc_ucmp($xd, '0') === 0) {
+    if (_bc_iszero($xd)) {
         if ($eneg) {
             throw new DivisionByZeroError("Negative power of zero");
         }
@@ -412,7 +419,7 @@ function bc_powmod(string $num, string $exponent, string $modulus, ?int $scale =
     }
     $ms = _bc_parse($modulus, 'bc_powmod', 3, 'modulus');
     $md = _bc_intonly(_bc_digits($modulus, $ms), $ms, 'bc_powmod', 3, 'modulus');
-    if (_bc_ucmp($md, '0') === 0) {
+    if (_bc_iszero($md)) {
         throw new DivisionByZeroError("Modulo by zero");
     }
     if (_bc_ucmp($md, '1') === 0) {
@@ -422,7 +429,7 @@ function bc_powmod(string $num, string $exponent, string $modulus, ?int $scale =
     $temp = '1';
     $power = bc_mod($num, $modulus, 0);
     $exp = substr($ed, _bc_skip0($ed));
-    while (_bc_ucmp($exp, '0') !== 0) {
+    while (!_bc_iszero($exp)) {
         $odd = (ord($exp[strlen($exp) - 1]) - 48) & 1;
         $q = substr(_bc_udivmod($exp, '2'), 0, strlen($exp));
         $exp = substr($q, _bc_skip0($q));
@@ -463,7 +470,7 @@ function bc_sqrt(string $num, ?int $scale = null): string {
     if (_bc_neg($num, $xd)) {
         throw new ValueError("bc_sqrt(): Argument #1 (\$num) must be greater than or equal to 0");
     }
-    if (_bc_ucmp($xd, '0') === 0) {
+    if (_bc_iszero($xd)) {
         return _bc_fmt(false, '0', 0, $s);
     }
     $d2 = 2 * $s - $xs;
@@ -490,8 +497,8 @@ function bc_comp(string $num1, string $num2, ?int $scale = null): int {
     $ty = $ys > $s ? $s : $ys;
     if ($xs > $tx) { $xd = substr($xd, 0, strlen($xd) - ($xs - $tx)); }
     if ($ys > $ty) { $yd = substr($yd, 0, strlen($yd) - ($ys - $ty)); }
-    $xn = $num1 !== '' && $num1[0] === '-' && _bc_ucmp($xd, '0') !== 0;
-    $yn = $num2 !== '' && $num2[0] === '-' && _bc_ucmp($yd, '0') !== 0;
+    $xn = $num1 !== '' && $num1[0] === '-' && strspn($xd, '0') < strlen($xd);
+    $yn = $num2 !== '' && $num2[0] === '-' && strspn($yd, '0') < strlen($yd);
     if ($xn !== $yn) {
         return $xn ? -1 : 1;
     }

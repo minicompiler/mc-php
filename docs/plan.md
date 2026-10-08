@@ -1208,24 +1208,28 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    over every function, argument shape and error path (`tests/leaks.sh`); wired into
    `tests/examples.sh`. No `src/*.mc` or `lib/*.mc` touched (so no CodeQL surface), and
    `mini_compiler` untouched.
-   **The DONE bar is module/C < 2.0, and it is NOT met: per-function 2.50x-6.18x, mixed 3.64x**
-   (macos/arm64; the module is 5.37x the interpreter). The cause is one general mc-php
-   limitation, root-caused and reproduced, NOT the port's algorithm: bcmath's faithful signature
-   is `?int $scale = null` (optional, nullable; the omitted and the explicit-null cases both use
-   the request default), and mc-php lowers ANY optional/nullable parameter to a heap zval
-   (`src/decl.mc` forces `PT_MIXED` for a defaulted param so "not passed" is expressible), which
-   the extension handler then marshals per call (`phx_zarg` allocation + `php_param_coerce` +
-   `phx_chk2` + `phx_arity2`) where a required scalar is read in place. Measured exactly:
-   `examples/decimal` (required `int $scale`) is **1.80x** on the identical loan workload with the
-   current compiler; `bcmath` (`?int $scale = null`, same digit helpers) is **4.9x** on the same
-   workload -- the whole gap is the optional-parameter path. Minimal reproducer: a function
-   `f(string, string, ?int $s = null)` is **2.5x** `f(string, string, int $s)`, same body, with
-   the argument passed. There is NO source workaround (a faithful bcmath cannot drop the optional
-   nullable scale), so reaching < 2x needs a mc-php compiler change -- a nullable/optional scalar
-   parameter carried as a raw value rather than a heap zval -- which touches the parameter-lowering
-   path shared with the program road and is its own gated batch (the shape of the "call-frame
-   optimizations" that took ctype to 1.85x). `examples/bcmath/README.md` § The bench has the
-   table and the root cause.
+   **The DONE bar is module/C < 2.0, and it is NOT met: per-function 2.51x-6.12x, mixed 3.54x**
+   (macos/arm64; the module is 5.47x the interpreter). The cause is optimization work, NOT the
+   port's algorithm -- and `examples/decimal` is module/C **1.80x** on the identical loan workload
+   with the current compiler, so < 2x is reachable for this exact shape (the digit helpers ARE
+   decimal's own; `bc_div`, the compute-heavy one, is the closest at 3.18x). The gap is two
+   measured parts, both in mc-php's source, not the math, and `mini_compiler` untouched:
+   (1) **bcmath.php is a first cut; decimal.php was hand-tuned.** On the identical loan workload the
+   bcmath module runs ~2.6x the decimal module (0.49 ms vs 0.23 ms) and builds ~1.5x the strings
+   per call (add 600 vs 400, mul 700 vs 500, `MCPHP_STATS=1`). decimal.php had its "same-algorithm
+   2x batch" (§ 7) rewriting it function by function against the optimizer; bcmath.php has not. Pure
+   source work, safe, the owner's first lever. (2) **The optional nullable `?int $scale = null`
+   adds the rest.** It is bcmath's exact signature (the omitted and the explicit-null cases both use
+   the request default) and a faithful port cannot drop it; mc-php lowers ANY optional/nullable
+   parameter to a heap zval (`src/decl.mc` forces `PT_MIXED` for a defaulted param), which the
+   extension handler marshals per call (`phx_zarg` alloc + `php_param_coerce` + `phx_chk2` +
+   `phx_arity2`) where a required scalar is read in place. Measured on the loan workload: the
+   required-`int $scale` variant is ~4.1x and `?int $scale = null` is ~4.9x -- so the optional path
+   is the smaller ~0.8x and the per-call tuning (part 1) is the larger. Minimal reproducer:
+   `f(string, string, ?int $s = null)` is ~2.5x `f(string, string, int $s)`, same body, argument
+   passed. Part 1 is source tuning; part 2 has no source workaround and is a mc-php change of its
+   own (a nullable/optional scalar carried as a raw value, not a heap zval -- the parameter-lowering
+   path shared with the program road). `examples/bcmath/README.md` § The bench has the table.
 5. **Port json.** `ext/json` cannot be built shared at all (T1), so this port is the only way a
    json extension exists outside php's own binary.
 6. **Distribution -- Composer, Packagist, PIE. To be designed with the owner**: the owner stops

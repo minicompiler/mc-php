@@ -96,53 +96,68 @@ between 0 and 2147483647")` -- the same class and message text as the built-in
 roots and moduli) and, with `MCPHP_EACH=1`, each function on its own
 (steady-state, best of nine, interleaved). DONE is module / C-twin < 2.0.
 
-Measured on this host (macOS/arm64, best of nine):
+Measured on this host (macOS/arm64, best of nine, three rounds interleaved):
 
 | function | module (ms) | C twin (ms) | module/C |
 |---|---|---|---|
-| add    |   5.97 |  1.38 | 4.34x |
-| sub    |   8.54 |  1.38 | 6.18x |
-| mul    |   7.11 |  1.79 | 3.97x |
-| div    |  19.66 |  5.71 | 3.45x |
-| mod    |  16.63 |  5.41 | 3.08x |
-| comp   |   4.54 |  0.93 | 4.88x |
-| pow    |  17.95 |  4.50 | 3.99x |
-| powmod | 282.30 | 61.64 | 4.58x |
-| sqrt   | 194.43 | 77.68 | 2.50x |
-| floor  |   3.09 |  0.79 | 3.93x |
-| ceil   |   3.57 |  0.96 | 3.71x |
-| round  |   8.10 |  1.34 | 6.06x |
+| add    |   5.93 |  1.42 | 4.18x |
+| sub    |   7.31 |  1.44 | 5.09x |
+| mul    |   7.03 |  1.79 | 3.92x |
+| div    |  18.35 |  5.77 | 3.18x |
+| mod    |  15.41 |  5.50 | 2.80x |
+| comp   |   4.50 |  0.91 | 4.95x |
+| pow    |  16.69 |  4.51 | 3.70x |
+| powmod | 257.34 | 61.30 | 4.20x |
+| sqrt   | 193.72 | 77.10 | 2.51x |
+| floor  |   3.07 |  0.77 | 3.97x |
+| ceil   |   3.53 |  0.95 | 3.71x |
+| round  |   8.10 |  1.32 | 6.12x |
 
-Mixed workload: interpreted 5.52 ms, compiled 1.03 ms (**5.37x faster than
-interpreted**), C twin 0.28 ms -- module/C **3.64x**.
+Mixed workload: interpreted 5.47 ms, compiled 1.00 ms (**5.47x faster than
+interpreted**), C twin 0.28 ms -- module/C **3.54x**.
 
-**This is over the 2.0 DONE bar, and the cause is a single, general mc-php
-limitation, not this port's algorithm.** Every `bc_*` function takes the
-optional, nullable scale as `?int $scale = null` -- which is bcmath's exact
-signature, and the one thing the faithful port cannot drop (`bc_add('1','2')`
-with the scale omitted must use the default, and `bc_add('1','2',null)` must
-behave the same). mc-php lowers *any* optional or nullable parameter to a
-zval (`src/decl.mc`: a parameter with a default is forced to `PT_MIXED` so
-"not passed" is expressible), and the extension handler then marshals it with
-a per-call heap allocation (`phx_zarg`), coerces it (`php_param_coerce`), runs
-the generic type check (`phx_chk2`) and the arity check as a call
-(`phx_arity2`) -- where a required scalar parameter is read in place with a
-single load and a one-byte tag test.
+**This is over the 2.0 DONE bar, and the cause is optimization work, not this
+port's algorithm.** The arithmetic core -- the base-10 digit helpers (`uadd`,
+`usub`, `umul`, `udivmod`, the magnitude compare) -- is `examples/decimal`'s
+own, and `examples/decimal` is module/C **1.80x** on the identical loan
+workload with the current compiler. So the compiler reaches < 2x for this
+exact shape; the digits are not the problem. `div`, the compute-heavy function
+where the digit loops dominate, is the closest here (3.18x) for the same
+reason.
 
-The size of this is exact: `examples/decimal`, whose functions take a
-**required** `int $scale`, is module/C **1.80x** on the identical loan
-workload with the current compiler; `bcmath`, whose only difference is the
-optional nullable `?int $scale = null`, is **4.9x** on the same workload. The
-whole gap is the optional-parameter path. A minimal reproducer -- a function
-`f(string $a, string $b, ?int $s = null)` against `f(string $a, string $b, int
-$s)`, same body -- measures the nullable/optional parameter at **2.5x** the
-required one, with the argument passed. The arithmetic core (the digit
-helpers, shared with `examples/decimal`) is already fast; a nullable-scalar
-parameter represented as a raw value rather than a heap zval would bring every
-function under the bar, and is a mc-php compiler change of its own (it touches
-the parameter-lowering path shared with the program road). It is `mini_compiler`
-(the mc compiler) that is untouched here -- this residual is in mc-php's own
-`src/`, not in mc.
+The gap is two measured things, neither an algorithm change:
+
+1. **bcmath.php is a first cut; decimal.php was hand-tuned.** For the identical
+   loan workload, the bcmath module runs ~2.6x the decimal module (0.49 ms vs
+   0.23 ms) and builds ~1.5x the strings per call (add 600 vs 400, mul 700 vs
+   500, counted with `MCPHP_STATS=1`). decimal.php was rewritten function by
+   function against the compiler's optimizer -- its "same-algorithm 2x batch"
+   (docs/plan.md § 7), which drove its string counts and frame down to where
+   the generated code is as lean as the C twin's glue. bcmath.php has not had
+   that pass. This is pure source work (and the owner's first lever), safe and
+   in this repository.
+
+2. **The optional, nullable scale costs the rest.** bcmath's exact signature is
+   `?int $scale = null` -- the one thing a faithful port cannot drop
+   (`bc_add('1','2')` with the scale omitted must use the request default, and
+   `bc_add('1','2',null)` must behave the same). mc-php lowers *any* optional or
+   nullable parameter to a zval (`src/decl.mc`: a defaulted parameter is forced
+   to `PT_MIXED` so "not passed" is expressible), and the extension handler
+   marshals it per call (`phx_zarg` heap allocation + `php_param_coerce` +
+   `phx_chk2` + `phx_arity2`) where a required scalar is read in place. Measured
+   on the loan workload: the required-`int $scale` variant is ~4.1x and the
+   `?int $scale = null` one is ~4.9x -- so the optional-parameter path is the
+   smaller ~0.8x of the gap, and item 1 (the per-call tuning) is the larger
+   part. A minimal reproducer: `f(string, string, ?int $s = null)` is ~2.5x
+   `f(string, string, int $s)`, same body, argument passed. There is no source
+   workaround for this half (the optional nullable scale is bcmath's contract);
+   it is a mc-php change of its own -- a nullable/optional scalar carried as a
+   raw value rather than a heap zval -- touching the parameter-lowering path
+   shared with the program road.
+
+Both are in mc-php's own `src/`/source, not in the port's math; `mini_compiler`
+(the mc compiler) is untouched. decimal at 1.80x on the identical workload is
+the proof the bar is reachable for this shape.
 
 ## Not for this port
 
