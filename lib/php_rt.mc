@@ -505,9 +505,15 @@ uptr php_str_rope(uptr r, i64 n) {
         if (s) {
             i64 ln = ld64(p + 16);
             uptr f = s + ZS_HDR + ld64(p + 8);
-            // a one-byte piece -- a sign, a point -- is one store
-            if (ln == 1) st8(d, ld8(f));
-            else php_memcpy(d, f, ln);
+            // a piece of at most sixteen bytes -- a sign, a point, a run of
+            // digits -- is copied with no call: two loads and two stores
+            // that may overlap each other, both inside the piece
+            if (ln <= 16) {
+                if (ln >= 8) { u64 a8 = ld64(f); u64 b8 = ld64(f + ln - 8); st64(d, a8); st64(d + ln - 8, b8); }
+                else if (ln >= 4) { i64 a4 = ld32(f); i64 b4 = ld32(f + ln - 4); st32(d, a4); st32(d + ln - 4, b4); }
+                else if (ln >= 2) { i64 a2 = ld16(f); i64 b2 = ld16(f + ln - 2); st16(d, a2); st16(d + ln - 2, b2); }
+                else if (ln == 1) st8(d, ld8(f));
+            } else php_memcpy(d, f, ln);
             d = d + ln;
         }
         p = p + 24;
