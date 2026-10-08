@@ -189,6 +189,22 @@ else
     echo "  FAIL  packed: $pk / $pn accepted in g/105; lowered in g/106 where the proof must fail: ${pe:-none}"
     fail=1
 fi
+# g/146's native ?int: every nat_* function keeps its parameter as the value +
+# u8 null-flag pair (the body scan proved each use, src/decl.mc ph_opt_scan),
+# and every zv_* function -- a copy, a comparison, a `= 5` default, a compound
+# write outside a proof -- keeps php's zval. A scan that proved nothing would
+# pass the differential just as well and lose the native pair.
+"$MCPHP_BIN" --dump-ast $P/g/146-nullable-writes.php > "$tmp/nw.ast" 2>&1
+nwn=$(grep -c '^FUNC.* name=f_nat_' "$tmp/nw.ast")
+nwz=$(grep -c '^FUNC.* name=f_zv_' "$tmp/nw.ast")
+nwa=$(awk '/^FUNC/ { f = ($NF ~ /name=f_nat_/) } f && /^  PARAM type=u8 name=vn_x$/ { n++ } END { print n + 0 }' "$tmp/nw.ast")
+nwb=$(awk '/^FUNC/ { f = ($NF ~ /name=f_zv_/) } f && /^  PARAM type=php_zval name=v_x$/ { n++ } END { print n + 0 }' "$tmp/nw.ast")
+if [ "$nwn" -gt 0 ] && [ "$nwa" = "$nwn" ] && [ "$nwz" -gt 0 ] && [ "$nwb" = "$nwz" ]; then
+    echo "  nullable: $nwa / $nwn native in g/146, $nwb / $nwz kept as a zval"
+else
+    echo "  FAIL  nullable: native $nwa / $nwn, zval $nwb / $nwz in g/146"
+    fail=1
+fi
 # g/128's globals: every top-level name some function declares `global` is
 # bound to its table entry ONCE, as the top level's first statements, and
 # nowhere else -- not per read, not inside the loop (src/vars.mc ph_gtop_bind)

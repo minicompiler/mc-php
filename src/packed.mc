@@ -765,15 +765,11 @@ i64 pkx_isfixed(i64 v) {
 }
 
 // Scan the body whose `{` the parser is on, and set pkx_names.
-void ph_pk_scan() {
-    pkx_names = 0;
-    pkx_fixed = 0;
+// a fresh token buffer for a scan: this one and src/decl.mc's ph_opt_scan
+void pkx_reset() {
     pkx_bad = 0;
     pkx_n = 0;
     pkx_nv = 0;
-    uptr src = p_cp();
-    i64 len = p_src_end() - src;
-    if (len <= 0) return;
     if (!pkx_k) {
         pkx_k = xalloc(PK_MAXT * 8);
         pkx_t = xalloc(PK_MAXT * 8);
@@ -786,6 +782,15 @@ void ph_pk_scan() {
         pkx_vs = xalloc(PK_MAXV * 8);
         pkx_vx = xalloc(PK_MAXV * 8);
     }
+}
+
+void ph_pk_scan() {
+    pkx_names = 0;
+    pkx_fixed = 0;
+    pkx_reset();
+    uptr src = p_cp();
+    i64 len = p_src_end() - src;
+    if (len <= 0) return;
     pkx_lex(src, len);
     if (pkx_bad) return;
     pkx_nest();

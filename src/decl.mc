@@ -40,6 +40,236 @@ i64 ph_always_returns(i64 s) {
     return 0;
 }
 
+// ---- which `?int $x` parameter may be carried natively ---------------------
+// A native nullable int is two locals, the value v_x and the null flag vn_x
+// (src/vars.mc). Only a few lowerings read the flag -- `=== null`/`!== null`,
+// `??`, isset/is_null, and passing the pair on to another `?int` (or boxing it
+// into a zval parameter). Every OTHER read sees the bare int, where null is 0:
+// `$y = $x` copied int(0), `return $x` from an `: int` function returned 0
+// instead of php's TypeError, `$x < -1` answered false where php's null < -1
+// is true, `$x === 0` answered true. So the lowering is a PROOF over the body,
+// made by a token scan before the body is compiled (the src/packed.mc lexer),
+// and it fails in the safe direction: a parameter whose every occurrence is
+// not one of the shapes below keeps the zval, which is php's own semantics.
+//
+//   * `$x === null` / `$x !== null` (either order), bounded on both sides by
+//     tokens of lower precedence, so the comparison is the whole operand;
+//   * `$x ?? ...`, `isset($x)`, `is_null($x)`;
+//   * `$x` as a WHOLE argument of a user function declared before this one
+//     whose parameter there is a native `?int` (the pair is passed) or a
+//     by-value zval (the pair is boxed) -- never a builtin, a method, a
+//     plain `int`, a by-reference or a variadic parameter;
+//   * a statement `$x = ...;` -- the write clears the flag (ph_opt_wflag);
+//   * ANY use where $x is provably not null: inside the then-block of
+//     `if ($x !== null) {`, and after an `if ($x === null) { ... }` whose
+//     block ends in `return`/`throw` or is the single statement `$x = ...;`,
+//     to the end of the enclosing block. Null is never written back (a null
+//     assignment and unset() of an int are D4 refusals), so it stays proved.
+//
+// A body the scan cannot see through (a closure, a heredoc, `$$`, `?>`, ...)
+// proves nothing, and so does a source with no body at all.
+i64  ph_optok;              // 1 when the body was scanned
+uptr ph_optbad;             // the names some occurrence disproved, 0-terminated
+
+i64 ph_opt_safe(uptr d) { return ph_optok && !pkx_in(ph_optbad, d); }
+
+i64 ph_opt_null(i64 i) { return pkx_isid(i, "null") || pkx_isid(i, "NULL"); }
+i64 ph_opt_cmp(i64 i) { return pkx_isp(i, "===") || pkx_isp(i, "!=="); }
+// a token an operand may start after / end before, of lower precedence than ===
+i64 ph_opt_lo(i64 i) {
+    return pkx_isp(i, "(") || pkx_isp(i, ",") || pkx_isp(i, ";") || pkx_isp(i, "{") || pkx_isp(i, "}")
+        || pkx_isp(i, "&&") || pkx_isp(i, "||") || pkx_isp(i, "?") || pkx_isp(i, ":") || pkx_isp(i, "=")
+        || pkx_isid(i, "return") || pkx_isid(i, "and") || pkx_isid(i, "or");
+}
+i64 ph_opt_hi(i64 i) {
+    return pkx_isp(i, ")") || pkx_isp(i, ",") || pkx_isp(i, ";") || pkx_isp(i, "&&") || pkx_isp(i, "||")
+        || pkx_isp(i, "?") || pkx_isp(i, ":") || pkx_isid(i, "and") || pkx_isid(i, "or");
+}
+i64 ph_opt_stmt(i64 i) { return i < 0 || pkx_isp(i, ";") || pkx_isp(i, "{") || pkx_isp(i, "}"); }
+
+// the block ob..cb (a `{` and its `}`) leaves the function: its last top-level
+// statement starts with `return` or `throw`
+i64 ph_opt_exits(i64 ob, i64 cb) {
+    if (!pkx_isp(cb - 1, ";")) return 0;
+    i64 st = ob + 1;
+    i64 j = ob + 1;
+    loop {
+        if (j >= cb) break;
+        if (pkx_isp(j, "(") || pkx_isp(j, "[") || pkx_isp(j, "{")) {
+            i64 m = pkx_mat(j);
+            if (pkx_isp(j, "{")) st = m + 1;      // a nested block ends a statement
+            j = m + 1;
+            continue;
+        }
+        if (pkx_isp(j, ";")) { if (j == cb - 1) break; st = j + 1; }
+        j = j + 1;
+    }
+    return pkx_isid(st, "return") || pkx_isid(st, "throw");
+}
+
+// the block ob..cb is the single statement `$x = ...;` for name index v
+i64 ph_opt_fills(i64 ob, i64 cb, i64 v) {
+    if (pkx_kind(ob + 1) != PKK_VAR || ld64(pkx_vi + (ob + 1) * 8) != v) return 0;
+    if (!pkx_isp(ob + 2, "=") || !pkx_isp(cb - 1, ";")) return 0;
+    i64 j = ob + 3;
+    loop {
+        if (j >= cb - 1) break;
+        if (pkx_isp(j, "(") || pkx_isp(j, "[") || pkx_isp(j, "{")) { j = pkx_mat(j) + 1; continue; }
+        if (pkx_isp(j, ";")) return 0;
+        j = j + 1;
+    }
+    return 1;
+}
+
+// `$x` at token j is a whole argument of a user function whose parameter
+// there takes the pair (?int) or a boxed zval
+i64 ph_opt_arg(i64 j) {
+    if (!pkx_isp(j - 1, "(") && !pkx_isp(j - 1, ",")) return 0;
+    if (!pkx_isp(j + 1, ",") && !pkx_isp(j + 1, ")")) return 0;
+    i64 k = j - 1;
+    i64 idx = 0;
+    loop {
+        if (k < 0) return 0;
+        if (pkx_isp(k, "(")) break;
+        if (pkx_isp(k, "[") || pkx_isp(k, "{")) return 0;
+        if (pkx_isp(k, ")") || pkx_isp(k, "]") || pkx_isp(k, "}")) { k = pkx_mat(k) - 1; continue; }
+        if (pkx_isp(k, ",")) idx = idx + 1;
+        k = k - 1;
+    }
+    if (pkx_kind(k - 1) != PKK_ID) return 0;
+    if (pkx_isp(k - 2, "->") || pkx_isp(k - 2, "?->") || pkx_isp(k - 2, "::") || pkx_isp(k - 2, "\\")
+        || pkx_isid(k - 2, "new") || pkx_isid(k - 2, "function")) return 0;
+    i64 fi = ph_fn_find0(ld64(pkx_t + (k - 1) * 8));
+    if (fi < 0) return 0;
+    if (ld64(ph_fvar + fi * 8)) return 0;
+    if (idx >= ld64(ph_fnp + fi * 8)) return 0;
+    if ((ld64(ph_fpr + fi * 8) >> idx) & 1) return 0;
+    i64 o = ld64(ph_fopt + (fi * PH_MAXP + idx) * 8);
+    if (o == 1) return 1;
+    return o == 0 && ld64(ph_fpt + (fi * PH_MAXP + idx) * 8) == PT_MIXED;
+}
+
+// Called with the parameter list's `(` as the current token.
+void ph_opt_scan() {
+    ph_optok = 0;
+    ph_optbad = 0;
+    uptr src = p_cp();
+    i64 len = p_src_end() - src;
+    if (len <= 0) return;
+    // past the parameter list's `)`, then the return type, to the body's `{`
+    i64 dp = 1;
+    i64 i = 0;
+    loop {
+        if (i >= len) return;
+        i64 h = ph_scan_hop(src, len, i);
+        if (h != i) { i = h; continue; }
+        i64 c = ld8(src + i);
+        i = i + 1;
+        if (c == 40) dp = dp + 1;
+        if (c == 41) { dp = dp - 1; if (!dp) break; }
+    }
+    loop {
+        if (i >= len) return;
+        i64 h2 = ph_scan_hop(src, len, i);
+        if (h2 != i) { i = h2; continue; }
+        i64 c2 = ld8(src + i);
+        if (c2 == 123) break;
+        if (c2 == 59 || c2 == 40 || c2 == 61 || c2 == 125) return;
+        i = i + 1;
+    }
+    pkx_reset();
+    pkx_lex(src + i + 1, len - i - 1);
+    if (pkx_bad) return;
+    pkx_nest();
+    if (pkx_bad) return;
+    // proved non-null, per token
+    uptr nn = xalloc(pkx_n * 8 + 8);
+    i64 t = 0;
+    loop { if (t > pkx_n) break; st64(nn + t * 8, 0); t = t + 1; }
+    t = 0;
+    loop {
+        if (t >= pkx_n) break;
+        if (pkx_isid(t, "if") && pkx_isp(t + 1, "(") && pkx_mat(t + 1) == t + 5 && pkx_isp(t + 6, "{")) {
+            i64 vt = 0 - 1;
+            if (pkx_kind(t + 2) == PKK_VAR && ph_opt_cmp(t + 3) && ph_opt_null(t + 4)) vt = t + 2;
+            if (ph_opt_null(t + 2) && ph_opt_cmp(t + 3) && pkx_kind(t + 4) == PKK_VAR) vt = t + 4;
+            if (vt >= 0) {
+                i64 v = ld64(pkx_vi + vt * 8);
+                i64 ob = t + 6;
+                i64 cb = pkx_mat(ob);
+                i64 lo = 0 - 1;
+                i64 hi = 0 - 1;
+                if (pkx_isp(t + 3, "!==")) { lo = ob; hi = cb; }
+                if (pkx_isp(t + 3, "===") && ph_opt_stmt(t - 1) && (ph_opt_exits(ob, cb) || ph_opt_fills(ob, cb, v))) {
+                    lo = cb;
+                    hi = pkx_n;
+                    i64 eb = ld64(pkx_b + t * 8);
+                    if (eb >= 0) hi = pkx_mat(eb);
+                }
+                i64 j = lo + 1;
+                loop {
+                    if (lo < 0 || j >= hi) break;
+                    if (pkx_kind(j) == PKK_VAR && ld64(pkx_vi + j * 8) == v) st64(nn + j * 8, 1);
+                    j = j + 1;
+                }
+            }
+        }
+        t = t + 1;
+    }
+    // every other occurrence must be one of the listed shapes
+    uptr bad = xalloc(pkx_nv * 8 + 8);
+    i64 v2 = 0;
+    loop { if (v2 >= pkx_nv) break; st64(bad + v2 * 8, ld64(pkx_vx + v2 * 8)); v2 = v2 + 1; }
+    i64 j2 = 0;
+    loop {
+        if (j2 >= pkx_n) break;
+        if (pkx_kind(j2) == PKK_VAR && !ld64(nn + j2 * 8)) {
+            i64 ok = 0;
+            if (ph_opt_lo(j2 - 1) && ph_opt_cmp(j2 + 1) && ph_opt_null(j2 + 2) && ph_opt_hi(j2 + 3)) ok = 1;
+            if (ph_opt_lo(j2 - 3) && ph_opt_null(j2 - 2) && ph_opt_cmp(j2 - 1) && ph_opt_hi(j2 + 1)) ok = 1;
+            if (ph_opt_lo(j2 - 1) && pkx_isp(j2 + 1, "??")) ok = 1;
+            if ((pkx_isid(j2 - 2, "isset") || pkx_isid(j2 - 2, "is_null")) && pkx_isp(j2 - 1, "(") && pkx_isp(j2 + 1, ")")) ok = 1;
+            if (ph_opt_stmt(j2 - 1) && pkx_isp(j2 + 1, "=")) ok = 1;
+            if (!ok && ph_opt_arg(j2)) ok = 1;
+            if (!ok) st64(bad + ld64(pkx_vi + j2 * 8) * 8, 1);
+        }
+        j2 = j2 + 1;
+    }
+    ph_optbad = xalloc(pkx_nv * 8 + 8);
+    i64 a = 0;
+    v2 = 0;
+    loop {
+        if (v2 >= pkx_nv) break;
+        if (ld64(bad + v2 * 8)) { st64(ph_optbad + a * 8, ld64(pkx_vn + v2 * 8)); a = a + 1; }
+        v2 = v2 + 1;
+    }
+    st64(ph_optbad + a * 8, 0);
+    ph_optok = 1;
+}
+
+// After the body: every assignment of a native `?int` (whichever lowering
+// made it -- a statement, an expression's pending store, ++/--) is followed by
+// clearing its null flag, so a later `=== null`, isset() or a pair passed on
+// sees the value just written and not the null the call came in with.
+void ph_opt_wflag(i64 s, uptr v, uptr f) {
+    loop {
+        if (!s) break;
+        ph_opt_wflag(nd_a(s), v, f);
+        ph_opt_wflag(nd_b(s), v, f);
+        ph_opt_wflag(nd_c(s), v, f);
+        ph_opt_wflag(nd_d(s), v, f);
+        if (nd_kind(s) == N_ASSIGN && str_eq(nd_name(s), v)) {
+            i64 z = node_new(N_ASSIGN, ph_tline, ph_tfile);
+            set_nd_name(z, f);
+            set_nd_a(z, ph_int(0));
+            set_nd_next(z, nd_next(s));
+            set_nd_next(s, z);
+            s = z;
+        }
+        s = nd_next(s);
+    }
+}
+
 i64 ph_function() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
@@ -95,6 +325,7 @@ i64 ph_function() {
     st64(ph_fpr + fi * 8, 0);
     st64(ph_frr + fi * 8, retref);
 
+    ph_opt_scan();                                // which ?int parameters stay native
     ph_want("(", 1, "expected ( in a php function");
     uptr save = ph_scope_save();
     i64 scp = ph_ncp;
@@ -149,9 +380,11 @@ i64 ph_function() {
         // one shape a native parameter can be filled with in its prologue
         i64 dint = 0;
         i64 dlit = 0;
+        i64 dnul = 0;
         if (ph_accept("=", 1)) {
             i64 dv = ph_expr(0);
             if (ph_ety == PT_INT && nd_kind(dv) == N_INT) { dlit = 1; dint = nd_val(dv); }
+            if (ph_ety == PT_NULL) dnul = 1;
             dflt = ph_to_mixed(dv, ph_ety);
         }
         // a NULLABLE SCALAR parameter (?int/?float/?string/?bool, with or
@@ -166,8 +399,11 @@ i64 ph_function() {
         // int only: a value type the handler reads call-free with no ownership.
         // ?string would borrow an engine zend_string (an escape question) and
         // ?float needs a reinterpret, so those keep the zval for now.
+        // Only when "not passed" IS null (no default, or `= null`: the flag
+        // cannot tell a `= 5` default from an explicit null) and the body scan
+        // proved every use of it (ph_opt_scan).
         if (pt == PT_MIXED && ph_lt_null && ph_lt_k == 10 + PT_INT
-            && !byref && !variadic && !fwd) {
+            && !byref && !variadic && !fwd && (!dflt || dnul) && ph_opt_safe(d)) {
             optst = PT_INT;
             isopt = 1;
             pt = optst;
@@ -353,6 +589,17 @@ i64 ph_function() {
     uptr spf = pkx_fixed;
     if (ph_at("{", 1)) ph_pk_scan();
     i64 body = ph_block();
+    // a write to a native ?int clears its null flag (ph_opt_scan's proof
+    // admits writes on that condition)
+    i64 oj = 0;
+    loop {
+        if (oj >= ph_nvar) break;
+        if (ld64(ph_vopt + oj * 8)) {
+            uptr od = ld64(ph_vname + oj * 8);
+            ph_opt_wflag(nd_a(body), ph_mangle(od, "v_"), ph_vflag(od));
+        }
+        oj = oj + 1;
+    }
     pkx_names = spk;
     pkx_fixed = spf;
     ph_in_try = sit;
