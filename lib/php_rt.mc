@@ -1504,7 +1504,15 @@ void php_undef_skey(uptr k) {
 i64 php_truthy_s(uptr s);
 i64 php_cmp_i(i64 a, i64 b);
 i64 php_cmp_f(f64 a, f64 b);
-i64 php_mod(i64 a, i64 b);
+// `%` on two ints: a positive divisor can be neither zero nor -1, so the
+// remainder itself -- defined here, ahead of its first use, as the one
+// declaration src/opt.mc's copy finds (php_intdiv's shape); the rest is
+// php_mod_slow, below
+i64 php_mod_slow(i64 a, i64 b);
+i64 php_mod(i64 a, i64 b) {
+    if (b > 0) return a - (a / b) * b;
+    return php_mod_slow(a, b);
+}
 i64 php_div_i(i64 a, i64 b);
 f64 php_pow_f(f64 a, i64 e);
 i64 php_pow_i(i64 a, i64 e);
@@ -3308,7 +3316,7 @@ i64 php_max_i(i64 a, i64 b) { if (a >= b) return a; return b; }
 i64 php_min_i(i64 a, i64 b) { if (a <= b) return a; return b; }
 f64 php_max_f(f64 a, f64 b) { if (a >= b) return a; return b; }
 f64 php_min_f(f64 a, f64 b) { if (a <= b) return a; return b; }
-i64 php_mod(i64 a, i64 b) {
+i64 php_mod_slow(i64 a, i64 b) {
     if (b == 0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Modulo by zero", 14)); return 0; }
     // `x % -1` is 0 for every x, and this is not a shortcut: on x86-64 `idiv`
     // raises #DE for PHP_INT_MIN / -1 because the quotient is not

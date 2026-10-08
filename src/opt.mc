@@ -1581,6 +1581,7 @@ void phr_init() {
     phr_add("php_pk_set_f");
     phr_add("php_pk_ea");
     phr_add("php_intdiv");
+    phr_add("php_mod");
     phr_add("php_rc_ret");
     phr_add("phx_enter");
     phr_add("phx_leave");
