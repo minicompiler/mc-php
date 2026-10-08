@@ -518,6 +518,9 @@ if build examples/hello "examples/hello/mcphp$suf.toml" "hello.$sx" && [ -f "$ds
     done
 fi
 
+# The program-road bench rows below (threads, sync, await, connect) build at
+# mc's -O (MCPHP_OPT=1), as every extension here does ([project].opt = 1):
+# their twins are cc -O2.
 # --- threads: the thread API on the program road --------------------------------
 # examples/threads/primes.php counts the primes below 2 000 000 in slices, one
 # thread each (docs/threads.md § Step 3), on 1 thread and on 4; the answer is
@@ -528,8 +531,8 @@ echo "  -- threads"
 EX=examples/threads
 tw="primes below 2000000: 148933"
 tb=$tmp/primes
-t1=$(PRIMES_THREADS=1 MCPHP_BIN=$BIN MCPHP_OUT=$tb sh "$here/mcphp.sh" "$EX/primes.php" 2>&1 | tr -d '\r')
-t4=$(PRIMES_THREADS=4 MCPHP_BIN=$BIN MCPHP_OUT=$tb sh "$here/mcphp.sh" "$EX/primes.php" 2>&1 | tr -d '\r')
+t1=$(PRIMES_THREADS=1 MCPHP_OPT=1 MCPHP_BIN=$BIN MCPHP_OUT=$tb sh "$here/mcphp.sh" "$EX/primes.php" 2>&1 | tr -d '\r')
+t4=$(PRIMES_THREADS=4 MCPHP_OPT=1 MCPHP_BIN=$BIN MCPHP_OUT=$tb sh "$here/mcphp.sh" "$EX/primes.php" 2>&1 | tr -d '\r')
 if [ "$t1" = "$tw" ] && [ "$t4" = "$tw" ]; then
     say "primes.php: $tw, on 1 thread and on 4"
 else
@@ -568,7 +571,7 @@ echo "  -- sync"
 EX=examples/sync
 sb=$tmp/sync
 sw="checksum 80000200000 expected 80000200000 ok"
-sr=$(MCPHP_BIN=$BIN MCPHP_OUT=$sb sh "$here/mcphp.sh" "$EX/sync.php" 2>&1 | tr -d '\r')
+sr=$(MCPHP_OPT=1 MCPHP_BIN=$BIN MCPHP_OUT=$sb sh "$here/mcphp.sh" "$EX/sync.php" 2>&1 | tr -d '\r')
 if [ "$sr" = "$sw" ]; then
     say "sync.php: the checksum is exact on 4 producers and 4 consumers"
 else
@@ -605,7 +608,7 @@ aw=$tmp/await
 # capture to a file (so the program's exit status survives, not tr's, and
 # trailing newlines are not stripped by $(...)), normalize CRs to another file,
 # and cmp byte for byte against the expected output
-MCPHP_BIN=$BIN MCPHP_OUT=$aw sh "$here/mcphp.sh" tests/c/18-await.php > "$tmp/await.raw" 2>&1; arc=$?
+MCPHP_OPT=1 MCPHP_BIN=$BIN MCPHP_OUT=$aw sh "$here/mcphp.sh" tests/c/18-await.php > "$tmp/await.raw" 2>&1; arc=$?
 aw_bin=$aw; [ -f "$aw.exe" ] && aw_bin=$aw.exe
 tr -d '\r' < tests/c/18-await.out > "$tmp/await.want"
 tr -d '\r' < "$tmp/await.raw" > "$tmp/await.got"
@@ -645,7 +648,7 @@ fi
 # backends' connect/read semantics independently.
 echo "  -- connect"
 cn=$tmp/connect
-MCPHP_BIN=$BIN MCPHP_OUT=$cn sh "$here/mcphp.sh" tests/c/22-connect.php > "$tmp/connect.raw" 2>&1; crc=$?
+MCPHP_OPT=1 MCPHP_BIN=$BIN MCPHP_OUT=$cn sh "$here/mcphp.sh" tests/c/22-connect.php > "$tmp/connect.raw" 2>&1; crc=$?
 cn_bin=$cn; [ -f "$cn.exe" ] && cn_bin=$cn.exe
 tr -d '\r' < tests/c/22-connect.out > "$tmp/connect.want"
 tr -d '\r' < "$tmp/connect.raw" > "$tmp/connect.got"
