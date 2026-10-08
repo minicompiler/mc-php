@@ -145,7 +145,15 @@ i64 ph_function() {
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
         i64 dflt = 0;
-        if (ph_accept("=", 1)) { i64 dv = ph_expr(0); dflt = ph_to_mixed(dv, ph_ety); }
+        // the default's value when it is an int LITERAL (`= 0`, `= 2`): the
+        // one shape a native parameter can be filled with in its prologue
+        i64 dint = 0;
+        i64 dlit = 0;
+        if (ph_accept("=", 1)) {
+            i64 dv = ph_expr(0);
+            if (ph_ety == PT_INT && nd_kind(dv) == N_INT) { dlit = 1; dint = nd_val(dv); }
+            dflt = ph_to_mixed(dv, ph_ety);
+        }
         // a NULLABLE SCALAR parameter (?int/?float/?string/?bool, with or
         // without a default): carried as the native value plus a u8 null flag,
         // not a heap zval. ph_lt_k is 10 + the scalar type (src/types.mc).
@@ -168,6 +176,16 @@ i64 ph_function() {
         // a default, because "not passed" has to be expressible -- but a native
         // nullable scalar expresses "not passed / null" in its flag, so it keeps
         // its scalar type
+        // A plain `int $x = <int literal>` keeps its native int too: it takes
+        // the same value + u8 flag slots, but the flag means "not passed" only
+        // (php_param_coerce / phx_chk2 refuse a null: the declaration is not
+        // nullable) and the prologue below fills the literal. The variable
+        // itself is never null, so it is NOT bound as an opt one.
+        i64 dfill = 0;
+        if (!isopt && pt == PT_INT && dlit && !ph_lt_null && !byref && !variadic && !fwd) {
+            isopt = 2;
+            dfill = 1;
+        }
         if (!isopt && (pt < 0 || dflt)) pt = PT_MIXED;
         if (variadic) pt = PT_ARR;
         // reached by a call before the declaration: the row the call was
@@ -180,7 +198,7 @@ i64 ph_function() {
         if (byref) pt = PT_MIXED;
         if (np >= PH_MAXP) ph_todo(fl, line, "more than 12 parameters");
         ph_var_bind_raw(d, pt);
-        if (isopt) ph_set_opt(d);
+        if (isopt == 1) ph_set_opt(d);
         if (byref) { ph_set_ref(d); st64(ph_fpr + fi * 8, ld64(ph_fpr + fi * 8) | (1 << np)); }
         if (np < PH_MAXCP) st64(ph_cpn + np * 8, d);
         if (pt != PT_MIXED) ph_cpzv = 0;
@@ -200,6 +218,18 @@ i64 ph_function() {
             i64 fnp = param_new(TY_U8, ph_vflag(d));
             set_nd_next(pn, fnp);
             tail = fnp;
+        }
+        if (dfill) {
+            // not passed: the literal, before the body reads it
+            i64 fr = node_new(N_IDENT, line, fl);
+            set_nd_name(fr, ph_vflag(d));
+            set_nd_type(fr, TY_U8);
+            i64 iff2 = node_new(N_IF, line, fl);
+            set_nd_a(iff2, fr);
+            set_nd_b(iff2, ph_set(ph_mangle(d, "v_"), ph_int(dint)));
+            if (pret) set_nd_next(pret, iff2);
+            if (!pret) pre = iff2;
+            pret = iff2;
         }
         if (pt == PT_MIXED) {
             if (!byref) {

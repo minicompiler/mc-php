@@ -1018,7 +1018,9 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (!tf) err_at2(fl, line, "mc-php: mcphp_threads() names its function by a literal", name);
         i64 tfi = ph_fn_find(tf);
         if (tfi < 0 || ld64(ph_fnp + tfi * 8) != 2 || ld64(ph_fret + tfi * 8) != PT_INT
-            || ld64(ph_fpt + (tfi * PH_MAXP) * 8) != PT_INT || ld64(ph_fpt + (tfi * PH_MAXP + 1) * 8) != PT_INT)
+            || ld64(ph_fpt + (tfi * PH_MAXP) * 8) != PT_INT || ld64(ph_fpt + (tfi * PH_MAXP + 1) * 8) != PT_INT
+            // a flagged slot (?int, int $x = N) is two mc parameters, not one
+            || ld64(ph_fopt + (tfi * PH_MAXP) * 8) || ld64(ph_fopt + (tfi * PH_MAXP + 1) * 8))
             err_at2(fl, line, "mc-php: mcphp_threads() runs a function declared above as f(int, int): int", tf);
         i64 fp = node_new(N_ADDR, line, fl);
         set_nd_name(fp, ph_mangle(ld64(ph_fname + tfi * 8), "f_"));
@@ -1756,7 +1758,11 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         // a u8 null flag as two mc arguments. The argument may be another such
         // variable (pass its value and flag), the null literal or an omitted
         // optional one (0 / flag 1), or a plain scalar value (coerced / flag 0).
-        if (ld64(ph_fopt + (fi * PH_MAXP + i) * 8)) {
+        // a defaulted `int $x = N` (opt slot 2) takes this road only when the
+        // argument is omitted; a passed one is an ordinary native int below,
+        // with its TypeError check, and a 0 flag after it
+        i64 fo = ld64(ph_fopt + (fi * PH_MAXP + i) * 8);
+        if (fo == 1 || (fo == 2 && i >= na)) {
             i64 vv = 0;
             i64 vfl = 0;
             if (i >= na) {
@@ -1894,6 +1900,11 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (tail) set_nd_next(tail, v);
         if (!tail) head = v;
         tail = v;
+        if (fo == 2) {
+            i64 pf0 = ph_int(0);
+            set_nd_next(v, pf0);
+            tail = pf0;
+        }
         i = i + 1;
     }
     // ONE check for the whole argument list: php_param_coerce is a no-op once
