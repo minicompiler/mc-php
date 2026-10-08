@@ -918,6 +918,34 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
     else
         bad "thread API (exit $ta)"; diff "$tmp/t.aw" "$tmp/t.a" | sed -n '1,12p' | sed 's/^/      /'
     fi
+    # --- 20d. bcmath's default scale from a worker (review of #65): the port's
+    # bc_scale writes a module global, which a module's own workers share; the
+    # only worker that can reach it is another module's, and that road is
+    # php's engine -- refused on this php (20b's $ref), or under ZTS a php
+    # request of its own whose global table is a fresh copy (bcscale.php)
+    bcfg=examples/bcmath/mcphp.toml
+    [ "${LINUX:-0}" = 1 ] && bcfg=examples/bcmath/mcphp.linux.toml
+    [ "${WINDOWS:-0}" = 1 ] && bcfg=examples/bcmath/mcphp.windows.toml
+    bso=examples/bcmath/build/bcmath_port.$sx
+    rm -f "$bso"
+    if "$BIN" build examples/bcmath --config "$(mcphp_ts_cfg "$bcfg")" > "$tmp/bc.build" 2>&1 && [ -f "$bso" ]; then
+        bx="-d extension=$tmp/build/r.$sx -d extension=$root/$bso"
+        "$PHP" -d opcache.enable_cli=0 $bx tests/ext/threads/bcscale.php 2>&1 | tr -d '\r' > "$tmp/t.bs"; tb=$?
+        printf '%s\n' "a php worker: $ref" "this request's scale: 3" > "$tmp/t.bsw"
+        if [ "$TSV" = zts ]; then
+            bo="-d opcache.enable_cli=1 -d opcache.file_update_protection=0"
+            "$PHP" $bo -r 'exit(function_exists("opcache_get_status") ? 0 : 1);' 2>/dev/null || bo="$bo -d zend_extension=opcache"
+            "$PHP" $bo $bx tests/ext/threads/bcscale.php 2>&1 | tr -d '\r' >> "$tmp/t.bs" || tb=1
+            printf '%s\n' "a php worker: ran in a request of its own, saw 0" "this request's scale: 3" >> "$tmp/t.bsw"
+        fi
+        if [ "$tb" = 0 ] && cmp -s "$tmp/t.bsw" "$tmp/t.bs"; then
+            say "bcmath's default scale from a worker: only this request writes it ($TSV)"
+        else
+            bad "bcmath's default scale from a worker (exit $tb)"; diff "$tmp/t.bsw" "$tmp/t.bs" | sed 's/^/      /'
+        fi
+    else
+        bad "bcmath for 20d would not build:"; sed 's/^/      /' "$tmp/bc.build"
+    fi
     # --- 20c. PHP callables on threads of their own (docs/threads.md § 3b):
     # a ZTS php only, with opcache on -- each worker a php request of its own
     # sharing the request's code, arguments and results copied, what cannot

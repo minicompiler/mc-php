@@ -522,7 +522,15 @@ function bc_comp(string $num1, string $num2, ?int $scale = null): int {
 }
 
 // ---- scale ------------------------------------------------------------------
-// bcscale: read and (optionally) set the request default scale.
+// bcscale: read and (optionally) set the request default scale. php keeps it in
+// BCG(bc_precision): per request, and per php thread under ZTS. Here it is a
+// `global`, which mc-php keeps the same way (docs/threads.md, "What each
+// request starts from"): per php thread, copied fresh at each request. The
+// module's OWN worker threads would share it, but this file starts none, and
+// another module's worker reaches bc_scale only through php's engine -- refused
+// on a worker, or under ZTS a php request of its own with its own copy
+// (tests/ext/threads/bcscale.php, tests/ext.sh step 20d). So no lock: only the
+// request's own thread ever writes it.
 function bc_scale(?int $scale = null): int {
     global $__bc_scale;
     $old = isset($__bc_scale) ? $__bc_scale : 0;
