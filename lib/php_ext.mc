@@ -1866,6 +1866,28 @@ uptr phx_zarg(uptr ex, i64 k) {
     return phx_e2r(phx_argz(ex, k));
 }
 
+// Argument k borrowed in place: the engine zval itself, after a reference is
+// followed, with no runtime zval allocated and no array/object proxy. Used
+// only where the body reads the zval's words (type and value) and never the
+// zval as a value -- src/ext.mc's ph_borrow_scan proves it per parameter, so
+// the engine owns the zval for the whole call and nothing here outlives it.
+// A string is still escaped (php_str_esc takes a reference, kept to the chunk's
+// end), so should the body carry the string out it stays alive; a resource
+// still cannot cross and is php's Error, with a null zval in its place so the
+// (discarded) body reads nothing wild.
+uptr phx_zarg_ro(uptr ex, i64 k) {
+    if (k >= phx_nargs(ex)) { uptr z = php_alloc(ZV_SIZE); st64(z, 0); st32(z + 8, IZ_NULL); return z; }
+    uptr ez = phx_argz(ex, k);
+    i64 t = phx_type(ez);
+    if (t == IZ_REFERENCE) { ez = ld64(ez) + ZRX_VAL; t = phx_type(ez); }
+    if (t > IZ_REFERENCE || t == IZ_RESOURCE) {
+        php_throw_cls(php_str_new("Error", 5), php_str_new("mc-php: a php resource cannot cross into the module", 51));
+        uptr z = php_alloc(ZV_SIZE); st64(z, 0); st32(z + 8, IZ_NULL); return z;
+    }
+    if (t == IZ_STRING) php_str_esc(ld64(ez));
+    return ez;
+}
+
 uptr phx_aarg(uptr ex, i64 k) { return ld64(phx_zarg(ex, k)); }
 
 // the arguments from k on, a runtime array: a variadic parameter

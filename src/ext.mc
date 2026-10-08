@@ -407,6 +407,77 @@ i64 ph_ext_body(i64 fi, uptr name, i64 np, i64 rt) {
     return ph_ext_write(rt, ph_calln(ph_mangle(name, "f_"), av, np, ph_mcty(rt)));
 }
 
+// 1 iff every occurrence of `v` in `s` is the base of an ld32/ld64 field read
+// (v or v + const). A bare occurrence, or v as any other call's argument, or
+// an array/object access, returns 0 -- so v's zval is only ever inspected
+// (type and value word), never carried out as a value, array-accessed or
+// object-accessed. That is exactly what phx_zarg_ro (lib/php_ext.mc) needs to
+// borrow the engine zval in place instead of copying it.
+i64 ph_borrow_scan(i64 s, uptr v) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_IDENT) {
+            if (str_eq(nd_name(s), v)) return 0;
+            s = nd_next(s);
+            continue;
+        }
+        // `!v` is mc's pointer-nullness test (node.mc ph_truthy's `!!x`): it
+        // reads whether the zval pointer is 0, never the zval's memory, so a
+        // borrowed engine zval is as safe here as a copied one. Only `!` -- a
+        // `-`/`~` would read the value word.
+        if (k == N_UNARY && nd_op(s) == ph_tok("!", 1) && nd_a(s) && nd_kind(nd_a(s)) == N_IDENT && str_eq(nd_name(nd_a(s)), v)) {
+            s = nd_next(s);
+            continue;
+        }
+        if (k == N_CALL && (str_eq(nd_name(s), "ld32") || str_eq(nd_name(s), "ld64")) && ph_pin_fieldarg(nd_a(s), v)) {
+            // the field-read base (nd_a) is v or v + const: do not descend into
+            // it (a bare v there is the allowed read, not an escape)
+            if (!ph_borrow_scan(nd_next(nd_a(s)), v)) return 0;
+            if (!ph_borrow_scan(nd_b(s), v)) return 0;
+            if (!ph_borrow_scan(nd_c(s), v)) return 0;
+            if (!ph_borrow_scan(nd_d(s), v)) return 0;
+            s = nd_next(s);
+            continue;
+        }
+        if (!ph_borrow_scan(nd_a(s), v)) return 0;
+        if (!ph_borrow_scan(nd_b(s), v)) return 0;
+        if (!ph_borrow_scan(nd_c(s), v)) return 0;
+        if (!ph_borrow_scan(nd_d(s), v)) return 0;
+        s = nd_next(s);
+    }
+    return 1;
+}
+
+// Over the handler's final (inlined, pinned) body: a `vn = phx_zarg(ex, k)`
+// binding whose parameter is a plain mixed (ph_ext_anymixed) and whose temp vn
+// is only field-read (ph_borrow_scan) becomes a borrow, phx_zarg_ro. Every
+// other binding keeps the full marshalling phx_zarg. The two body copies (bare
+// and slow) carry their own vn, so each is judged on its own.
+void ph_borrow_rewrite(i64 s, i64 fi, i64 root) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_ASSIGN) {
+            i64 r = nd_a(s);
+            if (r && nd_kind(r) == N_CALL && str_eq(nd_name(r), "phx_zarg")) {
+                i64 a0 = nd_a(r);
+                i64 a1 = 0;
+                if (a0) a1 = nd_next(a0);
+                if (a1 && nd_kind(a1) == N_INT) {
+                    i64 k = nd_val(a1);
+                    if (ph_ext_anymixed(fi, k) && ph_borrow_scan(root, nd_name(s)))
+                        set_nd_name(r, "phx_zarg_ro");
+                }
+            }
+        }
+        ph_borrow_rewrite(nd_a(s), fi, root);
+        ph_borrow_rewrite(nd_b(s), fi, root);
+        ph_borrow_rewrite(nd_c(s), fi, root);
+        ph_borrow_rewrite(nd_d(s), fi, root);
+        s = nd_next(s);
+    }
+}
+
 void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     uptr name = ld64(ph_fname + fi * 8);
     i64 np = ld64(ph_fnp + fi * 8);
@@ -526,6 +597,9 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     // on the handler's own final body -- both the bare and the slow copy,
     // which are still one chain here, before the split below.
     ph_pin_fn(f);
+    // a plain mixed parameter whose temp is only ever field-read borrows the
+    // engine zval in place (phx_zarg -> phx_zarg_ro) rather than copying it
+    ph_borrow_rewrite(nd_a(nd_b(f)), fi, nd_a(nd_b(f)));
     // the copy may have put declarations in front of it: unlinked where it is
     ph_ext_lazy = 0;
     if (bare && ph_ext_pure(nd_b(bare)) && ph_ext_lazy) {
