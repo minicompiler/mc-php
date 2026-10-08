@@ -1165,8 +1165,21 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    And one recorded then, **fixed in batch A**: `str_replace` with an ARRAY search was a wrong
    answer -- `Array to string conversion` and the array's text searched for. It takes php's whole
    signature now (`tests/g/100-str-replace-array.php`).
-3. **Port ctype.** php-src's `ext/ctype` written in php and compiled by mc-php, graded against
-   php's own `ctype.so` (T1 measured it at 7 Zend functions and no data global).
+3. **Port ctype -- DONE** (2026-10-07, `examples/ctype`): php-src's `ext/ctype` (the 11
+   `ctype_*` predicates) written in PHP and compiled by mc-php, graded against php's own built-in
+   `ctype_*`. Published as `cty_*` (php refuses to redeclare an internal function). Faithful to
+   `ctype.so`'s exact semantics incl. the int char-code quirk (`ctype_digit(48)` true,
+   `ctype_digit(256)` true, `ctype_alpha(-1)` = `isalpha(255)`), the all-256-byte libc parity via
+   compile-time C-locale literal sets, and float/bool/null/array -> false. The differential is
+   **3322 cases, 0 mismatches**, byte for byte. The bench is **module/ctype.so 1.85-1.96x on all
+   11 predicates** -- under the 2x DONE bar -- reached by a batch of general mc-php call-frame
+   optimizations (read-only mixed-param borrow, type-narrowing in `is_string`/`is_int` guards,
+   rc-drain confinement, throw-elision, a leaner extension handler, and the `phx_zarg` in-place
+   borrow of a provably-safe mixed argument), every one gated by `leaks.sh` + the 3322 differential
+   + `fixtures.sh`/`ext.sh` + CodeQL, with NO mini_compiler change. The residual below the bar is
+   mc's own M49 union-prologue (proven with a minimal `.mc` reproducer; a shrink-wrapped prologue
+   is an mc-side optimization). Two compiler leaks ctype exposed were fixed on the way: `strspn`
+   over a mixed set and the `global`/`static` read pin leak.
 4. **Port bcmath.**
 5. **Port json.** `ext/json` cannot be built shared at all (T1), so this port is the only way a
    json extension exists outside php's own binary.
