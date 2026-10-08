@@ -584,8 +584,11 @@ function bc_round(string $num, int $precision = 0): string {
         $nlen = strlen($ip);
         $nval = $ip . substr($xd, $ilen);
     }
-    // the number is smaller than the place being rounded to -> 0 (HalfAwayFromZero)
-    if ($precision < 0 && $nlen < -($precision + 1) + 1) {
+    // the number is smaller than the place being rounded to -> 0 (HalfAwayFromZero).
+    // `$nlen < -$precision`, written without the negation: -PHP_INT_MIN
+    // overflows a C integer (docs/semantics.md), and $nlen >= 1 keeps the sum
+    // in range for every accepted precision.
+    if ($precision < 0 && $nlen + $precision < 0) {
         return '0';
     }
     // rounding to more places than the number has: unchanged, padded

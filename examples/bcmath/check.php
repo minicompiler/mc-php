@@ -66,6 +66,10 @@ foreach (['2.5', '3.5', '-2.5', '1.95583', '0.125', '0.135', '9.995', '-0.5', '0
 foreach (['1241757', '1234', '5', '45', '0.5', '0.001'] as $a) {
     echo "roundn $a: ", bc_round($a, -1), " ", bc_round($a, -3), "\n";
 }
+// the ends of the precision range: -PHP_INT_MIN overflows a C integer
+foreach (['1', '-999.5', '9999999999999999999.99'] as $a) {
+    echo "roundx $a: ", bc_round($a, PHP_INT_MIN), " ", bc_round($a, PHP_INT_MIN + 1), " ", bc_round($a, -2147483648), "\n";
+}
 
 // the request default scale (bcscale)
 echo "scale: ", bc_scale(), " ";

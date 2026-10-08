@@ -708,7 +708,9 @@ PHP_FUNCTION(bc_round)
         memcpy(nval + nip, x.d + ilen, x.sc);
     }
     zend_string *out;
-    if (precision < 0 && (long) nlen < -(precision + 1) + 1) {
+    /* nlen < -precision, without negating: -LONG_MIN overflows, and
+       nlen >= 1 keeps the sum in range for every accepted precision */
+    if (precision < 0 && (long) nlen + precision < 0) {
         out = zend_string_init("0", 1, 0);
     } else if (precision >= 0 && (long) x.sc <= precision) {
         out = bfmt(x.neg, nval, nsize, x.sc, (size_t) precision);

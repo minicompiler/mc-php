@@ -114,6 +114,14 @@ foreach ([['2.5',0],['3.5',0],['-2.5',0],['1.95583',2],['1241757',-3],['0.125',2
     $p = (int)$p;
     check("round($a,$p)", fn()=>bc_round($a,$p), fn()=>bcround($a,$p));
 }
+// the ends of the accepted precision range (review of #65): -PHP_INT_MIN
+// overflows a C integer, so the "smaller than the place" guard must not negate
+// it -- '0' for every number below; PHP_INT_MAX and 2^31 are php's ValueError
+foreach (['1','-1','0','-999.5','0.000','123.456','9999999999999999999.99'] as $a) {
+    foreach ([PHP_INT_MIN, PHP_INT_MIN + 1, -2147483648, PHP_INT_MAX, 2147483648] as $p) {
+        check("round($a,$p)", fn()=>bc_round($a,$p), fn()=>bcround($a,$p));
+    }
+}
 
 // ---- random corpus ----------------------------------------------------------
 mt_srand(20261007);
