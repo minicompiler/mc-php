@@ -149,10 +149,243 @@ i64 ph_opt_arg(i64 j) {
     return o == 0 && ld64(ph_fpt + (fi * PH_MAXP + idx) * 8) == PT_MIXED;
 }
 
+// ---- phsi: the slots of the native statics (below) -----------------------------
+// One generated `i64 phsi[]`, slot 0 unused so that it always exists (the
+// runtime names it: lib/php_ext.mc), and `phsin`, its length in slots. Each
+// initialiser is the declaration's literal, which is also what a request is
+// put back to when MINIT did not change it.
+i64 ph_nstg;
+i64 ph_nsttail;
+i64 ph_nstcnt;
+i64 ph_nstcount;
+void ph_nst_init(uptr fl, i64 line) {
+    ph_nstg = node_new(N_GLOBAL, line, fl);
+    set_nd_name(ph_nstg, "phsi");
+    set_nd_type(ph_nstg, TY_I64);
+    ph_nsttail = ph_int(0);
+    set_nd_a(ph_nstg, ph_nsttail);
+    set_nd_val(ph_nstg, 1);
+    top_add(ph_nstg);
+    ph_nstcount = 1;
+    i64 c = node_new(N_GLOBAL, line, fl);
+    set_nd_name(c, "phsin");
+    set_nd_type(c, TY_I64);
+    ph_nstcnt = ph_int(1);
+    set_nd_a(c, ph_nstcnt);
+    set_nd_val(c, 0);
+    top_add(c);
+}
+i64 ph_nst_add(i64 lit) {
+    i64 n = ph_int(lit);
+    set_nd_next(ph_nsttail, n);
+    ph_nsttail = n;
+    ph_nstcount = ph_nstcount + 1;
+    set_nd_val(ph_nstg, ph_nstcount);
+    set_nd_val(ph_nstcnt, ph_nstcount);
+    return (ph_nstcount - 1) * 8;
+}
+
+// ---- a function `static $x = <int>` held natively -----------------------------
+// A `static` is a zval reached through php_static (a call, a pin, the
+// initialiser built on every call). One that only ever holds an int is kept
+// instead in a slot of the generated array `phsi` (src/program.mc), read and
+// written in place with ld64/st64 -- no call, so a handler that copies its
+// function in keeps php's call-free bare road (src/ext.mc). It is the same
+// state a zval static is: one per declaration, per php thread in a ZTS module
+// (src/tls.mc moves `phsi` into the thread's area) and put back to what MINIT
+// left at each request (phz_statics; lib/php_ext.mc for an NTS module).
+//
+// The same body scan proves it. `$x` qualifies when its FIRST occurrence is
+// `static $x = <plain int literal>;` and every other one is
+//   * a read: not after `&`, not before `[`, `->`, `?->` or `::`, not inside
+//     unset()/list()/a destructuring, and not a whole argument of a call (a
+//     by-reference parameter would need the zval);
+//   * a statement `$x = <int literal> | (int) ... | $y;` -- $y an int variable
+//     already bound when the `static` is lowered (ph_nst_rhs_ok), so D4 never
+//     meets a non-int there -- `$x++;`, `$x--;`, `++$x`, `--$x`, or
+//     `$x += | -= | *= <int literal>;`.
+// Anything else keeps the zval static, which is php's own semantics.
+uptr ph_nstok;               // the qualifying names, 0-terminated
+uptr ph_nstrhs;              // (static, $y) pairs the lowering must check
+uptr ph_nstv;                // this body's native statics: v_ names ...
+uptr ph_nstx;                // ... and their byte offsets in phsi
+i64  ph_nstn;
+
+i64 ph_nst_ok(uptr d) { return ph_optok && pkx_in(ph_nstok, d); }
+
+// every `$x = $y;` the scan admitted names an int variable already bound
+i64 ph_nst_rhs_ok(uptr d) {
+    if (!ph_nstrhs) return 1;
+    i64 i = 0;
+    loop {
+        uptr a = ld64(ph_nstrhs + i * 16);
+        if (!a) break;
+        if (str_eq(a, d)) {
+            uptr y = ld64(ph_nstrhs + i * 16 + 8);
+            if (ph_var_find(y) < 0 || ph_var_type(y) != PT_INT || ph_is_opt(y) || ph_is_ref(y)) return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// the `(` at token o opens a call (a function, a method, a closure value)
+i64 ph_nst_callp(i64 o) {
+    if (pkx_kind(o - 1) == PKK_VAR || pkx_isp(o - 1, ")") || pkx_isp(o - 1, "]")) return 1;
+    if (pkx_kind(o - 1) != PKK_ID) return 0;
+    uptr w = ld64(pkx_t + (o - 1) * 8);
+    return !(str_eq(w, "if") || str_eq(w, "elseif") || str_eq(w, "while") || str_eq(w, "for")
+        || str_eq(w, "foreach") || str_eq(w, "isset") || str_eq(w, "empty") || str_eq(w, "return")
+        || str_eq(w, "echo") || str_eq(w, "print") || str_eq(w, "and") || str_eq(w, "or")
+        || str_eq(w, "array") || str_eq(w, "match"));
+}
+
+// is token j (an occurrence of a candidate, not its declaration) one of the
+// listed uses? A `$x = $y;` write appends (name, $y) to the pairs.
+i64 ph_nst_use(i64 j, uptr pr, uptr pn) {
+    if (ld64(pkx_f + j * 8) & PKF_KILL) return 0;
+    if (pkx_isp(j - 1, "&") || pkx_isp(j - 1, "=>")) return 0;
+    // after a word: only one that takes a value (`foreach (... as $x)`,
+    // `catch (E $x)`, `global $x`, a second `static $x` all write or alias it)
+    if (pkx_kind(j - 1) == PKK_ID && !pkx_isid(j - 1, "return") && !pkx_isid(j - 1, "echo")
+        && !pkx_isid(j - 1, "print") && !pkx_isid(j - 1, "and") && !pkx_isid(j - 1, "or")
+        && !pkx_isid(j - 1, "case")) return 0;
+    if (pkx_isp(j + 1, "[") || pkx_isp(j + 1, "->") || pkx_isp(j + 1, "?->") || pkx_isp(j + 1, "::")) return 0;
+    if (pkx_isp(j - 1, "++") || pkx_isp(j - 1, "--")) return 1;
+    if (pkx_isp(j + 1, "++") || pkx_isp(j + 1, "--")) return ph_opt_stmt(j - 1) && pkx_isp(j + 2, ";");
+    if (pkx_isp(j + 1, "+=") || pkx_isp(j + 1, "-=") || pkx_isp(j + 1, "*="))
+        return ph_opt_stmt(j - 1) && pkx_kind(j + 2) == PKK_NUM && ld64(pkx_t + (j + 2) * 8) && pkx_isp(j + 3, ";");
+    if (pkx_isp(j + 1, "=")) {
+        if (!ph_opt_stmt(j - 1)) return 0;
+        if (pkx_kind(j + 2) == PKK_NUM && ld64(pkx_t + (j + 2) * 8) && pkx_isp(j + 3, ";")) return 1;
+        if (pkx_kind(j + 2) == PKK_VAR && pkx_isp(j + 3, ";")) {
+            i64 n = ld64(pn);
+            st64(pr + n * 16, ld64(pkx_t + j * 8));
+            st64(pr + n * 16 + 8, ld64(pkx_t + (j + 2) * 8));
+            st64(pn, n + 1);
+            return 1;
+        }
+        if (pkx_isp(j + 2, "(") && pkx_isid(j + 3, "int") && pkx_isp(j + 4, ")")) {
+            i64 k = j + 5;
+            loop {
+                if (k >= pkx_n) return 0;
+                if (pkx_isp(k, "(") || pkx_isp(k, "[") || pkx_isp(k, "{")) { k = pkx_mat(k) + 1; continue; }
+                if (pkx_isp(k, ";")) return 1;
+                if (pkx_isp(k, "}") || pkx_isp(k, ")") || pkx_isp(k, "]")) return 0;
+                k = k + 1;
+            }
+        }
+        return 0;
+    }
+    // any other assignment operator writes something that may not be an int
+    i64 c = 0;
+    if (pkx_kind(j + 1) == PKK_P) c = ld64(pkx_t + (j + 1) * 8);
+    if (c > 255 && ((c >> 8) & 255) == 61 && !pkx_isp(j + 1, "==") && !pkx_isp(j + 1, "!=")
+        && !pkx_isp(j + 1, "<=") && !pkx_isp(j + 1, ">=")) return 0;
+    if (c > 65535 && ((c >> 16) & 255) == 61 && !pkx_isp(j + 1, "===") && !pkx_isp(j + 1, "!==")) return 0;
+    // a whole argument of a call: the parameter could be by reference
+    if ((pkx_isp(j - 1, "(") || pkx_isp(j - 1, ",")) && (pkx_isp(j + 1, ",") || pkx_isp(j + 1, ")"))) {
+        i64 k2 = j - 1;
+        loop {
+            if (k2 < 0) return 1;
+            if (pkx_isp(k2, "(")) return !ph_nst_callp(k2);
+            if (pkx_isp(k2, "[") || pkx_isp(k2, "{")) return 1;
+            if (pkx_isp(k2, ")") || pkx_isp(k2, "]") || pkx_isp(k2, "}")) { k2 = pkx_mat(k2) - 1; continue; }
+            k2 = k2 - 1;
+        }
+    }
+    return 1;
+}
+
+// the native statics' proof, over the tokens ph_opt_scan lexed
+void ph_nst_scan() {
+    uptr first = xalloc(pkx_nv * 8 + 8);
+    uptr cand = xalloc(pkx_nv * 8 + 8);
+    i64 v = 0;
+    loop { if (v >= pkx_nv) break; st64(first + v * 8, 0 - 1); st64(cand + v * 8, 0); v = v + 1; }
+    uptr pr = xalloc(pkx_n * 16 + 16);
+    u8 pnb[8];
+    st64(pnb, 0);
+    i64 j = 0;
+    loop {
+        if (j >= pkx_n) break;
+        if (pkx_kind(j) == PKK_VAR) {
+            i64 vi = ld64(pkx_vi + j * 8);
+            if (ld64(first + vi * 8) < 0) {
+                st64(first + vi * 8, j);
+                if (pkx_isid(j - 1, "static") && ph_opt_stmt(j - 2) && pkx_isp(j + 1, "=")
+                    && pkx_kind(j + 2) == PKK_NUM && ld64(pkx_t + (j + 2) * 8) && pkx_isp(j + 3, ";"))
+                    st64(cand + vi * 8, 1);
+            } else if (ld64(cand + vi * 8) && !ph_nst_use(j, pr, pnb)) {
+                st64(cand + vi * 8, 0);
+            }
+        }
+        j = j + 1;
+    }
+    ph_nstok = xalloc(pkx_nv * 8 + 8);
+    i64 a = 0;
+    v = 0;
+    loop {
+        if (v >= pkx_nv) break;
+        if (ld64(cand + v * 8)) { st64(ph_nstok + a * 8, ld64(pkx_vn + v * 8)); a = a + 1; }
+        v = v + 1;
+    }
+    st64(ph_nstok + a * 8, 0);
+    st64(pr + ld64(pnb) * 16, 0);
+    ph_nstrhs = pr;
+}
+
+// a native static's declaration: a slot of phsi holding `lit`, and its
+// binding recorded for the rewrite after the body (ph_nst_rw)
+void ph_nst_decl(uptr d, i64 lit) {
+    i64 off = ph_nst_add(lit);
+    ph_var_bind(d, PT_INT);
+    if (!ph_nstv) { ph_nstv = xalloc(PH_MAXVAR * 8); ph_nstx = xalloc(PH_MAXVAR * 8); }
+    if (ph_nstn < PH_MAXVAR) {
+        st64(ph_nstv + ph_nstn * 8, ph_mangle(d, "v_"));
+        st64(ph_nstx + ph_nstn * 8, off);
+        ph_nstn = ph_nstn + 1;
+    }
+}
+
+// After the body: every read of a native static is ld64 of its slot and every
+// assignment a st64 into it -- no local copy, so a re-entrant call that writes
+// the static is seen at once, as with php's own.
+i64 ph_nst_addr(i64 off) {
+    i64 g = node_new(N_IDENT, ph_tline, ph_tfile);
+    set_nd_name(g, "phsi");
+    set_nd_type(g, TY_UPTR);
+    return ph_bin(ph_tok("+", 1), g, ph_int(off), TY_UPTR);
+}
+void ph_nst_rw(i64 s, uptr v, i64 off) {
+    loop {
+        if (!s) break;
+        ph_nst_rw(nd_a(s), v, off);
+        ph_nst_rw(nd_b(s), v, off);
+        ph_nst_rw(nd_c(s), v, off);
+        ph_nst_rw(nd_d(s), v, off);
+        i64 k = nd_kind(s);
+        if ((k == N_IDENT || k == N_ASSIGN) && str_eq(nd_name(s), v)) {
+            i64 nx = nd_next(s);
+            i64 r = 0;
+            if (k == N_IDENT) r = ph_quiet("ld64", 1, ph_nst_addr(off), 0, 0, 0, TY_I64);
+            if (k == N_ASSIGN) {
+                r = node_new(N_EXPRSTMT, ph_tline, ph_tfile);
+                set_nd_a(r, ph_quiet("st64", 2, ph_nst_addr(off), nd_a(s), 0, 0, TY_VOID));
+            }
+            node_assign(s, r);
+            set_nd_next(s, nx);
+        }
+        s = nd_next(s);
+    }
+}
+
 // Called with the parameter list's `(` as the current token.
 void ph_opt_scan() {
     ph_optok = 0;
     ph_optbad = 0;
+    ph_nstok = 0;
+    ph_nstrhs = 0;
     uptr src = p_cp();
     i64 len = p_src_end() - src;
     if (len <= 0) return;
@@ -244,6 +477,7 @@ void ph_opt_scan() {
         v2 = v2 + 1;
     }
     st64(ph_optbad + a * 8, 0);
+    ph_nst_scan();
     ph_optok = 1;
 }
 
@@ -326,6 +560,7 @@ i64 ph_function() {
     st64(ph_frr + fi * 8, retref);
 
     ph_opt_scan();                                // which ?int parameters stay native
+    i64 sns = ph_nstn;                             // this body's native statics follow the outer's
     ph_want("(", 1, "expected ( in a php function");
     uptr save = ph_scope_save();
     i64 scp = ph_ncp;
@@ -600,6 +835,12 @@ i64 ph_function() {
         }
         oj = oj + 1;
     }
+    oj = sns;
+    loop { if (oj >= ph_nstn) break; ph_nst_rw(nd_a(body), ld64(ph_nstv + oj * 8), ld64(ph_nstx + oj * 8)); oj = oj + 1; }
+    // the proofs were this body's: a method, a closure or the top level
+    // lowered after it must not read them
+    ph_optok = 0;
+    ph_nstn = sns;
     pkx_names = spk;
     pkx_fixed = spf;
     ph_in_try = sit;
@@ -731,7 +972,11 @@ i64 ph_function() {
     i64 kd = 0;
     loop {
         if (kd >= np) break;
-        if (ld64(ph_fpd + (fi * PH_MAXP + kd) * 8)) inl = 0;
+        // a default makes a copy wrong only when the CALLEE fills it from a
+        // missing argument; a native ?int / `int $x = <literal>` is always
+        // passed as its value + flag pair (src/builtin.mc), and any fill is in
+        // the body that is copied
+        if (ld64(ph_fpd + (fi * PH_MAXP + kd) * 8) && !ld64(ph_fopt + (fi * PH_MAXP + kd) * 8)) inl = 0;
         kd = kd + 1;
     }
     ph_inl_fn(f, inl);

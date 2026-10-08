@@ -638,6 +638,22 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
         loop {
             if (k >= np) break;
             i64 pk = ld64(ph_fpt + (fi * PH_MAXP + k) * 8);
+            // a native ?int (src/decl.mc): every argument was passed, so its
+            // value and flag are read call-free (ph_ext_optval/optflag) once
+            // the tag is an int -- or null, for `?int` (fopt 1) but not for a
+            // plain `int $x = 5` (fopt 2), which php refuses a null
+            i64 fo = ld64(ph_fopt + (fi * PH_MAXP + k) * 8);
+            if (fo && pk == PT_INT) {
+                i64 ty0 = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
+                i64 ok0 = ph_bin(ph_tok("==", 2), ty0, ph_int(4), TY_U8);
+                if (fo == 1) {
+                    i64 ty1 = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
+                    ok0 = ph_bin(ph_tok("||", 2), ok0, ph_bin(ph_tok("==", 2), ty1, ph_int(1), TY_U8), TY_U8);
+                }
+                cond = ph_bin(ph_tok("&&", 2), cond, ok0, TY_U8);
+                k = k + 1;
+                continue;
+            }
             i64 tag = 0;
             if (pk == PT_INT) tag = 4;                    // IS_LONG
             if (pk == PT_STRING) tag = 6;                 // IS_STRING

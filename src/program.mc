@@ -14,6 +14,7 @@ void ph_program() {
     ph_entry = ph_absfile(fl);
     ph_fn_ret = PT_VOID;
     ph_fn_retref = 0;
+    ph_nst_init(fl, line);                         // the native statics' slots (src/decl.mc)
     ph_sync();
     // `<?=` opens a file too, and it is an ECHO: leave it for the statement
     // loop below, which takes the echo branch on it

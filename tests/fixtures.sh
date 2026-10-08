@@ -217,6 +217,20 @@ else
     echo "  FAIL  strict fold: pure_cmp kept $sfp php_zv_identical call(s)"
     fail=1
 fi
+# g/148's native statics: every nst_* function keeps its static in a slot of
+# phsi (read and written with ld64/st64, no php_static), every zst_* one keeps
+# the zval static (src/decl.mc ph_nst_scan)
+"$MCPHP_BIN" --dump-ast $P/g/148-native-static.php > "$tmp/ns.ast" 2>&1
+nsn=$(grep -c '^FUNC.* name=f_nst_' "$tmp/ns.ast")
+nsz=$(grep -c '^FUNC.* name=f_zst_' "$tmp/ns.ast")
+nsa=$(awk '/^FUNC/ { f = ($NF ~ /name=f_nst_/); s = 0; p = 0 } f && /name=phsi$/ { if (!s) { n++; s = 1 } } f && /name=php_static$/ { b++ } END { print n + 0, b + 0 }' "$tmp/ns.ast")
+nsb=$(awk '/^FUNC/ { f = ($NF ~ /name=f_zst_/); s = 0 } f && /name=php_static$/ { if (!s) { n++; s = 1 } } END { print n + 0 }' "$tmp/ns.ast")
+if [ "$nsn" -gt 0 ] && [ "$nsa" = "$nsn 0" ] && [ "$nsz" -gt 0 ] && [ "$nsb" = "$nsz" ]; then
+    echo "  native statics: $nsn / $nsn in phsi in g/148, $nsb / $nsz kept as a zval"
+else
+    echo "  FAIL  native statics: g/148 nst_* in phsi / php_static: $nsa of $nsn; zst_* zval $nsb of $nsz"
+    fail=1
+fi
 # g/128's globals: every top-level name some function declares `global` is
 # bound to its table entry ONCE, as the top level's first statements, and
 # nowhere else -- not per read, not inside the loop (src/vars.mc ph_gtop_bind)

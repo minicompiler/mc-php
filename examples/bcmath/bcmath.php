@@ -33,16 +33,20 @@
 
 // ---- the default scale (bcscale), per request -------------------------------
 // bcmath keeps one default scale per request; a function called without a
-// scale uses it, and it starts at 0. `global` persists across calls in one
-// request (tests/g/128), and an entry no one set reads back unset -> 0.
-function _bc_defscale(): int {
-    global $__bc_scale;
-    return isset($__bc_scale) ? $__bc_scale : 0;
+// scale uses it, and it starts at 0. One function owns it, as a `static`: it
+// persists across calls in one request, like php's BCG(bc_precision), and is
+// one slot -- not a `global`'s lookup by name on every call. $set < 0 reads
+// it; otherwise it is replaced. Either way the old value comes back.
+function _bc_dscale(int $set): int {
+    static $s = 0;
+    $o = $s;
+    if ($set >= 0) { $s = $set; }
+    return $o;
 }
 
 // resolve a function's scale argument: null -> the default; otherwise 0..INT_MAX
 function _bc_scaleof(?int $scale, string $fn, int $argno): int {
-    if ($scale === null) { return _bc_defscale(); }
+    if ($scale === null) { return _bc_dscale(-1); }
     if ($scale < 0 || $scale > 2147483647) {
         throw new ValueError("$fn(): Argument #$argno (\$scale) must be between 0 and 2147483647");
     }
@@ -532,15 +536,11 @@ function bc_comp(string $num1, string $num2, ?int $scale = null): int {
 // (tests/ext/threads/bcscale.php, tests/ext.sh step 20d). So no lock: only the
 // request's own thread ever writes it.
 function bc_scale(?int $scale = null): int {
-    global $__bc_scale;
-    $old = isset($__bc_scale) ? $__bc_scale : 0;
-    if ($scale !== null) {
-        if ($scale < 0 || $scale > 2147483647) {
-            throw new ValueError("bc_scale(): Argument #1 (\$scale) must be between 0 and 2147483647");
-        }
-        $__bc_scale = $scale;
+    if ($scale === null) { return _bc_dscale(-1); }
+    if ($scale < 0 || $scale > 2147483647) {
+        throw new ValueError("bc_scale(): Argument #1 (\$scale) must be between 0 and 2147483647");
     }
-    return $old;
+    return _bc_dscale($scale);
 }
 
 // ---- floor / ceil -----------------------------------------------------------

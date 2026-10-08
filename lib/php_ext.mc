@@ -658,6 +658,11 @@ void phx_ret_str(uptr rv, uptr s) {
 
 i64  phx_mark;                      // the arena's top when MINIT ended
 uptr phx_snap;                      // and a copy of the arena below it
+// The native statics (src/decl.mc: `phsi`, `phsin` slots, generated in every
+// module) as MINIT left them: a request writes them in place, and its end puts
+// them back, as php resets a function's statics per request. A ZTS module's
+// copy is per php thread and reset by phz_statics; this one is the NTS road.
+uptr phx_nsnap;
 
 void phx_grow() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 nc = ld64(phT + PHT_phx_cc) * 2 + 256;
@@ -782,6 +787,8 @@ void phx_snapshot() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     phx_mark = ld64(phT + PHT_ph_top);
     phx_snap = php_alloc(phx_mark + 8);
     phx_copy(phx_snap, ph_heap, phx_mark);
+    phx_nsnap = php_alloc(phsin * 8 + 8);
+    phx_copy(phx_nsnap, phsi, phsin * 8);
     php_roots(1);
     // a sync object made from here on belongs to the request that makes it
     ph_syown = 1;
@@ -846,6 +853,7 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) { uptr phT = ph_tcur; if (!phT) phT = ph_
     if (ld64(phT + PHT_ph_loop)) { ph_loop_destroy(ld64(phT + PHT_ph_loop)); st64(phT + PHT_ph_loop, 0); }
     php_flush();
     php_request_reset();
+    if (phx_nsnap) phx_copy(phsi, phx_nsnap, phsin * 8);
     // a userland function a call site cached is gone with the request
     st64(phT + PHT_phx_gen, ld64(phT + PHT_phx_gen) + 1);
     phx_zexc_drop();

@@ -76,6 +76,7 @@ function bench_each(): void {
         'floor'  => fn() => bc_floor('123456.78'),
         'ceil'   => fn() => bc_ceil('123456.78'),
         'round'  => fn() => bc_round('123456.785', 2),
+        'scale'  => fn() => bc_scale(2),
     ];
     foreach ($fns as $name => $op) {
         $ms = $best(function () use ($op, $reps) { for ($i = 0; $i < $reps; $i++) { $op(); } });

@@ -1532,8 +1532,20 @@ i64 ph_stmt_1() {
             ph_next();
             uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
             ph_next();
+            i64 iv = 0;
+            i64 ivt = PT_NULL;
+            if (ph_accept("=", 1)) { iv = ph_expr(0); ivt = ph_ety; }
+            // proved to hold only ints (src/decl.mc ph_nst_scan): a slot of
+            // phsi, no zval and no call -- not in a `function &f()`, whose
+            // `return $x` hands out a reference to the static itself
+            if (iv && nd_kind(iv) == N_INT && ivt == PT_INT && !ph_fn_retref
+                && ph_nst_ok(d) && ph_var_find(d) < 0 && ph_nst_rhs_ok(d)) {
+                ph_nst_decl(d, nd_val(iv));
+                if (!ph_accept(",", 1)) break;
+                continue;
+            }
             i64 init = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
-            if (ph_accept("=", 1)) { i64 iv = ph_expr(0); init = ph_to_mixed(iv, ph_ety); }
+            if (iv) init = ph_to_mixed(iv, ivt);
             ph_nonce = ph_nonce + 1;
             uptr sg = p_cat("phst_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
             i64 gn = node_new(N_GLOBAL, line, fl);

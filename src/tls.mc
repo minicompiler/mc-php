@@ -65,7 +65,7 @@ i64 ph_tza_is(uptr n) {
     if (ld8(n) != 112 || ld8(n + 1) != 104) return 0;                     // "ph"
     if (ld8(n + 2) == 115 && ld8(n + 3) == 116 && ld8(n + 4) == 95) return 1;   // "phst_"
     if (ld8(n + 2) == 102 && ld8(n + 3) == 95) return 1;                   // "phf_"
-    return 0;
+    return str_eq(n, "phsi");                     // the native statics (src/decl.mc)
 }
 i64 ph_tza_find(uptr n) {
     i64 i = 0;
@@ -346,7 +346,21 @@ i64 ph_tza_emit(i64 at) {
             t2 = s;
             k = k + 1;
         }
-        if (ld8(nm + 2) == 115) {                                         // phst_
+        // phsi, the native statics: each request starts from MINIT's words
+        if (str_eq(nm, "phsi")) {
+            i64 w2 = 0;
+            loop {
+                if (w2 >= ld64(ph_tza_words + i * 8)) break;
+                i64 dst2 = ph_tz_add(at, ph_tz_id(at, "a", TY_UPTR), ph_tz_int(at, off + w2 * 8));
+                i64 old2 = ph_tz_call(at, "ld64", ph_tz_add(at, ph_tz_id(at, "snap", TY_UPTR), ph_tz_int(at, off + w2 * 8)), 0, TY_I64);
+                i64 s4 = ph_tz_stmt(at, ph_tz_call(at, "st64", dst2, old2, TY_VOID));
+                if (t3) set_nd_next(t3, s4);
+                if (!t3) h3 = s4;
+                t3 = s4;
+                w2 = w2 + 1;
+            }
+        }
+        if (ld8(nm + 2) == 115 && ld8(nm + 3) == 116) {                  // phst_
             i64 dst = ph_tz_add(at, ph_tz_id(at, "a", TY_UPTR), ph_tz_int(at, off));
             i64 old = ph_tz_call(at, "ld64", ph_tz_add(at, ph_tz_id(at, "snap", TY_UPTR), ph_tz_int(at, off)), 0, TY_I64);
             i64 cp = ph_tz_call(at, "phz_zref", old, 0, TY_UPTR);
