@@ -1404,6 +1404,13 @@ i64 rp_bump(uptr name, uptr from, i64 k, i64 line, uptr fl) {
     set_nd_a(as, ad);
     return as;
 }
+i64 vw_callx(uptr name, i64 args, i64 line, uptr fl) {
+    i64 c = node_new(N_CALL, line, fl);
+    set_nd_name(c, name);
+    set_nd_type(c, TY_I64);
+    set_nd_a(c, args);
+    return c;
+}
 // The three stores of a piece: a substr() is its own window, anything else
 // whole. The first store's piece is the array's first; every later one goes
 // where rp_ptr points and moves it on, so the rope holds only the pieces
@@ -1434,12 +1441,43 @@ i64 rp_piece(i64 y, i64 line, uptr fl) {
         set_nd_next(st, 0);
         set_nd_next(ln, 0);
     }
+    // substr() of a window local (ph_view_fn): the window's string, the
+    // start and length stored as given, then made the window's own --
+    // php_substr_v's bounds -- with the entry's two words as the temporaries
+    i64 fx = 0;
+    if (nd_kind(y) == N_CALL && str_eq(nd_name(y), "php_substr_v")) {
+        s = nd_a(y);
+        i64 vs = nd_next(s);
+        i64 vl = nd_next(vs);
+        st = nd_next(vl);
+        i64 l2 = nd_next(st);
+        i64 has = nd_next(l2);
+        set_nd_next(s, 0);
+        set_nd_next(vs, 0);
+        set_nd_next(vl, 0);
+        set_nd_next(st, 0);
+        set_nd_next(l2, 0);
+        if (!(nd_kind(has) == N_INT && nd_val(has) == 0)) ln = l2;
+        // php_rope_v(entry, vs, vl): the entry made the window's own
+        i64 ad = node_new(N_BINARY, line, fl);
+        set_nd_op(ad, ph_tok("+", 1));
+        set_nd_type(ad, TY_UPTR);
+        set_nd_a(ad, rp_id(base, TY_UPTR, line, fl));
+        set_nd_b(ad, rp_int(0, line, fl));
+        set_nd_next(ad, vs);
+        set_nd_next(vs, vl);
+        i64 cv = vw_callx("php_rope_v", ad, line, fl);
+        set_nd_type(cv, TY_VOID);
+        fx = node_new(N_EXPRSTMT, line, fl);
+        set_nd_a(fx, cv);
+    }
     set_nd_next(s, 0);
     i64 a = rp_stb(base, 0, s, line, fl);
     i64 b = rp_stb(base, 8, st, line, fl);
     i64 c = rp_stb(base, 16, ln, line, fl);
     set_nd_next(a, b);
     set_nd_next(b, c);
+    if (fx) { set_nd_next(c, fx); c = phi_last(fx); }
     if (base == rp_arr) set_nd_next(c, rp_bump(rp_ptr, rp_arr, 24, line, fl));
     else set_nd_next(c, rp_bump(rp_ptr, rp_ptr, 24, line, fl));
     return a;
@@ -1567,6 +1605,8 @@ uptr vw_s;
 uptr vw_l;
 i64  vw_nsub;                       // substr() stores it saves
 i64  vw_noth;                       // reads it would make a string for
+i64  vw_nst;                        // other stores: the whole of a string
+i64  vw_nvc;                        // a window made a string, copied
 i64  vw_bad;
 i64  vw_ln;
 uptr vw_fl;
@@ -1629,7 +1669,13 @@ void vw_cnt(i64 s) {
                 vw_nsub = vw_nsub + 1;
                 i64 b = nd_a(nd_a(s));
                 vw_cnt(nd_next(b));               // st, ln: may read the local
-            } else vw_cnt(nd_a(s));
+            } else {
+                // a window made a string keeps its window; anything else
+                // makes the local the whole of a string
+                if (ph_opt_is(nd_a(s), "php_vstr")) vw_nvc = vw_nvc + 1;
+                else vw_nst = vw_nst + 1;
+                vw_cnt(nd_a(s));
+            }
         } else if (k == N_CALL && (vw_is_len(s) || vw_is_winread(s))) {
             if (vw_is_winread(s)) vw_cnt(nd_next(nd_a(s)));
         } else if (k == N_CALL && (str_eq(nd_name(s), "php_str_concat") || str_eq(nd_name(s), "php_str_cat3")
@@ -1651,6 +1697,175 @@ void vw_cnt1(i64 n) {
     set_nd_next(n, 0);
     vw_cnt(n);
     set_nd_next(n, nx);
+}
+
+// ---- the count along every path
+// A read a window cannot serve builds a string only when the window is a part
+// of its string: php_vstr of a whole string is that string. So what matters
+// is not how many cuts and reads the function has, but, along each path, how
+// many reads follow a cut against how many cuts there are. The walk keeps,
+// for the paths that reach the current statement, the most and the least of
+// (strings built - strings saved), separately for the paths where the local
+// may now be a part (a cut, or a window copied) and where it is a whole
+// string. A function has no loop here, so a path is a choice at each `if`;
+// a `return` ends one, and a raise's unwinding is not counted. The local is
+// taken when no path builds more than it saves and some path that runs to
+// the function's own end saves: a saving only on an early `return` from
+// inside an `if` -- a special case -- does not pay for the window's own
+// bookkeeping on the path that is taken.
+#define VW_NEG (0 - 1000000)
+#define VW_POS 1000000
+i64 vw_xw;                          // the most, whole / part
+i64 vw_xc;
+i64 vw_mw;                          // the least, whole / part
+i64 vw_mc;
+i64 vw_xr;                          // over the paths a return ended
+i64 vw_mr;
+i64 vw_ifd;                         // inside how many `if`s
+
+i64 vw_max(i64 a, i64 b) { if (a > b) return a; return b; }
+i64 vw_min(i64 a, i64 b) { if (a < b) return a; return b; }
+
+// one statement: its reads, then its store
+void vw_step(i64 s) {
+    i64 n0 = vw_nsub;
+    i64 r0 = vw_noth;
+    i64 o0 = vw_nst;
+    i64 c0 = vw_nvc;
+    vw_cnt1(s);
+    i64 cut = vw_nsub - n0;
+    i64 oth = vw_nst - o0;
+    i64 vc = vw_nvc - c0;
+    vw_xc = vw_xc + vw_noth - r0;
+    vw_mc = vw_mc + vw_noth - r0;
+    if (cut + oth + vc > 1) { vw_bad = 1; return; }
+    i64 x = vw_max(vw_xw, vw_xc);
+    i64 m = vw_min(vw_mw, vw_mc);
+    if (cut) { vw_xc = x - 1; vw_mc = m - 1; vw_xw = VW_NEG; vw_mw = VW_POS; }
+    if (vc) { vw_xc = x; vw_mc = m; vw_xw = VW_NEG; vw_mw = VW_POS; }
+    if (oth) { vw_xw = x; vw_mw = m; vw_xc = VW_NEG; vw_mc = VW_POS; }
+}
+
+i64 phr_is_check(i64 s);
+i64 vw_is_exc(i64 c) {
+    if (nd_kind(c) != N_UNARY) return 0;
+    c = nd_a(c);
+    if (nd_kind(c) != N_UNARY) return 0;
+    c = nd_a(c);
+    return nd_kind(c) == N_IDENT && str_eq(nd_name(c), "ph_exc");
+}
+void vw_flow(i64 s) {
+    loop {
+        if (!s || vw_bad) break;
+        i64 k = nd_kind(s);
+        // a raise's unwinding is not a path the count is about
+        if (phr_is_check(s)) { s = nd_next(s); continue; }
+        // an inline copy's check: `if (!!ph_exc) <set its answer> else <rest>`
+        if (k == N_IF && vw_is_exc(nd_a(s))) { vw_flow(nd_c(s)); s = nd_next(s); continue; }
+        if (k == N_BLOCK) vw_flow(nd_a(s));
+        else if (k == N_IF) {
+            vw_step(nd_a(s));
+            i64 xw = vw_xw;
+            i64 xc = vw_xc;
+            i64 mw = vw_mw;
+            i64 mc = vw_mc;
+            vw_ifd = vw_ifd + 1;
+            vw_flow(nd_b(s));
+            i64 bxw = vw_xw;
+            i64 bxc = vw_xc;
+            i64 bmw = vw_mw;
+            i64 bmc = vw_mc;
+            vw_xw = xw;
+            vw_xc = xc;
+            vw_mw = mw;
+            vw_mc = mc;
+            vw_flow(nd_c(s));
+            vw_ifd = vw_ifd - 1;
+            vw_xw = vw_max(vw_xw, bxw);
+            vw_xc = vw_max(vw_xc, bxc);
+            vw_mw = vw_min(vw_mw, bmw);
+            vw_mc = vw_min(vw_mc, bmc);
+        } else if (k == N_RETURN) {
+            if (nd_a(s)) vw_step(nd_a(s));
+            vw_xr = vw_max(vw_xr, vw_max(vw_xw, vw_xc));
+            if (!vw_ifd) vw_mr = vw_min(vw_mr, vw_min(vw_mw, vw_mc));
+            vw_xw = VW_NEG;
+            vw_xc = VW_NEG;
+            vw_mw = VW_POS;
+            vw_mc = VW_POS;
+        } else vw_step(s);
+        s = nd_next(s);
+    }
+}
+
+// ---- `$v = c ? A : B` stores the local in each branch
+// expr.mc makes a conditional a temporary set in each branch, then copies it:
+// `if (c) phq = A; else phq = B; $v = phq;`. Where the copy is the
+// temporary's only read and the two are strings, each branch stores the
+// local itself -- a cut in a branch is then the local's own.
+i64 ph_ext_pfx(uptr s, uptr p);
+i64 vw_nread(i64 n, uptr name) {
+    i64 c = 0;
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_IDENT && str_eq(nd_name(n), name)) c = c + 1;
+        c = c + vw_nread(nd_a(n), name) + vw_nread(nd_b(n), name) + vw_nread(nd_c(n), name) + vw_nread(nd_d(n), name);
+        n = nd_next(n);
+    }
+    return c;
+}
+void vw_rename(i64 n, uptr from, uptr to) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_ASSIGN && str_eq(nd_name(n), from)) set_nd_name(n, to);
+        vw_rename(nd_a(n), from, to);
+        vw_rename(nd_b(n), from, to);
+        vw_rename(nd_c(n), from, to);
+        vw_rename(nd_d(n), from, to);
+        n = nd_next(n);
+    }
+}
+// does a branch cut the temporary (`t = substr(...)`)? Only then is the fold
+// worth it: a conditional the local does not cut stays one store, which is
+// what src/opt.mc's rope wants of its first.
+i64 vw_hascut(i64 n, uptr t) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_ASSIGN && str_eq(nd_name(n), t) && ph_opt_is(nd_a(n), "php_substr")) return 1;
+        if (vw_hascut(nd_a(n), t) || vw_hascut(nd_b(n), t) || vw_hascut(nd_c(n), t) || vw_hascut(nd_d(n), t)) return 1;
+        n = nd_next(n);
+    }
+    return 0;
+}
+i64 vw_strvar(i64 body, uptr name) {
+    i64 v = nd_a(body);
+    loop {
+        if (!v || nd_kind(v) != N_VAR) break;
+        if (str_eq(nd_name(v), name)) return nd_type(v) == ty_pstr;
+        v = nd_next(v);
+    }
+    return 0;
+}
+void vw_fold(i64 body, i64 s) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        i64 a = nd_next(s);
+        if (k == N_IF && a && nd_kind(a) == N_ASSIGN && nd_kind(nd_a(a)) == N_IDENT) {
+            uptr t = nd_name(nd_a(a));
+            uptr v = nd_name(a);
+            if (ph_ext_pfx(t, "phq_") && vw_strvar(body, t) && vw_strvar(body, v)
+                && vw_nread(nd_a(body), t) == 1 && (vw_hascut(nd_b(s), t) || vw_hascut(nd_c(s), t))) {
+                vw_rename(nd_b(s), t, v);
+                vw_rename(nd_c(s), t, v);
+                set_nd_next(s, nd_next(a));
+                a = nd_next(s);
+            }
+        }
+        if (k == N_BLOCK) vw_fold(body, nd_a(s));
+        if (k == N_IF) { vw_fold(body, nd_b(s)); vw_fold(body, nd_c(s)); }
+        s = a;
+    }
 }
 
 // ---- the rewrite
@@ -1783,6 +1998,7 @@ void ph_view_fn(i64 f) {
     i64 body = nd_b(f);
     if (!body) return;
     if (ph_rc_has_loop(nd_a(body))) return;
+    vw_fold(body, nd_a(body));
     i64 v = nd_a(body);
     loop {
         if (!v || nd_kind(v) != N_VAR) break;
@@ -1791,9 +2007,20 @@ void ph_view_fn(i64 f) {
             vw_v = nd_name(v);
             vw_nsub = 0;
             vw_noth = 0;
+            vw_nst = 0;
+            vw_nvc = 0;
             vw_bad = 0;
-            vw_cnt(nd_a(body));
-            if (!vw_bad && vw_noth < vw_nsub) {
+            vw_xw = 0;
+            vw_xc = VW_NEG;
+            vw_mw = 0;
+            vw_mc = VW_POS;
+            vw_xr = VW_NEG;
+            vw_mr = VW_POS;
+            vw_ifd = 0;
+            vw_flow(nd_a(body));
+            i64 most = vw_max(vw_xr, vw_max(vw_xw, vw_xc));
+            i64 least = vw_min(vw_mr, vw_min(vw_mw, vw_mc));
+            if (!vw_bad && vw_nsub > 0 && most <= 0 && least < 0) {
                 vw_ln = nd_line(v);
                 vw_fl = nd_file(v);
                 vw_b = p_cat("phvw_b_", vw_v, 0, cstrlen(vw_v));
@@ -1860,6 +2087,7 @@ void phr_init() {
     phr_add("php_str_sets_own");
     phr_add("php_str_setb_own");
     phr_add("php_str_setb_f");
+    phr_add("php_str_setb_n");
     phr_add("php_str_byte_c");
     phr_add("php_str_byte_d");
     phr_add("php_pk_get_c");
@@ -1874,6 +2102,7 @@ void phr_init() {
     phr_add("phx_enter");
     phr_add("phx_leave");
     phr_add("phx_zarg_rov");
+    phr_add("php_rope_v");
 }
 
 // ---- the position and the unwinding check go where a call can raise ---------

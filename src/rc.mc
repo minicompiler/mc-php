@@ -314,6 +314,8 @@ i64 ph_rc_is_param(uptr name);
 uptr ph_rc_fbs;
 i64  ph_rc_nfb;
 i64  ph_rc_fb_bad;
+i64  ph_rc_fb_nc;                   // the function does not loop: textual order is run order
+i64  ph_rc_fb_esc;                  // the buffer was handed on: no byte write may follow
 
 i64 ph_rc_is_fb(uptr name) {
     i64 i = 0;
@@ -355,7 +357,12 @@ void ph_rc_fb_walk(i64 s, uptr name) {
         i64 k = nd_kind(s);
         if (k == N_RETURN) { s = nd_next(s); continue; }
         if (k == N_ASSIGN && ph_rc_pfx(nd_name(s), "phrt_") && ph_rc_fb_retval(s)) { s = nd_next(s); continue; }
-        if (k == N_IDENT && str_eq(nd_name(s), name)) ph_rc_fb_bad = 1;
+        if (k == N_IDENT && str_eq(nd_name(s), name)) {
+            // in a function that does not loop, a read that hands the
+            // buffer on is fine once no byte is written after it
+            if (ph_rc_fb_nc) ph_rc_fb_esc = 1;
+            else ph_rc_fb_bad = 1;
+        }
         i64 skip = 0;
         if (k == N_ASSIGN && str_eq(nd_name(s), name)) {
             i64 v = nd_a(s);
@@ -364,6 +371,7 @@ void ph_rc_fb_walk(i64 s, uptr name) {
             if (!(nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_repeat"))) {
                 if (nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_setb") && ph_rc_arg0_is(v, name)) {
                     ph_rc_fb_walk(nd_next(nd_a(v)), name);
+                    if (ph_rc_fb_esc) ph_rc_fb_bad = 1;
                     skip = 1;
                 } else ph_rc_fb_bad = 1;
             }
@@ -387,6 +395,36 @@ void ph_rc_fb_walk(i64 s, uptr name) {
     }
 }
 
+// The same proof for a function that does not loop (no slots, nothing
+// counted): every statement runs at most once and in the order it is
+// written, so a buffer may also be handed on -- passed to a call, copied --
+// as long as every byte write into it comes before the first such read. Up
+// to there nobody else holds it, and after it nothing writes it. The string
+// is the pool's, borrowed, so past its bound a write is php_str_setb's copy
+// (php_str_setb_n), never the counted slot's growth.
+void ph_rc_fb_scan_nc(i64 body) {
+    ph_rc_nfb = 0;
+    i64 n = 0;
+    i64 v = body;
+    loop { if (!v || nd_kind(v) != N_VAR) break; n = n + 1; v = nd_next(v); }
+    if (!n) return;
+    ph_rc_fbs = xalloc(n * 8 + 8);
+    ph_rc_fb_nc = 1;
+    v = body;
+    loop {
+        if (!v || nd_kind(v) != N_VAR) break;
+        uptr nm = nd_name(v);
+        if (nd_type(v) == ty_pstr && !nd_a(v) && ph_rc_assigned(body, nm)) {
+            ph_rc_fb_bad = 0;
+            ph_rc_fb_esc = 0;
+            ph_rc_fb_walk(body, nm);
+            if (!ph_rc_fb_bad) { st64(ph_rc_fbs + ph_rc_nfb * 8, nm); ph_rc_nfb = ph_rc_nfb + 1; }
+        }
+        v = nd_next(v);
+    }
+    ph_rc_fb_nc = 0;
+}
+
 void ph_rc_fb_scan(i64 body) {
     ph_rc_nfb = 0;
     if (!ph_rc_nslot) return;
@@ -396,6 +434,7 @@ void ph_rc_fb_scan(i64 body) {
         if (i >= ph_rc_nslot) break;
         uptr nm = ld64(ph_rc_slots + i * 8);
         ph_rc_fb_bad = ph_rc_is_param(nm) || ph_rc_assigned(body, nm) == 0;
+        ph_rc_fb_esc = 0;
         if (!ph_rc_fb_bad) ph_rc_fb_walk(body, nm);
         if (!ph_rc_fb_bad) { st64(ph_rc_fbs + ph_rc_nfb * 8, nm); ph_rc_nfb = ph_rc_nfb + 1; }
         i = i + 1;
@@ -513,6 +552,13 @@ i64 ph_rc_one(i64 s) {
             set_nd_next(z, nd_a(s));
             set_nd_a(s, ph_rc_call("php_sset", z, ty_pstr));
         }
+        return s;
+    }
+    // a fresh buffer of a function that does not loop (ph_rc_fb_scan_nc)
+    if (k == N_ASSIGN && !ph_rc_counting && !ph_rc_is_slot(nd_name(s)) && ph_rc_is_fb(nd_name(s))) {
+        i64 v = nd_a(s);
+        if (ph_rc_is_call(v, "php_str_setb", nd_name(s))) set_nd_name(v, "php_str_setb_n");
+        else if (nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_repeat")) set_nd_name(v, "php_str_repeat_f");
         return s;
     }
     if (k == N_ASSIGN && ph_rc_is_slot(nd_name(s))) {
@@ -809,6 +855,7 @@ void ph_rc_fn(i64 f) {
     }
     if (ph_rc_counting) ph_rc_scan_vars(nd_a(body));
     ph_rc_fb_scan(nd_a(body));
+    if (!ph_rc_counting) ph_rc_fb_scan_nc(nd_a(body));
     // the string parameters the body assigns are slots too; the ones it never
     // assigns stay borrowed
     i64 entry = 0;

@@ -603,7 +603,9 @@ function bc_round(string $num, int $precision = 0): string {
     }
     $kept = str_pad(substr($nval, 0, $rlen), $nlen + $rsc, '0', STR_PAD_RIGHT);
     if ($up) {
-        $one = str_repeat('0', $rlen - 1) . '1' . str_repeat('0', $nlen + $rsc - $rlen);
+        // a one at the last kept place: zeros, then the digit written in place
+        $one = str_repeat('0', $nlen + $rsc);
+        $one[$rlen - 1] = '1';
         $kept = _bc_uadd($kept, $one);
         return _bc_fmt($neg, $kept, $rsc, $rsc);
     }

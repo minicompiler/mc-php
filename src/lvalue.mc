@@ -338,6 +338,9 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
                 set_nd_type(cv, TY_I64);
                 return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_c3("php_str_setb", sb, ix, cv, ty_pstr)));
             }
+            // a one-byte literal is its byte
+            if (cvt == PT_STRING && ph_lit_len(cv) == 1)
+                return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_c3("php_str_setb", sb, ix, ph_int(ph_lit_byte(cv)), ty_pstr)));
             if (cvt == PT_STRING)
                 return ph_wrap(ph_set(ph_mangle(d, "v_"), ph_c3("php_str_sets", sb, ix, cv, ty_pstr)));
             return ph_wrap(ph_set(ph_mangle(d, "v_"),

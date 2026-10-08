@@ -472,11 +472,14 @@ uptr php_str_concat(uptr a, uptr b) {
 // start, length) window with php's substr bounds, 0 for an append that did
 // not run -- one allocation of the final length, one copy a piece
 uptr php_str_rope(uptr r, i64 n) {
+    // a pointer walk with few locals, so every one of them is a register
+    // (mc gives a function ten): the entries are read twice, once for the
+    // length and once to copy
+    uptr e = r + n * 24;
+    uptr p = r;
     i64 t = 0;
-    i64 i = 0;
     loop {
-        if (i >= n) break;
-        uptr p = r + i * 24;
+        if (p >= e) break;
         uptr s = ld64(p);
         if (s) {
             i64 st = ld64(p + 8);
@@ -484,29 +487,53 @@ uptr php_str_rope(uptr r, i64 n) {
             i64 sl = ld64(s + 16);
             // a window inside its string, the common case: no php_win call
             if ((u64) st <= (u64) sl && ln >= 0) {
-                if (ln > sl - st) ln = sl - st;
-            } else ln = php_win(s, st, ln, p + 8);
-            st64(p + 16, ln);
+                if (ln > sl - st) { ln = sl - st; st64(p + 16, ln); }
+            } else {
+                ln = php_win(s, st, ln, p + 8);
+                st64(p + 16, ln);
+            }
             t = t + ln;
         }
-        i = i + 1;
+        p = p + 24;
     }
     uptr o = php_str_alloc(t);
     uptr d = o + ZS_HDR;
-    i = 0;
+    p = r;
     loop {
-        if (i >= n) break;
-        uptr q = r + i * 24;
-        uptr w = ld64(q);
-        if (w) {
-            i64 m = ld64(q + 16);
-            uptr f = w + ZS_HDR + ld64(q + 8);
-            php_memcpy(d, f, m);
-            d = d + m;
+        if (p >= e) break;
+        uptr s = ld64(p);
+        if (s) {
+            i64 ln = ld64(p + 16);
+            uptr f = s + ZS_HDR + ld64(p + 8);
+            // a one-byte piece -- a sign, a point -- is one store
+            if (ln == 1) st8(d, ld8(f));
+            else php_memcpy(d, f, ln);
+            d = d + ln;
         }
-        i = i + 1;
+        p = p + 24;
     }
     return o;
+}
+
+// A rope entry stored as a substr() of a window (b, vs, vl) -- the start
+// and length as written -- made the entry of b's bytes it stands for, with
+// php_substr_v's bounds: the common case (a start inside the window and a
+// length not negative) here, every other in php_rope_v_slow. The compiler
+// copies the fast half into the rope's caller (src/opt.mc, phr).
+void php_rope_v_slow(uptr p, i64 vs, i64 vl) {
+    i64 st = ld64(p + 8);
+    st64(p + 16, php_win_ln(vl, st, ld64(p + 16)));
+    st64(p + 8, vs + php_win_st(vl, st));
+}
+void php_rope_v(uptr p, i64 vs, i64 vl) {
+    i64 st = ld64(p + 8);
+    i64 ln = ld64(p + 16);
+    if ((u64) st <= (u64) vl && ln >= 0) {
+        if (ln > vl - st) st64(p + 16, vl - st);
+        st64(p + 8, vs + st);
+        return;
+    }
+    php_rope_v_slow(p, vs, vl);
 }
 
 // `a . str_repeat(c, n)` (src/opt.mc): one string of the final length. A
@@ -744,6 +771,14 @@ uptr php_str_setb_f_slow(uptr s, i64 i, i64 c) { uptr phT = ph_tcur; if (!phT) p
 uptr php_str_setb_f(uptr s, i64 i, i64 c) {
     if ((u64) i < (u64) ld64(s + 16)) { st8(s + ZS_HDR + i, c); return s; }
     return php_str_setb_f_slow(s, i, c);
+}
+
+// the same buffer in a function that does not loop (src/rc.mc's
+// ph_rc_fb_scan_nc): the string is the pool's, borrowed, so past the bound
+// it is php_str_setb's copy, a temporary like any other
+uptr php_str_setb_n(uptr s, i64 i, i64 c) {
+    if ((u64) i < (u64) ld64(s + 16)) { st8(s + ZS_HDR + i, c); return s; }
+    return php_str_setb(s, i, c);
 }
 
 // memcmp over the bytes, then the length: PHP's own strcmp ordering.
