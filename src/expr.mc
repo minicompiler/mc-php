@@ -998,6 +998,25 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
     i64 eq = 0;
     if (t == ph_tok("==", 2) || t == ph_tok("!=", 2) || t == ph_tok("<>", 2) || strict) eq = 1;
 
+    // `=== null` / `!== null`: no znull allocation and no php_zv_identical
+    // call. The null literal is PT_NULL; the other side decides. A statically
+    // non-null type is a compile-time answer (an int is never null); only a
+    // zval can be null at runtime, and then it is the type byte against IS_NULL
+    // (ld8(z + 8), what php_zv_identical against a null zval tests) in place.
+    if (strict && (lt == PT_NULL || rt == PT_NULL)) {
+        i64 nt = lt; i64 nn = lhs;                     // rt is the null literal: lhs decides
+        if (lt == PT_NULL && rt == PT_NULL) { nt = PT_NULL; }
+        if (lt == PT_NULL && rt != PT_NULL) { nt = rt; nn = rhs; }   // lhs is null: rhs decides
+        ph_ety = PT_BOOL;
+        if (nt == PT_NULL) { i64 r0 = 1; if (neg) r0 = 0; return ph_bool(r0); }  // null === null
+        if (nt != PT_MIXED) { i64 r1 = 0; if (neg) r1 = 1; return ph_bool(r1); } // a static non-null type
+        i64 a = ph_to_mixed(nn, nt);
+        i64 tag = ph_quiet("ld8", 1, ph_bin(ph_tok("+", 1), a, ph_int(8), TY_UPTR), 0, 0, 0, TY_I64);
+        i64 op = ph_tok("==", 2);
+        if (neg) op = ph_tok("!=", 2);
+        return ph_cast(TY_U8, ph_bin(op, tag, ph_int(1), TY_U8));   // IS_NULL
+    }
+
     // the one union T5 has: `strpos(...) === false`
     if (lt == PT_IFALSE && rt == PT_BOOL && eq) {
         ph_ety = PT_BOOL;
