@@ -1,0 +1,28 @@
+# bcmath -- the LINUX linker line. Everything but [linker] is
+# examples/bcmath/mcphp.toml, byte for byte: mc's [linker] is flat and has no
+# per-OS form yet (docs/mcphp-toml.md), so the second host is a second file.
+#
+#     mc-php build examples/bcmath --config examples/bcmath/mcphp.linux.toml
+#
+# and build/bcmath_port.so is what `php -d extension=...` loads.
+
+[project]
+entry = "bcmath.php"
+out = "build/bcmath_port.so"
+kind = "exe"
+opt = 1
+
+[linker]
+cmd = "ld.lld"
+args = ["-shared", "-Bsymbolic", "-o", "{out}", "{obj}"]
+
+[extension]
+name = "bcmath_port"
+version = "0.1.0"
+
+[php]
+api = 20250925
+build_id = "API20250925,NTS"
+thread_safety = "nts"
+debug = false
+checked_reads = false

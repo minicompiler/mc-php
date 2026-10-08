@@ -1,0 +1,40 @@
+# bcmath -- the WINDOWS linker line. Everything but [target], [sysroot],
+# [linker] and build_id is examples/bcmath/mcphp.toml.
+#
+#     sh tests/winsys.sh x86_64
+#     mc-php build examples/bcmath --config examples/bcmath/mcphp.windows.toml
+#
+# and build/bcmath_port.dll is what `php -d extension=...` loads. The
+# architecture is the target php's (windows.php.net ships x64/x86 only), so an
+# arm64 host cross-compiles to x86_64. Import libraries come from the names
+# tests/winsys.sh writes -- no php development pack, no Windows SDK.
+
+[project]
+entry = "bcmath.php"
+out = "build/bcmath_port.dll"
+kind = "exe"
+opt = 1
+
+[target]
+os   = "windows"
+arch = "x86_64"
+
+[sysroot]
+path = "../../build/win-x86_64"
+
+[linker]
+cmd = "lld-link"
+args = ["-dll", "-noentry", "-machine:x64", "-nodefaultlib", "-export:get_module",
+        "-out:{out}", "{obj}",
+        "{sysroot}/php8.lib", "{sysroot}/kernel32.lib", "{sysroot}/ucrtbase.lib"]
+
+[extension]
+name = "bcmath_port"
+version = "0.1.0"
+
+[php]
+api = 20250925
+build_id = "API20250925,NTS,VS17"
+thread_safety = "nts"
+debug = false
+checked_reads = false

@@ -1188,7 +1188,44 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    with a minimal `.mc` reproducer; a shrink-wrapped prologue is an mc-side optimization). Two
    compiler leaks ctype exposed were fixed on the way: `strspn` over a mixed set and the
    `global`/`static` read pin leak.
-4. **Port bcmath.**
+4. **Port bcmath -- correctness DONE, the < 2x bench NOT YET** (`examples/bcmath`):
+   php-src's `ext/bcmath` (libbcmath) written in PHP and compiled by mc-php, graded against php's
+   own built-in bcmath. Published as `bc_*` (`bc_add`..`bc_scale`, thirteen functions incl. 8.4's
+   `bc_floor`/`bc_ceil`/`bc_round`) because php refuses to redeclare an internal name. Faithful to
+   libbcmath's EXACT semantics: **TRUNCATION** at the scale (not half-even -- that is
+   `examples/decimal`), the permissive parse (`""`, `"."`, `"5."`, `".5"` all valid), the
+   per-function scale rules (`bc_mul`'s `min(scale, s1+s2)`, `bc_div`/`bc_mod` truncate toward
+   zero, `bc_mod`'s sign follows the dividend, `bc_pow`'s negative/zero exponent and `'2.0'`
+   integer check, `bc_powmod`, `bc_sqrt`'s integer-sqrt-at-scale, `bc_comp` truncating to the
+   scale before judging sign, `bc_round` HalfAwayFromZero with negative precision), the request
+   default scale (`bc_scale`), and the exact exception class and message (`DivisionByZeroError`,
+   `ValueError` "is not well-formed" / "must be between 0 and 2147483647" / "cannot have a
+   fractional part"), each confirmed against the host php 8.5. The C twin is
+   `examples/bcmath/c/bcmath.c` -- bcmath.php's algorithm function by function. Gates GREEN:
+   the `check.php` differential (module vs interpreted) **130 lines byte for byte**, the C twin
+   graded the same way; `bccheck.php` against the built-in **10511 results, 0 wrong** for the
+   module AND the twin AND interpreted; `leakmatrix.php` under the ZTS debug allocator **leak-free**
+   over every function, argument shape and error path (`tests/leaks.sh`); wired into
+   `tests/examples.sh`. No `src/*.mc` or `lib/*.mc` touched (so no CodeQL surface), and
+   `mini_compiler` untouched.
+   **The DONE bar is module/C < 2.0, and it is NOT met: per-function 2.50x-6.18x, mixed 3.64x**
+   (macos/arm64; the module is 5.37x the interpreter). The cause is one general mc-php
+   limitation, root-caused and reproduced, NOT the port's algorithm: bcmath's faithful signature
+   is `?int $scale = null` (optional, nullable; the omitted and the explicit-null cases both use
+   the request default), and mc-php lowers ANY optional/nullable parameter to a heap zval
+   (`src/decl.mc` forces `PT_MIXED` for a defaulted param so "not passed" is expressible), which
+   the extension handler then marshals per call (`phx_zarg` allocation + `php_param_coerce` +
+   `phx_chk2` + `phx_arity2`) where a required scalar is read in place. Measured exactly:
+   `examples/decimal` (required `int $scale`) is **1.80x** on the identical loan workload with the
+   current compiler; `bcmath` (`?int $scale = null`, same digit helpers) is **4.9x** on the same
+   workload -- the whole gap is the optional-parameter path. Minimal reproducer: a function
+   `f(string, string, ?int $s = null)` is **2.5x** `f(string, string, int $s)`, same body, with
+   the argument passed. There is NO source workaround (a faithful bcmath cannot drop the optional
+   nullable scale), so reaching < 2x needs a mc-php compiler change -- a nullable/optional scalar
+   parameter carried as a raw value rather than a heap zval -- which touches the parameter-lowering
+   path shared with the program road and is its own gated batch (the shape of the "call-frame
+   optimizations" that took ctype to 1.85x). `examples/bcmath/README.md` § The bench has the
+   table and the root cause.
 5. **Port json.** `ext/json` cannot be built shared at all (T1), so this port is the only way a
    json extension exists outside php's own binary.
 6. **Distribution -- Composer, Packagist, PIE. To be designed with the owner**: the owner stops

@@ -343,6 +343,99 @@ elif build "$EX" "$EX/mcphp$suf.toml" "ctype.$sx"; then
     fi
 fi
 
+# --- bcmath: php-src's ext/bcmath ported to PHP ------------------------------
+# examples/bcmath/bcmath.php reproduces ext/bcmath (libbcmath) over digit
+# strings -- EXACT bcmath semantics, which means TRUNCATION at the scale, not
+# rounding (that is examples/decimal). bcmath is loaded in this php and an
+# internal name cannot be redeclared, so the port publishes bc_* and check.php
+# is the byte-for-byte differential (module vs bcmath.php required), bccheck.php
+# the second oracle against php's own built-in bcmath, then the C twin
+# (c/bcmath.c) graded the same way and the bench whose module/C ratio is the
+# DONE bar (README.md: < 2.0). SKIPPED on Windows only: it ships a
+# mcphp.windows.toml and would build, but the C twin and bccheck need the
+# host's bcmath, which the Windows legs' setup does not guarantee.
+echo "  -- bcmath"
+EX=examples/bcmath
+bso=$rootn/$EX/build/bcmath_port.$sx
+if build "$EX" "$EX/mcphp$suf.toml" "bcmath_port.$sx"; then
+    say "built: $(wc -c < "$bso" | tr -d ' ') bytes from $EX/bcmath.php"
+    differential check.php "$EX/check.php" -d extension="$bso"
+    vis=$("$PHP" -d extension="$bso" -r '$f = get_extension_funcs("bcmath_port"); sort($f); echo implode(" ", $f);' 2>&1 | tr -d '\r')
+    if [ "$vis" = "bc_add bc_ceil bc_comp bc_div bc_floor bc_mod bc_mul bc_pow bc_powmod bc_round bc_scale bc_sqrt bc_sub" ]; then
+        say "published: the thirteen bc_* functions and none of the _bc_* helpers"
+    else
+        bad "bcmath published: want the thirteen bc_* functions, got: $vis"
+    fi
+    if "$PHP" -m | tr -d '\r' | grep -qix bcmath; then
+        if "$PHP" -d extension="$bso" "$EX/bccheck.php" > "$tmp/bc.out" 2>&1 &&
+           [ "$(tr -d '\r' < "$tmp/bc.out")" = "bcmath agrees: 10511 results, 0 wrong" ]; then
+            say "$(tr -d '\r' < "$tmp/bc.out")"
+        else
+            bad "bcmath bccheck.php:"; sed 's/^/      /' "$tmp/bc.out"
+        fi
+    else
+        skip "the bcmath cross-check: this php has no bcmath"
+    fi
+    # the C twin (c/bcmath.c): the same functions written the ordinary way,
+    # bcmath.php's algorithm function by function, graded by the same check.php
+    # and bccheck.php, and the reference the bench's module/C ratio is measured
+    # against. It needs php-config and a C compiler; without them the bench has
+    # no C column and no DONE ratio.
+    cso=
+    CC=${CC:-cc}
+    if command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; then
+        inc=$(php-config --includes)
+        if "$CC" -O2 -bundle -undefined dynamic_lookup -o "$tmp/c-bcmath.so" "$EX/c/bcmath.c" $inc 2>"$tmp/c.err" ||
+           "$CC" -O2 -shared -fPIC -o "$tmp/c-bcmath.so" "$EX/c/bcmath.c" $inc 2>>"$tmp/c.err"; then
+            cso=$tmp/c-bcmath.so
+            differential "check.php (the C twin)" "$EX/check.php" -d extension="$cso"
+            if "$PHP" -m | tr -d '\r' | grep -qix bcmath; then
+                if "$PHP" -d extension="$cso" "$EX/bccheck.php" > "$tmp/bc.out" 2>&1 &&
+                   [ "$(tr -d '\r' < "$tmp/bc.out")" = "bcmath agrees: 10511 results, 0 wrong" ]; then
+                    say "the C twin (c/bcmath.c): $(tr -d '\r' < "$tmp/bc.out") against the built-in"
+                else
+                    bad "the C twin bccheck.php:"; sed 's/^/      /' "$tmp/bc.out"
+                fi
+            fi
+        else
+            bad "the C twin would not build:"; sed 's/^/      /' "$tmp/c.err"
+        fi
+    else
+        skip "the C twin: no php-config or no $CC here -- the bench has no C column"
+    fi
+    # the bench row: the mixed workload, three rounds interleaved, minimums; the
+    # module/C ratio is the DONE bar (README.md), printed with the row.
+    bi=; bc=; bt=; ai=; ac=
+    for r in 1 2 3; do
+        set -- $("$PHP" "$EX/bench.php" | tr -d '\r')
+        [ "$1" = interpreted ] || { bad "bench.php (interpreted): $*"; break; }
+        bi=$(awk -v a="$bi" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2; ai=$*
+        set -- $("$PHP" -d extension="$bso" "$EX/bench.php" | tr -d '\r')
+        [ "$1" = compiled ] || { bad "bench.php (compiled): $*"; break; }
+        bc=$(awk -v a="$bc" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2; ac=$*
+        [ "$ai" = "$ac" ] || bad "bench.php: the two answers differ: $ai / $ac"
+        if [ -n "$cso" ]; then
+            set -- $("$PHP" -d extension="$cso" "$EX/bench.php" c | tr -d '\r')
+            [ "$1" = c ] || { bad "bench.php (the C twin): $*"; break; }
+            bt=$(awk -v a="$bt" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2
+            [ "$ai" = "$*" ] || bad "bench.php: the C twin's answer differs: $*"
+        fi
+    done
+    if [ -n "$bc" ]; then
+        row="interpreted $bi ms, compiled $bc ms $(awk -v i="$bi" -v c="$bc" 'BEGIN { printf "(%.2fx)", i / c }')"
+        [ -n "$bt" ] && row="$row, C twin $bt ms, module/C $(awk -v m="$bc" -v c="$bt" 'BEGIN { printf "%.2fx", m / c }') (DONE < 2.0)"
+        say "bench: $row -- best of nine, three rounds interleaved; not gated"
+    fi
+    # the per-function module/C ratios (MCPHP_EACH), the real DONE evidence --
+    # each function under 2.0; printed, not gated
+    if [ -n "$cso" ]; then
+        MCPHP_EACH=1 "$PHP" -d extension="$bso" "$EX/bench.php" 2>/dev/null | tr -d '\r' > "$tmp/each.mod"
+        MCPHP_EACH=1 "$PHP" -d extension="$cso" "$EX/bench.php" c 2>/dev/null | tr -d '\r' > "$tmp/each.c"
+        pf=$(awk 'NR==FNR{if(NR>1)m[$1]=$2;next} FNR>1{printf "%s %.2f ", $1, m[$1]/$2}' "$tmp/each.mod" "$tmp/each.c")
+        say "per-function module/C: $pf(DONE each < 2.0; not gated)"
+    fi
+fi
+
 # --- two-extensions -------------------------------------------------------------
 # Two extensions compiled from PHP, and B calls a function A publishes and
 # B's source does not declare: looked up in php's function table when the

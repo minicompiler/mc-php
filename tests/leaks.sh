@@ -130,6 +130,24 @@ else
     bad "ctype: it would not build"; sed "s/^/      /" "$t/b.out"
 fi
 
+# bcmath: every bc_* builds intermediate digit strings and has error paths (a
+# malformed number, a zero divisor, a fractional exponent, a negative scale)
+# that must free what they built; the nullable scale is a zval. leakmatrix.php
+# drives every function over every shape -- valid and malformed numbers, every
+# scale including null, a reference, a stringable, and wrong-type arguments --
+# for 120 rounds, so any block the module forgets shows at the end of the run.
+cp -R examples/bcmath "$t/bcmath"
+dbg examples/bcmath/mcphp.linux.toml > "$t/bcmath/dbg.toml"
+rm -rf "$t/bcmath/build"
+if "$BIN" build "$t/bcmath" --config "$t/bcmath/dbg.toml" > "$t/b.out" 2>&1; then
+    bso=$t/bcmath/build/bcmath_port.so
+    leakfree "bcmath leakmatrix.php (every function, every shape, error paths)" -d extension="$bso" "$t/bcmath/leakmatrix.php"
+    leakfree "bcmath check.php" -d extension="$bso" "$t/bcmath/check.php"
+    leakfree "bcmath bench.php" -d extension="$bso" "$t/bcmath/bench.php"
+else
+    bad "bcmath: it would not build"; sed "s/^/      /" "$t/b.out"
+fi
+
 mkdir -p "$t/own"
 { printf "<?php\n"; awk "/^echo /{exit} /^function /{p=1} p" tests/g/111-string-ownership.php
   printf "%s\n" \
