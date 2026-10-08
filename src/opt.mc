@@ -55,7 +55,7 @@ void ph_opt_catw(i64 c) {
     if (!k) return;
     i64 p = nd_a(c);
     i64 any = 0;
-    loop { if (!p) break; if (ph_opt_is(p, "php_substr")) any = 1; p = nd_next(p); }
+    loop { if (!p) break; if (ph_opt_is(p, "php_substr") || ph_opt_is(p, "php_vstr")) any = 1; p = nd_next(p); }
     if (!any) return;
     i64 line = nd_line(c);
     uptr fl = nd_file(c);
@@ -74,6 +74,12 @@ void ph_opt_catw(i64 c) {
             ln = nd_next(st);
             i64 has = nd_next(ln);
             if (nd_kind(has) == N_INT && nd_val(has) == 0) ln = ph_opt_imax(line, fl);
+        }
+        // a window local made a string (ph_view_fn): its window as it is
+        if (ph_opt_is(p, "php_vstr")) {
+            s = nd_a(p);
+            st = nd_next(s);
+            ln = nd_next(st);
         }
         if (!st) {
             st = ph_opt_i0(line, fl);
@@ -1232,15 +1238,18 @@ void ph_inl_fn(i64 f, i64 ok) {
     set_nd_a(body, phi_list(nd_a(body)));
     if (phi_vh) { set_nd_next(phi_vt, nd_a(body)); set_nd_a(body, phi_vh); }
     phi_cf = 0;
-    // the rope (below) before the copy is kept, so a function that builds its
-    // answer by appends is copied into its callers as ONE allocation: once
-    // copied, its return is the caller's `ret = ...; break` and the caller
-    // may loop, and the rope could no longer be found there
-    ph_rope_fn(f);
     if (!ok) return;
+    // The copy kept is roped (below) before it is kept, so a function that
+    // builds its answer by appends is copied into its callers as ONE
+    // allocation: once copied, its return is the caller's `ret = ...; break`
+    // and the caller may loop, and the rope could no longer be found there.
+    // The function's own body is roped later (src/decl.mc), after its
+    // windows (ph_view_fn), which a copy never carries.
+    i64 tf = phi_copy1(f);
+    ph_rope_fn(tf);
     phi_size = 0;
     phi_bad = 0;
-    phi_scan(f, body);
+    phi_scan(tf, nd_b(tf));
     if (phi_bad || phi_size > PHI_MAXN) return;
     if (phi_n == phi_cap) {
         i64 cap = phi_cap * 2 + 32;
@@ -1253,7 +1262,7 @@ void ph_inl_fn(i64 f, i64 ok) {
         phi_cap = cap;
     }
     st64(phi_name + phi_n * 8, nd_name(f));
-    st64(phi_fn + phi_n * 8, phi_copy1(f));
+    st64(phi_fn + phi_n * 8, tf);
     phi_n = phi_n + 1;
 }
 
@@ -1416,6 +1425,15 @@ i64 rp_piece(i64 y, i64 line, uptr fl) {
         set_nd_next(l2, 0);
         if (!(nd_kind(has) == N_INT && nd_val(has) == 0)) ln = l2;
     }
+    // a window local made a string (ph_view_fn): its window as it is
+    if (nd_kind(y) == N_CALL && str_eq(nd_name(y), "php_vstr")) {
+        s = nd_a(y);
+        st = nd_next(s);
+        ln = nd_next(st);
+        set_nd_next(s, 0);
+        set_nd_next(st, 0);
+        set_nd_next(ln, 0);
+    }
     set_nd_next(s, 0);
     i64 a = rp_stb(base, 0, s, line, fl);
     i64 b = rp_stb(base, 8, st, line, fl);
@@ -1527,6 +1545,276 @@ void ph_rope_fn(i64 f) {
             }
         }
         v = nd_next(v);
+    }
+}
+
+// ---- a substr() local is a window, not a string -------------------------------
+// `$ip = substr($xd, 0, $n); $z = strspn($ip, '0'); $ip = substr($ip, $z);
+// $v = $ip . substr($xd, $n);` built two strings that were only read through:
+// a C programmer moves a pointer. In a function that does not loop nothing is
+// counted, drained or written in place before it returns (src/rc.mc), so a
+// string local may be held as a WINDOW of the string it was cut from -- three
+// locals, base, start and length -- and stay alive exactly as long as the
+// borrowing local it replaces. A read a window can serve takes none: strlen,
+// a strspn scan, a byte, a substr() of it, a piece of a concatenation or of a
+// rope; any other read is the window made a string there (php_vstr), and a
+// local is taken only where that builds fewer strings than it saves. A
+// function's inline copy (ph_inl_fn) is kept before this runs, so no window
+// is ever copied into a caller that loops.
+uptr vw_v;                          // the local, and its three
+uptr vw_b;
+uptr vw_s;
+uptr vw_l;
+i64  vw_nsub;                       // substr() stores it saves
+i64  vw_noth;                       // reads it would make a string for
+i64  vw_bad;
+i64  vw_ln;
+uptr vw_fl;
+
+i64 vw_is(i64 n) { return n && nd_kind(n) == N_IDENT && str_eq(nd_name(n), vw_v); }
+i64 vw_id(uptr name, i64 ty) { return rp_id(name, ty, vw_ln, vw_fl); }
+i64 vw_int(i64 v) { return rp_int(v, vw_ln, vw_fl); }
+i64 vw_call(uptr name, i64 ty, i64 args) {
+    i64 c = node_new(N_CALL, vw_ln, vw_fl);
+    set_nd_name(c, name);
+    set_nd_type(c, ty);
+    set_nd_a(c, args);
+    return c;
+}
+// a list of nodes, in order
+i64 vw_args(i64 a, i64 b, i64 c, i64 d, i64 e, i64 f) {
+    if (b) set_nd_next(a, b);
+    if (c) set_nd_next(b, c);
+    if (d) set_nd_next(c, d);
+    if (e) set_nd_next(d, e);
+    if (f) set_nd_next(e, f);
+    return a;
+}
+i64 vw_win3() { return vw_args(vw_id(vw_b, TY_UPTR), vw_id(vw_s, TY_I64), vw_id(vw_l, TY_I64), 0, 0, 0); }
+
+// `ld64(v + 16)`: the length
+i64 vw_is_len(i64 n) {
+    if (!ph_opt_is(n, "ld64")) return 0;
+    i64 a = nd_a(n);
+    return a && nd_kind(a) == N_BINARY && nd_op(a) == ph_tok("+", 1) && vw_is(nd_a(a))
+        && nd_kind(nd_b(a)) == N_INT && nd_val(nd_b(a)) == 16;
+}
+// a call whose first argument is the local, read through as a window
+i64 vw_is_winread(i64 n) {
+    if (nd_kind(n) != N_CALL || !vw_is(nd_a(n))) return 0;
+    uptr c = nd_name(n);
+    return str_eq(c, "php_substr") || str_eq(c, "php_spn_r") || str_eq(c, "php_spn_o")
+        || str_eq(c, "php_str_byte_c") || str_eq(c, "php_str_off_c");
+}
+// `v = substr(X, st, ln, has)` with has a literal: the store a window replaces
+i64 vw_is_cut(i64 s) {
+    if (nd_kind(s) != N_ASSIGN || !str_eq(nd_name(s), vw_v)) return 0;
+    i64 v = nd_a(s);
+    if (!ph_opt_is(v, "php_substr")) return 0;
+    i64 b = nd_a(v);
+    if (!b || nd_kind(b) != N_IDENT) return 0;
+    i64 has = nd_next(nd_next(nd_next(b)));
+    return has && nd_kind(has) == N_INT;
+}
+
+// ---- the count: what the window saves and what it would build
+void vw_cnt1(i64 n);
+void vw_cnt(i64 s) {
+    loop {
+        if (!s || vw_bad) break;
+        i64 k = nd_kind(s);
+        if (k == N_IDENT && vw_is(s)) vw_noth = vw_noth + 1;
+        else if (k == N_ASSIGN && str_eq(nd_name(s), vw_v)) {
+            if (vw_is_cut(s)) {
+                vw_nsub = vw_nsub + 1;
+                i64 b = nd_a(nd_a(s));
+                vw_cnt(nd_next(b));               // st, ln: may read the local
+            } else vw_cnt(nd_a(s));
+        } else if (k == N_CALL && (vw_is_len(s) || vw_is_winread(s))) {
+            if (vw_is_winread(s)) vw_cnt(nd_next(nd_a(s)));
+        } else if (k == N_CALL && (str_eq(nd_name(s), "php_str_concat") || str_eq(nd_name(s), "php_str_cat3")
+                                   || str_eq(nd_name(s), "php_str_cat4"))) {
+            // a piece of a concatenation becomes a window (src/opt.mc's catw)
+            i64 a = nd_a(s);
+            loop { if (!a) break; if (!vw_is(a)) vw_cnt1(a); a = nd_next(a); }
+        } else {
+            vw_cnt(nd_a(s));
+            vw_cnt(nd_b(s));
+            vw_cnt(nd_c(s));
+            vw_cnt(nd_d(s));
+        }
+        s = nd_next(s);
+    }
+}
+void vw_cnt1(i64 n) {
+    i64 nx = nd_next(n);
+    set_nd_next(n, 0);
+    vw_cnt(n);
+    set_nd_next(n, nx);
+}
+
+// ---- the rewrite
+i64 vw_list(i64 s);
+// one node (its nd_next is the caller's); answers its replacement, which may
+// be a list of statements for a store
+i64 vw_one(i64 n) {
+    i64 k = nd_kind(n);
+    if (k == N_IDENT && vw_is(n))
+        return vw_call("php_vstr", ty_pstr, vw_win3());
+    if (k == N_ASSIGN && str_eq(nd_name(n), vw_v)) {
+        if (vw_is_cut(n)) {
+            i64 c = nd_a(n);
+            i64 b = nd_a(c);
+            i64 st = nd_next(b);
+            i64 ln = nd_next(st);
+            i64 has = nd_next(ln);
+            set_nd_next(b, 0);
+            set_nd_next(st, 0);
+            set_nd_next(ln, 0);
+            st = vw_list(st);
+            ln = vw_list(ln);
+            if (!nd_val(has)) ln = ph_opt_imax(vw_ln, vw_fl);
+            // the start and the length once, then the window: of itself, or
+            // of the string X names
+            ph_nonce = ph_nonce + 1;
+            uptr ts = p_cat("phvw_t", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+            uptr tl = p_cat("phvw_u", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+            uptr ts2 = p_cat("phvw_o", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+            phi_declare(ts, TY_I64, vw_ln, vw_fl);
+            phi_declare(tl, TY_I64, vw_ln, vw_fl);
+            phi_declare(ts2, TY_I64, vw_ln, vw_fl);
+            i64 a1 = ph_set(ts, st);
+            i64 a2 = ph_set(tl, ln);
+            i64 n0 = 0;                                // the length cut from
+            i64 hd = a1;
+            set_nd_next(a1, a2);
+            i64 tl2 = a2;
+            if (vw_is(b)) {
+                n0 = vw_id(vw_l, TY_I64);
+            } else {
+                i64 sb = ph_set(vw_b, b);
+                set_nd_next(tl2, sb);
+                tl2 = sb;
+                i64 z = ph_set(vw_s, vw_int(0));
+                set_nd_next(tl2, z);
+                tl2 = z;
+                i64 ad = ph_bin(ph_tok("+", 1), vw_id(vw_b, TY_UPTR), vw_int(16), TY_UPTR);
+                n0 = vw_call("ld64", TY_I64, ad);
+            }
+            i64 o = ph_set(ts2, vw_call("php_win_st", TY_I64, vw_args(n0, vw_id(ts, TY_I64), 0, 0, 0, 0)));
+            set_nd_next(tl2, o);
+            i64 n1 = 0;
+            if (vw_is(b)) n1 = vw_id(vw_l, TY_I64);
+            else n1 = vw_call("ld64", TY_I64, ph_bin(ph_tok("+", 1), vw_id(vw_b, TY_UPTR), vw_int(16), TY_UPTR));
+            i64 l = ph_set(vw_l, vw_call("php_win_ln", TY_I64, vw_args(n1, vw_id(ts, TY_I64), vw_id(tl, TY_I64), 0, 0, 0)));
+            set_nd_next(o, l);
+            i64 sv = ph_set(vw_s, ph_bin(ph_tok("+", 1), vw_id(vw_s, TY_I64), vw_id(ts2, TY_I64), TY_I64));
+            set_nd_next(l, sv);
+            return hd;
+        }
+        // any other value: the window is all of it -- or, when the value is
+        // itself a window made a string, that window
+        i64 v = vw_list(nd_a(n));
+        if (ph_opt_is(v, "php_vstr")) {
+            i64 vb = nd_a(v);
+            i64 vs = nd_next(vb);
+            i64 vl = nd_next(vs);
+            set_nd_next(vb, 0);
+            set_nd_next(vs, 0);
+            i64 a1 = ph_set(vw_b, vb);
+            i64 a2 = ph_set(vw_s, vs);
+            i64 a3 = ph_set(vw_l, vl);
+            set_nd_next(a1, a2);
+            set_nd_next(a2, a3);
+            return a1;
+        }
+        i64 a1 = ph_set(vw_b, v);
+        i64 a2 = ph_set(vw_s, vw_int(0));
+        i64 a3 = ph_set(vw_l, vw_call("ld64", TY_I64, ph_bin(ph_tok("+", 1), vw_id(vw_b, TY_UPTR), vw_int(16), TY_UPTR)));
+        set_nd_next(a1, a2);
+        set_nd_next(a2, a3);
+        return a1;
+    }
+    if (k == N_CALL && vw_is_len(n)) return vw_id(vw_l, TY_I64);
+    if (k == N_CALL && vw_is_winread(n)) {
+        uptr c = nd_name(n);
+        i64 rest = vw_list(nd_next(nd_a(n)));
+        if (str_eq(c, "php_str_byte_c") || str_eq(c, "php_str_off_c")) {
+            i64 ix = ph_bin(ph_tok("+", 1), vw_id(vw_s, TY_I64), rest, TY_I64);
+            return vw_call(c, nd_type(n), vw_args(vw_id(vw_b, TY_UPTR), ix, 0, 0, 0, 0));
+        }
+        uptr nm = "php_substr_v";
+        if (str_eq(c, "php_spn_r")) nm = "php_spn_rv";
+        if (str_eq(c, "php_spn_o")) nm = "php_spn_ov";
+        i64 w = vw_win3();
+        set_nd_next(phi_last(w), rest);
+        return vw_call(nm, nd_type(n), w);
+    }
+    set_nd_a(n, vw_list(nd_a(n)));
+    set_nd_b(n, vw_list(nd_b(n)));
+    set_nd_c(n, vw_list(nd_c(n)));
+    set_nd_d(n, vw_list(nd_d(n)));
+    return n;
+}
+i64 vw_list(i64 s) {
+    i64 h = 0;
+    i64 t = 0;
+    loop {
+        if (!s) break;
+        i64 nx = nd_next(s);
+        set_nd_next(s, 0);
+        i64 r = vw_one(s);
+        if (t) set_nd_next(t, r);
+        if (!t) h = r;
+        t = phi_last(r);
+        s = nx;
+    }
+    return h;
+}
+
+i64 vw_isparam(i64 f, uptr name) {
+    i64 p = nd_a(f);
+    loop { if (!p) break; if (str_eq(nd_name(p), name)) return 1; p = nd_next(p); }
+    return 0;
+}
+
+void ph_view_fn(i64 f) {
+    if (phi_off) return;
+    i64 body = nd_b(f);
+    if (!body) return;
+    if (ph_rc_has_loop(nd_a(body))) return;
+    i64 v = nd_a(body);
+    loop {
+        if (!v || nd_kind(v) != N_VAR) break;
+        i64 nv = nd_next(v);
+        if (nd_type(v) == ty_pstr && !nd_val(v) && !nd_a(v) && !vw_isparam(f, nd_name(v))) {
+            vw_v = nd_name(v);
+            vw_nsub = 0;
+            vw_noth = 0;
+            vw_bad = 0;
+            vw_cnt(nd_a(body));
+            if (!vw_bad && vw_noth < vw_nsub) {
+                vw_ln = nd_line(v);
+                vw_fl = nd_file(v);
+                vw_b = p_cat("phvw_b_", vw_v, 0, cstrlen(vw_v));
+                vw_s = p_cat("phvw_s_", vw_v, 0, cstrlen(vw_v));
+                vw_l = p_cat("phvw_l_", vw_v, 0, cstrlen(vw_v));
+                phi_vh = 0;
+                phi_vt = 0;
+                phi_declare(vw_b, TY_UPTR, vw_ln, vw_fl);
+                phi_declare(vw_s, TY_I64, vw_ln, vw_fl);
+                phi_declare(vw_l, TY_I64, vw_ln, vw_fl);
+                // the whole list, declarations' initialisers included (a
+                // declaration is its own node again, so the walk continues)
+                set_nd_a(body, vw_list(nd_a(body)));
+                // the new declarations ahead of the rest
+                set_nd_next(phi_vt, nd_a(body));
+                set_nd_a(body, phi_vh);
+                phi_vh = 0;
+                phi_vt = 0;
+            }
+        }
+        v = nv;
     }
 }
 

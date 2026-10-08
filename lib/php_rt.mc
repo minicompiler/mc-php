@@ -3029,6 +3029,65 @@ uptr php_substr_own(uptr s, i64 start, i64 len, i64 haslen) { uptr phT = ph_tcur
     return o;
 }
 
+// ---- a substr() local held as a window (src/opt.mc's views) --------------
+// A string local of a function that does not loop, assigned by substr(), is
+// kept as (base string, start, length) and never built unless a read needs a
+// string of its own. The bounds are php_substr's: php_win_st is the start a
+// substr of a string of n bytes begins at, php_win_ln its length (ln is
+// PHP_INT_MAX where the call had none).
+i64 php_win_st(i64 n, i64 st) {
+    if (st < 0) { st = n + st; if (st < 0) st = 0; }
+    if (st > n) st = n;
+    return st;
+}
+i64 php_win_ln(i64 n, i64 st, i64 ln) {
+    if (st < 0) { st = n + st; if (st < 0) st = 0; }
+    if (st > n) return 0;
+    i64 want = ln;
+    if (ln < 0) want = n - st + ln;
+    if (want < 0) want = 0;
+    if (want > n - st) want = n - st;
+    return want;
+}
+// the window as a string: its base when it is all of it, else a new one
+uptr php_vstr(uptr b, i64 s, i64 l) {
+    if (s == 0 && l == ld64(b + 16)) return b;
+    return php_str_short(b + ZS_HDR + s, l);
+}
+// substr() of a window, bounded by the window
+uptr php_substr_v(uptr b, i64 vs, i64 vl, i64 st, i64 ln, i64 haslen) {
+    if (!haslen) ln = 9223372036854775807;
+    i64 s0 = php_win_st(vl, st);
+    return php_str_short(b + ZS_HDR + vs + s0, php_win_ln(vl, st, ln));
+}
+// strspn() of a window from offset o: php_spn_r's and php_spn_o's loops over
+// the window's bytes; an offset outside it is the string's own road
+i64 php_spn_r(uptr s, i64 lo, i64 w, i64 o);
+i64 php_spn_o(uptr s, uptr bm, i64 o);
+i64 php_spn_rv(uptr b, i64 vs, i64 vl, i64 lo, i64 w, i64 o) {
+    if ((u64) o > (u64) vl) return php_spn_r(php_vstr(b, vs, vl), lo, w, o);
+    uptr p = b + ZS_HDR + vs;
+    i64 i = o;
+    loop {
+        if (i >= vl) break;
+        if ((u64) (ld8(p + i) - lo) > (u64) w) break;
+        i = i + 1;
+    }
+    return i - o;
+}
+i64 php_spn_ov(uptr b, i64 vs, i64 vl, uptr bm, i64 o) {
+    if ((u64) o > (u64) vl) return php_spn_o(php_vstr(b, vs, vl), bm, o);
+    uptr p = b + ZS_HDR + vs;
+    i64 i = o;
+    loop {
+        if (i >= vl) break;
+        i64 c = ld8(p + i);
+        if (!((ld8(bm + (c >> 3)) >> (c & 7)) & 1)) break;
+        i = i + 1;
+    }
+    return i - o;
+}
+
 // (int) substr($s, ...): the same window, read as an int in place -- the
 // compiler fuses the two (ph_to_int), so the substring is never built
 i64 php_substr_i(uptr s, i64 start, i64 len, i64 haslen) {
@@ -3091,9 +3150,15 @@ i64 php_strpos1(uptr h, i64 c) { return php_memchr(h + ZS_HDR, c, ld64(h + 16));
 uptr php_str_repeat(uptr s, i64 times);
 // str_repeat for a FRESH buffer (src/rc.mc): never the shared one-byte string
 uptr php_str_repeat_f(uptr s, i64 times) {
-    if (times == 1 && ld64(s + 16) == 1) {
-        uptr o = php_str_alloc(1);
-        st8(o + ZS_HDR, ld8(s + ZS_HDR));
+    // one byte, at least once: the buffer and its fill, a word at a time,
+    // with none of php_str_repeat's general road in front
+    if (times > 0 && ld64(s + 16) == 1) {
+        uptr o = php_str_alloc(times);
+        i64 b = ld8(s + ZS_HDR);
+        u64 w = b * 0x0101010101010101;
+        i64 i = 0;
+        loop { if (i + 8 > times) break; st64(o + ZS_HDR + i, w); i = i + 8; }
+        loop { if (i >= times) break; st8(o + ZS_HDR + i, b); i = i + 1; }
         return o;
     }
     return php_str_repeat(s, times);

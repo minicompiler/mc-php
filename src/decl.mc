@@ -477,6 +477,7 @@ i64 ph_function() {
         kd = kd + 1;
     }
     ph_inl_fn(f, inl);
+    ph_view_fn(f);
     ph_rope_fn(f);
     ph_rc_fn(f);
     ph_opt_fn(f);
