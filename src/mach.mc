@@ -293,8 +293,11 @@ void pm_load(i64 ty, i64 d) {
 }
 
 // between the address and the store, nothing may name the address's register
-// or its base, and nothing may be a label or a call (a path that skipped the
-// add, or a callee that clobbers the base)
+// nor write its base -- reading the base leaves the address what it was
+// (`st64(phT + k, ld64(phT + j))` loads through the same base) -- and nothing
+// may be a label or a call (a path that skipped the add, or a callee that
+// clobbers the base). An arm64 instruction writes only its rd (a store's rd
+// is its source, and blocking on it is merely cautious).
 i64 pm_clean(i64 j, i64 r1, i64 r2) {
     i64 i = j + 1;
     loop {
@@ -305,7 +308,7 @@ i64 pm_clean(i64 j, i64 r1, i64 r2) {
             if (op == I_LABEL || op == I_BL || op == I_BLR || op == I_B || op == I_BCOND
                 || op == I_CBZ || op == I_CBNZ || op == I_EMIT || op >= I_COUNT) return 0;
             if (ins_rd(e) == r1 || ins_rn(e) == r1 || ins_rm(e) == r1) return 0;
-            if (ins_rd(e) == r2 || ins_rn(e) == r2 || ins_rm(e) == r2) return 0;
+            if (ins_rd(e) == r2) return 0;
         }
         i = i + 1;
     }
@@ -329,6 +332,19 @@ void pm_store(i64 ty, i64 d) {
     callp(pm_of(MTASK_STORE), ty, d);
 }
 
+// does a movz's 16-bit value need no extension at this type's width?
+i64 pm_fits(i64 k, i64 ty) {
+    i64 w = type_width(ty);
+    if (k < 0) return 0;
+    if (type_kind(ty) == TK_SINT) {
+        if (w == 1) return k <= 127;
+        if (w == 2) return k <= 32767;
+        return 1;
+    }
+    if (w == 1) return k <= 255;
+    return 1;
+}
+
 // P3: a local's register gets a small constant directly
 void pm_reg_store(i64 ty, i64 d, i64 r) {
     i64 j = 0 - 1;
@@ -340,9 +356,20 @@ void pm_reg_store(i64 ty, i64 d, i64 r) {
     }
     if (j >= 0) {
         set_ins_rd(ins_at(j), REG_ALLOC + r);
-        gen_cast(REG_ALLOC + r, ty);
+        // a constant the type's width already holds needs no extension
+        if (!(ins_op(ins_at(j)) == I_MOVZ && pm_fits(ins_imm(ins_at(j)), ty))) gen_cast(REG_ALLOC + r, ty);
         a64_alias_reset();
         return;
+    }
+    // P16: a cset into the depth's register is the local's 0 or 1 directly,
+    // which every integer width holds
+    if (!pm_off && pm_int(d) && in_reg(d) && dalias_at(d) < 0) {
+        i64 c = pm_last();
+        if (c >= 0 && ins_op(ins_at(c)) == I_CSET && ins_rd(ins_at(c)) == REG_BASE + d) {
+            set_ins_rd(ins_at(c), REG_ALLOC + r);
+            a64_alias_reset();
+            return;
+        }
     }
     callp(pm_of(MTASK_REG_STORE), ty, d, r);
 }
