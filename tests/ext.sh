@@ -929,7 +929,9 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
     bso=examples/bcmath/build/bcmath_port.$sx
     rm -f "$bso"
     if "$BIN" build examples/bcmath --config "$(mcphp_ts_cfg "$bcfg")" > "$tmp/bc.build" 2>&1 && [ -f "$bso" ]; then
-        bx="-d extension=$tmp/build/r.$sx -d extension=$root/$bso"
+        # php.exe opens a Windows path, not an MSYS one (step 10's cygpath)
+        bsn=$(cygpath -m "$root/$bso" 2>/dev/null || echo "$root/$bso")
+        bx="-d extension=$tmp/build/r.$sx -d extension=$bsn"
         "$PHP" -d opcache.enable_cli=0 $bx tests/ext/threads/bcscale.php 2>&1 | tr -d '\r' > "$tmp/t.bs"; tb=$?
         printf '%s\n' "a php worker: $ref" "this request's scale: 3" > "$tmp/t.bsw"
         if [ "$TSV" = zts ]; then
