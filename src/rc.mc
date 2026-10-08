@@ -336,11 +336,25 @@ i64 ph_rc_arg0_is(i64 v, uptr name) {
     return a && nd_kind(a) == N_IDENT && str_eq(nd_name(a), name);
 }
 
+// `phrt_N = E;` then its unwinding check, then `return phrt_N;` -- what
+// src/lvalue.mc makes of a `return E;` whose E can throw: E is the returned
+// value as much as a bare `return E;`'s is. In a try with a finally the value
+// goes to the flag and a break instead, the finally runs before the return,
+// and that road is not this shape, so it stays a read like any other.
+i64 ph_rc_fb_retval(i64 s) {
+    i64 t = nd_next(s);
+    if (t && nd_kind(t) == N_IF) t = nd_next(t);
+    if (!t || nd_kind(t) != N_RETURN) return 0;
+    i64 e = nd_a(t);
+    return e && nd_kind(e) == N_IDENT && str_eq(nd_name(e), nd_name(s));
+}
+
 void ph_rc_fb_walk(i64 s, uptr name) {
     loop {
         if (!s) break;
         i64 k = nd_kind(s);
         if (k == N_RETURN) { s = nd_next(s); continue; }
+        if (k == N_ASSIGN && ph_rc_pfx(nd_name(s), "phrt_") && ph_rc_fb_retval(s)) { s = nd_next(s); continue; }
         if (k == N_IDENT && str_eq(nd_name(s), name)) ph_rc_fb_bad = 1;
         i64 skip = 0;
         if (k == N_ASSIGN && str_eq(nd_name(s), name)) {
