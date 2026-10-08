@@ -1221,7 +1221,6 @@ i64 phi_list(i64 s) {
 // calls to candidates are copied in, then `f` becomes a candidate itself when
 // `ok` (no by-reference, default or variadic parameter, no func_num_args) and
 // it is small and loop-free.
-i64 ph_rope_early = 1;
 void ph_rope_fn(i64 f);
 void ph_inl_fn(i64 f, i64 ok) {
     if (phi_off) return;
@@ -1237,7 +1236,7 @@ void ph_inl_fn(i64 f, i64 ok) {
     // answer by appends is copied into its callers as ONE allocation: once
     // copied, its return is the caller's `ret = ...; break` and the caller
     // may loop, and the rope could no longer be found there
-    if (ph_rope_early) ph_rope_fn(f);
+    ph_rope_fn(f);
     if (!ok) return;
     phi_size = 0;
     phi_bad = 0;
