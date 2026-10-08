@@ -1581,6 +1581,16 @@ uptr php_zstr(uptr s) { uptr z = php_alloc(ZV_SIZE); st64(z, php_str_esc(s)); st
 uptr php_zarr(uptr a) { uptr z = php_zv_alloc(); st64(z, a); php_zv_settype(z, IS_ARRAY); return z; }
 uptr php_zobj(uptr o) { uptr z = php_zv_alloc(); st64(z, o); php_zv_settype(z, IS_OBJECT); return z; }
 
+// A native nullable-scalar value (src/decl.mc: carried as the int `v` plus the
+// u8 null flag `isnull`) made into a zval where a zval is needed -- null when
+// the flag is set, the int otherwise. php_opt_str is the (string) cast: php's
+// (string)null is "" and (string)int is the digits.
+uptr php_opt_box(i64 v, i64 isnull) { if (isnull) return php_znull(); return php_zlong(v); }
+uptr php_opt_str(i64 v, i64 isnull) { if (isnull) return php_str_new("", 0); return php_itos(v); }
+// the reverse, for a zval arriving where a native nullable scalar is wanted
+i64 php_opt_isnull(uptr z) { return php_zv_type(z) == IS_NULL; }
+i64 php_opt_long(uptr z) { if (php_zv_type(z) == IS_NULL) return 0; return php_zv_long(z); }
+
 // ---- the ordered hash: PHP's zend_array, field for field -------------------
 //  0 gc      refcount u32, type_info u32
 //  8 flags   u32

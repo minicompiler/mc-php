@@ -146,9 +146,29 @@ i64 ph_function() {
         ph_next();
         i64 dflt = 0;
         if (ph_accept("=", 1)) { i64 dv = ph_expr(0); dflt = ph_to_mixed(dv, ph_ety); }
+        // a NULLABLE SCALAR parameter (?int/?float/?string/?bool, with or
+        // without a default): carried as the native value plus a u8 null flag,
+        // not a heap zval. ph_lt_k is 10 + the scalar type (src/types.mc).
+        // Not for a by-reference, a variadic, or a forward-widened row -- those
+        // keep the zval. "Not passed" and "null" are the flag; the value local
+        // is 0 when null, which is php's null in every arithmetic the body does
+        // after the `=== null` guard the idiom requires.
+        i64 isopt = 0;
+        i64 optst = 0;
+        // int only: a value type the handler reads call-free with no ownership.
+        // ?string would borrow an engine zend_string (an escape question) and
+        // ?float needs a reinterpret, so those keep the zval for now.
+        if (pt == PT_MIXED && ph_lt_null && ph_lt_k == 10 + PT_INT
+            && !byref && !variadic && !fwd) {
+            optst = PT_INT;
+            isopt = 1;
+            pt = optst;
+        }
         // a parameter with no declared type IS mixed (D4 (c)); so is one with
-        // a default, because "not passed" has to be expressible
-        if (pt < 0 || dflt) pt = PT_MIXED;
+        // a default, because "not passed" has to be expressible -- but a native
+        // nullable scalar expresses "not passed / null" in its flag, so it keeps
+        // its scalar type
+        if (!isopt && (pt < 0 || dflt)) pt = PT_MIXED;
         if (variadic) pt = PT_ARR;
         // reached by a call before the declaration: the row the call was
         // built against says zval, so the definition has to agree
@@ -160,10 +180,12 @@ i64 ph_function() {
         if (byref) pt = PT_MIXED;
         if (np >= PH_MAXP) ph_todo(fl, line, "more than 12 parameters");
         ph_var_bind_raw(d, pt);
+        if (isopt) ph_set_opt(d);
         if (byref) { ph_set_ref(d); st64(ph_fpr + fi * 8, ld64(ph_fpr + fi * 8) | (1 << np)); }
         if (np < PH_MAXCP) st64(ph_cpn + np * 8, d);
         if (pt != PT_MIXED) ph_cpzv = 0;
         st64(ph_fpt + (fi * PH_MAXP + np) * 8, pt);
+        st64(ph_fopt + (fi * PH_MAXP + np) * 8, isopt);
         st64(ph_fpn + (fi * PH_MAXP + np) * 8, d + 1);
         st64(ph_fpd + (fi * PH_MAXP + np) * 8, dflt);
         np = np + 1;
@@ -171,6 +193,14 @@ i64 ph_function() {
         if (tail) set_nd_next(tail, pn);
         if (!tail) head = pn;
         tail = pn;
+        // a native nullable scalar's null flag is a second mc parameter right
+        // after its value, so the body, the handler and every caller agree on
+        // the slot order
+        if (isopt) {
+            i64 fnp = param_new(TY_U8, ph_vflag(d));
+            set_nd_next(pn, fnp);
+            tail = fnp;
+        }
         if (pt == PT_MIXED) {
             if (!byref) {
                 i64 bv = ph_byval(d, line, fl);

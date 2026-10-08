@@ -52,6 +52,12 @@ uptr ph_fpn[PH_MAXFN * PH_MAXP];        // the bare parameter name, for a messag
 i64  ph_fvar[PH_MAXFN];                 // 1 when the last parameter is ...$rest
 i64  ph_fvpc[PH_MAXFN];                 // the DECLARED element type of ...$rest
 i64  ph_fpr[PH_MAXFN];                  // bit i: parameter i is `&$x`
+// 1 when parameter i is a NULLABLE SCALAR (`?int $s`, with or without a
+// default) carried natively: the value in ph_fpt's scalar type plus a u8
+// null flag as a second mc parameter (vn_<name>), not a heap zval. Its
+// `=== null` reads the flag; a call passes the pair. src/decl.mc builds it,
+// src/ext.mc reads it from the engine arg, src/builtin.mc marshals the pair.
+i64  ph_fopt[PH_MAXFN * PH_MAXP];
 i64  ph_frr[PH_MAXFN];                  // 1 when declared `function &f()`
 // 1 when a CALL came before the declaration, so the declared types were
 // widened to mixed to match the signature that call was built against. The

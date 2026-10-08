@@ -1009,6 +1009,18 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         if (lt == PT_NULL && rt != PT_NULL) { nt = rt; nn = rhs; }   // lhs is null: rhs decides
         ph_ety = PT_BOOL;
         if (nt == PT_NULL) { i64 r0 = 1; if (neg) r0 = 0; return ph_bool(r0); }  // null === null
+        // a native nullable scalar (src/decl.mc): its null-ness is its u8 flag,
+        // not its value's tag -- the value is a native scalar with no tag
+        if (nn && nd_kind(nn) == N_IDENT) {
+            uptr ofl = ph_opt_flag_of(nd_name(nn));
+            if (ofl) {
+                i64 fr = node_new(N_IDENT, line, fl);
+                set_nd_name(fr, ofl);
+                set_nd_type(fr, TY_U8);
+                if (neg) return ph_cast(TY_U8, ph_bin(ph_tok("==", 2), fr, ph_int(0), TY_U8));
+                return fr;                             // the flag is 1 iff null
+            }
+        }
         if (nt != PT_MIXED) { i64 r1 = 0; if (neg) r1 = 1; return ph_bool(r1); } // a static non-null type
         i64 a = ph_to_mixed(nn, nt);
         i64 tag = ph_quiet("ld8", 1, ph_bin(ph_tok("+", 1), a, ph_int(8), TY_UPTR), 0, 0, 0, TY_I64);

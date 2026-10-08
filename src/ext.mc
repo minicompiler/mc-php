@@ -216,6 +216,9 @@ i64  ph_bd_nul(i64 fi, i64 k) { return ld64(ph_fbnul + (fi * (PH_MAXP + 1) + k) 
 i64 ph_ext_plain(i64 fi, i64 k) {
     i64 np = ld64(ph_fnp + fi * 8);
     if (ld64(ph_fvar + fi * 8) && k == np - 1) return 0;
+    // a native nullable scalar admits null, which phx_chk's one-tag test does
+    // not: it keeps the phx_chk2 guard (null allowed) and the value+flag read
+    if (ld64(ph_fopt + (fi * PH_MAXP + k) * 8)) return 0;
     return ph_ext_scalar(ld64(ph_fpt + (fi * PH_MAXP + k) * 8));
 }
 
@@ -395,16 +398,47 @@ i64 ph_ext_noann(i64 s) {
     return h;
 }
 
-// the call to the php function, with every argument already checked
+// A native nullable-scalar argument k, read CALL-FREE after phx_chk2 validated
+// it (null / absent allowed, else int). The null flag is 1 when the argument
+// was not passed (NUM_ARGS <= k) or is IS_NULL -- the `||` reads the type byte
+// only when it was passed. The value is the int word of the engine arg; the
+// pointer is ex when absent (a valid in-bounds read whose value the flag then
+// discards) and the real slot otherwise, so no out-of-range read happens.
+i64 ph_ext_optflag(i64 k) {
+    i64 ck = 80 + k * 16;
+    i64 na = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR), 0, 0, 0, TY_I64);
+    i64 absent = ph_bin(ph_tok("<=", 2), na, ph_int(k), TY_U8);
+    i64 ty = ph_quiet("ld8", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(ck + 8), TY_UPTR), 0, 0, 0, TY_I64);
+    i64 isnull = ph_bin(ph_tok("==", 2), ty, ph_int(1), TY_U8);         // IS_NULL
+    return ph_bin(ph_tok("||", 2), absent, isnull, TY_U8);
+}
+i64 ph_ext_optval(i64 k) {
+    i64 ck = 80 + k * 16;
+    i64 na = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR), 0, 0, 0, TY_I64);
+    i64 present = ph_bin(ph_tok(">", 1), na, ph_int(k), TY_U8);
+    i64 ptr = ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_bin(ph_tok("*", 1), ph_int(ck), present, TY_I64), TY_UPTR);
+    return ph_quiet("ld64", 1, ptr, 0, 0, 0, TY_I64);
+}
+
+// the call to the php function, with every argument already checked. A native
+// nullable-scalar parameter contributes TWO arguments, value then flag, in the
+// slot order src/decl.mc and src/builtin.mc agree on.
 i64 ph_ext_body(i64 fi, uptr name, i64 np, i64 rt) {
-    u8 av[96];
+    u8 av[200];
     i64 k = 0;
+    i64 m = 0;
     loop {
         if (k >= np) break;
-        st64(av + k * 8, ph_ext_read(fi, k));
+        if (ld64(ph_fopt + (fi * PH_MAXP + k) * 8)) {
+            st64(av + m * 8, ph_ext_optval(k));  m = m + 1;
+            st64(av + m * 8, ph_ext_optflag(k)); m = m + 1;
+        } else {
+            st64(av + m * 8, ph_ext_read(fi, k));
+            m = m + 1;
+        }
         k = k + 1;
     }
-    return ph_ext_write(rt, ph_calln(ph_mangle(name, "f_"), av, np, ph_mcty(rt)));
+    return ph_ext_write(rt, ph_calln(ph_mangle(name, "f_"), av, m, ph_mcty(rt)));
 }
 
 // 1 iff every occurrence of `v` in `s` is the base of an ld32/ld64 field read

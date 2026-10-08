@@ -180,8 +180,23 @@ i64 ph_is_narrowed(i64 n, i64 want) {
 // ---- conversions between the static types ----------------------------------
 // mixed is a zval: the one type every other one converts into, which is what
 // makes an array element, an untyped parameter and `int / int` expressible.
+// the null flag of a native nullable-scalar value node, or 0
+i64 ph_opt_flagnode(i64 n) {
+    if (nd_kind(n) != N_IDENT) return 0;
+    uptr ofl = ph_opt_flag_of(nd_name(n));
+    if (!ofl) return 0;
+    i64 fr = node_new(N_IDENT, ph_tline, ph_tfile);
+    set_nd_name(fr, ofl);
+    set_nd_type(fr, TY_U8);
+    return fr;
+}
+
 i64 ph_to_mixed(i64 n, i64 t) {
     if (t == PT_MIXED || t == PT_NULL) return n;
+    // a native nullable scalar (src/decl.mc) made into a zval: null when its
+    // flag is set, else the int -- not php_zlong of the value, which would box
+    // a null as int(0)
+    if (t == PT_INT) { i64 f = ph_opt_flagnode(n); if (f) return ph_c2("php_opt_box", n, f, ty_pzv); }
     if (t == PT_PK)     ph_pk_disagree(ph_tfile, ph_tline, "a packed array used as a value");
     if (t == PT_INT)    return ph_c1("php_zlong", n, ty_pzv);
     if (t == PT_IFALSE) return ph_c1("php_zifalse", n, ty_pzv);
@@ -200,6 +215,9 @@ i64 ph_zkey(i64 n, i64 t) { return ph_to_mixed(n, t); }
 
 i64 ph_to_str(i64 n, i64 t) {
     if (t == PT_STRING) return n;
+    // a native nullable scalar cast to string: php's (string)null is "", not
+    // the "0" that php_itos of the value-0 would give
+    if (t == PT_INT) { i64 f = ph_opt_flagnode(n); if (f) return ph_c2("php_opt_str", n, f, ty_pstr); }
     // a narrowed string: the zval's embedded zend_string, borrowed (ld64(z)),
     // which is exactly what php_zv_str returns for a string -- no call, no push
     if ((t == PT_MIXED || t == PT_NULL) && ph_is_narrowed(n, PT_STRING))

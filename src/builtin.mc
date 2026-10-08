@@ -861,12 +861,23 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                     v = ph_c2("php_arr_zget", v, k, ty_pzv);
                     t = PT_MIXED;
                 }
-                if (!isempty) {
+                // a native nullable scalar (src/decl.mc): isset is "not null"
+                // (its u8 flag is 0), empty is "null or the value is falsy". A
+                // chained isset($s[...]) would have refused on the int above.
+                i64 optf = 0;
+                if (t == PT_INT && ph_is_opt(d)) {
+                    optf = node_new(N_IDENT, line, fl);
+                    set_nd_name(optf, ph_vflag(d));
+                    set_nd_type(optf, TY_U8);
+                }
+                if (optf && !isempty) one = ph_cast(TY_U8, ph_bin(ph_tok("==", 2), optf, ph_int(0), TY_U8));
+                if (optf && isempty) one = ph_cast(TY_U8, ph_bin(ph_tok("||", 2), optf, ph_bin(ph_tok("==", 2), v, ph_int(0), TY_U8), TY_U8));
+                if (!optf && !isempty) {
                     if (t == PT_INT)   one = ph_cast(TY_U8, ph_bin(ph_tok("!=", 2), v, ph_int(0), TY_U8));
                     if (t == PT_MIXED) one = ph_cast(TY_U8, ph_c1("php_zv_isset", v, TY_I64));
                     if (t != PT_INT && t != PT_MIXED) one = ph_bool(1);
                 }
-                if (isempty) {
+                if (!optf && isempty) {
                     i64 b = ph_to_bool(v, t);
                     i64 nn = node_new(N_UNARY, line, fl);
                     set_nd_op(nn, ph_tok("!", 1));
@@ -1661,7 +1672,13 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     if (str_eq(name, "is_float") || str_eq(name, "is_double")) return ph_isof(na, t0, a0, PT_FLOAT, 5, fl, line, name);
     if (str_eq(name, "is_bool")) return ph_isof(na, t0, a0, PT_BOOL, 3, fl, line, name);
     if (str_eq(name, "is_array")) return ph_isof(na, t0, a0, PT_ARR, 7, fl, line, name);
-    if (str_eq(name, "is_null")) return ph_isof(na, t0, a0, PT_NULL, 1, fl, line, name);
+    if (str_eq(name, "is_null")) {
+        // a native nullable scalar: its null-ness is its flag, not a tag on a
+        // (nonexistent) zval
+        i64 onf = ph_opt_flagnode(a0);
+        if (onf) { ph_ety = PT_BOOL; return ph_cast(TY_U8, onf); }
+        return ph_isof(na, t0, a0, PT_NULL, 1, fl, line, name);
+    }
     if (str_eq(name, "is_numeric")) {
         ph_need(na, 1, name, fl, line); ph_ety = PT_BOOL;
         if (t0 == PT_MIXED || t0 == PT_NULL) return ph_cast(TY_U8, ph_c1("php_zv_isnum", a0, TY_I64));
@@ -1735,6 +1752,56 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         if (i >= np) break;
         i64 want = ld64(ph_fpt + (fi * PH_MAXP + i) * 8);
         i64 v = 0;
+        // a native nullable-scalar parameter (src/decl.mc): pass the value and
+        // a u8 null flag as two mc arguments. The argument may be another such
+        // variable (pass its value and flag), the null literal or an omitted
+        // optional one (0 / flag 1), or a plain scalar value (coerced / flag 0).
+        if (ld64(ph_fopt + (fi * PH_MAXP + i) * 8)) {
+            i64 vv = 0;
+            i64 vfl = 0;
+            if (i >= na) {
+                if (!ld64(ph_fpd + (fi * PH_MAXP + i) * 8)) ph_todo2(fl, line, "the wrong number of arguments for", name);
+                vv = ph_cast(ph_mcty(want), ph_int(0));
+                vfl = ph_int(1);
+            } else {
+                i64 have = ph_aty(av, i);
+                i64 an = ph_a(av, i);
+                uptr af = 0;
+                if (nd_kind(an) == N_IDENT) af = ph_opt_flag_of(nd_name(an));
+                if (have == PT_NULL) {
+                    vv = ph_cast(ph_mcty(want), ph_int(0));
+                    vfl = ph_int(1);
+                } else if (af) {
+                    // another native nullable scalar: its value (coerced) and flag
+                    if (want == PT_INT)    vv = ph_to_int(an, have);
+                    if (want == PT_FLOAT)  vv = ph_to_float(an, have);
+                    if (want == PT_STRING) vv = ph_to_str(an, have);
+                    if (want == PT_BOOL)   vv = ph_to_bool(an, have);
+                    i64 ff = node_new(N_IDENT, line, fl);
+                    set_nd_name(ff, af);
+                    set_nd_type(ff, TY_U8);
+                    vfl = ff;
+                } else if (have == PT_MIXED) {
+                    // a zval arriving where a native nullable scalar is wanted:
+                    // the value once, then its null-ness and its int
+                    i64 zt = ph_temp(an, ty_pzv, "phopt_");
+                    vfl = ph_c1("php_opt_isnull", ph_tref(zt), TY_I64);
+                    vv = ph_c1("php_opt_long", zt, TY_I64);
+                } else {
+                    if (want == PT_INT)    vv = ph_to_int(an, have);
+                    if (want == PT_FLOAT)  vv = ph_to_float(an, have);
+                    if (want == PT_STRING) vv = ph_to_str(an, have);
+                    if (want == PT_BOOL)   vv = ph_to_bool(an, have);
+                    vfl = ph_int(0);
+                }
+            }
+            if (tail) set_nd_next(tail, vv);
+            if (!tail) head = vv;
+            set_nd_next(vv, vfl);
+            tail = vfl;
+            i = i + 1;
+            continue;
+        }
         if (vararg && i == np - 1) {
             // ...$rest: the caller packs what is left into an array
             ph_nonce = ph_nonce + 1;
