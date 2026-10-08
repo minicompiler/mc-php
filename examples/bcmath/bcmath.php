@@ -416,7 +416,7 @@ function bc_pow(string $num, string $exponent, ?int $scale = null): string {
 function bc_powmod(string $num, string $exponent, string $modulus, ?int $scale = null): string {
     $s = _bc_scaleof($scale, 'bc_powmod', 4);
     $ns = _bc_parse($num, 'bc_powmod', 1, 'num');
-    _bc_intonly(_bc_digits($num, $ns), $ns, 'bc_powmod', 1, 'num');
+    $xd = _bc_intonly(_bc_digits($num, $ns), $ns, 'bc_powmod', 1, 'num');
     $es = _bc_parse($exponent, 'bc_powmod', 2, 'exponent');
     $ed = _bc_intonly(_bc_digits($exponent, $es), $es, 'bc_powmod', 2, 'exponent');
     if (_bc_neg($exponent, $ed)) {
@@ -430,22 +430,31 @@ function bc_powmod(string $num, string $exponent, string $modulus, ?int $scale =
     if (_bc_ucmp($md, '1') === 0) {
         return _bc_fmt(false, '0', 0, $s);
     }
-    // iterate on signed integers through bc_mod/bc_mul (scale 0)
+    // Square and multiply on magnitudes and signs, as libbcmath and the C
+    // twin do: each product reduced mod the modulus by the long division,
+    // the remainder's sign following the dividend's and a zero never
+    // negative. The power starts as num mod modulus; squaring makes it
+    // non-negative.
+    $power = substr(_bc_udivmod($xd, $md), strlen($xd));
+    $psign = _bc_neg($num, $xd) && $power !== '0';
     $temp = '1';
-    $power = bc_mod($num, $modulus, 0);
+    $tsign = false;
     $exp = substr($ed, _bc_skip0($ed));
-    while (!_bc_iszero($exp)) {
+    while ($exp !== '0') {
         $odd = (ord($exp[strlen($exp) - 1]) - 48) & 1;
         $q = substr(_bc_udivmod($exp, '2'), 0, strlen($exp));
         $exp = substr($q, _bc_skip0($q));
         if ($odd) {
-            $temp = bc_mod(bc_mul($temp, $power, 0), $modulus, 0);
+            $pr = _bc_umul($temp, $power);
+            $temp = substr(_bc_udivmod($pr, $md), strlen($pr));
+            $tsign = $tsign !== $psign && $temp !== '0';
         }
-        $power = bc_mod(bc_mul($power, $power, 0), $modulus, 0);
+        $sq = _bc_umul($power, $power);
+        $power = substr(_bc_udivmod($sq, $md), strlen($sq));
+        $psign = false;
     }
-    // $temp is an integer string; render it at $scale (pad only)
-    $tn = _bc_neg($temp, _bc_digits($temp, 0));
-    return _bc_fmt($tn, _bc_digits($temp, 0), 0, $s);
+    // $temp is an integer magnitude; render it at $scale (pad only)
+    return _bc_fmt($tsign, $temp, 0, $s);
 }
 
 // ---- integer square root (floor) -------------------------------------------
