@@ -678,6 +678,14 @@ void phx_track(uptr p) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 // the slow path: a block too big for a chunk gets its own, and a full chunk
 // gets a successor
 uptr phx_zalloc(i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    // the call's first allocation (phx_enter left the cursor unset): the
+    // request's home chunk, from the floor the calls before it left
+    if (!((uptr) ld64(phT + PHT_ph_zcur))) {
+        st64(phT + PHT_ph_zcur, ((uptr) ld64(phT + PHT_phx_home)));
+        st64(phT + PHT_ph_zpos, ld64(phT + PHT_phx_floor));
+        st64(phT + PHT_ph_zlim, PHX_CK);
+        return php_alloc(n);
+    }
     // a size that wrapped negative (PHP_INT_MAX bytes and a header) is a
     // huge one: Zend's allocator refuses it with php's own memory fatal
     if (n > PH_ZBIG || n < 0) {
@@ -877,17 +885,17 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) { uptr phT = ph_tcur; if (!phT) phT = ph_
 }
 
 // ---- around every handler --------------------------------------------------
-// The common call: the runtime is up, no call is open and the home chunk
-// exists -- a handful of stores, written in place by src/opt.mc (the first
-// call and a nested one take phx_enter_slow)
+// The common call: no call is open and the home chunk exists (so the runtime
+// is up: phx_enter_slow boots it before it makes the chunk) -- three stores,
+// written in place by src/opt.mc (the first call and a nested one take
+// phx_enter_slow). The arena's cursor is left unset (php_alloc's bound is 0
+// since the last call's end), so a call that allocates nothing pays nothing
+// for it; the first allocation sets it from the home chunk (phx_zalloc).
 uptr phx_zalloc_fn;
 void phx_enter_slow();
 void phx_enter() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
-    if (ph_boot_done && !ld64(phT + PHT_phx_depth) && ((uptr) ld64(phT + PHT_phx_home))) {
+    if (!ld64(phT + PHT_phx_depth) && ((uptr) ld64(phT + PHT_phx_home))) {
         st64(phT + PHT_ph_pin, 0);
-        st64(phT + PHT_ph_zcur, ((uptr) ld64(phT + PHT_phx_home)));
-        st64(phT + PHT_ph_zpos, ld64(phT + PHT_phx_floor));
-        st64(phT + PHT_ph_zlim, PHX_CK);
         st64(phT + PHT_phx_depth, 1);
         st64(phT + PHT_ph_zalloc, phx_zalloc_fn);
     } else phx_enter_slow();
@@ -1024,6 +1032,9 @@ void phx_leave_slow() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_rc_drain(0);
     uptr cur = ((uptr) ld64(phT + PHT_ph_zcur));
     i64 pos = ld64(phT + PHT_ph_zpos);
+    // a call that allocated nothing never set the cursor: it is still where
+    // the calls before it left the home chunk
+    if (!cur) { cur = ((uptr) ld64(phT + PHT_phx_home)); pos = ld64(phT + PHT_phx_floor); }
     st64(phT + PHT_ph_zalloc, 0);
     st64(phT + PHT_ph_zcur, 0);
     st64(phT + PHT_ph_zlim, 0);

@@ -845,7 +845,7 @@ void user_init() {
         // EG(exception), which RINIT cannot make (no script runs yet). On
         // Windows the measured offset is not the headers' 960, so the fast
         // path waits for it.
-        e = ph_swap(e, cstrlen(e), "if (ph_boot_done && !ld64(phT + PHT_phx_depth)", "if (ph_boot_done && phx_egx_ok() && !ld64(phT + PHT_phx_depth)");
+        e = ph_swap(e, cstrlen(e), "if (!ld64(phT + PHT_phx_depth) && ((uptr) ld64(phT + PHT_phx_home))) {", "if (phx_egx_ok() && !ld64(phT + PHT_phx_depth) && ((uptr) ld64(phT + PHT_phx_home))) {");
         p_push_source("php extension runtime", e, cstrlen(e));
         // the booting thread's fast path never comes back (several php threads
         // run the module at once), a thread's block carries the ZTS words, and
