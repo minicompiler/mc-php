@@ -73,15 +73,18 @@ function _bc_parse(string $s, string $fn, int $argno, string $name): int {
 // the magnitude digits of a valid number at scale $sc: sign and point left
 // out, integer part then fraction. Empty (e.g. "", ".") is the digit "0".
 function _bc_digits(string $s, int $sc): string {
-    $i = ($s !== '' && ($s[0] === '-' || $s[0] === '+')) ? 1 : 0;
-    $dot = strpos($s, '.');
-    if ($dot === false) {
-        return $i >= strlen($s) ? '0' : substr($s, $i);
+    $n = strlen($s);
+    $i = ($n > 0 && ($s[0] === '-' || $s[0] === '+')) ? 1 : 0;
+    // The scale $sc (from _bc_parse) fixes the dot's place arithmetically, so
+    // no strpos -- which would return int|false and make every use of its
+    // result a zval op. With $sc fraction digits the dot is at strlen-$sc-1.
+    if ($sc > 0) {
+        $dot = $n - $sc - 1;
+        return substr($s, $i, $dot - $i) . substr($s, $dot + 1);
     }
-    if ($dot === $i) {                                  // no integer digits: ".5", "+.5", "."
-        return $dot + 1 >= strlen($s) ? '0' : substr($s, $dot + 1);
-    }
-    return substr($s, $i, $dot - $i) . substr($s, $dot + 1);
+    // $sc == 0: integer digits only; drop a trailing '.' ("5.", ".", "+")
+    $end = ($n > 0 && $s[$n - 1] === '.') ? $n - 1 : $n;
+    return $i >= $end ? '0' : substr($s, $i, $end - $i);
 }
 
 // negative, and not zero (a zero is never negative in bcmath)
@@ -93,6 +96,14 @@ function _bc_neg(string $s, string $d): bool {
 // than _bc_ucmp($d, '0'), which skip0's both sides into new strings.
 function _bc_iszero(string $d): bool {
     return strspn($d, '0') === strlen($d);
+}
+
+// ---- magnitudes: digit strings, most significant first (decimal.php's) ------
+// skip0: how many leading zeros to step over, keeping at least one digit
+function _bc_skip0(string $d): int {
+    $k = strspn($d, '0');
+    if ($k === strlen($d)) { $k--; }
+    return $k;
 }
 
 // an integer argument: its fraction must be all zeros (trailing zeros carry no
@@ -110,13 +121,6 @@ function _bc_intonly(string $d, int $sc, string $fn, int $argno, string $name): 
     return substr($d, _bc_skip0($d));
 }
 
-// ---- magnitudes: digit strings, most significant first (decimal.php's) ------
-// skip0: how many leading zeros to step over, keeping at least one digit
-function _bc_skip0(string $d): int {
-    $k = strspn($d, '0');
-    if ($k === strlen($d)) { $k--; }
-    return $k;
-}
 
 function _bc_ucmp(string $a, string $b): int {
     $ka = _bc_skip0($a);
@@ -124,7 +128,9 @@ function _bc_ucmp(string $a, string $b): int {
     $na = strlen($a) - $ka;
     $nb = strlen($b) - $kb;
     if ($na !== $nb) { return $na < $nb ? -1 : 1; }
-    $c = strcmp(substr($a, $ka), substr($b, $kb));
+    // no leading zeros on either side (the money-shaped common case): the
+    // strings compare directly, with no substr copy of each
+    $c = ($ka === 0 && $kb === 0) ? strcmp($a, $b) : strcmp(substr($a, $ka), substr($b, $kb));
     if ($c < 0) { return -1; }
     return $c > 0 ? 1 : 0;
 }
@@ -265,8 +271,7 @@ function _bc_fmt(bool $neg, string $c, int $from, int $to): string {
 
 // ---- add / sub --------------------------------------------------------------
 // exact sum/difference at max(scale_a, scale_b), truncated to $scale
-function _bc_addsub(string $fn, string $a, string $b, ?int $scale, bool $minus): string {
-    $s = _bc_scaleof($scale, $fn, 3);
+function _bc_addsub(string $fn, string $a, string $b, int $s, bool $minus): string {
     $xs = _bc_parse($a, $fn, 1, 'num1');
     $ys = _bc_parse($b, $fn, 2, 'num2');
     $xd = _bc_digits($a, $xs);
@@ -291,11 +296,11 @@ function _bc_addsub(string $fn, string $a, string $b, ?int $scale, bool $minus):
 }
 
 function bc_add(string $num1, string $num2, ?int $scale = null): string {
-    return _bc_addsub('bc_add', $num1, $num2, $scale, false);
+    return _bc_addsub('bc_add', $num1, $num2, _bc_scaleof($scale, 'bc_add', 3), false);
 }
 
 function bc_sub(string $num1, string $num2, ?int $scale = null): string {
-    return _bc_addsub('bc_sub', $num1, $num2, $scale, true);
+    return _bc_addsub('bc_sub', $num1, $num2, _bc_scaleof($scale, 'bc_sub', 3), true);
 }
 
 // ---- mul --------------------------------------------------------------------
