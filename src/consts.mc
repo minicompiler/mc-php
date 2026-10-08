@@ -24,6 +24,26 @@ i64 ph_const_find(uptr n) {
     return -1;
 }
 
+// + - * over small int literals, where no overflow can happen (php makes an
+// overflow a float); anything else -- a division, a call, a float, a big
+// operand -- is not folded and stays a run-time constant
+i64 ph_cfold_v;
+i64 ph_const_fold(i64 v) {
+    if (nd_kind(v) == N_INT) { ph_cfold_v = nd_val(v); return 1; }
+    if (nd_kind(v) != N_BINARY) return 0;
+    if (!ph_const_fold(nd_a(v))) return 0;
+    i64 l = ph_cfold_v;
+    if (!ph_const_fold(nd_b(v))) return 0;
+    i64 r = ph_cfold_v;
+    i64 op = nd_op(v);
+    // only where no overflow can happen: php makes an overflow a float
+    if (l <= -1073741824 || l >= 1073741824 || r <= -1073741824 || r >= 1073741824) return 0;
+    if (op == ph_tok("+", 1)) { ph_cfold_v = l + r; return 1; }
+    if (op == ph_tok("-", 1)) { ph_cfold_v = l - r; return 1; }
+    if (op == ph_tok("*", 1) && l > -32768 && l < 32768 && r > -32768 && r < 32768) { ph_cfold_v = l * r; return 1; }
+    return 0;
+}
+
 // A constant's value has to be known at compile time: an int/bool literal or a
 // string literal, which is the php_str_lit call ph_strlit built.
 void ph_const_add(uptr cn, i64 v, i64 t, uptr fl, i64 line) {
@@ -33,6 +53,9 @@ void ph_const_add(uptr cn, i64 v, i64 t, uptr fl, i64 line) {
     uptr bytes = 0;
     i64 lit = 0;
     if ((t == PT_INT || t == PT_BOOL) && nd_kind(v) == N_INT) { val = nd_val(v); lit = 1; }
+    // `const X = -1;` and `const Y = 60 * 60;`: arithmetic over int literals
+    // is a literal too (ph_const_fold), not a value looked up at run time
+    if (t == PT_INT && !lit && ph_const_fold(v)) { val = ph_cfold_v; lit = 1; }
     if (t == PT_STRING && nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_lit")) {
         i64 raw = nd_next(nd_a(v));
         bytes = nd_name(raw);

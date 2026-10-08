@@ -244,6 +244,17 @@ elif build "$EX" "$EX/mcphp$suf.toml" "db.$sx"; then
     else
         bad "db published: want the eight db_* functions, got: $vis"
     fi
+    # a call leaves the request's memory where it found it: db.php's top-level
+    # `const _SQLITE_TRANSIENT = -1;` used to be glued to _out8's body, so every
+    # db_open, db_scalar and db_text registered the constant again and the
+    # request grew by ~500 bytes a call until php's memory limit
+    grow=$("$PHP" -d extension="$dbso" -r '$db = db_open(":memory:"); db_scalar($db, "SELECT 1"); db_text($db, "SELECT 1"); db_close(db_open(":memory:"));
+        $m = memory_get_usage(); for ($i = 0; $i < 2000; $i++) { db_scalar($db, "SELECT 1"); db_text($db, "SELECT 1"); db_close(db_open(":memory:")); } echo memory_get_usage() - $m;' 2>&1 | tr -d '\r')
+    if [ -n "$grow" ] && [ "$grow" -lt 4096 ] 2>/dev/null; then
+        say "memory: 2000 calls each of db_scalar, db_text and db_open+db_close grow the request by $grow bytes"
+    else
+        bad "db memory: 2000 calls grew the request by $grow bytes (want under 4 KiB)"
+    fi
     # the C twin (c/db.c): the same eight db_* functions written the ordinary
     # way, graded by the same check.php against check.expect, and the reference
     # the bench's DONE ratio is measured against. Like db.php it declares its own

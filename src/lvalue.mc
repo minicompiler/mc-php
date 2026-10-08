@@ -1444,7 +1444,10 @@ i64 ph_stmt_1() {
             if (!ph_accept(",", 1)) break;
         }
         ph_semi("expected ; after a php const");
-        return ph_empty();
+        // a constant computed at run time is a statement (php_const_set) left
+        // pending: it is this statement's, never the next one's -- at a
+        // file's top level the next one is a function's first
+        return ph_wrap(ph_empty());
     }
     if (ph_is("unset")) {
         // unset($a[k]) removes the element; unset($x) on a zval variable makes
