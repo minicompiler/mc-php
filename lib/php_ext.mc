@@ -232,7 +232,13 @@ void php_rc_drain(i64 m) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
         if (rc > 1) { st32(s, rc - 1); continue; }
         if (ld64(phT + PHT_ph_shared)) { php_str_defer(phT, s); continue; }
         if (ld32(s + 4) & ZSX_PERSIST) { free(s); continue; }
-        php_str_efree(phT, s);
+        // php_str_efree's list push, in the loop: most temporaries are short
+        i64 n = ld64(s + ZSX_LEN);
+        if (n <= PH_SCMAX) {
+            uptr hd = phT + PHT_ph_scache + ((n + 32) >> 3) * 8;
+            if (ld64(hd + 136) < 32) { st64(s, ld64(hd)); st64(hd, s); st64(hd + 136, ld64(hd + 136) + 1); continue; }
+        }
+        _efree(s, "mc-php", 0, 0, 0);
     }
     if (ld64(phT + PHT_ph_pn) > m) st64(phT + PHT_ph_pn, m);
 }
