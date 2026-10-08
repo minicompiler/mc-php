@@ -216,6 +216,18 @@ void php_pool_push(uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     st64(phT + PHT_ph_pn, ld64(phT + PHT_ph_pn) + 1);
 }
 
+// A string block's size: the header, n bytes and the NUL, rounded up to its
+// 8-byte class (Zend's ZEND_MM_ALIGNED_SIZE, which php's own
+// zend_string_alloc asks for). A wrapped negative size is left as it is, for
+// _emalloc to refuse. lib/php_ext.mc keeps freed blocks per class up to
+// PH_SCMAX bytes.
+#define PH_SCMAX 103                    // 24 + 103 + 1 = 128 bytes: class 16
+i64 php_str_csz(i64 n) {
+    i64 z = ZS_HDR + n + 1;
+    if (n >= 0) z = (z + 7) & (0 - 8);
+    return z;
+}
+
 // A string of n bytes, the header written and the NUL; the n bytes are the
 // caller's to write, every one of them (nothing here is zeroed). `pool` 0 is
 // a string whose one reference the caller keeps (php_str_append's copy).
@@ -224,7 +236,7 @@ uptr php_str_mk(i64 n, i64 pool) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(
     if (((uptr) ld64(phT + PHT_ph_zalloc))) {
         // a size that wrapped negative goes to _emalloc as a huge size_t,
         // which php's memory limit refuses by name, as php_alloc's does
-        s = phx_em(ZS_HDR + n + 1);
+        s = phx_em(php_str_csz(n));
         st64(phT + PHT_ph_rc_built, ld64(phT + PHT_ph_rc_built) + 1);
         st32(s + 4, ZS_GC_STRING);
     }
@@ -338,7 +350,7 @@ i64 php_str_mine(uptr s) {
 // zend_string_extend. In check mode it always moves and the old block is
 // poisoned, so a stale pointer is caught rather than lucky.
 uptr php_str_grow(uptr s, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
-    if (((uptr) ld64(phT + PHT_ph_zalloc))) return phx_er(s, ZS_HDR + n + 1);
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) return phx_er(s, php_str_csz(n));
     uptr ns = php_alloc(ZS_HDR + n + 1);
     i64 i = 0;
     i64 w = ZS_HDR + ld64(s + 16) + 1;

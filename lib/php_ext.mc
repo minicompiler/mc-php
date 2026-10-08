@@ -137,16 +137,67 @@ i64  phx_rshutdown(i64 mtype, i64 mnum);
 // program road, where nothing reaches them.
 uptr phx_em(i64 n) { return _emalloc(n, "mc-php", 0, 0, 0); }
 
+// a counted string's block back: onto its class's list while the list is
+// short, else to Zend. Its class is read off its length NOW, which is never
+// more than what its block holds (a string is shortened in place, never
+// lengthened without a new block).
+void php_str_efree(uptr phT, uptr s) {
+    i64 n = ld64(s + ZSX_LEN);
+    if (n <= PH_SCMAX) {
+        uptr hd = phT + PHT_ph_scache + ((n + 32) >> 3) * 8;
+        if (ld64(hd + 136) < 32) { st64(s, ld64(hd)); st64(hd, s); st64(hd + 136, ld64(hd + 136) + 1); return; }
+    }
+    _efree(s, "mc-php", 0, 0, 0);
+}
+
+// RSHUTDOWN: every kept block back to Zend
+void phx_sc_flush(uptr phT) {
+    i64 c = 0;
+    loop {
+        if (c > 16) break;
+        uptr hd = phT + PHT_ph_scache + c * 8;
+        loop {
+            uptr s = ld64(hd);
+            if (!s) break;
+            st64(hd, ld64(s));
+            _efree(s, "mc-php", 0, 0, 0);
+        }
+        st64(hd + 136, 0);
+        c = c + 1;
+    }
+}
+
 // Every string the runtime builds inside a call: php's zend_string_alloc laid
 // by hand over _emalloc -- refcount 1 and GC_STRING in one store, hash 0, the
 // length, the NUL -- and pushed on the pool as a temporary. The n bytes are
 // the caller's to write. Outside a call (MINIT) it is module memory, the
 // arena's, as on the program road.
+//
+// A string of at most PH_SCMAX bytes takes a block a freed string of the
+// same 8-byte class left on this thread's list (php_rc_drain, php_str_free)
+// before it asks Zend: the bench's strings are a few dozen bytes, and the
+// _emalloc/_efree pair was most of what building one cost. Every block is a
+// genuine Zend block of this thread's request heap, so one that leaves on a
+// string php keeps is freed by php as any other; the lists go back to Zend
+// at RSHUTDOWN (phx_sc_flush), before the heap is reset and before a debug
+// php counts what is left. Each string block is requested at its whole
+// class (php_str_csz), so a block is never smaller than its class even
+// where _emalloc is malloc itself (USE_ZEND_ALLOC=0).
 uptr php_str_alloc(i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (!((uptr) ld64(phT + PHT_ph_zalloc))) return php_str_mk(n, 1);
+    uptr s = 0;
+    if (n >= 0 && n <= PH_SCMAX) {
+        uptr hd = phT + PHT_ph_scache + ((n + 32) >> 3) * 8;
+        s = ld64(hd);
+        if (s) { st64(hd, ld64(s)); st64(hd + 136, ld64(hd + 136) - 1); }
+    }
     // a size that wrapped negative is a huge size_t to _emalloc, which php's
     // memory limit refuses by name
-    uptr s = _emalloc(ZSX_HDR + n + 1, "mc-php", 0, 0, 0);
+    if (!s) {
+        i64 z = ZSX_HDR + n + 1;               // php_str_csz, in line
+        if (n >= 0) z = (z + 7) & (0 - 8);
+        s = _emalloc(z, "mc-php", 0, 0, 0);
+    }
     st64(phT + PHT_ph_rc_built, ld64(phT + PHT_ph_rc_built) + 1);
     st64(s, 94489280513);                       // refcount 1 | GC_STRING (22) << 32
     st64(s + 8, 0);
@@ -164,7 +215,7 @@ void php_str_free(uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     // counts may have raced, so a string is not freed now but at RSHUTDOWN
     if (ld64(phT + PHT_ph_shared)) { php_str_defer(phT, s); return; }
     if (ld32(s + 4) & ZSX_PERSIST) { free(s); return; }
-    _efree(s, "mc-php", 0, 0, 0);
+    php_str_efree(phT, s);
 }
 
 // The temporaries above mark m die (php_rt.mc § who owns a string): every
@@ -181,7 +232,7 @@ void php_rc_drain(i64 m) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
         if (rc > 1) { st32(s, rc - 1); continue; }
         if (ld64(phT + PHT_ph_shared)) { php_str_defer(phT, s); continue; }
         if (ld32(s + 4) & ZSX_PERSIST) { free(s); continue; }
-        _efree(s, "mc-php", 0, 0, 0);
+        php_str_efree(phT, s);
     }
     if (ld64(phT + PHT_ph_pn) > m) st64(phT + PHT_ph_pn, m);
 }
@@ -555,7 +606,7 @@ void phx_ret_float(uptr rv, f64 v) {
 // name phx_throw looks up (the lookup may keep the key).
 uptr phx_zstr(uptr s) {
     i64 n = ld64(s + ZSX_LEN);
-    uptr z = phx_em(ZSX_HDR + n + 1);
+    uptr z = phx_em(php_str_csz(n));
     st32(z, 1);
     st32(z + 4, ZSX_GC_STRING);
     st64(z + 8, 0);
@@ -815,6 +866,7 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) { uptr phT = ph_tcur; if (!phT) phT = ph_
     // kept, and shared mode off
     if (ld64(phT + PHT_ph_shared)) php_str_undefer(phT);
     php_thr_endall(phT, 1, 0);
+    phx_sc_flush(phT);
     return 0;
 }
 
