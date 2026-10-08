@@ -640,6 +640,7 @@ void pm_env() {
         if (str_eq(s, "MCPHP_LAYOUT=0")) pm_nolay = 1;
         if (str_eq(s, "MCPHP_LEAF=0")) pm_nolf = 1;
         if (str_eq(s, "MCPHP_DIVK=0")) pm_nodiv = 1;
+        if (str_eq(s, "MCPHP_DIVQ=0")) phq_off = 1;
         if (str_eq(s, "MCPHP_ADDM=0")) pm_noaddm = 1;
         if (str_eq(s, "MCPHP_SHIFT=0")) pm_nosh = 1;
         if (str_eq(s, "MCPHP_LOGIC=0")) pm_nolg = 1;

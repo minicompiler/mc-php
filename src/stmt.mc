@@ -407,11 +407,96 @@ i64 ph_cont_out(i64 s, i64 depth) {
     return 0;
 }
 
+// the continues that name the loop `s` is the body of: at its own level
+// (ph_cont_own, depth 0) or from inside a loop nested in it (ph_cont_deep). A
+// continue to a loop further out runs no step of this one and counts for
+// neither.
+i64 ph_cont_own;
+i64 ph_cont_deep;
+void ph_cont_count(i64 s, i64 depth) {
+    loop {
+        if (!s) break;
+        i64 k = nd_kind(s);
+        if (k == N_CONTINUE) {
+            i64 lv = nd_val(s);
+            if (lv < 1) lv = 1;
+            if (lv == depth + 1) {
+                if (depth == 0) ph_cont_own = ph_cont_own + 1;
+                else ph_cont_deep = ph_cont_deep + 1;
+            }
+        }
+        i64 d = depth;
+        if (k == N_LOOP) d = depth + 1;
+        ph_cont_count(nd_a(s), d);
+        ph_cont_count(nd_b(s), d);
+        ph_cont_count(nd_c(s), d);
+        ph_cont_count(nd_d(s), d);
+        s = nd_next(s);
+    }
+}
+
+// the list with a copy of the step in front of each continue at the loop's
+// own level; nested loops are not entered
+i64 ph_cont_step(i64 s, i64 step) {
+    i64 h = s;
+    i64 pv = 0;
+    loop {
+        if (!s) break;
+        i64 nx = nd_next(s);
+        i64 k = nd_kind(s);
+        if (k == N_CONTINUE && nd_val(s) <= 1) {
+            // one node where the continue was: an if's branch is a node, not
+            // a list, and a block adds no loop level
+            i64 c = phi_copy(step);
+            i64 ct = c;
+            loop { if (!nd_next(ct)) break; ct = nd_next(ct); }
+            set_nd_next(ct, s);
+            set_nd_next(s, 0);
+            i64 cb = node_new(N_BLOCK, nd_line(s), nd_file(s));
+            set_nd_a(cb, c);
+            set_nd_next(cb, nx);
+            if (pv) set_nd_next(pv, cb);
+            if (!pv) h = cb;
+            s = cb;
+        } else if (k != N_LOOP) {
+            set_nd_a(s, ph_cont_step(nd_a(s), step));
+            set_nd_b(s, ph_cont_step(nd_b(s), step));
+            set_nd_c(s, ph_cont_step(nd_c(s), step));
+            set_nd_d(s, ph_cont_step(nd_d(s), step));
+        }
+        pv = s;
+        s = nx;
+    }
+    return h;
+}
+
+i64 ph_nodes(i64 n) {
+    i64 c = 0;
+    loop { if (!n) break; c = c + 1 + ph_nodes(nd_a(n)) + ph_nodes(nd_b(n)) + ph_nodes(nd_c(n)) + ph_nodes(nd_d(n)); n = nd_next(n); }
+    return c;
+}
+
 i64 ph_loop_of(i64 cond, i64 body, i64 step, i64 line, uptr fl) {
     i64 pre = 0;
+    // A continue at the loop's own level takes a copy of the (small) step
+    // with it, so the step can follow the body like a loop with none: the
+    // first-iteration flag below costs a load, a test and a store on every
+    // iteration (bcmath's _bc_umul skips a zero digit with `continue`). A
+    // continue from inside a nested loop keeps the flag -- a copied step's
+    // unwinding check would leave by the wrong number of loops.
+    i64 tail = 0;
+    if (step && body) {
+        ph_cont_own = 0;
+        ph_cont_deep = 0;
+        ph_cont_count(body, 0);
+        if (ph_cont_own > 0 && ph_cont_own <= 4 && ph_cont_deep == 0 && ph_nodes(step) <= 24) {
+            body = ph_cont_step(body, step);
+            tail = 1;
+        }
+    }
     // with no `continue` to skip it, the step simply follows the body: no
     // flag to test and clear on every iteration
-    if (step && body && !ph_cont_out(body, 0)) {
+    if (step && body && (tail || !ph_cont_out(body, 0))) {
         i64 bt = body;
         loop { if (!nd_next(bt)) break; bt = nd_next(bt); }
         set_nd_next(bt, step);

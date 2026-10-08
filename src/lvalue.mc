@@ -236,7 +236,37 @@ i64 ph_pk_init(uptr d, uptr fl, i64 line, i64 semi) {
     }
     if (semi) ph_semi("expected ; after a php assignment");
     if (ph_var_find(d) < 0) ph_var_bind(d, PT_PK);
-    return ph_wrap(ph_set(ph_mangle(d, "v_"), v));
+    uptr mn = ph_mangle(d, "v_");
+    i64 st = ph_set(mn, v);
+    // a STABLE array's buffer pointer moves only here (src/packed.mc)
+    if (pkx_in(pkx_stable, mn)) {
+        i64 h = node_new(N_IDENT, line, fl);
+        set_nd_name(h, mn);
+        set_nd_type(h, TY_UPTR);
+        set_nd_next(st, ph_set(ph_pk_dname(mn), ph_quiet("php_pk_dp", 1, h, 0, 0, 0, TY_UPTR)));
+    }
+    return ph_wrap(st);
+}
+
+// a key that reads only int locals of this function and integers, under
+// + - * (at most `left` nodes): a native static is excluded, since a call in
+// the value could re-enter this function and write it. Answers what is left
+// of the budget, or -1.
+i64 ph_pk_keypure(i64 n, i64 left) {
+    if (!n || left <= 0 || nd_next(n) || nd_c(n) || nd_d(n)) return 0 - 1;
+    left = left - 1;
+    i64 k = nd_kind(n);
+    if (k == N_INT) return left;
+    if (k == N_IDENT) {
+        if (nd_type(n) != TY_I64 || ld8(nd_name(n)) != 'v' || ld8(nd_name(n) + 1) != '_' || ph_nst_has(nd_name(n))) return 0 - 1;
+        return left;
+    }
+    if (k == N_BINARY && (nd_op(n) == ph_tok("+", 1) || nd_op(n) == ph_tok("-", 1) || nd_op(n) == ph_tok("*", 1))) {
+        left = ph_pk_keypure(nd_a(n), left);
+        if (left < 0) return left;
+        return ph_pk_keypure(nd_b(n), left);
+    }
+    return 0 - 1;
 }
 
 // `$x[] = E;` and `$x[K] = E;` on a packed $x; the parser is on the [
@@ -263,7 +293,13 @@ i64 ph_pk_store(uptr d, uptr fl, i64 line, i64 semi) {
     // is taken first so php's
     // order -- key, then value -- survives the value moving ahead of the store.
     i64 k0 = k;
-    if (k && nd_kind(k) != N_INT && nd_kind(k) != N_IDENT) k = ph_temp(k, TY_I64, "phk_");
+    // A FIXED array's right-hand side assigns nothing (src/packed.mc's
+    // proof), so a key that reads only this function's int locals and
+    // integers means the same thing after the value as before it: no
+    // temporary, which held a register for the whole function -- bcmath's
+    // _bc_umul spilled its carry for `$acc[$i + $j]`'s
+    if (k && nd_kind(k) != N_INT && nd_kind(k) != N_IDENT && !(ph_pk_fixed(base) && ph_pk_keypure(k, 8) >= 0))
+        k = ph_temp(k, TY_I64, "phk_");
     ph_can_throw = 0;
     i64 v = ph_pk_int(fl, line);
     if (ph_can_throw) v = ph_checked_now(v, TY_I64, line, fl);
@@ -273,17 +309,25 @@ i64 ph_pk_store(uptr d, uptr fl, i64 line, i64 semi) {
     // a FIXED array's keyed store is to a key its own right-hand side read
     // (src/packed.mc), so the key is inside the buffer
     if (ph_pk_fixed(base)) {
+        // a STABLE one (src/packed.mc) goes through its buffer pointer's
+        // local: the same three routines over the pointer
+        i64 stb = ph_pk_stable(base);
+        i64 cb = base;
+        uptr rdn = "php_pk_get_f";
+        uptr ean = "php_pk_ea";
+        uptr stn = "php_pk_set_f";
+        if (stb) { cb = ph_pk_dref(base); rdn = "php_pk_get_fd"; ean = "php_pk_ead"; stn = "php_pk_set_fd"; }
         // `$x[K] = $x[K] + E` on a FIXED array: the element's address is
         // computed once, and one read, add and write go through it
         // (ph_addm64, src/mach.mc) -- the read and the store no longer each
         // recompute it from the buffer pointer, which kept the store's
         // address late and the next iteration's load waiting behind it
         if (ph_addm_on && nd_kind(v) == N_BINARY && nd_op(v) == ph_tok("+", 1)
-            && nd_kind(nd_a(v)) == N_CALL && str_eq(nd_name(nd_a(v)), "php_pk_get_f")
-            && ph_same_tree(nd_a(nd_a(v)), base) && ph_same_tree(nd_next(nd_a(nd_a(v))), k0))
+            && nd_kind(nd_a(v)) == N_CALL && str_eq(nd_name(nd_a(v)), rdn)
+            && ph_same_tree(nd_a(nd_a(v)), cb) && ph_same_tree(nd_next(nd_a(nd_a(v))), k0))
             return ph_expr_stmt_of(ph_quiet("ph_addm64", 2,
-                ph_quiet("php_pk_ea", 2, base, k, 0, 0, TY_UPTR), nd_b(v), 0, 0, TY_VOID));
-        return ph_expr_stmt_of(ph_quiet("php_pk_set_f", 3, base, k, v, 0, TY_VOID));
+                ph_quiet(ean, 2, cb, k, 0, 0, TY_UPTR), nd_b(v), 0, 0, TY_VOID));
+        return ph_expr_stmt_of(ph_quiet(stn, 3, cb, k, v, 0, TY_VOID));
     }
     return ph_expr_stmt_of(ph_quiet("php_pk_set", 3, base, k, v, 0, TY_VOID));
 }

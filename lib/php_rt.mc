@@ -2060,9 +2060,13 @@ uptr php_pk_fill(i64 n, i64 v) {
     // the count's two refusals, out of line: one unsigned test in front
     if (n < 0 || n >= 2147483648) { php_fill_count_ok(n); return php_pk_new(8); }
     uptr p = php_pk_new(n);
+    // two words a step through a pointer: the indexed loop was a multiply,
+    // an add and two branches for each word (bcmath's _bc_umul fills one
+    // per call of a power)
     uptr d = ld64(p + 16);
-    i64 i = 0;
-    loop { if (i >= n) break; st64(d + i * 8, v); i = i + 1; }
+    uptr e = d + (n << 3);
+    loop { if (d + 8 >= e) break; st64(d, v); st64(d + 8, v); d = d + 16; }
+    if (d < e) st64(d, v);
     st64(p, n);
     return p;
 }
@@ -2101,6 +2105,12 @@ i64 php_pk_get_f(uptr p, i64 k) { return ld64(ld64(p + 16) + (k << 3)); }
 void php_pk_set_f(uptr p, i64 k, i64 v) { st64(ld64(p + 16) + (k << 3), v); }
 // the element's address, for src/lvalue.mc's read-modify-write (ph_addm64)
 uptr php_pk_ea(uptr p, i64 k) { return ld64(p + 16) + (k << 3); }
+// a STABLE array (src/packed.mc) keeps its buffer pointer in a local: the
+// pointer, then the same three over it
+uptr php_pk_dp(uptr p) { return ld64(p + 16); }
+i64 php_pk_get_fd(uptr d, i64 k) { return ld64(d + (k << 3)); }
+void php_pk_set_fd(uptr d, i64 k, i64 v) { st64(d + (k << 3), v); }
+uptr php_pk_ead(uptr d, i64 k) { return d + (k << 3); }
 
 void php_pk_set_slow(uptr p, i64 k, i64 v);
 // the fast path alone, and no early return: src/opt.mc copies it into the

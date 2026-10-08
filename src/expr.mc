@@ -369,6 +369,8 @@ i64 ph_index(i64 base, i64 bt) {
         ph_ety = PT_INT;
         if (ph_checked_reads) return ph_c2("php_pk_get_d", base, kx, TY_I64);
         // a FIXED array (src/packed.mc) is never a hash: the buffer's element
+        // a STABLE one (src/packed.mc) through its buffer pointer's local
+        if (ph_pk_stable(base)) return ph_quiet("php_pk_get_fd", 2, ph_pk_dref(base), kx, 0, 0, TY_I64);
         if (ph_pk_fixed(base)) return ph_quiet("php_pk_get_f", 2, base, kx, 0, 0, TY_I64);
         return ph_quiet("php_pk_get_c", 2, base, kx, 0, 0, TY_I64);
     }
@@ -971,7 +973,12 @@ i64 ph_arith(i64 op, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         return ph_bin(op, ph_to_float(lhs, lt), ph_to_float(rhs, rt), ty_f64);
     }
     ph_ety = PT_INT;
-    // + - * wrap as C's do, on any int (docs/semantics.md)
+    // + - * wrap as C's do, on any int (docs/semantics.md). A literal on the
+    // left of + or * goes to the right, where src/mach.mc's P1 makes it the
+    // instruction's immediate: `chr(48 + $d % 10)` was a movz and an add. The
+    // literal evaluates nothing, so the order of evaluation is unchanged.
+    if ((op == ph_tok("+", 1) || op == ph_tok("*", 1)) && nd_kind(lhs) == N_INT && nd_kind(rhs) != N_INT)
+        return ph_bin(op, rhs, lhs, TY_I64);
     return ph_bin(op, lhs, rhs, TY_I64);
 }
 

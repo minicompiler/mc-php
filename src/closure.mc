@@ -272,8 +272,10 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     // answer must not depend on that.
     uptr spk = pkx_names;
     uptr spf = pkx_fixed;
+    uptr sps = pkx_stable;
     pkx_names = 0;
     pkx_fixed = 0;
+    pkx_stable = 0;
     if (arrow) {
         ph_want("=>", 2, "expected => in a php arrow function");
         i64 rv = ph_expr(0);
@@ -285,6 +287,7 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     if (!arrow) body = ph_block();
     pkx_names = spk;
     pkx_fixed = spf;
+    pkx_stable = sps;
     // php's rule for fn(): capture, by value at creation, the variables the
     // body names and no other -- one it does not name is never read, and may
     // be a slot nothing assigned on this path (a catch's $e)

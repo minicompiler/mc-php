@@ -2564,6 +2564,10 @@ void phr_init() {
     phr_add("php_pk_get_f");
     phr_add("php_pk_set_f");
     phr_add("php_pk_ea");
+    phr_add("php_pk_dp");
+    phr_add("php_pk_get_fd");
+    phr_add("php_pk_set_fd");
+    phr_add("php_pk_ead");
     phr_add("php_intdiv");
     phr_add("php_mod");
     phr_add("php_rc_ret");
@@ -2789,6 +2793,15 @@ i64 phr_has_cont(i64 n) {
     return 0;
 }
 
+// The pend at a loop's top is the pend on entry, at the end of its body, and
+// at each `continue` that names it -- a continue goes to the top. phr_cacc[d]
+// collects the last for the loop d levels into the walk (src/stmt.mc's
+// rotated loop ends `if (c) continue; break;`, so without this every loop
+// it rotated kept every check it holds, as if anything could be pending).
+#define PHR_MAXD 64
+i64 phr_cdep;
+i64 phr_cacc[PHR_MAXD];
+
 i64 phr_chk(i64 s, i64 pend, i64 dry) {
     i64 h = 0;
     i64 t = 0;
@@ -2800,6 +2813,11 @@ i64 phr_chk(i64 s, i64 pend, i64 dry) {
         if (phr_is_check(s)) {
             if (!pend) keep = 0;
             pend = 0;
+        } else if (k == N_CONTINUE) {
+            i64 lv = nd_val(s);
+            if (lv < 1) lv = 1;
+            i64 tg = phr_cdep - lv + 1;
+            if (tg >= 1 && tg < PHR_MAXD && pend) st64(&phr_cacc + tg * 8, 1);
         } else if (k == N_IF) {
             if (phr_uncond(nd_a(s))) pend = 1;
             i64 pb = pend;
@@ -2818,9 +2836,21 @@ i64 phr_chk(i64 s, i64 pend, i64 dry) {
             pend = po | pc;
         } else if (k == N_LOOP) {
             i64 pin = pend;
-            if (phr_has_cont(nd_a(s))) { if (phr_calls(nd_a(s))) pin = 1; }
-            else { phr_chk(nd_a(s), pend, 1); pin = pend | phr_pend; }
-            i64 b = phr_chk(nd_a(s), pin, dry);
+            i64 b = 0;
+            if (phr_cdep + 1 >= PHR_MAXD) {
+                if (phr_has_cont(nd_a(s))) { if (phr_calls(nd_a(s))) pin = 1; }
+                else { phr_chk(nd_a(s), pend, 1); pin = pend | phr_pend; }
+                b = phr_chk(nd_a(s), pin, dry);
+            } else {
+                // one dry pass reaches the fixed point: pend only ever goes
+                // from 0 to 1, and a pass entered with 1 answers 1 at the top
+                phr_cdep = phr_cdep + 1;
+                st64(&phr_cacc + phr_cdep * 8, 0);
+                phr_chk(nd_a(s), pend, 1);
+                pin = pend | phr_pend | ld64(&phr_cacc + phr_cdep * 8);
+                b = phr_chk(nd_a(s), pin, dry);
+                phr_cdep = phr_cdep - 1;
+            }
             if (!dry) set_nd_a(s, b);
             if (phr_calls(nd_a(s))) pend = 1;
         } else if (k == N_BLOCK) {
@@ -3021,6 +3051,145 @@ void phr_nodrain(i64 s) {
     }
 }
 
+// ---- `x % K` and then `y = x / K`: one division ---------------------------------
+// Every digit loop computes both (`$out[...] = chr(48 + $t % 10); $carry =
+// intdiv($t, 10);`), and each is a multiply-high by the magic number
+// (src/mach.mc's P12) -- C's compiler shares the one. In a statement list,
+// `y = x / K` (x and y locals of the function, K a positive literal) moves up
+// to just before the first statement that computes `x % K`, and each such
+// remainder becomes `x - y * K`, the same integer for every x. Only when
+// nothing between reads or writes y, writes x, or leaves -- an unwinding
+// check that returns is let through: after it y is never read again.
+// MCPHP_DIVQ=0 turns it off.
+i64 phq_off;
+
+// n itself and everything under it, but not what follows n
+i64 phq_names(i64 n, uptr nm) {
+    if ((nd_kind(n) == N_IDENT || nd_kind(n) == N_ASSIGN) && str_eq(nd_name(n), nm)) return 1;
+    return aset_n(nd_a(n), nm) + aset_n(nd_b(n), nm) + aset_n(nd_c(n), nm) + aset_n(nd_d(n), nm) > 0;
+}
+i64 phq_sets(i64 n, uptr nm) {
+    loop {
+        if (!n) break;
+        if (nd_kind(n) == N_ASSIGN && str_eq(nd_name(n), nm)) return 1;
+        if (phq_sets(nd_a(n), nm) || phq_sets(nd_b(n), nm) || phq_sets(nd_c(n), nm) || phq_sets(nd_d(n), nm)) return 1;
+        n = nd_next(n);
+    }
+    return 0;
+}
+i64 phq_sets1(i64 n, uptr nm) {
+    if (nd_kind(n) == N_ASSIGN && str_eq(nd_name(n), nm)) return 1;
+    return phq_sets(nd_a(n), nm) || phq_sets(nd_b(n), nm) || phq_sets(nd_c(n), nm) || phq_sets(nd_d(n), nm);
+}
+// does the statement n (not what follows it) leave, loop or take an
+// address? An unwinding check that returns -- the copied slow path of a
+// runtime routine ends in one -- does not count.
+i64 phq_jumps1(i64 n) {
+    if (!n) return 0;
+    if (phr_is_check(n) && phr_rets(nd_b(n))) return 0;
+    i64 k = nd_kind(n);
+    if (k == N_BREAK || k == N_CONTINUE || k == N_RETURN || k == N_LOOP || k == N_ADDR) return 1;
+    return phq_jumps(nd_a(n)) || phq_jumps(nd_b(n)) || phq_jumps(nd_c(n)) || phq_jumps(nd_d(n));
+}
+i64 phq_jumps(i64 n) {
+    loop {
+        if (!n) break;
+        if (phq_jumps1(n)) return 1;
+        n = nd_next(n);
+    }
+    return 0;
+}
+i64 phq_isrem(i64 n, uptr x, i64 k) {
+    return nd_kind(n) == N_BINARY && nd_op(n) == ph_tok("%", 1) && nd_kind(nd_a(n)) == N_IDENT
+        && str_eq(nd_name(nd_a(n)), x) && nd_kind(nd_b(n)) == N_INT && nd_val(nd_b(n)) == k;
+}
+// how many `x % K` under n (n's own list included when `all`); with y, each becomes x - y * K
+i64 phq_rem(i64 n, uptr x, i64 k, uptr y, i64 all) {
+    i64 c = 0;
+    loop {
+        if (!n) break;
+        if (phq_isrem(n, x, k)) {
+            c = c + 1;
+            if (y) {
+                i64 yi = node_new(N_IDENT, nd_line(n), nd_file(n));
+                set_nd_name(yi, y);
+                set_nd_type(yi, TY_I64);
+                set_nd_op(n, ph_tok("-", 1));
+                set_nd_b(n, ph_bin(ph_tok("*", 1), yi, phi_copy1(nd_b(n)), TY_I64));
+            }
+        } else {
+            c = c + phq_rem(nd_a(n), x, k, y, 1) + phq_rem(nd_b(n), x, k, y, 1)
+                  + phq_rem(nd_c(n), x, k, y, 1) + phq_rem(nd_d(n), x, k, y, 1);
+        }
+        if (!all) break;
+        n = nd_next(n);
+    }
+    return c;
+}
+
+i64 phq_list(i64 s) {
+    if (phq_off) return s;
+    i64 h = s;
+    i64 p = s;
+    loop {
+        if (!p) break;
+        i64 k = nd_kind(p);
+        if (k == N_IF || k == N_BLOCK || k == N_LOOP) {
+            if (nd_a(p) && k != N_IF) set_nd_a(p, phq_list(nd_a(p)));
+            if (nd_b(p)) set_nd_b(p, phq_list(nd_b(p)));
+            if (nd_c(p)) set_nd_c(p, phq_list(nd_c(p)));
+        }
+        p = nd_next(p);
+    }
+    i64 j = h;
+    i64 pj = 0;
+    loop {
+        if (!j) break;
+        i64 nx = nd_next(j);
+        i64 v = nd_a(j);
+        if (nd_kind(j) == N_ASSIGN && v && nd_kind(v) == N_BINARY && nd_op(v) == ph_tok("/", 1)
+            && nd_kind(nd_a(v)) == N_IDENT && nd_type(nd_a(v)) == TY_I64 && nd_kind(nd_b(v)) == N_INT
+            && nd_val(nd_b(v)) > 0 && !str_eq(nd_name(nd_a(v)), nd_name(j))
+            && phi_local_of_caller(nd_name(j)) && phi_local_of_caller(nd_name(nd_a(v)))
+            && phi_decl_ty(nd_name(j)) == TY_I64) {
+            uptr y = nd_name(j);
+            uptr x = nd_name(nd_a(v));
+            i64 kk = nd_val(nd_b(v));
+            // the first statement since the last one that stops the move and
+            // that computes x % K
+            i64 i0 = 0;
+            i64 pi0 = 0;
+            i64 q = h;
+            i64 pq = 0;
+            loop {
+                if (q == j) break;
+                if (phq_names(q, y) || phq_sets1(q, x)
+                    || phq_jumps1(q)) {
+                    i0 = 0;
+                } else if (!i0 && phq_rem(q, x, kk, 0, 0) > 0) {
+                    i0 = q;
+                    pi0 = pq;
+                }
+                pq = q;
+                q = nd_next(q);
+            }
+            if (i0) {
+                q = i0;
+                loop { if (q == j) break; phq_rem(q, x, kk, y, 0); q = nd_next(q); }
+                set_nd_next(pj, nx);               // j out (i0 precedes it, so pj is set)
+                set_nd_next(j, i0);
+                if (pi0) set_nd_next(pi0, j);
+                if (!pi0) h = j;
+                j = nx;
+                continue;
+            }
+        }
+        pj = j;
+        j = nx;
+    }
+    return h;
+}
+
 void phr_fn(i64 f) {
     if (phi_off) return;
     if (!phr_done) phr_init();
@@ -3043,6 +3212,7 @@ void phr_fn(i64 f) {
     phi_drop = 0;
     set_nd_a(body, phr_lazy(nd_a(body)));
     phr_nodrain(nd_a(body));
+    set_nd_a(body, phq_list(nd_a(body)));
     phr_tail(f);
     if (phi_vh) { set_nd_next(phi_vt, nd_a(body)); set_nd_a(body, phi_vh); }
     phi_cf = 0;

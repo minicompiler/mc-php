@@ -587,7 +587,30 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
             st64(dv + 56, ph_raw(pn, cstrlen(pn)));
             uptr cf = "phx_chk2";
             if (ld64(ph_fvar + fi * 8) && k == np - 1) cf = "phx_chk_rest";
-            body = ph_ext_if(ph_calln(cf, dv, 8, TY_I64), body);
+            i64 c2 = ph_calln(cf, dv, 8, TY_I64);
+            // phx_chk2's common answers in place, as for a plain parameter: an
+            // argument not passed (its default fills it), the one tag an
+            // int, float or string declaration takes as it is, or null where
+            // the declaration admits it (bcmath's `?int $scale = null` on
+            // every function). Anything else -- a reference, an int for a
+            // float, a type to reject -- is phx_chk2's, which raises.
+            i64 dt = ph_bd_pt(fi, k);
+            i64 tg2 = 0;
+            if (dt == PT_INT) tg2 = 4;                    // IS_LONG
+            if (dt == PT_FLOAT) tg2 = 5;                  // IS_DOUBLE
+            if (dt == PT_STRING) tg2 = 6;                 // IS_STRING
+            if (str_eq(cf, "phx_chk2") && tg2 && ph_bd_k(fi, k) == BK_ANY) {
+                i64 ty2 = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
+                i64 fast = ph_bin(ph_tok("==", 2), ty2, ph_int(tg2), TY_U8);
+                if (ph_bd_nul(fi, k)) {
+                    i64 ty3 = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
+                    fast = ph_ext_or(fast, ph_bin(ph_tok("==", 2), ty3, ph_int(1), TY_U8));   // IS_NULL
+                }
+                i64 na2 = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR),
+                                   0, 0, 0, TY_I64);
+                c2 = ph_ext_or(ph_ext_or(ph_bin(ph_tok("<=", 2), na2, ph_int(k), TY_U8), fast), c2);
+            }
+            body = ph_ext_if(c2, body);
             continue;
         }
         u8 cv[48];
@@ -617,8 +640,17 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
                                    ph_c3("phx_arity", ph_ext_ident("ex", TY_UPTR), ph_int(np),
                                          ph_raw(name, cstrlen(name)), TY_I64)), body);
     } else {
-        body = ph_ext_if(ph_c4("phx_arity2", ph_ext_ident("ex", TY_UPTR), ph_int(nreq), ph_int(nmax),
-                               ph_raw(name, cstrlen(name)), TY_I64), body);
+        // the count in range is tested in place; phx_arity2 runs only to raise
+        i64 na3 = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR),
+                           0, 0, 0, TY_I64);
+        i64 inr = ph_bin(ph_tok(">=", 2), na3, ph_int(nreq), TY_U8);
+        if (nmax >= 0) {
+            i64 na4 = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR),
+                               0, 0, 0, TY_I64);
+            inr = ph_bin(ph_tok("&&", 2), inr, ph_bin(ph_tok("<=", 2), na4, ph_int(nmax), TY_U8), TY_U8);
+        }
+        body = ph_ext_if(ph_ext_or(inr, ph_c4("phx_arity2", ph_ext_ident("ex", TY_UPTR), ph_int(nreq), ph_int(nmax),
+                               ph_raw(name, cstrlen(name)), TY_I64)), body);
     }
 
     i64 pre = ph_stmt_of(ph_call("phx_enter", 0, 0, 0, 0, 0, TY_VOID));

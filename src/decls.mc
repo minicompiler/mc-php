@@ -203,6 +203,7 @@ i64  ph_echo_of(i64 v, i64 t, uptr fl, i64 line);
 i64  ph_inline_html(uptr fl, i64 line);
 i64  ph_pk_has(uptr d);
 void ph_pk_scan();
+i64  ph_nst_has(uptr vn);
 void ph_pk_disagree(uptr fl, i64 line, uptr what);
 
 i64 ph_is_arr(i64 t) { if (t == PT_ARR) return 1; return 0; }

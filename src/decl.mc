@@ -212,6 +212,12 @@ uptr ph_nstx;                // ... and their byte offsets in phsi
 i64  ph_nstn;
 
 i64 ph_nst_ok(uptr d) { return ph_optok && pkx_in(ph_nstok, d); }
+// is the mc name vn ("v_x") one of the native statics lowered so far?
+i64 ph_nst_has(uptr vn) {
+    i64 i = 0;
+    loop { if (i >= ph_nstn) break; if (str_eq(ld64(ph_nstv + i * 8), vn)) return 1; i = i + 1; }
+    return 0;
+}
 
 // every `$x = $y;` the scan admitted names an int variable already bound
 i64 ph_nst_rhs_ok(uptr d) {
@@ -822,6 +828,7 @@ i64 ph_function() {
     // body a nested declaration interrupted
     uptr spk = pkx_names;
     uptr spf = pkx_fixed;
+    uptr sps = pkx_stable;
     if (ph_at("{", 1)) ph_pk_scan();
     i64 body = ph_block();
     // a write to a native ?int clears its null flag (ph_opt_scan's proof
@@ -843,6 +850,7 @@ i64 ph_function() {
     ph_nstn = sns;
     pkx_names = spk;
     pkx_fixed = spf;
+    pkx_stable = sps;
     ph_in_try = sit;
     ph_frv = sfv;
     ph_frf = sff;
