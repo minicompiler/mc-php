@@ -1060,6 +1060,23 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
         // $s[$i] === 'c' (either side): the byte compared in place. A string
         // offset is a one-byte string or "", so only === and !== against a
         // one-byte LITERAL are this -- `==` would compare numeric strings.
+        // $r[$m] === $b[$m]: C's reads (php_str_off_c) and the trapping ones
+        // (php_str_off_d) are always ONE byte each (src/lvalue.mc says why),
+        // so two of them are equal exactly when the bytes are
+        if (strict && nd_kind(lhs) == N_CALL && nd_kind(rhs) == N_CALL
+            && (str_eq(nd_name(lhs), "php_str_off_c") || str_eq(nd_name(lhs), "php_str_off_d"))
+            && (str_eq(nd_name(rhs), "php_str_off_c") || str_eq(nd_name(rhs), "php_str_off_d"))) {
+            if (str_eq(nd_name(lhs), "php_str_off_c")) set_nd_name(lhs, "php_str_byte_c");
+            else set_nd_name(lhs, "php_str_byte_d");
+            if (str_eq(nd_name(rhs), "php_str_off_c")) set_nd_name(rhs, "php_str_byte_c");
+            else set_nd_name(rhs, "php_str_byte_d");
+            set_nd_type(lhs, TY_I64);
+            set_nd_type(rhs, TY_I64);
+            ph_ety = PT_BOOL;
+            i64 bop = ph_tok("==", 2);
+            if (neg) bop = ph_tok("!=", 2);
+            return ph_bin(bop, lhs, rhs, TY_U8);
+        }
         if (strict) {
             i64 off = 0;
             i64 lit = 0;
