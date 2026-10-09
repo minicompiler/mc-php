@@ -94,7 +94,7 @@ EOF
 "$BIN" /tmp/hosts-smoke.php -o /tmp/hosts-smoke.o || exit 1
 mcphp_link /tmp/hosts-smoke.o /tmp/hosts-smoke || exit 1
 /tmp/hosts-smoke > /tmp/hosts-smoke.mc 2>&1; mrc=$?
-php -d display_errors=1 -d log_errors=1 -d html_errors=0 -d error_reporting=E_ALL \
+php -d display_errors=1 -d log_errors=1 -d html_errors=0 -d error_reporting=E_ALL -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15 \
     /tmp/hosts-smoke.php > /tmp/hosts-smoke.php.out 2>&1; prc=$?
 sed "s/^/  mc-php  /" /tmp/hosts-smoke.mc
 sed "s/^/  php     /" /tmp/hosts-smoke.php.out

@@ -24,7 +24,7 @@ P=tests
 # display_errors is Off prints no warning where mc-php prints one, and ten
 # fixtures "failed" on a CI runner for exactly that (2026-09-23).
 #
-# These four are the configuration mc-php IMPLEMENTS. It has no php.ini of its
+# These six are the configuration mc-php IMPLEMENTS. It has no php.ini of its
 # own, so its diagnostic channel is one fixed behaviour, and each of these was
 # MEASURED against it rather than assumed:
 #
@@ -36,10 +36,17 @@ P=tests
 #   error_reporting=E_ALL which on php 8.5 is 30719 and INCLUDES E_DEPRECATED
 #                         -- `E_ALL & ~E_DEPRECATED` is 22527 and made php drop
 #                         a str_getcsv() deprecation that mc-php emits
+#   zend.exception_ignore_args=0, zend.exception_string_param_max_len=15
+#                         php's own defaults: a trace keeps its arguments and
+#                         cuts a string at 15 bytes. php.ini-production sets
+#                         them On and 0, which the CI runners' php ships, and
+#                         their oracle printed `b()` and `t('...')` where
+#                         mc-php -- and php with no ini -- prints `b(1)` and
+#                         the string's first 15 bytes
 #
 # The GRID is a different thing and uses probes/t0/phpt-run.py's DEFAULT_INI,
 # which sets log_errors=0 -- correct there, because the grid ignores stderr.
-PHPINI="-d display_errors=1 -d log_errors=1 -d html_errors=0 -d error_reporting=E_ALL"
+PHPINI="-d display_errors=1 -d log_errors=1 -d html_errors=0 -d error_reporting=E_ALL -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15"
 BIN=${BIN:-build/mc-php}
 # A measurement takes a SNAPSHOT of the compiler (T7's note): an edit during
 # the run cannot then corrupt it.
@@ -187,6 +194,48 @@ if [ "$pn" -gt 0 ] && [ "$pk" = "$pn" ] && [ -z "$pe" ] && [ "$en" -gt 0 ]; then
     echo "  packed: $pk / $pn accepted in g/105, 0 / $en lowered in g/106"
 else
     echo "  FAIL  packed: $pk / $pn accepted in g/105; lowered in g/106 where the proof must fail: ${pe:-none}"
+    fail=1
+fi
+# g/146's native ?int: every nat_* function keeps its parameter as the value +
+# u8 null-flag pair (the body scan proved each use, src/decl.mc ph_opt_scan),
+# and every zv_* function -- a copy, a comparison, a `= 5` default, a compound
+# write outside a proof -- keeps php's zval. A scan that proved nothing would
+# pass the differential just as well and lose the native pair.
+"$MCPHP_BIN" --dump-ast $P/g/146-nullable-writes.php > "$tmp/nw.ast" 2>&1
+nwn=$(grep -c '^FUNC.* name=f_nat_' "$tmp/nw.ast")
+nwz=$(grep -c '^FUNC.* name=f_zv_' "$tmp/nw.ast")
+nwa=$(awk '/^FUNC/ { f = ($NF ~ /name=f_nat_/) } f && /^  PARAM type=u8 name=vn_x$/ { n++ } END { print n + 0 }' "$tmp/nw.ast")
+nwb=$(awk '/^FUNC/ { f = ($NF ~ /name=f_zv_/) } f && /^  PARAM type=php_zval name=v_x$/ { n++ } END { print n + 0 }' "$tmp/nw.ast")
+if [ "$nwn" -gt 0 ] && [ "$nwa" = "$nwn" ] && [ "$nwz" -gt 0 ] && [ "$nwb" = "$nwz" ]; then
+    echo "  nullable: $nwa / $nwn native in g/146, $nwb / $nwz kept as a zval"
+else
+    echo "  FAIL  nullable: native $nwa / $nwn, zval $nwb / $nwz in g/146"
+    fail=1
+fi
+# g/147: a strict comparison the static types decide is still FOLDED when its
+# operands are a variable or a literal (pure_cmp: no php_zv_identical), while
+# every call operand elsewhere in the file is evaluated (the differential).
+"$MCPHP_BIN" --dump-ast $P/g/147-strict-fold-eval.php > "$tmp/sf.ast" 2>&1
+sfp=$(awk '/^FUNC/ { f = ($NF ~ /name=f_pure_cmp$/) } f && /name=php_zv_identical$/ { n++ } END { print n + 0 }' "$tmp/sf.ast")
+sfn=$(grep -c '^FUNC.* name=f_pure_cmp$' "$tmp/sf.ast")
+if [ "$sfn" = 1 ] && [ "$sfp" = 0 ]; then
+    echo "  strict fold: g/147's pure comparisons folded, its calls evaluated"
+else
+    echo "  FAIL  strict fold: pure_cmp kept $sfp php_zv_identical call(s)"
+    fail=1
+fi
+# g/148's native statics: every nst_* function keeps its static in a slot of
+# phsi (read and written with ld64/st64, no php_static), every zst_* one keeps
+# the zval static (src/decl.mc ph_nst_scan)
+"$MCPHP_BIN" --dump-ast $P/g/148-native-static.php > "$tmp/ns.ast" 2>&1
+nsn=$(grep -c '^FUNC.* name=f_nst_' "$tmp/ns.ast")
+nsz=$(grep -c '^FUNC.* name=f_zst_' "$tmp/ns.ast")
+nsa=$(awk '/^FUNC/ { f = ($NF ~ /name=f_nst_/); s = 0; p = 0 } f && /name=phsi$/ { if (!s) { n++; s = 1 } } f && /name=php_static$/ { b++ } END { print n + 0, b + 0 }' "$tmp/ns.ast")
+nsb=$(awk '/^FUNC/ { f = ($NF ~ /name=f_zst_/); s = 0 } f && /name=php_static$/ { if (!s) { n++; s = 1 } } END { print n + 0 }' "$tmp/ns.ast")
+if [ "$nsn" -gt 0 ] && [ "$nsa" = "$nsn 0" ] && [ "$nsz" -gt 0 ] && [ "$nsb" = "$nsz" ]; then
+    echo "  native statics: $nsn / $nsn in phsi in g/148, $nsb / $nsz kept as a zval"
+else
+    echo "  FAIL  native statics: g/148 nst_* in phsi / php_static: $nsa of $nsn; zst_* zval $nsb of $nsz"
     fail=1
 fi
 # g/128's globals: every top-level name some function declares `global` is

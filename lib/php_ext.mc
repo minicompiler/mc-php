@@ -137,16 +137,67 @@ i64  phx_rshutdown(i64 mtype, i64 mnum);
 // program road, where nothing reaches them.
 uptr phx_em(i64 n) { return _emalloc(n, "mc-php", 0, 0, 0); }
 
+// a counted string's block back: onto its class's list while the list is
+// short, else to Zend. Its class is read off its length NOW, which is never
+// more than what its block holds (a string is shortened in place, never
+// lengthened without a new block).
+void php_str_efree(uptr phT, uptr s) {
+    i64 n = ld64(s + ZSX_LEN);
+    if (n <= PH_SCMAX) {
+        uptr hd = phT + PHT_ph_scache + ((n + 32) >> 3) * 8;
+        if (ld64(hd + 136) < 32) { st64(s, ld64(hd)); st64(hd, s); st64(hd + 136, ld64(hd + 136) + 1); return; }
+    }
+    _efree(s, "mc-php", 0, 0, 0);
+}
+
+// RSHUTDOWN: every kept block back to Zend
+void phx_sc_flush(uptr phT) {
+    i64 c = 0;
+    loop {
+        if (c > 16) break;
+        uptr hd = phT + PHT_ph_scache + c * 8;
+        loop {
+            uptr s = ld64(hd);
+            if (!s) break;
+            st64(hd, ld64(s));
+            _efree(s, "mc-php", 0, 0, 0);
+        }
+        st64(hd + 136, 0);
+        c = c + 1;
+    }
+}
+
 // Every string the runtime builds inside a call: php's zend_string_alloc laid
 // by hand over _emalloc -- refcount 1 and GC_STRING in one store, hash 0, the
 // length, the NUL -- and pushed on the pool as a temporary. The n bytes are
 // the caller's to write. Outside a call (MINIT) it is module memory, the
 // arena's, as on the program road.
+//
+// A string of at most PH_SCMAX bytes takes a block a freed string of the
+// same 8-byte class left on this thread's list (php_rc_drain, php_str_free)
+// before it asks Zend: the bench's strings are a few dozen bytes, and the
+// _emalloc/_efree pair was most of what building one cost. Every block is a
+// genuine Zend block of this thread's request heap, so one that leaves on a
+// string php keeps is freed by php as any other; the lists go back to Zend
+// at RSHUTDOWN (phx_sc_flush), before the heap is reset and before a debug
+// php counts what is left. Each string block is requested at its whole
+// class (php_str_csz), so a block is never smaller than its class even
+// where _emalloc is malloc itself (USE_ZEND_ALLOC=0).
 uptr php_str_alloc(i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (!((uptr) ld64(phT + PHT_ph_zalloc))) return php_str_mk(n, 1);
+    uptr s = 0;
+    if (n >= 0 && n <= PH_SCMAX) {
+        uptr hd = phT + PHT_ph_scache + ((n + 32) >> 3) * 8;
+        s = ld64(hd);
+        if (s) { st64(hd, ld64(s)); st64(hd + 136, ld64(hd + 136) - 1); }
+    }
     // a size that wrapped negative is a huge size_t to _emalloc, which php's
     // memory limit refuses by name
-    uptr s = _emalloc(ZSX_HDR + n + 1, "mc-php", 0, 0, 0);
+    if (!s) {
+        i64 z = ZSX_HDR + n + 1;               // php_str_csz, in line
+        if (n >= 0) z = (z + 7) & (0 - 8);
+        s = _emalloc(z, "mc-php", 0, 0, 0);
+    }
     st64(phT + PHT_ph_rc_built, ld64(phT + PHT_ph_rc_built) + 1);
     st64(s, 94489280513);                       // refcount 1 | GC_STRING (22) << 32
     st64(s + 8, 0);
@@ -164,7 +215,7 @@ void php_str_free(uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     // counts may have raced, so a string is not freed now but at RSHUTDOWN
     if (ld64(phT + PHT_ph_shared)) { php_str_defer(phT, s); return; }
     if (ld32(s + 4) & ZSX_PERSIST) { free(s); return; }
-    _efree(s, "mc-php", 0, 0, 0);
+    php_str_efree(phT, s);
 }
 
 // The temporaries above mark m die (php_rt.mc § who owns a string): every
@@ -181,6 +232,12 @@ void php_rc_drain(i64 m) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
         if (rc > 1) { st32(s, rc - 1); continue; }
         if (ld64(phT + PHT_ph_shared)) { php_str_defer(phT, s); continue; }
         if (ld32(s + 4) & ZSX_PERSIST) { free(s); continue; }
+        // php_str_efree's list push, in the loop: most temporaries are short
+        i64 n = ld64(s + ZSX_LEN);
+        if (n <= PH_SCMAX) {
+            uptr hd = phT + PHT_ph_scache + ((n + 32) >> 3) * 8;
+            if (ld64(hd + 136) < 32) { st64(s, ld64(hd)); st64(hd, s); st64(hd + 136, ld64(hd + 136) + 1); continue; }
+        }
         _efree(s, "mc-php", 0, 0, 0);
     }
     if (ld64(phT + PHT_ph_pn) > m) st64(phT + PHT_ph_pn, m);
@@ -555,7 +612,7 @@ void phx_ret_float(uptr rv, f64 v) {
 // name phx_throw looks up (the lookup may keep the key).
 uptr phx_zstr(uptr s) {
     i64 n = ld64(s + ZSX_LEN);
-    uptr z = phx_em(ZSX_HDR + n + 1);
+    uptr z = phx_em(php_str_csz(n));
     st32(z, 1);
     st32(z + 4, ZSX_GC_STRING);
     st64(z + 8, 0);
@@ -601,6 +658,11 @@ void phx_ret_str(uptr rv, uptr s) {
 
 i64  phx_mark;                      // the arena's top when MINIT ended
 uptr phx_snap;                      // and a copy of the arena below it
+// The native statics (src/decl.mc: `phsi`, `phsin` slots, generated in every
+// module) as MINIT left them: a request writes them in place, and its end puts
+// them back, as php resets a function's statics per request. A ZTS module's
+// copy is per php thread and reset by phz_statics; this one is the NTS road.
+uptr phx_nsnap;
 
 void phx_grow() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     i64 nc = ld64(phT + PHT_phx_cc) * 2 + 256;
@@ -621,6 +683,14 @@ void phx_track(uptr p) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 // the slow path: a block too big for a chunk gets its own, and a full chunk
 // gets a successor
 uptr phx_zalloc(i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    // the call's first allocation (phx_enter left the cursor unset): the
+    // request's home chunk, from the floor the calls before it left
+    if (!((uptr) ld64(phT + PHT_ph_zcur))) {
+        st64(phT + PHT_ph_zcur, ((uptr) ld64(phT + PHT_phx_home)));
+        st64(phT + PHT_ph_zpos, ld64(phT + PHT_phx_floor));
+        st64(phT + PHT_ph_zlim, PHX_CK);
+        return php_alloc(n);
+    }
     // a size that wrapped negative (PHP_INT_MAX bytes and a header) is a
     // huge one: Zend's allocator refuses it with php's own memory fatal
     if (n > PH_ZBIG || n < 0) {
@@ -717,6 +787,8 @@ void phx_snapshot() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     phx_mark = ld64(phT + PHT_ph_top);
     phx_snap = php_alloc(phx_mark + 8);
     phx_copy(phx_snap, ph_heap, phx_mark);
+    phx_nsnap = php_alloc(phsin * 8 + 8);
+    phx_copy(phx_nsnap, phsi, phsin * 8);
     php_roots(1);
     // a sync object made from here on belongs to the request that makes it
     ph_syown = 1;
@@ -781,6 +853,7 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) { uptr phT = ph_tcur; if (!phT) phT = ph_
     if (ld64(phT + PHT_ph_loop)) { ph_loop_destroy(ld64(phT + PHT_ph_loop)); st64(phT + PHT_ph_loop, 0); }
     php_flush();
     php_request_reset();
+    if (phx_nsnap) phx_copy(phsi, phx_nsnap, phsin * 8);
     // a userland function a call site cached is gone with the request
     st64(phT + PHT_phx_gen, ld64(phT + PHT_phx_gen) + 1);
     phx_zexc_drop();
@@ -815,21 +888,22 @@ i64 phx_rshutdown(i64 mtype, i64 mnum) { uptr phT = ph_tcur; if (!phT) phT = ph_
     // kept, and shared mode off
     if (ld64(phT + PHT_ph_shared)) php_str_undefer(phT);
     php_thr_endall(phT, 1, 0);
+    phx_sc_flush(phT);
     return 0;
 }
 
 // ---- around every handler --------------------------------------------------
-// The common call: the runtime is up, no call is open and the home chunk
-// exists -- a handful of stores, written in place by src/opt.mc (the first
-// call and a nested one take phx_enter_slow)
+// The common call: no call is open and the home chunk exists (so the runtime
+// is up: phx_enter_slow boots it before it makes the chunk) -- three stores,
+// written in place by src/opt.mc (the first call and a nested one take
+// phx_enter_slow). The arena's cursor is left unset (php_alloc's bound is 0
+// since the last call's end), so a call that allocates nothing pays nothing
+// for it; the first allocation sets it from the home chunk (phx_zalloc).
 uptr phx_zalloc_fn;
 void phx_enter_slow();
 void phx_enter() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
-    if (ph_boot_done && !ld64(phT + PHT_phx_depth) && ((uptr) ld64(phT + PHT_phx_home))) {
+    if (!ld64(phT + PHT_phx_depth) && ((uptr) ld64(phT + PHT_phx_home))) {
         st64(phT + PHT_ph_pin, 0);
-        st64(phT + PHT_ph_zcur, ((uptr) ld64(phT + PHT_phx_home)));
-        st64(phT + PHT_ph_zpos, ld64(phT + PHT_phx_floor));
-        st64(phT + PHT_ph_zlim, PHX_CK);
         st64(phT + PHT_phx_depth, 1);
         st64(phT + PHT_ph_zalloc, phx_zalloc_fn);
     } else phx_enter_slow();
@@ -937,7 +1011,8 @@ void phx_leave_slow();
 void phx_leave() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (!ld64(phT + PHT_ph_outn) && !((uptr) ld64(phT + PHT_ph_exc)) && ld64(phT + PHT_phx_depth) == 1 && !ld64(phT + PHT_ph_nob) && !ld64(phT + PHT_ph_pin) && ld64(phT + PHT_ph_en) == ld64(phT + PHT_phx_efloor) && ld64(phT + PHT_phx_cn) == ld64(phT + PHT_phx_keep) && !((uptr) ld64(phT + PHT_phx_zmirror))) {
         st64(phT + PHT_phx_depth, 0);
-        php_rc_drain(0);
+        // most calls leave nothing on the pool: no drain call for them
+        if (ld64(phT + PHT_ph_pn)) php_rc_drain(0);
         st64(phT + PHT_ph_zalloc, 0);
         st64(phT + PHT_ph_zcur, 0);
         st64(phT + PHT_ph_zlim, 0);
@@ -965,6 +1040,9 @@ void phx_leave_slow() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     php_rc_drain(0);
     uptr cur = ((uptr) ld64(phT + PHT_ph_zcur));
     i64 pos = ld64(phT + PHT_ph_zpos);
+    // a call that allocated nothing never set the cursor: it is still where
+    // the calls before it left the home chunk
+    if (!cur) { cur = ((uptr) ld64(phT + PHT_phx_home)); pos = ld64(phT + PHT_phx_floor); }
     st64(phT + PHT_ph_zalloc, 0);
     st64(phT + PHT_ph_zcur, 0);
     st64(phT + PHT_ph_zlim, 0);
@@ -1403,6 +1481,8 @@ i64 phx_fcall_l2(uptr c, i64 v1, i64 v2, i64 lazy) { uptr phT = ph_tcur; if (!ph
 extern uptr _zend_new_array(i64 size);
 extern uptr zend_hash_update(uptr ht, uptr key, uptr zv);
 extern uptr zend_hash_index_update(uptr ht, i64 h, uptr zv);
+extern void zend_hash_real_init_mixed(uptr ht);
+extern void zend_hash_rehash(uptr ht);
 extern void zend_hash_internal_pointer_reset_ex(uptr ht, uptr pos);
 extern i32  zend_hash_get_current_key_ex(uptr ht, uptr sk, uptr nk, uptr pos);
 extern uptr zend_hash_get_current_data_ex(uptr ht, uptr pos);
@@ -1569,21 +1649,43 @@ void phx_r2e(uptr z, uptr ez) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (t > IZ_OBJECT) { st64(ez, 0); st32(ez + ZVX_TYPE_INFO, IZ_NULL); }
 }
 
+// A runtime array is php's zend_array field for field, its Buckets
+// included (lib/php_rt.mc § the ordered hash); only the hash slots in front
+// of them are indexed another way. So the engine's array is made at the
+// runtime one's size, its Buckets written in order -- each value made the
+// engine's (phx_r2e), each key the engine's reference -- and its hash slots
+// and collision links built by the engine itself (zend_hash_rehash, which
+// also closes the holes a deleted element left), where an insert per
+// element looked every key up again.
 uptr phx_r2e_arr(uptr a) {
     i64 used = php_ht_used(a);
-    uptr ht = _zend_new_array(php_count(a));
+    uptr ht = _zend_new_array(used);
+    if (!php_count(a)) return ht;
+    zend_hash_real_init_mixed(ht);
+    uptr d = ld64(ht + 16);
+    i64 dyn = 0;                        // a key the array must release
     i64 i = 0;
     loop {
         if (i >= used) break;
         uptr b = php_ht_bkt(a, i);
+        if (php_zv_type(b) == IZ_UNDEF) st32(d + ZVX_TYPE_INFO, IZ_UNDEF);
+        else {
+            phx_r2e(b, d);
+            uptr k = ld64(b + 24);
+            if (k && !(ld32(k + 4) & ZSX_INTERNED)) { st32(k, ld32(k) + 1); dyn = 1; }
+            st64(d + 24, k);
+        }
+        st64(d + 16, ld64(b + 16));
+        d = d + 32;
         i = i + 1;
-        if (php_zv_type(b) == IZ_UNDEF) continue;
-        u8 ez[16];
-        phx_r2e(b, ez);
-        uptr k = ld64(b + 24);
-        if (k) zend_hash_update(ht, k, ez);
-        else zend_hash_index_update(ht, ld64(b + 16), ez);
     }
+    st32(ht + 24, used);
+    st32(ht + 28, php_count(a));
+    st64(ht + 40, ld64(a + 40));
+    // HASH_FLAG_STATIC_KEYS (1 << 4) says no key needs releasing: off as soon
+    // as one does, as the engine's own insert of such a key turns it off
+    if (dyn) st32(ht + 8, ld32(ht + 8) & (0 - 17));
+    zend_hash_rehash(ht);
     return ht;
 }
 
@@ -1698,12 +1800,23 @@ uptr phx_vcall(uptr f, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) { upt
             return php_znull();
         }
     }
-    u8 av[80];
+    u8 av5[80];
+    uptr av = av5;
+    // more than five (lib/php_rt.mc php_call_zv_t): the rest are the list
+    uptr xa = 0;
+    if (n > 5) {
+        xa = ((uptr) ld64(phT + PHT_ph_xa));
+        st64(phT + PHT_ph_xa, 0);
+        if (!xa || ld64(xa) < n - 5) n = 5;
+        if (n > 5) av = php_alloc(n * 16);
+    }
     if (n > 0) phx_r2e(a1, av);
     if (n > 1) phx_r2e(a2, av + 16);
     if (n > 2) phx_r2e(a3, av + 32);
     if (n > 3) phx_r2e(a4, av + 48);
     if (n > 4) phx_r2e(a5, av + 64);
+    i64 xk = 5;
+    loop { if (xk >= n) break; phx_r2e(ld64(xa + 16 + (xk - 5) * 8), av + xk * 16); xk = xk + 1; }
     u8 rv[16];
     st32(rv + ZVX_TYPE_INFO, IZ_UNDEF);
     i64 lz = ld64(phT + PHT_phx_lz);
@@ -1891,6 +2004,20 @@ uptr phx_zarg_ro(uptr ex, i64 k) {
     return ez;
 }
 
+// The same borrow without the escape, for a handler src/ext.mc proved can
+// neither keep a string it reads nor hand one back (ph_ext_noretain): the
+// engine's own reference on the argument holds it for the whole call, so the
+// reference php_str_esc takes, and the call's slow leave that gives it back,
+// buy nothing. Its fast half reads the frame in place and calls nothing
+// (src/opt.mc copies it into the handler).
+uptr phx_znull_arg() { uptr z = php_alloc(ZV_SIZE); st64(z, 0); st32(z + 8, IZ_NULL); return z; }
+uptr phx_zarg_rov(uptr ex, i64 k) {
+    if (k >= ld32(ex + EXX_NUM_ARGS)) return phx_znull_arg();
+    uptr ez = ex + EXX_ARG1 + k * ZVX_SIZE;
+    if (ld8(ez + ZVX_TYPE_INFO) == IZ_REFERENCE) ez = ld64(ez) + ZRX_VAL;
+    return ez;
+}
+
 uptr phx_aarg(uptr ex, i64 k) { return ld64(phx_zarg(ex, k)); }
 
 // the arguments from k on, a runtime array: a variadic parameter
@@ -2016,6 +2143,13 @@ void phx_marg(uptr name) {
     phx_nai = phx_nai + 1;
 }
 
+// the last parameter, variadic (Zend counts it and sets the method's flag)
+void phx_marg_v(uptr name) {
+    phx_marg(name);
+    uptr a = phx_ai + (phx_nai - 1) * AIX_SIZE;
+    st32(a + AIX_TYPE_MASK, ld32(a + AIX_TYPE_MASK) | ZTX_VARIADIC);
+}
+
 // The class, registered: `flags` is the runtime's (1 abstract, 2 final).
 void phx_cls_end(uptr rce, uptr name, i64 flags) {
     // the table's zero row
@@ -2080,17 +2214,28 @@ uptr phx_pnew(uptr rce) {
 // A published method's handler: $this the engine's object as a proxy, the
 // arguments as runtime zvals (0 for one not passed: the body raises php's
 // own error or takes the default), the compiled body, the answer back.
-void phx_mh(uptr ex, uptr rv, uptr fn, uptr mname) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+// `max` is the most arguments the method takes (its parameter count, or -1
+// when it is variadic); past the sixth they reach it as a compiled call's do
+// (lib/php_rt.mc php_targs: the list, named for this method).
+void phx_mh(uptr ex, uptr rv, uptr fn, uptr mname, i64 max) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     phx_enter();
     i64 n = phx_nargs(ex);
-    if (n > 6) {
-        phx_arity2(ex, 0, 6, mname);
+    i64 lim = max;
+    if (lim >= 0 && lim < 6) lim = 6;
+    if (lim >= 0 && n > lim) {
+        phx_arity2(ex, 0, lim, mname);
         phx_leave();
         return;
     }
     u8 a[48];
     i64 k = 0;
     loop { if (k >= 6) break; st64(a + k * 8, 0); if (k < n) st64(a + k * 8, phx_e2r(phx_argz(ex, k))); k = k + 1; }
+    if (n > 6) {
+        uptr xa = php_tl_new();
+        loop { if (k >= n) break; xa = php_tl_add(xa, phx_e2r(phx_argz(ex, k))); k = k + 1; }
+        st64(phT + PHT_ph_xa, xa);
+        st64(phT + PHT_ph_xf, fn);
+    }
     uptr o = phx_proxy(ld64(ex + EXX_THIS));
     uptr r = callp(fn, o, ld64(a), ld64(a + 8), ld64(a + 16), ld64(a + 24), ld64(a + 32), ld64(a + 40));
     if (!((uptr) ld64(phT + PHT_ph_exc)) && r) phx_r2e(r, rv);

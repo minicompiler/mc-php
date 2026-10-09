@@ -56,6 +56,11 @@ echo "== the sources =="
 python3 tests/d8check.py    || fail=1
 python3 tests/lencheck.py   || fail=1
 python3 tests/aritycheck.py || fail=1
+# src/arginfo.mc is generated from php-src's stubs; php-src is not checked in
+# (it is cloned beside the sources for the grid), so where it is not here the
+# generated file is what is compiled and the check has nothing to read
+if [ -d php-src/ext ]; then python3 tests/arginfo.py --check || fail=1
+else echo "  arginfo: skipped (no php-src/ here; src/arginfo.mc is used as checked in)"; fi
 MC=$MC python3 tests/sweep_sync.py || fail=1
 
 echo ""

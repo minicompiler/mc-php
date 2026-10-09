@@ -709,6 +709,39 @@ uptr pkx_fixed;             // the fixed arrays, by their mangled names ("v_x")
 
 i64 ph_pk_fixed(i64 base) { return nd_kind(base) == N_IDENT && pkx_in(pkx_fixed, nd_name(base)); }
 
+// ---- a FIXED array no `$x[] = E` grows: its buffer never moves --------------------
+// php_pk_push is the one routine that replaces the buffer (a fixed array never
+// becomes a hash), so without a push the buffer pointer changes only where
+// the array is (re)initialised. Such an array (STABLE) keeps that pointer in a
+// local of its own, "pkv_x", written right after each initialisation, and
+// every element read, store and address goes through it: the element's
+// address no longer waits on a load of the handle, and mc's allocator gives
+// the pointer a register like any other local. Measured on bcmath's _bc_umul
+// (`$acc[$i + $j] = $acc[$i + $j] + ...`): the handle's load was the head of
+// every iteration's dependency chain.
+uptr pkx_stable;            // the stable arrays, by their mangled names ("v_x")
+
+i64 ph_pk_stable(i64 base) { return ph_pk_fixed(base) && pkx_in(pkx_stable, nd_name(base)); }
+// the buffer pointer's local: "v_x" -> "pkv_x"
+uptr ph_pk_dname(uptr mn) { return ph_mangle(mn, "pk"); }
+i64 ph_pk_dref(i64 base) {
+    i64 r = node_new(N_IDENT, nd_line(base), nd_file(base));
+    set_nd_name(r, ph_pk_dname(nd_name(base)));
+    set_nd_type(r, TY_UPTR);
+    return r;
+}
+
+// v has a `$x[] =`: the `[` closes right after itself
+i64 pkx_pushes(i64 v) {
+    i64 i = 0;
+    loop {
+        if (i >= pkx_n) break;
+        if (pkx_kind(i) == PKK_VAR && ld64(pkx_vi + i * 8) == v && pkx_isp(i + 1, "[") && pkx_mat(i + 1) == i + 2) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
 i64 pkx_keytok(i64 j) {
     i64 k = pkx_kind(j);
     if (k == PKK_VAR) return 1;
@@ -765,15 +798,11 @@ i64 pkx_isfixed(i64 v) {
 }
 
 // Scan the body whose `{` the parser is on, and set pkx_names.
-void ph_pk_scan() {
-    pkx_names = 0;
-    pkx_fixed = 0;
+// a fresh token buffer for a scan: this one and src/decl.mc's ph_opt_scan
+void pkx_reset() {
     pkx_bad = 0;
     pkx_n = 0;
     pkx_nv = 0;
-    uptr src = p_cp();
-    i64 len = p_src_end() - src;
-    if (len <= 0) return;
     if (!pkx_k) {
         pkx_k = xalloc(PK_MAXT * 8);
         pkx_t = xalloc(PK_MAXT * 8);
@@ -786,6 +815,16 @@ void ph_pk_scan() {
         pkx_vs = xalloc(PK_MAXV * 8);
         pkx_vx = xalloc(PK_MAXV * 8);
     }
+}
+
+void ph_pk_scan() {
+    pkx_names = 0;
+    pkx_fixed = 0;
+    pkx_stable = 0;
+    pkx_reset();
+    uptr src = p_cp();
+    i64 len = p_src_end() - src;
+    if (len <= 0) return;
     pkx_lex(src, len);
     if (pkx_bad) return;
     pkx_nest();
@@ -823,6 +862,8 @@ void ph_pk_scan() {
     // the answer, a 0-terminated list
     pkx_names = xalloc(pkx_nv * 8 + 8);
     pkx_fixed = xalloc(pkx_nv * 8 + 8);
+    pkx_stable = xalloc(pkx_nv * 8 + 8);
+    i64 sx = 0;
     i64 fx = 0;
     i64 a = 0;
     v = 0;
@@ -832,12 +873,20 @@ void ph_pk_scan() {
         if (s3 == PKS_CAND) {
             st64(pkx_names + a * 8, ld64(pkx_vn + v * 8));
             a = a + 1;
-            if (pkx_isfixed(v)) { st64(pkx_fixed + fx * 8, ph_mangle(ld64(pkx_vn + v * 8), "v_")); fx = fx + 1; }
+            if (pkx_isfixed(v)) {
+                uptr mn = ph_mangle(ld64(pkx_vn + v * 8), "v_");
+                st64(pkx_fixed + fx * 8, mn);
+                fx = fx + 1;
+                // the body's hoisted locals start here (ph_function reset
+                // them), so the buffer pointer is declared with them
+                if (!pkx_pushes(v)) { st64(pkx_stable + sx * 8, mn); sx = sx + 1; ph_local(ph_pk_dname(mn), TY_UPTR); }
+            }
         }
         v = v + 1;
     }
     st64(pkx_names + a * 8, 0);
     st64(pkx_fixed + fx * 8, 0);
+    st64(pkx_stable + sx * 8, 0);
 }
 
 // a prediction the lowering does not meet: the scan above is wrong, and the

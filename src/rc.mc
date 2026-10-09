@@ -314,6 +314,8 @@ i64 ph_rc_is_param(uptr name);
 uptr ph_rc_fbs;
 i64  ph_rc_nfb;
 i64  ph_rc_fb_bad;
+i64  ph_rc_fb_nc;                   // the function does not loop: textual order is run order
+i64  ph_rc_fb_esc;                  // the buffer was handed on: no byte write may follow
 
 i64 ph_rc_is_fb(uptr name) {
     i64 i = 0;
@@ -336,12 +338,31 @@ i64 ph_rc_arg0_is(i64 v, uptr name) {
     return a && nd_kind(a) == N_IDENT && str_eq(nd_name(a), name);
 }
 
+// `phrt_N = E;` then its unwinding check, then `return phrt_N;` -- what
+// src/lvalue.mc makes of a `return E;` whose E can throw: E is the returned
+// value as much as a bare `return E;`'s is. In a try with a finally the value
+// goes to the flag and a break instead, the finally runs before the return,
+// and that road is not this shape, so it stays a read like any other.
+i64 ph_rc_fb_retval(i64 s) {
+    i64 t = nd_next(s);
+    if (t && nd_kind(t) == N_IF) t = nd_next(t);
+    if (!t || nd_kind(t) != N_RETURN) return 0;
+    i64 e = nd_a(t);
+    return e && nd_kind(e) == N_IDENT && str_eq(nd_name(e), nd_name(s));
+}
+
 void ph_rc_fb_walk(i64 s, uptr name) {
     loop {
         if (!s) break;
         i64 k = nd_kind(s);
         if (k == N_RETURN) { s = nd_next(s); continue; }
-        if (k == N_IDENT && str_eq(nd_name(s), name)) ph_rc_fb_bad = 1;
+        if (k == N_ASSIGN && ph_rc_pfx(nd_name(s), "phrt_") && ph_rc_fb_retval(s)) { s = nd_next(s); continue; }
+        if (k == N_IDENT && str_eq(nd_name(s), name)) {
+            // in a function that does not loop, a read that hands the
+            // buffer on is fine once no byte is written after it
+            if (ph_rc_fb_nc) ph_rc_fb_esc = 1;
+            else ph_rc_fb_bad = 1;
+        }
         i64 skip = 0;
         if (k == N_ASSIGN && str_eq(nd_name(s), name)) {
             i64 v = nd_a(s);
@@ -350,6 +371,7 @@ void ph_rc_fb_walk(i64 s, uptr name) {
             if (!(nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_repeat"))) {
                 if (nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_setb") && ph_rc_arg0_is(v, name)) {
                     ph_rc_fb_walk(nd_next(nd_a(v)), name);
+                    if (ph_rc_fb_esc) ph_rc_fb_bad = 1;
                     skip = 1;
                 } else ph_rc_fb_bad = 1;
             }
@@ -373,6 +395,36 @@ void ph_rc_fb_walk(i64 s, uptr name) {
     }
 }
 
+// The same proof for a function that does not loop (no slots, nothing
+// counted): every statement runs at most once and in the order it is
+// written, so a buffer may also be handed on -- passed to a call, copied --
+// as long as every byte write into it comes before the first such read. Up
+// to there nobody else holds it, and after it nothing writes it. The string
+// is the pool's, borrowed, so past its bound a write is php_str_setb's copy
+// (php_str_setb_n), never the counted slot's growth.
+void ph_rc_fb_scan_nc(i64 body) {
+    ph_rc_nfb = 0;
+    i64 n = 0;
+    i64 v = body;
+    loop { if (!v || nd_kind(v) != N_VAR) break; n = n + 1; v = nd_next(v); }
+    if (!n) return;
+    ph_rc_fbs = xalloc(n * 8 + 8);
+    ph_rc_fb_nc = 1;
+    v = body;
+    loop {
+        if (!v || nd_kind(v) != N_VAR) break;
+        uptr nm = nd_name(v);
+        if (nd_type(v) == ty_pstr && !nd_a(v) && ph_rc_assigned(body, nm)) {
+            ph_rc_fb_bad = 0;
+            ph_rc_fb_esc = 0;
+            ph_rc_fb_walk(body, nm);
+            if (!ph_rc_fb_bad) { st64(ph_rc_fbs + ph_rc_nfb * 8, nm); ph_rc_nfb = ph_rc_nfb + 1; }
+        }
+        v = nd_next(v);
+    }
+    ph_rc_fb_nc = 0;
+}
+
 void ph_rc_fb_scan(i64 body) {
     ph_rc_nfb = 0;
     if (!ph_rc_nslot) return;
@@ -382,6 +434,7 @@ void ph_rc_fb_scan(i64 body) {
         if (i >= ph_rc_nslot) break;
         uptr nm = ld64(ph_rc_slots + i * 8);
         ph_rc_fb_bad = ph_rc_is_param(nm) || ph_rc_assigned(body, nm) == 0;
+        ph_rc_fb_esc = 0;
         if (!ph_rc_fb_bad) ph_rc_fb_walk(body, nm);
         if (!ph_rc_fb_bad) { st64(ph_rc_fbs + ph_rc_nfb * 8, nm); ph_rc_nfb = ph_rc_nfb + 1; }
         i = i + 1;
@@ -501,6 +554,13 @@ i64 ph_rc_one(i64 s) {
         }
         return s;
     }
+    // a fresh buffer of a function that does not loop (ph_rc_fb_scan_nc)
+    if (k == N_ASSIGN && !ph_rc_counting && !ph_rc_is_slot(nd_name(s)) && ph_rc_is_fb(nd_name(s))) {
+        i64 v = nd_a(s);
+        if (ph_rc_is_call(v, "php_str_setb", nd_name(s))) set_nd_name(v, "php_str_setb_n");
+        else if (nd_kind(v) == N_CALL && str_eq(nd_name(v), "php_str_repeat")) set_nd_name(v, "php_str_repeat_f");
+        return s;
+    }
     if (k == N_ASSIGN && ph_rc_is_slot(nd_name(s))) {
         uptr nm = nd_name(s);
         i64 v = nd_a(s);
@@ -522,6 +582,8 @@ i64 ph_rc_one(i64 s) {
         if (ph_rc_is_call(v, "php_str_setoff", nm)) { set_nd_name(v, "php_str_setoff_own"); return s; }
         if (ph_rc_is_call(v, "php_str_sets", nm)) { set_nd_name(v, "php_str_sets_own"); return s; }
         if (ph_rc_is_call(v, "php_str_setb", nm)) { set_nd_name(v, "php_str_setb_own"); return s; }
+        // `$s = substr($s, ...)`: shortened in place when nobody else holds it
+        if (ph_rc_is_call(v, "php_substr", nm)) { set_nd_name(v, "php_substr_own"); return s; }
         // ph_sn = value; take(ph_sn); release(slot); slot = ph_sn -- the new
         // reference first, so `$s = $s` and a call that answers its argument
         // change nothing
@@ -649,7 +711,10 @@ i64 ph_pin_isread(uptr fn) {
         || str_eq(fn, "php_zv_shr") || str_eq(fn, "php_zv_bnot")
         || str_eq(fn, "php_zv_add_zi") || str_eq(fn, "php_zv_add_iz") || str_eq(fn, "php_zv_sub_zi")
         || str_eq(fn, "php_zv_sub_iz") || str_eq(fn, "php_zv_mul_zi") || str_eq(fn, "php_zv_mul_iz")
-        || str_eq(fn, "php_zv_mod_zi");
+        || str_eq(fn, "php_zv_mod_zi")
+        // a builtin's argument check (src/builtin.mc ph_zpp_args): it reads
+        // the type and, refusing, names it in a message -- nothing kept
+        || str_eq(fn, "php_zpp");
 }
 
 // is a0 a pure field read of v's zval -- the ident `v`, or `v + <const>`
@@ -680,9 +745,10 @@ i64 ph_pin_used(i64 s, uptr v) {
         }
         if (k == N_CALL) {
             i64 a0 = nd_a(s);
-            // a pure field read, ld32/ld64 of v or v + const: reads the zval,
-            // never writes or escapes it (the is_string tag test, src/builtin.mc)
-            if ((str_eq(nd_name(s), "ld32") || str_eq(nd_name(s), "ld64")) && ph_pin_fieldarg(a0, v)) {
+            // a pure field read, ld8/ld32/ld64 of v or v + const: reads the
+            // zval, never writes or escapes it (the is_string tag test, and the
+            // ZPP check's type-byte test, src/builtin.mc)
+            if ((str_eq(nd_name(s), "ld8") || str_eq(nd_name(s), "ld32") || str_eq(nd_name(s), "ld64")) && ph_pin_fieldarg(a0, v)) {
                 if (ph_pin_used(nd_next(a0), v)) return 1;
                 s = nd_next(s);
                 continue;
@@ -793,6 +859,7 @@ void ph_rc_fn(i64 f) {
     }
     if (ph_rc_counting) ph_rc_scan_vars(nd_a(body));
     ph_rc_fb_scan(nd_a(body));
+    if (!ph_rc_counting) ph_rc_fb_scan_nc(nd_a(body));
     // the string parameters the body assigns are slots too; the ones it never
     // assigns stay borrowed
     i64 entry = 0;

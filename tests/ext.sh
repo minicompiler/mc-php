@@ -837,6 +837,27 @@ else
 fi
 rm -rf "$tmp/build"
 
+# --- 19b. arrays a module builds and hands to php, as interpreted ------------
+# tests/ext/arrays: rows moved into a list, a row copied because it is read
+# again, a numeric string key, holes, nested arrays -- the answer made the
+# engine's by its Buckets (lib/php_ext.mc's phx_r2e_arr)
+cp tests/ext/arrays/arrays.php "$tmp/r.php"
+sed "s#__DIR__ . '/arrays.php'#__DIR__ . '/r.php'#" tests/ext/arrays/check.php > "$tmp/ac.php"
+rm -f "$tmp/build/r.$sx"
+if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/a.build" 2>&1; then
+    "$PHP" -d extension="$tmp/build/r.$sx" "$tmp/ac.php" > "$tmp/a.m" 2>&1; am=$?
+    "$PHP" "$tmp/ac.php" > "$tmp/a.i" 2>&1; ai=$?
+    if [ "$am" = "$ai" ] && cmp -s "$tmp/a.m" "$tmp/a.i"; then
+        say "arrays: rows moved and copied, holes, nested arrays -- $(wc -l < "$tmp/a.m" | tr -d ' ') lines, the interpreted source's"
+    else
+        bad "arrays: the module (exit $am) and the interpreted source (exit $ai) differ"
+        diff "$tmp/a.i" "$tmp/a.m" | sed -n '1,20p' | sed 's/^/      /'
+    fi
+else
+    bad "arrays: it would not build"; sed 's/^/      /' "$tmp/a.build"
+fi
+rm -rf "$tmp/build"
+
 # php's compile-time Fatal errors about a closure's captures are the same on
 # this road: a parameter named like a use-list variable, and a use list that
 # names one variable twice. Both forms, php's words, exit 255, no module.
@@ -896,6 +917,36 @@ if "$BIN" build "$tmp" --config "$tmp/r.toml" > "$tmp/t.build" 2>&1; then
         say "thread API: compiled callables on threads, kept values after a join and a detach, a rethrow, shared mode, the php callable refused, each copy destructed once by its owner, a detached thread waited for by RSHUTDOWN; a mutex and an atomic from 4 compiled threads exact, the process's atomic made at MINIT, three sync refusals by name, a wait group and a broadcast across 8 compiled threads, await refused with php's engine on the stack, and a compiled worker's await succeeding off the engine"
     else
         bad "thread API (exit $ta)"; diff "$tmp/t.aw" "$tmp/t.a" | sed -n '1,12p' | sed 's/^/      /'
+    fi
+    # --- 20d. bcmath's default scale from a worker (review of #65): the port's
+    # bc_scale writes a module global, which a module's own workers share; the
+    # only worker that can reach it is another module's, and that road is
+    # php's engine -- refused on this php (20b's $ref), or under ZTS a php
+    # request of its own whose global table is a fresh copy (bcscale.php)
+    bcfg=examples/bcmath/mcphp.toml
+    [ "${LINUX:-0}" = 1 ] && bcfg=examples/bcmath/mcphp.linux.toml
+    [ "${WINDOWS:-0}" = 1 ] && bcfg=examples/bcmath/mcphp.windows.toml
+    bso=examples/bcmath/build/bcmath_port.$sx
+    rm -f "$bso"
+    if "$BIN" build examples/bcmath --config "$(mcphp_ts_cfg "$bcfg")" > "$tmp/bc.build" 2>&1 && [ -f "$bso" ]; then
+        # php.exe opens a Windows path, not an MSYS one (step 10's cygpath)
+        bsn=$(cygpath -m "$root/$bso" 2>/dev/null || echo "$root/$bso")
+        bx="-d extension=$tmp/build/r.$sx -d extension=$bsn"
+        "$PHP" -d opcache.enable_cli=0 $bx tests/ext/threads/bcscale.php 2>&1 | tr -d '\r' > "$tmp/t.bs"; tb=$?
+        printf '%s\n' "a php worker: $ref" "this request's scale: 3" > "$tmp/t.bsw"
+        if [ "$TSV" = zts ]; then
+            bo="-d opcache.enable_cli=1 -d opcache.file_update_protection=0"
+            "$PHP" $bo -r 'exit(function_exists("opcache_get_status") ? 0 : 1);' 2>/dev/null || bo="$bo -d zend_extension=opcache"
+            "$PHP" $bo $bx tests/ext/threads/bcscale.php 2>&1 | tr -d '\r' >> "$tmp/t.bs" || tb=1
+            printf '%s\n' "a php worker: ran in a request of its own, saw 0" "this request's scale: 3" >> "$tmp/t.bsw"
+        fi
+        if [ "$tb" = 0 ] && cmp -s "$tmp/t.bsw" "$tmp/t.bs"; then
+            say "bcmath's default scale from a worker: only this request writes it ($TSV)"
+        else
+            bad "bcmath's default scale from a worker (exit $tb)"; diff "$tmp/t.bsw" "$tmp/t.bs" | sed 's/^/      /'
+        fi
+    else
+        bad "bcmath for 20d would not build:"; sed 's/^/      /' "$tmp/bc.build"
     fi
     # --- 20c. PHP callables on threads of their own (docs/threads.md § 3b):
     # a ZTS php only, with opcache on -- each worker a php request of its own

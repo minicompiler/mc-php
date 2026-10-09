@@ -48,11 +48,20 @@ i64  ph_fret[PH_MAXFN];
 i64  ph_fnp[PH_MAXFN];
 i64  ph_fpt[PH_MAXFN * PH_MAXP];
 i64  ph_fpd[PH_MAXFN * PH_MAXP];        // the default value node, 0 = none
+i64  ph_fpl[PH_MAXFN * PH_MAXP];        // the line the parameter is declared on (0 = not yet)
 uptr ph_fpn[PH_MAXFN * PH_MAXP];        // the bare parameter name, for a message
 i64  ph_fvar[PH_MAXFN];                 // 1 when the last parameter is ...$rest
 i64  ph_fvpc[PH_MAXFN];                 // the DECLARED element type of ...$rest
 i64  ph_fpr[PH_MAXFN];                  // bit i: parameter i is `&$x`
+// 1 when parameter i is a NULLABLE SCALAR (`?int $s`, with or without a
+// default) carried natively: the value in ph_fpt's scalar type plus a u8
+// null flag as a second mc parameter (vn_<name>), not a heap zval. Its
+// `=== null` reads the flag; a call passes the pair. src/decl.mc builds it,
+// src/ext.mc reads it from the engine arg, src/builtin.mc marshals the pair.
+i64  ph_fopt[PH_MAXFN * PH_MAXP];
 i64  ph_frr[PH_MAXFN];                  // 1 when declared `function &f()`
+uptr ph_fdfile[PH_MAXFN];               // where it is declared: the file ...
+i64  ph_fdline[PH_MAXFN];               // ... and the line (0 until it is)
 // 1 when a CALL came before the declaration, so the declared types were
 // widened to mixed to match the signature that call was built against. The
 // extension back end reads it: the refusal it would otherwise print names the
@@ -91,13 +100,15 @@ i64 ph_fn_find0(uptr n) {
 // parameters, which are `&$x`, whether the last is variadic -- so a call that
 // arrives first can be built against it.
 //
-// A function reached this way is compiled with a ZVAL signature: every
-// parameter and the return are PT_MIXED, whatever the declaration says. A
-// zval holds any php value, so the call is correct; a native `int $n` on such
-// a function costs a box and nothing else, and it costs it only for the
-// functions a program really does call before declaring. That is what lets
-// the scan record no TYPES at all -- there is no second type table to
-// disagree with the parser's.
+// A function reached this way is compiled with a ZVAL signature for its
+// return, and for every parameter the scan cannot type exactly: a zval holds
+// any php value, so the call is correct, and a native `int $n` costs a box.
+// The scan types a parameter only where the text leaves no doubt -- a bare
+// `int $x`, `float $x`, `string $x` or `bool $x`, with no `?`, union,
+// namespace, default, `&` or `...` -- and only for a name that heads ONE
+// declaration in the source (a method of the same name would be a second),
+// so the parser reads the same type from the same text; src/decl.mc refuses
+// a definition that does not agree.
 #define PH_MAXDECL 256
 uptr ph_dn[PH_MAXDECL];
 i64  ph_dnp[PH_MAXDECL];
@@ -105,6 +116,9 @@ i64  ph_dpr[PH_MAXDECL];
 i64  ph_dvar[PH_MAXDECL];
 i64  ph_ndecl;
 i64  ph_ffwd[PH_MAXFN];                 // 1: the row came from the scan
+i64  ph_dpt[PH_MAXDECL * PH_MAXP];     // each parameter's scanned type (ph_scan_ptype)
+i64  ph_ddup[PH_MAXDECL];               // 1: the name heads more than one declaration
+uptr ph_dpnm[PH_MAXDECL * PH_MAXP];     // a typed parameter's name, for php's TypeError
 
 i64 ph_decl_find(uptr n) {
     i64 i = 0;
@@ -134,9 +148,16 @@ i64 ph_fwd_reg(uptr n) {
     i64 j = 0;
     loop {
         if (j >= ld64(ph_dnp + di * 8)) break;
-        st64(ph_fpt + (fi * PH_MAXP + j) * 8, PT_MIXED);
+        // the scanned type where the scan could read one -- a bare `int $x`,
+        // `float $x`, `string $x` or `bool $x` of a name declared once -- and
+        // a zval otherwise (src/decl.mc holds the definition to it)
+        i64 pt = PT_MIXED;
+        if (j < PH_MAXP && !ld64(ph_ddup + di * 8)) pt = ld64(ph_dpt + (di * PH_MAXP + j) * 8);
+        st64(ph_fpt + (fi * PH_MAXP + j) * 8, pt);
         st64(ph_fpd + (fi * PH_MAXP + j) * 8, 0);
-        st64(ph_fpn + (fi * PH_MAXP + j) * 8, "");
+        uptr pnm = "";
+        if (pt != PT_MIXED) pnm = ld64(ph_dpnm + (di * PH_MAXP + j) * 8);
+        st64(ph_fpn + (fi * PH_MAXP + j) * 8, pnm);
         j = j + 1;
     }
     return fi;

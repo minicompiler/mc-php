@@ -130,6 +130,24 @@ else
     bad "ctype: it would not build"; sed "s/^/      /" "$t/b.out"
 fi
 
+# bcmath: every bc_* builds intermediate digit strings and has error paths (a
+# malformed number, a zero divisor, a fractional exponent, a negative scale)
+# that must free what they built; the nullable scale is a zval. leakmatrix.php
+# drives every function over every shape -- valid and malformed numbers, every
+# scale including null, a reference, a stringable, and wrong-type arguments --
+# for 120 rounds, so any block the module forgets shows at the end of the run.
+cp -R examples/bcmath "$t/bcmath"
+dbg examples/bcmath/mcphp.linux.toml > "$t/bcmath/dbg.toml"
+rm -rf "$t/bcmath/build"
+if "$BIN" build "$t/bcmath" --config "$t/bcmath/dbg.toml" > "$t/b.out" 2>&1; then
+    bso=$t/bcmath/build/bcmath_port.so
+    leakfree "bcmath leakmatrix.php (every function, every shape, error paths)" -d extension="$bso" "$t/bcmath/leakmatrix.php"
+    leakfree "bcmath check.php" -d extension="$bso" "$t/bcmath/check.php"
+    leakfree "bcmath bench.php" -d extension="$bso" "$t/bcmath/bench.php"
+else
+    bad "bcmath: it would not build"; sed "s/^/      /" "$t/b.out"
+fi
+
 mkdir -p "$t/own"
 { printf "<?php\n"; awk "/^echo /{exit} /^function /{p=1} p" tests/g/111-string-ownership.php
   printf "%s\n" \
@@ -149,6 +167,19 @@ if "$BIN" build "$t/own" --config "$t/own/r.toml" > "$t/o.out" 2>&1; then
     leakfree "the ownership shapes, a pinned call and a loop inside one call" -d extension="$t/own/build/r.so" "$t/own/run.php"
 else
     bad "the ownership shapes: it would not build"; sed "s/^/      /" "$t/o.out"
+fi
+# arrays a module builds and hands to php (tests/ext.sh step 19b): rows moved
+# into a list, a row copied, holes, nested arrays, handed over Bucket by
+# Bucket -- every key and string value the engine now holds must be released
+# with the array
+mkdir -p "$t/arr"
+cp tests/ext/arrays/arrays.php "$t/arr/r.php"
+sed "s|^entry = .*|entry = \"r.php\"|; s|^out = .*|out = \"build/r.so\"|" examples/hello/mcphp.linux.toml | dbg /dev/stdin > "$t/arr/r.toml"
+cp tests/ext/arrays/check.php tests/ext/arrays/arrays.php "$t/arr/"
+if "$BIN" build "$t/arr" --config "$t/arr/r.toml" > "$t/o.out" 2>&1; then
+    leakfree "arrays handed to php (moved rows, holes, nested)" -d extension="$t/arr/build/r.so" "$t/arr/check.php"
+else
+    bad "arrays: it would not build"; sed "s/^/      /" "$t/o.out"
 fi
 cp -R examples/two-extensions "$t/two"
 rm -rf "$t/two/build"

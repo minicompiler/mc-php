@@ -14,6 +14,7 @@ void ph_program() {
     ph_entry = ph_absfile(fl);
     ph_fn_ret = PT_VOID;
     ph_fn_retref = 0;
+    ph_nst_init(fl, line);                         // the native statics' slots (src/decl.mc)
     ph_sync();
     // `<?=` opens a file too, and it is an ECHO: leave it for the statement
     // loop below, which takes the echo branch on it
@@ -85,6 +86,13 @@ void ph_program() {
     if (ph_ovr_head) {
         if (ph_cnew_tail) set_nd_next(ph_cnew_tail, ph_ovr_head);
         if (!ph_cnew_tail) ph_cnew_head = ph_ovr_head;
+        ph_cnew_tail = ph_ovr_tail;
+    }
+    // what php raised while compiling, before anything runs (ph_cdiag)
+    if (ph_cdiag_head) {
+        if (ph_cnew_tail) set_nd_next(ph_cnew_tail, ph_cdiag_head);
+        if (!ph_cnew_tail) ph_cnew_head = ph_cdiag_head;
+        ph_cnew_tail = ph_cdiag_tail;
     }
     i64 boot = ph_stmt_of(ph_call("php_bootstrap", 0, 0, 0, 0, 0, TY_VOID));
     set_nd_next(boot, ph_cnew_head);
@@ -317,6 +325,57 @@ void ph_scan_refs(uptr src, i64 len) {
 
 // pass 1 of the by-reference scan: which function names take one. A call may
 // come before the declaration, so this is its own pass over the buffer.
+// Which bytes of a source are inside a class, interface, trait or enum body:
+// a method is not a global function, and the declaration scan took `function
+// m(` there for one -- a class with a count() method made a call to the
+// builtin count() look like a call to the program's own function. (The
+// by-reference scan keeps methods: a method call's by-reference arguments
+// are found by the method's name.)
+uptr ph_cls_map;
+i64 ph_scan_word(uptr src, i64 len, i64 i, uptr w, i64 n) {
+    if (i + n > len || !mem_eq(src + i, w, n)) return 0;
+    if (i + n < len && ph_nmb(ld8(src + i + n), 0)) return 0;
+    if (i > 0 && (ph_nmb(ld8(src + i - 1), 0) || ld8(src + i - 1) == 36)) return 0;
+    return 1;
+}
+void ph_scan_cls(uptr src, i64 len) {
+    ph_cls_map = xalloc(len + 1);
+    mem_zero(ph_cls_map, len + 1);
+    u8 st[512];
+    i64 ns = 0;
+    i64 bd = 0;
+    i64 pend = 0;
+    i64 i = 0;
+    loop {
+        if (i >= len) break;
+        i64 hop = ph_scan_hop(src, len, i);
+        if (hop != i) {
+            if (ns) { i64 q = i; loop { if (q >= hop) break; st8(ph_cls_map + q, 1); q = q + 1; } }
+            i = hop;
+            continue;
+        }
+        i64 c = ld8(src + i);
+        if (ns) st8(ph_cls_map + i, 1);
+        if (c == 123) {
+            if (pend) { if (ns < 64) st64(st + ns * 8, bd); ns = ns + 1; pend = 0; }
+            bd = bd + 1;
+        }
+        if (c == 125) {
+            bd = bd - 1;
+            if (ns > 0 && ns <= 64 && ld64(st + (ns - 1) * 8) == bd) ns = ns - 1;
+        }
+        if (c == 59) pend = 0;
+        if (ph_scan_word(src, len, i, "class", 5) || ph_scan_word(src, len, i, "interface", 9)
+            || ph_scan_word(src, len, i, "trait", 5) || ph_scan_word(src, len, i, "enum", 4)) {
+            // not `Foo::class` nor `$o->class`
+            i64 b = i;
+            loop { if (b <= 0) break; if (!ph_space(ld8(src + b - 1))) break; b = b - 1; }
+            if (b == 0 || (ld8(src + b - 1) != 58 && ld8(src + b - 1) != 62)) pend = 1;
+        }
+        i = i + 1;
+    }
+}
+
 void ph_scan_brf(uptr src, i64 len) {
     i64 i = 0;
     loop {
@@ -362,6 +421,33 @@ void ph_scan_brf(uptr src, i64 len) {
     }
 }
 
+// One parameter's text, src[a..b): its native type when it is exactly a type
+// word the parser maps to one -- `int`, `float`, `string`, `bool` -- then a
+// `$name` and nothing else; PT_MIXED for anything more (a `?`, a union, a
+// namespace, a default, `&`, `...`, an attribute, a comment).
+uptr ph_sptn;                           // the name ph_scan_ptype read, without its `$`
+i64 ph_scan_ptype(uptr src, i64 a, i64 b) {
+    loop { if (a >= b) break; if (!ph_space(ld8(src + a))) break; a = a + 1; }
+    loop { if (b <= a) break; if (!ph_space(ld8(src + b - 1))) break; b = b - 1; }
+    i64 w = a;
+    loop { if (w >= b) break; i64 c = ld8(src + w); if (c < 97 || c > 122) break; w = w + 1; }
+    i64 t = PT_MIXED;
+    if (w - a == 3 && mem_eq(src + a, "int", 3)) t = PT_INT;
+    if (w - a == 5 && mem_eq(src + a, "float", 5)) t = PT_FLOAT;
+    if (w - a == 6 && mem_eq(src + a, "string", 6)) t = PT_STRING;
+    if (w - a == 4 && mem_eq(src + a, "bool", 4)) t = PT_BOOL;
+    ph_sptn = "";
+    if (t == PT_MIXED || w >= b || !ph_space(ld8(src + w))) return PT_MIXED;
+    loop { if (w >= b) break; if (!ph_space(ld8(src + w))) break; w = w + 1; }
+    if (w >= b || ld8(src + w) != 36) return PT_MIXED;           // `$`
+    w = w + 1;
+    i64 n0 = w;
+    loop { if (w >= b) break; if (!ph_nmb(ld8(src + w), w == n0)) break; w = w + 1; }
+    if (w == n0 || w != b) return PT_MIXED;
+    ph_sptn = xstrdup(src + n0, w - n0);
+    return t;
+}
+
 // The declaration shape of every `function NAME (...)` in the source, so a
 // call that comes BEFORE it can be built (php hoists a global function).
 // This is ph_scan_brf's walk with the parameter list counted rather than only
@@ -393,7 +479,8 @@ void ph_scan_decl(uptr src, i64 len) {
         if (ld8(src + i) == 102 && ld8(src + i + 1) == 117 && ld8(src + i + 2) == 110
             && ld8(src + i + 3) == 99 && ld8(src + i + 4) == 116 && ld8(src + i + 5) == 105
             && ld8(src + i + 6) == 111 && ld8(src + i + 7) == 110
-            && !ph_nmb(ld8(src + i + 8), 0) && (i == 0 || !ph_nmb(ld8(src + i - 1), 0))) {
+            && !ph_nmb(ld8(src + i + 8), 0) && (i == 0 || !ph_nmb(ld8(src + i - 1), 0))
+            && !ld8(ph_cls_map + i)) {
             i64 j = i + 8;
             loop { if (j >= len) break; if (!ph_space(ld8(src + j))) break; j = j + 1; }
             if (j < len && ld8(src + j) == 38) {              // function &name()
@@ -415,18 +502,33 @@ void ph_scan_decl(uptr src, i64 len) {
             i64 seen = 0;
             i64 prb = 0;
             i64 vrd = 0;
+            i64 ps = j + 1;                               // where this parameter's text starts
+            u8 pty[96];                                   // PH_MAXP scanned types
+            u8 ptn[96];                                   // and the names of the typed ones
+            i64 pi = 0;
+            loop { if (pi >= PH_MAXP) break; st64(pty + pi * 8, PT_MIXED); st64(ptn + pi * 8, ""); pi = pi + 1; }
             loop {
                 if (k >= len) break;
                 i64 h2 = ph_scan_hop(src, len, k);
-                if (h2 != k) { k = h2; continue; }
+                // a string or a comment inside the list: the parameter it is
+                // in is not a bare one (the hop jumped over its text)
+                if (h2 != k) { if (np < PH_MAXP) ps = 0 - 1; k = h2; continue; }
                 i64 c = ld8(src + k);
                 if (c == 40 || c == 91 || c == 123) d = d + 1;
                 if (c == 41 || c == 93 || c == 125) {
                     d = d - 1;
-                    if (!d) break;
+                    if (!d) {
+                        if (seen && np < PH_MAXP && ps >= 0) { st64(pty + np * 8, ph_scan_ptype(src, ps, k)); st64(ptn + np * 8, ph_sptn); }
+                        break;
+                    }
                 }
                 if (d == 1 && k > j) {                    // not the `(` itself
-                    if (c == 44) { np = np + 1; seen = 0; }
+                    if (c == 44) {
+                        if (np < PH_MAXP && ps >= 0) { st64(pty + np * 8, ph_scan_ptype(src, ps, k)); st64(ptn + np * 8, ph_sptn); }
+                        np = np + 1;
+                        seen = 0;
+                        ps = k + 1;
+                    }
                     if (c == 38 && k + 1 < len && ld8(src + k + 1) == 36 && np < 63) prb = prb | (1 << np);
                     if (c == 46 && k + 2 < len && ld8(src + k + 1) == 46 && ld8(src + k + 2) == 46) vrd = 1;
                     if (!ph_space(c) && c != 44) seen = 1;
@@ -435,11 +537,21 @@ void ph_scan_decl(uptr src, i64 len) {
             }
             if (seen) np = np + 1;
             if (!seen && !np) np = 0;
-            if (ph_ndecl < PH_MAXDECL && ph_decl_find(nm) < 0) {
+            i64 dx = ph_decl_find(nm);
+            if (dx >= 0) st64(ph_ddup + dx * 8, 1);       // a second header: types unknown
+            if (ph_ndecl < PH_MAXDECL && dx < 0) {
                 st64(ph_dn + ph_ndecl * 8, nm);
                 st64(ph_dnp + ph_ndecl * 8, np);
                 st64(ph_dpr + ph_ndecl * 8, prb);
                 st64(ph_dvar + ph_ndecl * 8, vrd);
+                st64(ph_ddup + ph_ndecl * 8, 0);
+                pi = 0;
+                loop {
+                    if (pi >= PH_MAXP) break;
+                    st64(ph_dpt + (ph_ndecl * PH_MAXP + pi) * 8, ld64(pty + pi * 8));
+                    st64(ph_dpnm + (ph_ndecl * PH_MAXP + pi) * 8, ld64(ptn + pi * 8));
+                    pi = pi + 1;
+                }
                 ph_ndecl = ph_ndecl + 1;
             }
             i = k;
@@ -531,6 +643,7 @@ void ph_scan_globals(uptr name, uptr src, i64 len) {
 
 void ph_on_source(uptr name, uptr src, i64 len) {
     if (ph_pushing || ph_ends(name, ".php")) ph_scan_globals(name, src, len);
+    ph_scan_cls(src, len);
     ph_scan_decl(src, len);
     ph_scan_brf(src, len);
     ph_scan_refs(src, len);
@@ -793,7 +906,7 @@ void user_init() {
         // EG(exception), which RINIT cannot make (no script runs yet). On
         // Windows the measured offset is not the headers' 960, so the fast
         // path waits for it.
-        e = ph_swap(e, cstrlen(e), "if (ph_boot_done && !ld64(phT + PHT_phx_depth)", "if (ph_boot_done && phx_egx_ok() && !ld64(phT + PHT_phx_depth)");
+        e = ph_swap(e, cstrlen(e), "if (!ld64(phT + PHT_phx_depth) && ((uptr) ld64(phT + PHT_phx_home))) {", "if (phx_egx_ok() && !ld64(phT + PHT_phx_depth) && ((uptr) ld64(phT + PHT_phx_home))) {");
         p_push_source("php extension runtime", e, cstrlen(e));
         // the booting thread's fast path never comes back (several php threads
         // run the module at once), a thread's block carries the ZTS words, and
@@ -815,7 +928,7 @@ void user_init() {
         r = ph_swap(r, cstrlen(r), "if (!exc && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC))", "if (!exc && !rep && !ld64(rec + PHA_DET) && ld64(rec + PHA_EXC))");
         p_push_source("php runtime", r, cstrlen(r));
         ph_push_rt_host();
-        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12368\n", "#define PHT_SIZE 12496\n");
+        uptr t = ph_swap(ph_tls, ph_tls_size, "#define PHT_SIZE 12704\n", "#define PHT_SIZE 12832\n");
         p_push_source("php thread block", t, cstrlen(t));
         pass(&ph_tls_pass);
         return;

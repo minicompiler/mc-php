@@ -31,11 +31,17 @@ function zts_say(int $n): void {
 // THAT request's module state: it reads the global this request just wrote
 function zts_shared(int $x): int { global $zts_g; return $x * 3 + (int) $zts_g['a']; }
 
+// a static that only holds ints is a native slot (src/decl.mc, `phsi`): per
+// php thread and put back to MINIT's at each request, like the zval one below
+function zts_calls(): int { static $c = 0; $c++; return $c; }
+
 // n|calls|a|list|count|items|K top|s|f|R|helper|boom:rev|api|thread
 function work(int $n, callable $boom): string {
     global $zts_g, $zts_box, $zts_top;
     static $calls = 0;
     $calls++;
+    // still 1 only when the native static started this request at 0 too
+    $calls = $calls * zts_calls();
     $zts_g['a'] += $n;
     $zts_g['list'][] = $n;
     _Box::$count += 1;

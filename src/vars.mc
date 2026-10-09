@@ -15,7 +15,22 @@ i64  ph_vtype[PH_MAXVAR];
 // of `foreach as &$v`. Reading one is reading the zval; writing one is a
 // store into it, which is what makes the alias visible to the other name.
 i64  ph_vref[PH_MAXVAR];
+// 1 when the variable is a NULLABLE SCALAR parameter carried natively: its
+// value is the typed local v_<name> (ph_vtype's scalar type) and its php
+// null-ness is the u8 local vn_<name>. A plain read is the value; `=== null`
+// reads the flag (src/expr.mc); passing it to a matching parameter passes
+// the pair (src/builtin.mc). Only src/decl.mc's param loop sets it.
+i64  ph_vopt[PH_MAXVAR];
 i64  ph_nvar;
+
+// the mc name of the null flag of a native nullable-scalar variable
+uptr ph_vflag(uptr d) { return ph_mangle(d, "vn_"); }
+// 1 when variable d is a native nullable-scalar (reads v_d, flag vn_d)
+i64 ph_is_opt(uptr d) {
+    i64 i = ph_var_find(d);
+    if (i < 0) return 0;
+    return ld64(ph_vopt + i * 8);
+}
 
 i64 ph_var_find(uptr d) {
     i64 i = 0;
@@ -247,14 +262,15 @@ void ph_set_ref(uptr d) {
 // closure's captures are copied in explicitly). The table is flat, so the
 // outer entries are saved and put back rather than just counted.
 uptr ph_scope_save() {
-    uptr b = xalloc(ph_nvar * 24 + 24);
+    uptr b = xalloc(ph_nvar * 32 + 32);
     st64(b, ph_nvar);
     i64 i = 0;
     loop {
         if (i >= ph_nvar) break;
-        st64(b + 8 + i * 24, ld64(ph_vname + i * 8));
-        st64(b + 16 + i * 24, ld64(ph_vtype + i * 8));
-        st64(b + 24 + i * 24, ld64(ph_vref + i * 8));
+        st64(b + 8 + i * 32, ld64(ph_vname + i * 8));
+        st64(b + 16 + i * 32, ld64(ph_vtype + i * 8));
+        st64(b + 24 + i * 32, ld64(ph_vref + i * 8));
+        st64(b + 32 + i * 32, ld64(ph_vopt + i * 8));
         i = i + 1;
     }
     ph_nvar = 0;
@@ -266,9 +282,10 @@ void ph_scope_restore(uptr b) {
     i64 i = 0;
     loop {
         if (i >= n) break;
-        st64(ph_vname + i * 8, ld64(b + 8 + i * 24));
-        st64(ph_vtype + i * 8, ld64(b + 16 + i * 24));
-        st64(ph_vref + i * 8, ld64(b + 24 + i * 24));
+        st64(ph_vname + i * 8, ld64(b + 8 + i * 32));
+        st64(ph_vtype + i * 8, ld64(b + 16 + i * 32));
+        st64(ph_vref + i * 8, ld64(b + 24 + i * 32));
+        st64(ph_vopt + i * 8, ld64(b + 32 + i * 32));
         i = i + 1;
     }
     ph_nvar = n;
@@ -283,7 +300,31 @@ void ph_var_bind_raw(uptr d, i64 ty) {
     st64(ph_vname + ph_nvar * 8, d);
     st64(ph_vtype + ph_nvar * 8, ty);
     st64(ph_vref + ph_nvar * 8, 0);
+    st64(ph_vopt + ph_nvar * 8, 0);
     ph_nvar = ph_nvar + 1;
+}
+
+// mark variable d (already bound) as a native nullable-scalar
+void ph_set_opt(uptr d) {
+    i64 i = ph_var_find(d);
+    if (i >= 0) st64(ph_vopt + i * 8, 1);
+}
+
+// if mcname is the value local (v_<name>) of a native nullable-scalar
+// variable, return its null-flag local's name (vn_<name>), else 0. The
+// lowered node of a read carries the mangled name, so `$x === null` finds
+// the flag from it (src/expr.mc).
+uptr ph_opt_flag_of(uptr mcname) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_nvar) break;
+        if (ld64(ph_vopt + i * 8)) {
+            uptr d = ld64(ph_vname + i * 8);
+            if (str_eq(ph_mangle(d, "v_"), mcname)) return ph_mangle(d, "vn_");
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 i64 ph_var_bind(uptr d, i64 ty) {
@@ -294,6 +335,7 @@ i64 ph_var_bind(uptr d, i64 ty) {
         st64(ph_vname + ph_nvar * 8, d);
         st64(ph_vtype + ph_nvar * 8, ty);
         st64(ph_vref + ph_nvar * 8, 0);
+        st64(ph_vopt + ph_nvar * 8, 0);
         ph_nvar = ph_nvar + 1;
         ph_local(ph_mangle(d, "v_"), ph_mcty(ty));
         // a packed element held in a variable: the value and php's null
@@ -311,3 +353,26 @@ i64 ph_var_bind(uptr d, i64 ty) {
     return 0;
 }
 
+
+// ---- declare(strict_types=1), per file ----------------------------------------
+// php decides a call's argument checks by the CALLING file's mode and a
+// return's by the declaring file's: each file that says strict_types=1 is
+// listed here when its declare is parsed (its first statement), and a check
+// lowered in it carries PC_STRICT (lib/php_rt.mc php_param_coerce).
+#define PH_MAXSTRICT 256
+uptr ph_strictf[PH_MAXSTRICT];
+i64  ph_nstrict;
+void ph_strict_add(uptr fl) {
+    if (ph_nstrict >= PH_MAXSTRICT) err_at(fl, 1, "mc-php: too many files with declare(strict_types=1)");
+    st64(ph_strictf + ph_nstrict * 8, fl);
+    ph_nstrict = ph_nstrict + 1;
+}
+i64 ph_strict_bit(uptr fl) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_nstrict) break;
+        if (str_eq(ld64(ph_strictf + i * 8), fl)) return 16;
+        i = i + 1;
+    }
+    return 0;
+}

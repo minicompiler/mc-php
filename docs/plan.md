@@ -1188,7 +1188,181 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    with a minimal `.mc` reproducer; a shrink-wrapped prologue is an mc-side optimization). Two
    compiler leaks ctype exposed were fixed on the way: `strspn` over a mixed set and the
    `global`/`static` read pin leak.
-4. **Port bcmath.**
+4. **Port bcmath -- DONE** (2026-10-08, `examples/bcmath`): php-src's `ext/bcmath` (libbcmath)
+   written in PHP and compiled by mc-php, graded against php's own built-in bcmath. Published as
+   `bc_*` (`bc_add`..`bc_scale`, thirteen functions incl. 8.4's `bc_floor`/`bc_ceil`/`bc_round`)
+   because php refuses to redeclare an internal name. Faithful to libbcmath's EXACT semantics:
+   **TRUNCATION** at the scale (not half-even -- that is `examples/decimal`), the permissive parse
+   (`""`, `"."`, `"5."`, `".5"` all valid), the per-function scale rules (`bc_mul`'s
+   `min(scale, s1+s2)`, `bc_div`/`bc_mod` truncate toward zero, `bc_mod`'s sign follows the
+   dividend, `bc_pow`'s negative/zero exponent, `'2.0'` integer check and exponent range (any magnitude up
+   to the host's C `LONG_MAX` in either sign -- 2^63-1 on macOS and Linux, 2^31-1 on Windows -- then libbcmath's "the number of digits overflowed"), `bc_powmod`, `bc_sqrt`'s
+   integer-sqrt-at-scale, `bc_comp` truncating to the scale before judging sign, `bc_round`
+   HalfAwayFromZero with negative precision), the request default scale (`bc_scale`), and the
+   exact exception class and message (`DivisionByZeroError`, `ValueError` "is not well-formed" /
+   "must be between 0 and 2147483647" / "cannot have a fractional part"), each confirmed against
+   the host php 8.5. The C twin is `examples/bcmath/c/bcmath.c` -- bcmath.php's algorithm function
+   by function.
+
+   The differential: `check.php` (module vs interpreted) **133 lines byte for byte**, the C twin
+   graded the same way; `bccheck.php` against the built-in **10570 results, 0 wrong** for the
+   module AND the twin AND interpreted; `leakmatrix.php` under the ZTS debug allocator
+   **leak-free** over every function, argument shape and error path (`tests/leaks.sh`).
+
+   **The bench, per function, every one under 2.0 with margin** (macOS/arm64; five runs, module
+   and twin alternated process by process, each run `bench.php`'s best of nine with
+   `MCPHP_EACH=1`; the bar is the WORST of the five under 1.95 and their median at most 1.90):
+
+   | function | worst | median | function | worst | median | function | worst | median |
+   |---|---|---|---|---|---|---|---|---|
+   | add | 1.54x | 1.49x | div | 1.33x | 1.31x | sqrt | 1.08x | 1.07x |
+   | sub | 1.59x | 1.51x | mod | 1.14x | 1.12x | comp | 1.55x | 1.51x |
+   | mul | 1.86x | 1.74x | pow | 1.85x | 1.83x | floor | 1.65x | 1.60x |
+   | round | 1.53x | 1.46x | powmod | 1.39x | 1.39x | ceil | 1.74x | 1.71x |
+   | scale | 1.40x | 1.36x | | | | | | |
+
+   The mixed workload: interpreted 10.38 ms, compiled 0.73 ms (14.3x), the twin 0.53 ms --
+   module/C **1.36x** (it was 3.54x at the first cut).
+
+   **The review of #65** (seven findings, each reproduced before it was fixed and each with a test
+   that fails on the commit before): a native `?int` parameter's null flag went stale after a
+   write, and its READS were just as wrong -- `$y = $x`, `$x < -1`, `$x === 0`, `return $x` from
+   an `: int` function, a `= 5` default -- so the lowering became a PROOF over the body
+   (`ph_opt_scan`, the packed lexer's tokens), with every write clearing the flag
+   (`tests/g/146`); `x === null` over a statically non-null CALL was folded without the call, its
+   output and its exception, and so was the mixed-type strict fold (`ph_pure`, `tests/g/147`);
+   `bc_round`'s guard negated `PHP_INT_MIN` in the port and the twin (`bccheck.php`'s extremes);
+   `bc_scale`'s default is per request and per php thread by mc-php's model, and no worker can
+   write it (`tests/ext.sh` step 20d measures it); `bc_scale` got its bench row -- 5.3x, which
+   took the three changes below to bring under the bar; and the leak matrix passes the
+   Stringable object itself, which the strict handler rejects (`docs/php-extension.md`). The same batch took every OTHER example
+   under 2.0 per function too, and that was the bar: `examples/decimal` add 1.48, sub 1.57, mul
+   1.75, div 1.38, cmp 1.82, round 1.81 (loan workload 1.55x); `examples/ctype` 1.44-1.91x called
+   directly and 1.06-1.16x called dynamically, all eleven predicates on passing AND failing input
+   (`bench.php`'s aggregate 4.49 -> 1.62); `examples/db` every call 1.02-1.29x but `db_rows` over
+   200 rows, 2.8 -> **1.78x** (workload 1.12x); two-extensions 1.06-1.07x; threads 1.00x, sync
+   1.64x, await 1.07x, connect 1.09x. Each example's README § The bench has its table.
+
+   What each change bought (module/C, the function it moved most; every change general -- in
+   mc-php's own `src/*.mc`, `lib/php_rt.mc`, `lib/php_ext.mc` -- and each gated by `fixtures.sh`,
+   `examples.sh`, `ext.sh`, `leaks.sh` aarch64 and ZTS, and CodeQL-mc with no alert of its own;
+   `mini_compiler` untouched, not one line):
+
+   | change | where | bought |
+   |---|---|---|
+   | a nullable scalar parameter (`?int $scale = null`) is a native value, not a zval; `=== null` a tag compare | `src/decl.mc`, `src/ext.mc`, `src/expr.mc` | add 2.59 -> 1.89, sub 2.52 -> 1.95, comp 2.72 -> 1.73 |
+   | an int parameter with an int-literal default is a native int | `src/decl.mc` | round 4.40 -> 2.66 |
+   | a call before the declaration passes a bare scalar parameter natively (php hoists the declaration; the scan types `int`/`float`/`string`/`bool $x` exactly) | `src/program.mc`, `src/tables.mc`, `src/decl.mc` | the define-before-use order bcmath.php needed (floor 4.0 -> 1.75) is no longer needed by anyone |
+   | `$s[$i] = $t[$j]` is a byte write; a throwing return's temporary counts as a return for the fresh buffer | `src/lvalue.mc`, `src/rc.mc` | div 2.52 -> 1.96, mod 2.06 -> 1.55, sqrt 2.19 -> 1.67 |
+   | a function's rope is built before its inline copy is kept | `src/opt.mc` | add 1.87 -> 1.72, sub 1.97 -> 1.81 |
+   | freed string blocks kept per size class; the drain pushes in the loop | `lib/php_ext.mc` | mul 2.01 -> 1.93, round 2.51 -> 2.36; decimal cmp 2.00 -> 1.79 |
+   | `$s = substr($s, ...)` on a counted slot shortened in place; a shift by a literal is mc's own | `src/rc.mc`, `src/expr.mc` | pow 2.19 -> 2.08 |
+   | bc_powmod squares and multiplies on magnitudes, as the twin does | `bcmath.php` | powmod 2.31 -> 1.88 |
+   | a borrowed string argument goes without its escape; leave drains only a non-empty pool | `lib/php_ext.mc` | ctype dynamic 1.83-2.02 -> 1.05-1.19 |
+   | a `substr()` local of a function that does not loop is a window | `src/opt.mc` | round 2.39 -> 2.05, pow 2.08 -> 2.00 |
+   | windows counted along paths; fresh buffers written in place where nothing loops | `src/opt.mc`, `src/rc.mc` | round 2.09 -> 1.89; decimal round 2.06 -> 1.93 |
+   | a db row moved into its array, set without boxes, handed to php as Buckets | `lib/php_rt.mc`, `lib/php_ext.mc`, `src/lvalue.mc`, `src/opt.mc` | db_rows 2.8 -> 1.76 |
+   | two string offsets compared with `===` are two bytes | `src/expr.mc` | div 1.95 -> 1.32, mod 1.50 -> 1.17, powmod 1.88 -> 1.45, sqrt 1.66 -> 1.05 |
+   | an integer literal argument of a copied routine is substituted; a store keeps its folded offset | `src/opt.mc`, `src/mach.mc` | pow, mul a few percent |
+   | a call that allocates nothing does not set the arena's cursor | `lib/php_ext.mc` | ctype direct on failing input 1.81-2.01 -> 1.70-1.88 |
+   | a rope piece of up to sixteen bytes copied with no call | `lib/php_rt.mc` | decimal round 1.96 -> 1.86 |
+   | int and bool locals whose ranges never overlap share one local (mc gives a local one register for the whole function) | `src/opt.mc` | pow 17.0 -> 16.7 ms, decimal round 2.81 -> 2.71 ms |
+   | a native `?int` argument takes the handler's call-free bare road (IS_LONG or IS_NULL), and a native-`?int` default no longer stops the inliner | `src/ext.mc`, `src/decl.mc` | a do-nothing `bc_scale` 1.72x -> 1.0x |
+   | a function `static` proved to hold only ints is a native slot of `phsi` (no `php_static`, pin or zval), per php thread and reset per request like a zval static | `src/decl.mc`, `src/lvalue.mc`, `src/tls.mc`, `lib/php_ext.mc` | scale 5.3 -> 1.91 (with the `_bc_dscale` static in `bcmath.php`) |
+
+   **`pow` with margin.** `pow` stood at 1.92-1.99x, and the review's own commits did not move it:
+   the compiler at d1cf7c4 (before the review) and at 74cd087 measure within each other's noise
+   (median 1.94 against 1.96), so there was no regression to revert -- the margin had never been
+   there. It was instruction-bound (13 385 instructions a call at IPC 7.9 against the twin's 5 257
+   at 6.1, `/usr/bin/time -l`), so six general changes took instructions out:
+
+   | change | where | bought |
+   |---|---|---|
+   | a FIXED packed array nothing appends to (`$x[] =`) keeps its buffer pointer in a local of its own, reloaded where the array is rebuilt; an element read or write goes through it, with no key temporary for a pure key | `src/packed.mc`, `src/expr.mc`, `src/lvalue.mc`, `lib/php_rt.mc` | pow ~2.6% |
+   | `y = x / K` moves up to the statement computing `x % K`, which becomes `x - y * K`: one division where there were two | `src/opt.mc` (`phq_list`) | pow ~4% |
+   | a `continue` that names its own `for` carries a copy of the step, so the step is not a join every iteration pays; the unwinding-check placement follows a `continue` exactly | `src/stmt.mc`, `src/opt.mc` | pow, mul ~1% |
+   | a literal on the left of `+` or `*` moves to the right, where the machine takes it as an immediate | `src/expr.mc` | a few instructions a digit |
+   | the handler tests its arity and each scalar argument's tag in line, calling the slow check only when one fails | `src/ext.mc` | a do-nothing `bc_scale` 160 -> 96 ms over 5M calls; pow 453 -> 447 ms |
+   | `array_fill(0, n, v)` stores two words a step | `lib/php_rt.mc` | `_bc_umul`'s clear |
+
+   pow 1.96x -> **1.79x** median (498 -> 447 ms over 600k calls), and `scale` 1.91x -> 1.32x with
+   it. `tests/g/149` holds each lowering's shapes against php. Measured and not kept: the loop
+   rotated so its test is at the bottom (6% SLOWER: the allocator gives the moved locals worse
+   registers), a machine peephole for the remainder (it never fired: the slow half's label is a
+   barrier), and hoisting the fixed array's pointer out of `_bc_umul`'s loop by hand (4% slower,
+   for the same register reason). What is closest now is `pow` (median 1.83x), the digit loop of
+   `_bc_umul`; `round` (once 1.86x) measures 1.46x.
+
+   **Four gaps closed in the same PR** (each reproduced against php 8.5 on the head first, each
+   with a fixture that fails on the commit before and passes after):
+   (1) `function &f(): int` returned a COPY -- the declared scalar made the return a native int;
+   the return is now the cell and php's check converts the value IN it (`src/decl.mc`,
+   `src/lvalue.mc`, `tests/g/150`). (2) `--` and `++` on null, bool, `""`, an array and an object
+   on the zval road said nothing; php's warnings, deprecation and TypeError now (`lib/php_rt.mc`
+   `php_zv_inc`/`php_zv_dec`/`php_incdec_other`, `tests/g/151`). (3) an assignment in EXPRESSION
+   position into a mixed variable took the D4 refusal a statement does not -- it follows the
+   statement's rules now (`src/expr.mc`, `tests/g/152`). (4) a throwable's trailer and trace were
+   not php's: every throwable now carries php's `trace` (frames innermost first: file, line,
+   function, class, type, args), `getTraceAsString()`, `__toString()` with its `Next` chain and
+   the uncaught `Stack trace:` / `thrown in` lines are php's byte for byte, closures are
+   `{closure:FILE:LINE}`, a parameter's TypeError names `called in ... and defined in ...` at the
+   declaration's line, `true`/`false` given are named as php names them, and `declare(strict_types=1)`
+   is honoured -- the caller's file for an argument, the declaring file for a return
+   (`tests/g/153`, `tests/g/154`).
+
+   What closing (4) found, fixed in the same batch: a user call's frame is built INSIDE the
+   expression (`php_frv(php_fr_open(..), f(php_fa(a0, ..), ..))`, `src/builtin.mc`), because a
+   frame pushed ahead of the statement ran the call before its left-hand neighbours; a copied call
+   takes the whole frame with it (`src/opt.mc`); a builtin that raises is its own innermost frame
+   with its arguments (`php_nat_throw`: `intdiv`, `str_repeat`, `array_fill`, `str_decrement`,
+   `str_replace`, `settype`, `func_get_arg`, which also gained php's `must be greater than or equal
+   to 0`); a binary operator's left operand runs before the right's hoisted temporaries
+   (`src/expr.mc` `ph_spill_left`: `f(5) . intdiv(9, f(3))` printed f3 first); an arrow function's
+   body announces its own position; popping a frame puts the caller's position back, so a
+   diagnostic after a user call returned no longer names the callee's last line (T7's documented
+   inexactness); a void function called ahead of its definition answers null instead of stopping
+   the compile; `return EXPR;` in a `: void` function is php's compile-time fatal, `return null;`
+   with its own wording; `class_alias` of a missing class is php's warning and false; and every
+   throwable's file is the RESOLVED path (`tests/g/155`-`158`). The frames cost nothing measurable:
+   sync 1.65-1.72x, threads 1.00x, awaitable 1.02-1.07x, connect 1.04-1.12x against the same
+   numbers before them, and an extension builds none (php's engine does).
+
+   The four that batch left open, closed in PR #65 (`tests/g/159`-`173`): (1) a statement spread
+   over several lines names the line php names -- the call's name, the operand's, the
+   interpolated variable's -- and not its first (`src/lex.mc` keeps php's `CG(zend_lineno)`,
+   `src/node.mc` records it per runtime call, `src/lvalue.mc` `ph_relines` stores it right
+   before the call that needs it). (2) a builtin given the wrong argument type is php's ZPP:
+   every parameter's type and name come from php-src's own stubs (`tests/arginfo.py` writes
+   `src/arginfo.mc`, `tests/run.sh` checks it is current), coerced in weak mode with php's null
+   and float-to-int deprecations, a TypeError under `strict_types` or when nothing coerces, the
+   builtin's frame on top (`lib/php_rt.mc` `php_zpp`). (3) a callback a builtin calls
+   (`array_map`, `array_filter`, `array_reduce`, `usort`, `uasort`, `uksort`) runs under
+   `#N [internal function]: f(..)` with the builtin's own frame below it. (4) a method's, a
+   closure's and an arrow function's declared return type is checked as a function's is --
+   php's compile-time fatals, its weak coercion and its TypeError (`src/types.mc` records the
+   declared type, `lib/php_rt.mc` `php_ret_check`).
+
+   What closing those found, fixed in the same PR: a typed PROPERTY is checked on every write
+   and is `uninitialized(T)` until written (`php_ce_ptype`, `php_ptype_check`); a missing
+   required argument is php's ArgumentCountError with its counts and the caller's position,
+   placed at the parameter, for functions, methods, closures and callbacks, and php's
+   optional-before-required and implicitly-nullable deprecations are raised while compiling; a
+   closure's typed parameter is checked; a parameter's TypeError is placed at the parameter's
+   line; `(array)` and `(object)` casts, and the non-canonical cast names' deprecation (php's
+   compile-time diagnostics run before the program, `src/decls.mc` `ph_cdiag`); `print` as an
+   expression; a property and a static property assigned inside an expression stop at a
+   refused write and answer the value as written; `var_dump()` used as a value is null; an
+   arrow function declared `never` runs its body and then refuses the implicit return; the
+   out-of-range offsets, empty needles and zero steps that are php's ValueErrors; `range()`
+   as php builds it; objects compared property by property; and a method no longer counts as
+   a global function in the pre-scan (`src/program.mc` `ph_scan_cls`). The runtime this added
+   moved every function after it, and `bc_round` -- unchanged code, all string work -- swung
+   from 1.84x to 2.16x with where its callees landed (a padding experiment measured it): its
+   common case now reads the kept digits out of the argument and adds one in place
+   (`examples/bcmath` `_bc_up1`), worst 1.49x, median 1.46x (`examples/bcmath/README.md`).
+
+   `$s[N]` past the end stays C's read by design (`docs/semantics.md` section 2), not php's
+   warning.
 5. **Port json.** `ext/json` cannot be built shared at all (T1), so this port is the only way a
    json extension exists outside php's own binary.
 6. **Distribution -- Composer, Packagist, PIE. To be designed with the owner**: the owner stops

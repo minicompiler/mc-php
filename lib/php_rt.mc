@@ -216,6 +216,18 @@ void php_pool_push(uptr s) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     st64(phT + PHT_ph_pn, ld64(phT + PHT_ph_pn) + 1);
 }
 
+// A string block's size: the header, n bytes and the NUL, rounded up to its
+// 8-byte class (Zend's ZEND_MM_ALIGNED_SIZE, which php's own
+// zend_string_alloc asks for). A wrapped negative size is left as it is, for
+// _emalloc to refuse. lib/php_ext.mc keeps freed blocks per class up to
+// PH_SCMAX bytes.
+#define PH_SCMAX 103                    // 24 + 103 + 1 = 128 bytes: class 16
+i64 php_str_csz(i64 n) {
+    i64 z = ZS_HDR + n + 1;
+    if (n >= 0) z = (z + 7) & (0 - 8);
+    return z;
+}
+
 // A string of n bytes, the header written and the NUL; the n bytes are the
 // caller's to write, every one of them (nothing here is zeroed). `pool` 0 is
 // a string whose one reference the caller keeps (php_str_append's copy).
@@ -224,7 +236,7 @@ uptr php_str_mk(i64 n, i64 pool) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(
     if (((uptr) ld64(phT + PHT_ph_zalloc))) {
         // a size that wrapped negative goes to _emalloc as a huge size_t,
         // which php's memory limit refuses by name, as php_alloc's does
-        s = phx_em(ZS_HDR + n + 1);
+        s = phx_em(php_str_csz(n));
         st64(phT + PHT_ph_rc_built, ld64(phT + PHT_ph_rc_built) + 1);
         st32(s + 4, ZS_GC_STRING);
     }
@@ -338,7 +350,7 @@ i64 php_str_mine(uptr s) {
 // zend_string_extend. In check mode it always moves and the old block is
 // poisoned, so a stale pointer is caught rather than lucky.
 uptr php_str_grow(uptr s, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
-    if (((uptr) ld64(phT + PHT_ph_zalloc))) return phx_er(s, ZS_HDR + n + 1);
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) return phx_er(s, php_str_csz(n));
     uptr ns = php_alloc(ZS_HDR + n + 1);
     i64 i = 0;
     i64 w = ZS_HDR + ld64(s + 16) + 1;
@@ -460,11 +472,14 @@ uptr php_str_concat(uptr a, uptr b) {
 // start, length) window with php's substr bounds, 0 for an append that did
 // not run -- one allocation of the final length, one copy a piece
 uptr php_str_rope(uptr r, i64 n) {
+    // a pointer walk with few locals, so every one of them is a register
+    // (mc gives a function ten): the entries are read twice, once for the
+    // length and once to copy
+    uptr e = r + n * 24;
+    uptr p = r;
     i64 t = 0;
-    i64 i = 0;
     loop {
-        if (i >= n) break;
-        uptr p = r + i * 24;
+        if (p >= e) break;
         uptr s = ld64(p);
         if (s) {
             i64 st = ld64(p + 8);
@@ -472,29 +487,59 @@ uptr php_str_rope(uptr r, i64 n) {
             i64 sl = ld64(s + 16);
             // a window inside its string, the common case: no php_win call
             if ((u64) st <= (u64) sl && ln >= 0) {
-                if (ln > sl - st) ln = sl - st;
-            } else ln = php_win(s, st, ln, p + 8);
-            st64(p + 16, ln);
+                if (ln > sl - st) { ln = sl - st; st64(p + 16, ln); }
+            } else {
+                ln = php_win(s, st, ln, p + 8);
+                st64(p + 16, ln);
+            }
             t = t + ln;
         }
-        i = i + 1;
+        p = p + 24;
     }
     uptr o = php_str_alloc(t);
     uptr d = o + ZS_HDR;
-    i = 0;
+    p = r;
     loop {
-        if (i >= n) break;
-        uptr q = r + i * 24;
-        uptr w = ld64(q);
-        if (w) {
-            i64 m = ld64(q + 16);
-            uptr f = w + ZS_HDR + ld64(q + 8);
-            php_memcpy(d, f, m);
-            d = d + m;
+        if (p >= e) break;
+        uptr s = ld64(p);
+        if (s) {
+            i64 ln = ld64(p + 16);
+            uptr f = s + ZS_HDR + ld64(p + 8);
+            // a piece of at most sixteen bytes -- a sign, a point, a run of
+            // digits -- is copied with no call: two loads and two stores
+            // that may overlap each other, both inside the piece
+            if (ln <= 16) {
+                if (ln >= 8) { u64 a8 = ld64(f); u64 b8 = ld64(f + ln - 8); st64(d, a8); st64(d + ln - 8, b8); }
+                else if (ln >= 4) { i64 a4 = ld32(f); i64 b4 = ld32(f + ln - 4); st32(d, a4); st32(d + ln - 4, b4); }
+                else if (ln >= 2) { i64 a2 = ld16(f); i64 b2 = ld16(f + ln - 2); st16(d, a2); st16(d + ln - 2, b2); }
+                else if (ln == 1) st8(d, ld8(f));
+            } else php_memcpy(d, f, ln);
+            d = d + ln;
         }
-        i = i + 1;
+        p = p + 24;
     }
     return o;
+}
+
+// A rope entry stored as a substr() of a window (b, vs, vl) -- the start
+// and length as written -- made the entry of b's bytes it stands for, with
+// php_substr_v's bounds: the common case (a start inside the window and a
+// length not negative) here, every other in php_rope_v_slow. The compiler
+// copies the fast half into the rope's caller (src/opt.mc, phr).
+void php_rope_v_slow(uptr p, i64 vs, i64 vl) {
+    i64 st = ld64(p + 8);
+    st64(p + 16, php_win_ln(vl, st, ld64(p + 16)));
+    st64(p + 8, vs + php_win_st(vl, st));
+}
+void php_rope_v(uptr p, i64 vs, i64 vl) {
+    i64 st = ld64(p + 8);
+    i64 ln = ld64(p + 16);
+    if ((u64) st <= (u64) vl && ln >= 0) {
+        if (ln > vl - st) st64(p + 16, vl - st);
+        st64(p + 8, vs + st);
+        return;
+    }
+    php_rope_v_slow(p, vs, vl);
 }
 
 // `a . str_repeat(c, n)` (src/opt.mc): one string of the final length. A
@@ -732,6 +777,14 @@ uptr php_str_setb_f_slow(uptr s, i64 i, i64 c) { uptr phT = ph_tcur; if (!phT) p
 uptr php_str_setb_f(uptr s, i64 i, i64 c) {
     if ((u64) i < (u64) ld64(s + 16)) { st8(s + ZS_HDR + i, c); return s; }
     return php_str_setb_f_slow(s, i, c);
+}
+
+// the same buffer in a function that does not loop (src/rc.mc's
+// ph_rc_fb_scan_nc): the string is the pool's, borrowed, so past the bound
+// it is php_str_setb's copy, a temporary like any other
+uptr php_str_setb_n(uptr s, i64 i, i64 c) {
+    if ((u64) i < (u64) ld64(s + 16)) { st8(s + ZS_HDR + i, c); return s; }
+    return php_str_setb(s, i, c);
 }
 
 // memcmp over the bytes, then the length: PHP's own strcmp ordering.
@@ -1074,25 +1127,55 @@ uptr php_ftos(f64 x) {
 }
 
 // ---- string to number (php's leading-numeric rule) -------------------------
+f64 php_stof(uptr s);
+i64 php_stoi_b(uptr v, i64 n);
 i64 php_stoi(uptr s) { return php_stoi_b(s + ZS_HDR, ld64(s + 16)); }
 
 // (int) over n bytes at v: php_stoi's reading, and what (int) substr(...)
 // uses on the substring's window without building it
 i64 php_stoi_b(uptr v, i64 n) {
     i64 i = 0;
-    loop { if (i >= n) break; i64 c = ld8(v + i); if (c != 32 && c != 9 && c != 10 && c != 13) break; i = i + 1; }
+    loop { if (i >= n) break; i64 c = ld8(v + i); if (c != 32 && c != 9 && c != 10 && c != 13 && c != 11 && c != 12) break; i = i + 1; }
+    i64 st = i;
     i64 neg = 0;
     if (i < n) { if (ld8(v + i) == '-') { neg = 1; i = i + 1; } else { if (ld8(v + i) == '+') i = i + 1; } }
-    i64 acc = 0;
+    u64 acc = 0;
+    i64 nd = 0;
+    i64 ovf = 0;
     loop {
         if (i >= n) break;
         i64 c = ld8(v + i);
         if (c < '0' || c > '9') break;
+        if (acc > 922337203685477580 || (acc == 922337203685477580 && c - '0' > 7 + neg)) ovf = 1;
         acc = acc * 10 + (c - '0');
+        nd = nd + 1;
         i = i + 1;
     }
-    if (neg) return 0 - acc;
-    return acc;
+    // php's (int) of a string is is_numeric_string's prefix: a fraction or an
+    // exponent makes it a float, and a float -- or an integer too long for
+    // 64 bits -- is capped into range (zend_dval_to_lval_cap)
+    i64 isf = 0;
+    if (i < n && ld8(v + i) == '.') {
+        i64 j = i + 1;
+        i64 fd = 0;
+        loop { if (j >= n) break; i64 c2 = ld8(v + j); if (c2 < '0' || c2 > '9') break; fd = fd + 1; j = j + 1; }
+        if (nd + fd > 0) { isf = 1; nd = nd + fd; i = j; }
+    }
+    if (nd && i < n && (ld8(v + i) == 'e' || ld8(v + i) == 'E')) {
+        i64 j2 = i + 1;
+        if (j2 < n && (ld8(v + j2) == '-' || ld8(v + j2) == '+')) j2 = j2 + 1;
+        if (j2 < n && ld8(v + j2) >= '0' && ld8(v + j2) <= '9') isf = 1;
+    }
+    if (!nd) return 0;
+    if (isf || ovf) {
+        f64 d = php_stof(php_str_new(v + st, n - st));
+        if (d != d || d - d != 0.0) return 0;
+        if (d >= 9223372036854775808.0) return 9223372036854775807;
+        if (d < -9223372036854775808.0) return -9223372036854775807 - 1;
+        return (i64) d;
+    }
+    if (neg) return 0 - (i64) acc;
+    return (i64) acc;
 }
 
 f64 php_stof(uptr s) {
@@ -1325,9 +1408,18 @@ i64 php_echo_null() { return 0; }
 #define PHE_USER_DEPR   16384
 
 i64 php_cstrlen(uptr s) {
-    i64 n = 0;
-    loop { if (!ld8(s + n)) break; n = n + 1; }
-    return n;
+    // bytes up to an 8-byte boundary, then a word at a time with the
+    // has-a-zero-byte test (an aligned word never crosses into another
+    // page), then the bytes of the word that has the NUL
+    uptr p = s;
+    loop { if ((p & 7) == 0) break; if (!ld8(p)) return p - s; p = p + 1; }
+    loop {
+        u64 x = ld64(p);
+        if (((x - 0x0101010101010101) & (x ^ 0xffffffffffffffff) & 0x8080808080808080) != 0) break;
+        p = p + 8;
+    }
+    loop { if (!ld8(p)) break; p = p + 1; }
+    return p - s;
 }
 
 // the label php prints for a level
@@ -1426,6 +1518,18 @@ void php_mc(uptr s) { php_mput(s, php_cstrlen(s)); }
 void php_ms(uptr s) { php_mput(s + ZS_HDR, php_strlen(s)); }
 void php_mi(i64 v) { php_ms(php_itos(v)); }
 
+// a diagnostic php raised while COMPILING (src/decls.mc ph_cdiag): raised
+// before the program runs, at the position php compiled it at
+void php_raise_at(i64 lv, uptr msg, uptr fl, i64 line) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr of = ((uptr) ld64(phT + PHT_ph_dfile));
+    i64 ol = ld64(phT + PHT_ph_dline);
+    st64(phT + PHT_ph_dfile, fl);
+    st64(phT + PHT_ph_dline, line);
+    php_raise(lv, msg);
+    st64(phT + PHT_ph_dfile, of);
+    st64(phT + PHT_ph_dline, ol);
+}
+
 void php_raise_m(i64 lv) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); php_raise(lv, (phT + PHT_ph_msg)); }
 
 // the two shapes almost every call site wants
@@ -1441,6 +1545,11 @@ void php_pos(uptr f, i64 l) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st
 void php_quiet_on() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st64(phT + PHT_ph_quiet, ld64(phT + PHT_ph_quiet) + 1); }
 void php_quiet_off() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); if (ld64(phT + PHT_ph_quiet)) st64(phT + PHT_ph_quiet, ld64(phT + PHT_ph_quiet) - 1); }
 void php_ln(i64 l) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st64(phT + PHT_ph_dline, l); }
+// the line of a statement spread over several lines, stored once the value
+// v -- the last argument of the call that may raise there -- is computed, and
+// v handed through (src/lvalue.mc ph_relines)
+i64 php_lnk(i64 l, i64 v) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st64(phT + PHT_ph_dline, l); return v; }
+f64 php_lnkf(i64 l, f64 v) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow(); st64(phT + PHT_ph_dline, l); return v; }
 
 // ---- the named diagnostics -------------------------------------------------
 // Each one is php-src's own text, checked against php 8.5.10 on this host.
@@ -1492,7 +1601,15 @@ void php_undef_skey(uptr k) {
 i64 php_truthy_s(uptr s);
 i64 php_cmp_i(i64 a, i64 b);
 i64 php_cmp_f(f64 a, f64 b);
-i64 php_mod(i64 a, i64 b);
+// `%` on two ints: a positive divisor can be neither zero nor -1, so the
+// remainder itself -- defined here, ahead of its first use, as the one
+// declaration src/opt.mc's copy finds (php_intdiv's shape); the rest is
+// php_mod_slow, below
+i64 php_mod_slow(i64 a, i64 b);
+i64 php_mod(i64 a, i64 b) {
+    if (b > 0) return a - (a / b) * b;
+    return php_mod_slow(a, b);
+}
 i64 php_div_i(i64 a, i64 b);
 f64 php_pow_f(f64 a, i64 e);
 i64 php_pow_i(i64 a, i64 e);
@@ -1550,9 +1667,24 @@ void php_ex_zv(uptr z, i64 depth);
 i64  php_zv_identical(uptr a, uptr b);
 uptr php_arr_copy(uptr src);
 i64  php_throw_str(uptr cls, uptr msg);
+// a frame: name, class, type, file, line, first argument, argument count;
+// an argument is a (tag, value) pair of 16 bytes
+#define FR_SIZE   64
+#define FR_INTERNAL 4                         // a frame's type: a builtin's own, not a method's
+#define FRT_INT    1
+#define FRT_FLOAT  2
+#define FRT_STR    3
+#define FRT_BOOL   4
+#define FRT_NULL   5
+#define FRT_ZV     6
+#define FRT_ARR    7
+#define FRT_OBJ    8
+#define FRT_VAR    9                         // a variadic parameter: its array, shown element by element
+void php_nat_throw(uptr cls, uptr msg, uptr name, i64 n, i64 t0, i64 v0, i64 t1, i64 v1, i64 t2, i64 v2);
+void php_valerr(uptr name, uptr tail, i64 n, uptr a0, uptr a1, uptr a2, uptr a3);
 
 i64  php_zv_type(uptr z) { return ld8(z + 8); }
-void php_zv_settype(uptr z, i64 t) { st8(z + 8, t); st8(z + 9, 0); }
+void php_zv_settype(uptr z, i64 t) { st32(z + 8, t); }
 
 uptr php_zv_alloc() {
     uptr z = php_alloc(ZV_SIZE);
@@ -1581,6 +1713,26 @@ uptr php_zstr(uptr s) { uptr z = php_alloc(ZV_SIZE); st64(z, php_str_esc(s)); st
 uptr php_zarr(uptr a) { uptr z = php_zv_alloc(); st64(z, a); php_zv_settype(z, IS_ARRAY); return z; }
 uptr php_zobj(uptr o) { uptr z = php_zv_alloc(); st64(z, o); php_zv_settype(z, IS_OBJECT); return z; }
 
+// A native nullable-scalar value (src/decl.mc: carried as the int `v` plus the
+// u8 null flag `isnull`) made into a zval where a zval is needed -- null when
+// the flag is set, the int otherwise. php_opt_str is the (string) cast: php's
+// (string)null is "" and (string)int is the digits.
+uptr php_opt_box(i64 v, i64 isnull) { if (isnull) return php_znull(); return php_zlong(v); }
+uptr php_opt_str(i64 v, i64 isnull) { if (isnull) return php_str_new("", 0); return php_itos(v); }
+// the reverse, for a zval arriving where a native nullable scalar is wanted
+// (0 is an argument a spread did not reach: not passed, i.e. null here)
+i64 php_opt_isnull(uptr z) { if (!z) return 1; return php_zv_type(z) == IS_NULL; }
+i64 php_opt_long(uptr z) { if (!z) return 0; if (php_zv_type(z) == IS_NULL) return 0; return php_zv_long(z); }
+void php_argcount_n(uptr disp, i64 passed, i64 min, i64 exact, uptr dfile, i64 dline);
+// a required parameter filled from a spread (`f(...$args)`): the values are
+// consecutive, so when the k-th is missing exactly k were passed -- php's
+// ArgumentCountError, raised where the parameter is declared
+uptr php_spread_req(uptr z, uptr disp, i64 passed, i64 min, i64 exact, uptr dfile, i64 dline) {
+    if (z) return z;
+    php_argcount_n(disp, passed, min, exact, dfile, dline);
+    return php_znull();
+}
+
 // ---- the ordered hash: PHP's zend_array, field for field -------------------
 //  0 gc      refcount u32, type_info u32
 //  8 flags   u32
@@ -1603,6 +1755,15 @@ uptr php_zobj(uptr o) { uptr z = php_zv_alloc(); st64(z, o); php_zv_settype(z, I
 #define HT_INVAL  4294967295
 
 i64  php_count(uptr a) { return ld32(a + 28); }
+// count() of a zval: an array's size, a Countable's own count() (ZPP already
+// refused anything else, so what is left answers 0)
+uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6);
+i64  php_zv_long(uptr z);
+i64 php_count_zv(uptr z) {
+    if (php_zv_type(z) == IS_ARRAY) return php_count(ld64(z));
+    if (php_zv_type(z) == IS_OBJECT) return php_zv_long(php_mcall(ld64(z), php_str_new("count", 5), 0, 0, 0, 0, 0, 0, 0, 0));
+    return 0;
+}
 i64  php_ht_used(uptr a) { return ld32(a + 24); }
 uptr php_ht_bkt(uptr a, i64 i) { return ld64(a + 16) + i * BKT; }
 i64  php_ht_slot(uptr a, u64 h) { i64 n = ld32(a + 32); return (h & (n - 1)) - n; }
@@ -1640,7 +1801,7 @@ u64 php_str_hash(uptr s) {
     u64 h = ld64(s + 8);
     if (h) return h;
     h = 5381;
-    i64 n = php_strlen(s);
+    i64 n = ld64(s + 16);
     i64 i = 0;
     loop {
         if (i >= n) break;
@@ -1655,7 +1816,7 @@ u64 php_str_hash(uptr s) {
 // php's ZEND_HANDLE_NUMERIC: "123" is the integer key 123, but "0123", "1.0",
 // " 1" and "+1" are not, and neither is anything past the i64 range.
 i64 php_key_numeric(uptr s, uptr pout) {
-    i64 n = php_strlen(s);
+    i64 n = ld64(s + 16);
     if (n == 0 || n > 20) return 0;
     uptr v = s + ZS_HDR;
     i64 i = 0;
@@ -1716,11 +1877,15 @@ void php_ht_grow(uptr a) {
     }
 }
 
+// (php_ht_slot, _hget and _bkt written out: these two run for every
+// element an array is given or asked for, and each accessor was a call)
 uptr php_ht_find(uptr a, u64 h, uptr key) {
-    i64 idx = php_ht_hget(a, php_ht_slot(a, h));
+    i64 n = ld32(a + 32);
+    uptr d = ld64(a + 16);
+    i64 idx = ld32(d + ((h & (n - 1)) - n) * 4);
     loop {
         if (idx == HT_INVAL) break;
-        uptr b = php_ht_bkt(a, idx);
+        uptr b = d + idx * BKT;
         if (ld64(b + 16) == h && ld8(b + 8) != IS_UNDEF) {
             uptr k = ld64(b + 24);
             if (!key && !k) return b;
@@ -1737,14 +1902,16 @@ uptr php_ht_slotfor(uptr a, u64 h, uptr key) {
     if (b) return b;
     if (ld32(a + 24) >= ld32(a + 32)) php_ht_grow(a);
     i64 i = ld32(a + 24);
-    b = php_ht_bkt(a, i);
+    uptr d = ld64(a + 16);
+    b = d + i * BKT;
     st64(b, 0);
-    php_zv_settype(b, IS_NULL);
+    st32(b + 8, IS_NULL);
     st64(b + 16, h);
     st64(b + 24, php_str_esc(key));        // a bucket counts nothing: the key is escaped
-    i64 si = php_ht_slot(a, h);
-    st32(b + 12, php_ht_hget(a, si));
-    php_ht_hset(a, si, i);
+    i64 n = ld32(a + 32);
+    uptr hs = d + ((h & (n - 1)) - n) * 4;
+    st32(b + 12, ld32(hs));
+    st32(hs, i);
     st32(a + 24, i + 1);
     st32(a + 28, ld32(a + 28) + 1);
     return b;
@@ -1885,11 +2052,26 @@ void php_arr_unset(uptr a, uptr k) {
 // php_zv_cpv is the copy an assignment makes, and it costs nothing at all
 // for a value that is not an array.
 void php_arr_push(uptr a, uptr v) { php_zv_cpv(php_arr_nextslot(a), v); }
+// the append of a value the caller already owns (src/lvalue.mc's ph_store:
+// the right side of `$a[] = $v` is the copy ph_own made): stored as it is,
+// as php_arr_set stores, not copied a second time
+void php_arr_pushv(uptr a, uptr v) { php_zv_cp(php_arr_nextslot(a), v); }
 void php_arr_set(uptr a, uptr k, uptr v) { php_zv_cp(php_arr_zslot(a, k), v); }
 void php_arr_iset(uptr a, i64 k, uptr v) { php_zv_cp(php_arr_islot(a, k), v); }
+// `$a[S] = T` with string S and T (src/opt.mc's ph_opt_aset): the value as
+// php_zstr would box it -- escaped, so it outlives the pool -- but written
+// straight into the slot, and the key as php_arr_sslot takes it (a new
+// bucket escapes its key itself), with no box made for either
+void php_arr_set_k(uptr a, uptr k, uptr v) { php_zv_cp(php_arr_sslot(a, k), v); }
+void php_arr_set_s(uptr a, uptr k, uptr v) { uptr d = php_arr_zslot(a, k); st64(d, php_str_esc(v)); st32(d + 8, IS_STRING); }
+void php_arr_set_ks(uptr a, uptr k, uptr v) { uptr d = php_arr_sslot(a, k); st64(d, php_str_esc(v)); st32(d + 8, IS_STRING); }
 
 // php arrays are VALUES: an assignment makes an independent array. There is no
 // free (D7), so the separation is eager when the refcount says it is shared.
+// an array handed over, not copied: the local it came from is dead after
+// it (src/opt.mc's ph_mv_fn)
+uptr php_arr_mv(uptr a) { return a; }
+
 uptr php_arr_copy(uptr src) {
     uptr a = php_arr_new(ld32(src + 32));
     i64 used = php_ht_used(src);
@@ -1926,10 +2108,10 @@ uptr php_arr_copy(uptr src) {
 
 uptr php_pk_new(i64 cap) {
     if (cap < 8) cap = 8;
-    uptr p = php_alloc(32);
+    uptr p = php_alloc(32 + cap * 8);
     st64(p, 0);
     st64(p + 8, cap);
-    st64(p + 16, php_alloc(cap * 8));
+    st64(p + 16, p + 32);
     st64(p + 24, 0);
     return p;
 }
@@ -1939,15 +2121,18 @@ uptr php_pk_new(i64 cap) {
 // limit's fatal and 2^31 this error). Under it n * 8 cannot overflow, and a
 // buffer too big for memory is Zend's memory-limit fatal on the extension
 // road and the arena's own on the program road.
-i64 php_fill_count_ok(i64 n) {
+// the trace's array_fill(start, n, value): ts/tv are their frame tags
+i64 php_fill_count_ok(i64 ts, i64 st, i64 n, i64 tv, i64 v) {
     if (n < 0) {
-        php_throw_str(php_str_new("ValueError", 10),
-            php_str_new("array_fill(): Argument #2 ($count) must be greater than or equal to 0", 69));
+        php_nat_throw(php_str_new("ValueError", 10),
+            php_str_new("array_fill(): Argument #2 ($count) must be greater than or equal to 0", 69),
+            "array_fill", 3, ts, st, FRT_INT, n, tv, v);
         return 0;
     }
     if (n >= 2147483648) {
-        php_throw_str(php_str_new("ValueError", 10),
-            php_str_new("array_fill(): Argument #2 ($count) is too large", 47));
+        php_nat_throw(php_str_new("ValueError", 10),
+            php_str_new("array_fill(): Argument #2 ($count) is too large", 47),
+            "array_fill", 3, ts, st, FRT_INT, n, tv, v);
         return 0;
     }
     return 1;
@@ -1955,11 +2140,16 @@ i64 php_fill_count_ok(i64 n) {
 
 // array_fill(0, n, v)
 uptr php_pk_fill(i64 n, i64 v) {
-    if (!php_fill_count_ok(n)) return php_pk_new(8);
+    // the count's two refusals, out of line: one unsigned test in front
+    if (n < 0 || n >= 2147483648) { php_fill_count_ok(FRT_INT, 0, n, FRT_INT, v); return php_pk_new(8); }
     uptr p = php_pk_new(n);
+    // two words a step through a pointer: the indexed loop was a multiply,
+    // an add and two branches for each word (bcmath's _bc_umul fills one
+    // per call of a power)
     uptr d = ld64(p + 16);
-    i64 i = 0;
-    loop { if (i >= n) break; st64(d + i * 8, v); i = i + 1; }
+    uptr e = d + (n << 3);
+    loop { if (d + 8 >= e) break; st64(d, v); st64(d + 8, v); d = d + 16; }
+    if (d < e) st64(d, v);
     st64(p, n);
     return p;
 }
@@ -1998,6 +2188,12 @@ i64 php_pk_get_f(uptr p, i64 k) { return ld64(ld64(p + 16) + (k << 3)); }
 void php_pk_set_f(uptr p, i64 k, i64 v) { st64(ld64(p + 16) + (k << 3), v); }
 // the element's address, for src/lvalue.mc's read-modify-write (ph_addm64)
 uptr php_pk_ea(uptr p, i64 k) { return ld64(p + 16) + (k << 3); }
+// a STABLE array (src/packed.mc) keeps its buffer pointer in a local: the
+// pointer, then the same three over it
+uptr php_pk_dp(uptr p) { return ld64(p + 16); }
+i64 php_pk_get_fd(uptr d, i64 k) { return ld64(d + (k << 3)); }
+void php_pk_set_fd(uptr d, i64 k, i64 v) { st64(d + (k << 3), v); }
+uptr php_pk_ead(uptr d, i64 k) { return d + (k << 3); }
 
 void php_pk_set_slow(uptr p, i64 k, i64 v);
 // the fast path alone, and no early return: src/opt.mc copies it into the
@@ -2561,9 +2757,73 @@ uptr php_zv_bnot(uptr a) {
 }
 
 // php 8's loose comparison
+// an object compared with something (zend_std_compare_objects): two objects
+// of one class property by property, in order -- an uninitialized typed one
+// equal only to another -- and of two classes uncomparable (1 either way);
+// an object and a bool as true, and a string through __toString; an int or
+// a float sees it as 1 with php's notice; anything else is uncomparable
+i64 php_prop_uninit(uptr b);
+i64 php_zv_cmp(uptr a, uptr b);
+i64 php_obj_cmp(uptr a, uptr b, i64 ta, i64 tb) {
+    if (ta == IS_OBJECT && tb == IS_OBJECT) {
+        uptr x = ld64(a);
+        uptr y = ld64(b);
+        if (x == y) return 0;
+        if (php_is_proxy(x) || php_is_proxy(y)) return 1;
+        if (php_obj_ce(x) != php_obj_ce(y)) return 1;
+        uptr px = php_obj_props(x);
+        uptr py = php_obj_props(y);
+        if (php_count(px) < php_count(py)) return -1;
+        if (php_count(px) > php_count(py)) return 1;
+        i64 used = php_ht_used(px);
+        i64 i = 0;
+        loop {
+            if (i >= used) break;
+            uptr bx = php_ht_bkt(px, i);
+            if (ld8(bx + 8) != IS_UNDEF) {
+                uptr k = ld64(bx + 24);
+                uptr by = 0;
+                if (k) by = php_ht_find(py, php_str_hash(k), k);
+                if (!k) by = php_ht_find(py, ld64(bx + 16), 0);
+                if (!by) return 1;
+                i64 ux = php_prop_uninit(bx);
+                i64 uy = php_prop_uninit(by);
+                if (ux || uy) { if (!(ux && uy)) return 1; }
+                else {
+                    i64 c = php_zv_cmp(bx, by);
+                    if (c) return c;
+                }
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+    i64 lhs = ta == IS_OBJECT;
+    uptr oz = b;
+    uptr v = a;
+    if (lhs) { oz = a; v = b; }
+    uptr o = ld64(oz);
+    i64 tv = php_zv_type(v);
+    uptr c = 0;
+    if (tv == IS_TRUE || tv == IS_FALSE) c = php_zbool(1);
+    if (tv == IS_STRING && php_ce_lookup(php_obj_ce(o), 24, php_str_new("__tostring", 10))) c = php_zstr(php_obj_tostr(o));
+    if (tv == IS_LONG || tv == IS_DOUBLE) {
+        php_mreset();
+        php_mc("Object of class ");
+        php_ms(php_obj_cname(o));
+        if (tv == IS_LONG) { php_mc(" could not be converted to int"); c = php_zlong(1); }
+        if (tv == IS_DOUBLE) { php_mc(" could not be converted to float"); c = php_zdouble(1.0); }
+        php_raise_m(PHE_NOTICE);
+    }
+    if (!c) { if (lhs) return 1; return -1; }
+    if (lhs) return php_zv_cmp(c, v);
+    return php_zv_cmp(v, c);
+}
+
 i64 php_zv_cmp(uptr a, uptr b) {
     i64 ta = php_zv_type(a);
     i64 tb = php_zv_type(b);
+    if (ta == IS_OBJECT || tb == IS_OBJECT) return php_obj_cmp(a, b, ta, tb);
     if (ta == IS_ARRAY && tb == IS_ARRAY) {
         i64 na = php_count(ld64(a));
         i64 nb = php_count(ld64(b));
@@ -2750,10 +3010,30 @@ void php_vd_ht_ce(uptr a, i64 depth, uptr ce) {
             php_ind(depth + 1);
             php_vd_key_ce(b, ce);
             php_ind(depth + 1);
-            php_vd_zv(b, depth + 1);
+            // a typed property never initialized: php's `uninitialized(T)`
+            if (php_prop_uninit(b) && ce) {
+                uptr tr = php_ptype_of(ce, ld64(b + 24));
+                php_write("uninitialized(", 14);
+                if (tr) php_echo_str(ld64(tr + 16));
+                php_write(")\n", 2);
+            } else php_vd_zv(b, depth + 1);
         }
         i = i + 1;
     }
+}
+
+// how many properties an object HAS: an uninitialized typed one is not one
+i64 php_obj_nprops(uptr p) {
+    i64 n = php_count(p);
+    i64 used = php_ht_used(p);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(p, i);
+        if (ld8(b + 8) != IS_UNDEF && php_prop_uninit(b)) n = n - 1;
+        i = i + 1;
+    }
+    return n;
 }
 
 void php_vd_arr(uptr a, i64 depth) {
@@ -2772,7 +3052,7 @@ void php_vd_obj(uptr o, i64 depth) {
     php_write(")#", 2);
     php_echo_int(php_obj_id(o));
     php_write(" (", 2);
-    php_echo_int(php_count(p));
+    php_echo_int(php_obj_nprops(p));
     php_write(") {\n", 4);
     php_vd_ht_ce(p, depth, php_obj_ce(o));
     php_ind(depth);
@@ -2811,7 +3091,7 @@ void php_pr_ht_ce(uptr a, i64 depth, i64 isobj, uptr ce) {
     loop {
         if (i >= used) break;
         uptr b = php_ht_bkt(a, i);
-        if (ld8(b + 8) != IS_UNDEF) {
+        if (php_prop_live(b)) {
             php_sp(depth + 4);
             php_write("[", 1);
             uptr k = ld64(b + 24);
@@ -2920,7 +3200,7 @@ void php_ex_zv(uptr z, i64 depth) {
             php_echo_str(cn);
             php_write("::__set_state(array(\n", 21);
         }
-        uptr a = php_obj_props(o);
+        uptr a = php_obj_live_props(o);
         i64 used = php_ht_used(a);
         i64 i = 0;
         loop {
@@ -2963,6 +3243,100 @@ uptr php_substr(uptr s, i64 start, i64 len, i64 haslen) {
     return php_str_short(s + ZS_HDR + start, want);
 }
 
+// `$s = substr($s, ...)` on a counted slot (src/rc.mc), php_str_append's
+// contract: the answer replaces the slot's reference. A string nobody else
+// holds (php_str_mine) is shortened where it lies -- the window moved to the
+// front, the length, the NUL, the hash forgotten -- with no new string and
+// nothing freed; anything else is copied into a string whose one reference
+// the slot keeps, and the old one is released. Bounds are php_substr's.
+uptr php_substr_own(uptr s, i64 start, i64 len, i64 haslen) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 n = ld64(s + 16);
+    if (start < 0) { start = n + start; if (start < 0) start = 0; }
+    i64 want = 0;
+    if (start <= n) {
+        want = n - start;
+        if (haslen) {
+            if (len < 0) { want = n - start + len; } else { want = len; }
+        }
+        if (want < 0) want = 0;
+        if (start + want > n) want = n - start;
+    }
+    if (php_str_mine(s)) {
+        st64(phT + PHT_ph_rc_inplace, ld64(phT + PHT_ph_rc_inplace) + 1);
+        // a forward copy is right for an overlap with the source after the
+        // destination (php_memcpy)
+        if (start && want) php_memcpy(s + ZS_HDR, s + ZS_HDR + start, want);
+        st64(s + 8, 0);
+        st64(s + 16, want);
+        st8(s + ZS_HDR + want, 0);
+        return s;
+    }
+    st64(phT + PHT_ph_rc_copied, ld64(phT + PHT_ph_rc_copied) + 1);
+    uptr o = php_str_mk(want, 0);
+    if (want) php_memcpy(o + ZS_HDR, s + ZS_HDR + start, want);
+    php_str_release(s);
+    return o;
+}
+
+// ---- a substr() local held as a window (src/opt.mc's views) --------------
+// A string local of a function that does not loop, assigned by substr(), is
+// kept as (base string, start, length) and never built unless a read needs a
+// string of its own. The bounds are php_substr's: php_win_st is the start a
+// substr of a string of n bytes begins at, php_win_ln its length (ln is
+// PHP_INT_MAX where the call had none).
+i64 php_win_st(i64 n, i64 st) {
+    if (st < 0) { st = n + st; if (st < 0) st = 0; }
+    if (st > n) st = n;
+    return st;
+}
+i64 php_win_ln(i64 n, i64 st, i64 ln) {
+    if (st < 0) { st = n + st; if (st < 0) st = 0; }
+    if (st > n) return 0;
+    i64 want = ln;
+    if (ln < 0) want = n - st + ln;
+    if (want < 0) want = 0;
+    if (want > n - st) want = n - st;
+    return want;
+}
+// the window as a string: its base when it is all of it, else a new one
+uptr php_vstr(uptr b, i64 s, i64 l) {
+    if (s == 0 && l == ld64(b + 16)) return b;
+    return php_str_short(b + ZS_HDR + s, l);
+}
+// substr() of a window, bounded by the window
+uptr php_substr_v(uptr b, i64 vs, i64 vl, i64 st, i64 ln, i64 haslen) {
+    if (!haslen) ln = 9223372036854775807;
+    i64 s0 = php_win_st(vl, st);
+    return php_str_short(b + ZS_HDR + vs + s0, php_win_ln(vl, st, ln));
+}
+// strspn() of a window from offset o: php_spn_r's and php_spn_o's loops over
+// the window's bytes; an offset outside it is the string's own road
+i64 php_spn_r(uptr s, i64 lo, i64 w, i64 o);
+i64 php_spn_o(uptr s, uptr bm, i64 o);
+i64 php_spn_rv(uptr b, i64 vs, i64 vl, i64 lo, i64 w, i64 o) {
+    if ((u64) o > (u64) vl) return php_spn_r(php_vstr(b, vs, vl), lo, w, o);
+    uptr p = b + ZS_HDR + vs;
+    i64 i = o;
+    loop {
+        if (i >= vl) break;
+        if ((u64) (ld8(p + i) - lo) > (u64) w) break;
+        i = i + 1;
+    }
+    return i - o;
+}
+i64 php_spn_ov(uptr b, i64 vs, i64 vl, uptr bm, i64 o) {
+    if ((u64) o > (u64) vl) return php_spn_o(php_vstr(b, vs, vl), bm, o);
+    uptr p = b + ZS_HDR + vs;
+    i64 i = o;
+    loop {
+        if (i >= vl) break;
+        i64 c = ld8(p + i);
+        if (!((ld8(bm + (c >> 3)) >> (c & 7)) & 1)) break;
+        i = i + 1;
+    }
+    return i - o;
+}
+
 // (int) substr($s, ...): the same window, read as an int in place -- the
 // compiler fuses the two (ph_to_int), so the substring is never built
 i64 php_substr_i(uptr s, i64 start, i64 len, i64 haslen) {
@@ -2987,6 +3361,26 @@ i64 php_str_at_is(uptr s, i64 i, i64 c) {
     if (j < 0) j = n + j;
     if (j < 0 || j >= n) { php_str_off_warn(i); return 0; }
     return ld8(s + ZS_HDR + j) == c;
+}
+
+// strpos()/stripos() with an offset (ext/standard/string.c): one past the
+// haystack, or before its start once counted from the end, is php's
+// ValueError. -1 is false.
+i64 php_strpos_off(uptr name, uptr h, uptr nd, i64 off, uptr oz) {
+    i64 hn = ld64(h + 16);
+    i64 o = off;
+    if (o < 0) o = o + hn;
+    if (o < 0 || o > hn) {
+        php_valerr(name, "Argument #3 ($offset) must be contained in argument #1 ($haystack)", 3, php_zstr(h), php_zstr(nd), oz, 0);
+        return 0 - 1;
+    }
+    return o;
+}
+i64 php_strpos(uptr h, uptr nd, i64 off);
+i64 php_strpos_c(uptr h, uptr nd, i64 off) {
+    i64 o = php_strpos_off("strpos", h, nd, off, php_zlong(off));
+    if (o < 0) return 0 - 1;
+    return php_strpos(h, nd, o);
 }
 
 // the first byte is scanned for on its own; the rest is compared only where
@@ -3025,9 +3419,15 @@ i64 php_strpos1(uptr h, i64 c) { return php_memchr(h + ZS_HDR, c, ld64(h + 16));
 uptr php_str_repeat(uptr s, i64 times);
 // str_repeat for a FRESH buffer (src/rc.mc): never the shared one-byte string
 uptr php_str_repeat_f(uptr s, i64 times) {
-    if (times == 1 && ld64(s + 16) == 1) {
-        uptr o = php_str_alloc(1);
-        st8(o + ZS_HDR, ld8(s + ZS_HDR));
+    // one byte, at least once: the buffer and its fill, a word at a time,
+    // with none of php_str_repeat's general road in front
+    if (times > 0 && ld64(s + 16) == 1) {
+        uptr o = php_str_alloc(times);
+        i64 b = ld8(s + ZS_HDR);
+        u64 w = b * 0x0101010101010101;
+        i64 i = 0;
+        loop { if (i + 8 > times) break; st64(o + ZS_HDR + i, w); i = i + 8; }
+        loop { if (i >= times) break; st8(o + ZS_HDR + i, b); i = i + 1; }
         return o;
     }
     return php_str_repeat(s, times);
@@ -3037,12 +3437,13 @@ uptr php_str_repeat(uptr s, i64 times) {
     // strings, not a new one (`$w . str_repeat('0', $to - $from)` is most
     // often a zero-length pad)
     if (times < 0) {
-        php_throw_str(php_str_new("ValueError", 10),
-            php_str_new("str_repeat(): Argument #2 ($times) must be greater than or equal to 0", 69));
+        php_nat_throw(php_str_new("ValueError", 10),
+            php_str_new("str_repeat(): Argument #2 ($times) must be greater than or equal to 0", 69),
+            "str_repeat", 2, FRT_STR, s, FRT_INT, times, 0, 0);
         return php_str_short("", 0);
     }
     if (times == 0) return php_str_short("", 0);
-    i64 n = php_strlen(s);
+    i64 n = ld64(s + 16);
     if (n == 1 && times == 1) return php_str_short(s + ZS_HDR, 1);
     uptr o = php_str_alloc(n * times);
     i64 i = 0;
@@ -3210,6 +3611,31 @@ uptr php_implode(uptr sep, uptr a) {
     return o;
 }
 
+// implode()/join() on zvals: php 8's two forms and its own refusals
+// (ext/standard/string.c). The argument-type errors php's ZPP raises are the
+// caller's (src/builtin.mc ph_zpp_args); what is left is the function's own:
+// one argument that is not an array, an array where the separator goes, and a
+// null where the array goes. `name` is how the call spelled it.
+uptr php_implode_any(uptr name, uptr a1, uptr a2) {
+    if (!a2) {
+        if (php_zv_type(a1) == IS_ARRAY) return php_implode(php_str_new("", 0), php_zv_arr_r(a1));
+        php_mreset();
+        php_mc(name);
+        php_mc("(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given");
+        uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+        php_nat_throw(php_str_new("TypeError", 9), php_str_new((phT + PHT_ph_msg), ld64(phT + PHT_ph_msgn)), name, 1, FRT_ZV, a1, 0, 0, 0, 0);
+        return php_str_new("", 0);
+    }
+    if (php_zv_type(a2) == IS_ARRAY && php_zv_type(a1) != IS_ARRAY) return php_implode(php_zv_str(a1), php_zv_arr_r(a2));
+    php_mreset();
+    php_mc(name);
+    if (php_zv_type(a1) == IS_ARRAY) php_mc("(): Argument #1 ($separator) must be of type string, array given");
+    else php_mc("(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given");
+    uptr phT2 = ph_tcur; if (!phT2) phT2 = ph_tslow();
+    php_nat_throw(php_str_new("TypeError", 9), php_str_new((phT2 + PHT_ph_msg), ld64(phT2 + PHT_ph_msgn)), name, 2, FRT_ZV, a1, FRT_ZV, a2, 0, 0);
+    return php_str_new("", 0);
+}
+
 uptr php_explode(uptr sep, uptr s) {
     uptr a = php_arr_new(8);
     i64 sl = php_strlen(sep);
@@ -3234,23 +3660,35 @@ i64 php_intdiv(i64 a, i64 b) {
 }
 
 i64 php_intdiv_slow(i64 a, i64 b) {
-    if (b == 0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16)); return 0; }
+    if (b == 0) {
+        php_nat_throw(php_str_new("DivisionByZeroError", 19), php_str_new("Division by zero", 16),
+                      "intdiv", 2, FRT_INT, a, FRT_INT, b, 0, 0);
+        return 0;
+    }
     // php's own message, and php's own class: the quotient is not an integer,
     // which is a throw and not a trap
     if (a == -9223372036854775807 - 1 && b == -1) {
-        php_throw_cls(php_str_new("ArithmeticError", 15),
-                      php_str_new("Division of PHP_INT_MIN by -1 is not an integer", 47));
+        php_nat_throw(php_str_new("ArithmeticError", 15),
+                      php_str_new("Division of PHP_INT_MIN by -1 is not an integer", 47),
+                      "intdiv", 2, FRT_INT, a, FRT_INT, b, 0, 0);
         return 0;
     }
     return a / b;
 }
 i64 php_abs_i(i64 v) { if (v < 0) return 0 - v; return v; }
 f64 php_abs_f(f64 v) { if (v < 0.0) return 0.0 - v; return v; }
+// abs() of a zval: int|float as php answers it, a float-string a float
+uptr php_zv_abs(uptr z) {
+    if (php_zv_isdouble(z)) return php_zdouble(php_abs_f(php_zv_double(z)));
+    i64 v = php_zv_long(z);
+    if (v == -9223372036854775807 - 1) return php_zdouble(9223372036854775808.0);
+    return php_zlong(php_abs_i(v));
+}
 i64 php_max_i(i64 a, i64 b) { if (a >= b) return a; return b; }
 i64 php_min_i(i64 a, i64 b) { if (a <= b) return a; return b; }
 f64 php_max_f(f64 a, f64 b) { if (a >= b) return a; return b; }
 f64 php_min_f(f64 a, f64 b) { if (a <= b) return a; return b; }
-i64 php_mod(i64 a, i64 b) {
+i64 php_mod_slow(i64 a, i64 b) {
     if (b == 0) { php_throw_cls(php_str_new("DivisionByZeroError", 19), php_str_new("Modulo by zero", 14)); return 0; }
     // `x % -1` is 0 for every x, and this is not a shortcut: on x86-64 `idiv`
     // raises #DE for PHP_INT_MIN / -1 because the quotient is not
@@ -3314,6 +3752,8 @@ void php_shutdown() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
             if (ld8(bk + 8) != IS_UNDEF) {
                 uptr row = ld64(bk);
                 i64 nsa = php_zv_long(php_arr_iget(row, 4));
+                // from the engine, as php runs it: `[internal function]`
+                st64(phT + PHT_ph_dfile, 0);
                 php_call_zv(php_arr_iget(row, 0), nsa, php_arr_iget(row, 1),
                             php_arr_iget(row, 2), php_arr_iget(row, 3), 0, 0);
                 st64(phT + PHT_ph_exc, 0);
@@ -3471,6 +3911,22 @@ uptr php_str_pad_b(uptr b, i64 n, i64 len, uptr pad, i64 type) {    // php: 0 le
     return o;
 }
 
+// str_pad() checked as php checks it: an empty pad, a pad type that is not
+// STR_PAD_LEFT/RIGHT/BOTH; n is how many arguments the call passed
+uptr php_str_pad(uptr s, i64 len, uptr pad, i64 type);
+uptr php_str_pad_c(uptr s, i64 len, uptr pad, i64 type, i64 n) {
+    if (!php_strlen(pad)) {
+        php_valerr("str_pad", "Argument #3 ($pad_string) must not be empty", n, php_zstr(s), php_zlong(len), php_zstr(pad), php_zlong(type));
+        return php_str_new("", 0);
+    }
+    if (type < 0 || type > 2) {
+        php_valerr("str_pad", "Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH", n,
+                   php_zstr(s), php_zlong(len), php_zstr(pad), php_zlong(type));
+        return php_str_new("", 0);
+    }
+    return php_str_pad(s, len, pad, type);
+}
+
 uptr php_str_pad(uptr s, i64 len, uptr pad, i64 type) {
     i64 n = php_strlen(s);
     if (len <= n || php_strlen(pad) == 0) return s;
@@ -3575,6 +4031,26 @@ uptr php_obj_tostr(uptr o) {
 }
 uptr php_obj_ce(uptr o) { return ld64(o + 16); }
 uptr php_obj_props(uptr o) { return ld64(o + 24); }
+// the properties an object HAS -- an uninitialized typed one is not among
+// them: the table itself when none is, else a copy without them
+i64 php_prop_uninit(uptr b);
+uptr php_obj_live_props(uptr o) {
+    uptr p = ld64(o + 24);
+    i64 used = php_ht_used(p);
+    i64 i = 0;
+    i64 any = 0;
+    loop { if (i >= used) break; uptr b = php_ht_bkt(p, i); if (ld8(b + 8) != IS_UNDEF && php_prop_uninit(b)) { any = 1; break; } i = i + 1; }
+    if (!any) return p;
+    uptr r = php_arr_new(8);
+    i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b2 = php_ht_bkt(p, i);
+        if (ld8(b2 + 8) != IS_UNDEF && !php_prop_uninit(b2)) php_zv_cp(php_arr_sslot(r, ld64(b2 + 24)), b2);
+        i = i + 1;
+    }
+    return r;
+}
 
 // ---- an ENGINE object inside the runtime -------------------------------------
 // On the extension road a php object crosses into the module as a PROXY: a
@@ -3858,6 +4334,38 @@ uptr php_str_inc(uptr s) {
     return r;
 }
 
+// ++ and -- on what is neither a number, null nor a string, as php 8.5
+// answers: a bool is a warning and keeps its value; an array or an object is
+// a TypeError naming it ("Cannot increment array", "... stdClass")
+void php_incdec_other(uptr z, i64 t, i64 dec) {
+    if (t == IS_FALSE || t == IS_TRUE) {
+        if (dec) php_warn1("Decrement on type bool has no effect, this will change in the next major version of PHP");
+        if (!dec) php_warn1("Increment on type bool has no effect, this will change in the next major version of PHP");
+        return;
+    }
+    if (t != IS_ARRAY && t != IS_OBJECT) return;
+    uptr m = php_str_new("Cannot increment ", 17);
+    if (dec) m = php_str_new("Cannot decrement ", 17);
+    if (t == IS_ARRAY) m = php_str_concat(m, php_str_new("array", 5));
+    if (t == IS_OBJECT) m = php_str_concat(m, php_obj_cname(ld64(z)));
+    php_throw_cls(php_str_new("TypeError", 9), m);
+}
+
+// the same answers for a variable the compiler holds natively (src/expr.mc
+// ph_incdec_other): kind 1 a bool, 2 an array, 3 an object (o its handle)
+void php_incdec_t(i64 k, i64 dec, uptr o) {
+    if (k == 1) {
+        if (dec) php_warn1("Decrement on type bool has no effect, this will change in the next major version of PHP");
+        if (!dec) php_warn1("Increment on type bool has no effect, this will change in the next major version of PHP");
+        return;
+    }
+    uptr m = php_str_new("Cannot increment ", 17);
+    if (dec) m = php_str_new("Cannot decrement ", 17);
+    if (k == 2) m = php_str_concat(m, php_str_new("array", 5));
+    if (k == 3) m = php_str_concat(m, php_obj_cname(o));
+    php_throw_cls(php_str_new("TypeError", 9), m);
+}
+
 uptr php_zv_inc(uptr z) {
     i64 t = php_zv_type(z);
     if (t == IS_NULL || t == IS_UNDEF) return php_zlong(1);
@@ -3876,12 +4384,17 @@ uptr php_zv_inc(uptr z) {
         php_depr1("Increment on non-numeric string is deprecated, use str_increment() instead");
         return php_zstr(php_str_inc(ld64(z)));
     }
+    php_incdec_other(z, t, 0);
     return php_zv_dup(z);
 }
 
 uptr php_zv_dec(uptr z) {
     i64 t = php_zv_type(z);
-    if (t == IS_NULL || t == IS_UNDEF) return php_znull();
+    if (t == IS_NULL || t == IS_UNDEF) {
+        // php 8.3+: a warning, and the value stays null (++ on null is 1, silently)
+        php_warn1("Decrement on type null has no effect, this will change in the next major version of PHP");
+        return php_znull();
+    }
     if (t == IS_LONG) {
         i64 v = ld64(z);
         if (v == -9223372036854775807 - 1) return php_zdouble(-9223372036854775808.0);
@@ -3894,9 +4407,14 @@ uptr php_zv_dec(uptr z) {
         i64 k = php_str_isnum(ld64(z), lb, db);
         if (k == 1) return php_zlong(ld64(lb) - 1);
         if (k == 2) return php_zdouble(ldf64(db) - 1.0);
+        if (php_strlen(ld64(z)) == 0) {
+            php_depr1("Decrement on empty string is deprecated as non-numeric");
+            return php_zlong(0 - 1);
+        }
         php_depr1("Decrement on non-numeric string has no effect and is deprecated");
         return php_zv_dup(z);
     }
+    php_incdec_other(z, t, 1);
     return php_zv_dup(z);
 }
 
@@ -4237,7 +4755,7 @@ uptr php_f_array_fill(uptr st, uptr num, uptr v) {
     uptr r = php_arr_new(8);
     i64 s = php_zv_long(st);
     i64 n = php_zv_long(num);
-    if (!php_fill_count_ok(n)) return r;
+    if (!php_fill_count_ok(FRT_ZV, st, n, FRT_ZV, v)) return r;
     i64 i = 0;
     loop { if (i >= n) break; php_zv_cpv(php_arr_islot(r, s + i), v); i = i + 1; }
     return r;
@@ -4272,49 +4790,268 @@ uptr php_f_array_key_last(uptr a) {
     return php_it_key(ld64(a), i);
 }
 
+// range() as php 8.5 builds it (ext/standard/array.c): the step's checks,
+// each bound read as an int, a float, a one-byte string or a one-digit string
+// (php_range_process_input), and then a character range, a float range or an
+// int range -- with php's ValueErrors and warnings, word for word.
+void php_range_warn(uptr a) { php_mreset(); php_mc("range(): "); php_mc(a); php_raise_m(PHE_WARNING); }
+
+// 0 when it threw; 4 int, 5 float, 6 a string, 7 a one-digit string
+i64 php_range_in(uptr z, i64 k, uptr pl, uptr pd, uptr a, uptr b, uptr st, i64 n) {
+    i64 t = php_zv_type(z);
+    f64 d = 0.0;
+    if (t == IS_STRING) {
+        uptr s = ld64(z);
+        i64 len = php_strlen(s);
+        if (!len) {
+            if (k == 1) php_range_warn("Argument #1 ($start) must not be empty, casted to 0");
+            if (k == 2) php_range_warn("Argument #2 ($end) must not be empty, casted to 0");
+            st64(pl, 0);
+            stf64(pd, 0.0);
+            return 4;
+        }
+        u8 lb[8];
+        u8 db[8];
+        i64 nt = php_str_isnum(s, lb, db);
+        if (nt == 1) {
+            st64(pl, ld64(lb));
+            stf64(pd, (f64) ld64(lb));
+            if (len == 1) return 7;
+            return 4;
+        }
+        if (nt == 2) { d = ldf64(db); t = IS_DOUBLE; }
+        if (!nt) {
+            if (len != 1) {
+                if (k == 1) php_range_warn("Argument #1 ($start) must be a single byte, subsequent bytes are ignored");
+                if (k == 2) php_range_warn("Argument #2 ($end) must be a single byte, subsequent bytes are ignored");
+            }
+            st64(pl, 0);
+            stf64(pd, 0.0);
+            return 6;
+        }
+    }
+    if (t == IS_DOUBLE) {
+        if (php_zv_type(z) == IS_DOUBLE) d = ldf64(z);
+        if (d != d || d - d != 0.0) {
+            uptr w = "INF";
+            if (d != d) w = "NAN";
+            uptr m = php_str_new("Argument #", 10);
+            m = php_str_concat(m, php_itos(k));
+            if (k == 1) m = php_str_concat(m, php_str_new(" ($start)", 9));
+            if (k == 2) m = php_str_concat(m, php_str_new(" ($end)", 7));
+            m = php_str_concat(m, php_str_new(" must be a finite number, ", 26));
+            m = php_str_concat(m, php_str_new(w, 3));
+            m = php_str_concat(m, php_str_new(" provided", 9));
+            php_valerr("range", php_cstr0(m), n, a, b, st, 0);
+            return 0;
+        }
+        stf64(pd, d);
+        st64(pl, (i64) d);
+        return 5;
+    }
+    i64 v = php_zv_long(z);
+    st64(pl, v);
+    stf64(pd, (f64) v);
+    return 4;
+}
+
+f64 php_round_mode(f64 value, i64 places, i64 mode);
+
+// the elements, into r: 0, or 1 a negative step on an increasing range, 2 a
+// step wider than the range, 3/4 more elements than an array holds
+i64 php_range_chars(uptr r, i64 lo, i64 hi, i64 s, i64 neg) {
+    if (lo > hi) {
+        if (lo - hi < s) return 2;
+        loop {
+            if (lo < hi) break;
+            php_arr_push(r, php_zstr(php_chr(lo)));
+            if (lo - s < 0) break;
+            lo = lo - s;
+        }
+        return 0;
+    }
+    if (hi > lo) {
+        if (neg) return 1;
+        if (hi - lo < s) return 2;
+        loop {
+            if (lo > hi) break;
+            php_arr_push(r, php_zstr(php_chr(lo)));
+            if (lo + s > 255) break;
+            lo = lo + s;
+        }
+        return 0;
+    }
+    php_arr_push(r, php_zstr(php_chr(lo)));
+    return 0;
+}
+
+i64 php_range_floats(uptr r, f64 x, f64 y, f64 sd, i64 neg) {
+    if (x == y) { php_arr_push(r, php_zdouble(x)); return 0; }
+    if (y > x && neg) return 1;
+    f64 span = x - y;
+    if (y > x) span = y - x;
+    if (span < sd) return 2;
+    f64 cs = span / sd + 1.0;
+    if (cs >= 1073741824.0) return 4;
+    i64 sz = (i64) php_round_mode(cs, 0, 1);
+    i64 i = 0;
+    loop {
+        if (i >= sz) break;
+        f64 e = x - (f64) i * sd;
+        if (y > x) e = x + (f64) i * sd;
+        if (y > x && e > y) break;
+        if (x > y && e < y) break;
+        php_arr_push(r, php_zdouble(e));
+        i = i + 1;
+    }
+    return 0;
+}
+
+i64 php_range_ints(uptr r, i64 x, i64 y, i64 s, i64 neg) {
+    if (x == y) { php_arr_push(r, php_zlong(x)); return 0; }
+    if (y > x && neg) return 1;
+    u64 span = (u64) (x - y);
+    if (y > x) span = (u64) (y - x);
+    if (span < (u64) s) return 2;
+    u64 cz = span / (u64) s;
+    if (cz >= 1073741823) return 3;
+    i64 j = 0;
+    loop {
+        if (j > (i64) cz) break;
+        if (x > y) php_arr_push(r, php_zlong(x - j * s));
+        if (y > x) php_arr_push(r, php_zlong(x + j * s));
+        j = j + 1;
+    }
+    return 0;
+}
+
+uptr php_f_number_format(uptr nz, uptr dz, uptr pz, uptr tz);
+f64 php_round_mode(f64 value, i64 places, i64 mode);
+
+// range()'s "exceeds the maximum array size" ValueError, php's own numbers
+void php_range_size(uptr a, uptr b, uptr st, i64 n, i64 isf, i64 xl, i64 yl, i64 s, f64 x, f64 y, f64 sd) {
+    uptr m = 0;
+    if (isf) {
+        f64 cs = x - y;
+        if (y > x) cs = y - x;
+        cs = cs / sd + 1.0;
+        uptr one = php_zlong(1);
+        uptr dot = php_zstr(php_str_new(".", 1));
+        uptr none = php_zstr(php_str_new("", 0));
+        m = php_str_new("The supplied range exceeds the maximum array size by ", 53);
+        m = php_str_concat(m, php_f_number_format(php_zdouble(cs - 1073741824.0), one, dot, none));
+        m = php_str_concat(m, php_str_new(" elements: start=", 17));
+        m = php_str_concat(m, php_f_number_format(php_zdouble(x), one, dot, none));
+        m = php_str_concat(m, php_str_new(", end=", 6));
+        m = php_str_concat(m, php_f_number_format(php_zdouble(y), one, dot, none));
+        m = php_str_concat(m, php_str_new(", step=", 7));
+        m = php_str_concat(m, php_f_number_format(php_zdouble(sd), one, dot, none));
+        m = php_str_concat(m, php_str_new(". Max size: 1073741824", 22));
+    } else {
+        u64 span = (u64) (xl - yl);
+        if (yl > xl) span = (u64) (yl - xl);
+        u64 cz = span / (u64) s;
+        m = php_str_new("The supplied range exceeds the maximum array size by ", 53);
+        m = php_str_concat(m, php_itos((i64) (cz - 1073741823)));
+        m = php_str_concat(m, php_str_new(" elements: start=", 17));
+        m = php_str_concat(m, php_itos(xl));
+        m = php_str_concat(m, php_str_new(", end=", 6));
+        m = php_str_concat(m, php_itos(yl));
+        m = php_str_concat(m, php_str_new(", step=", 7));
+        m = php_str_concat(m, php_itos(s));
+        m = php_str_concat(m, php_str_new(". Calculated size: ", 19));
+        m = php_str_concat(m, php_itos((i64) cz));
+        m = php_str_concat(m, php_str_new(". Maximum size: 1073741824.", 27));
+    }
+    uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr fl = ((uptr) ld64(phT + PHT_ph_dfile));
+    if (!fl) fl = "";
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) { php_throw_cls(php_str_new("ValueError", 10), m); return; }
+    uptr p = php_fr_push("range", 0, 0, fl, ld64(phT + PHT_ph_dline), n);
+    st64(p, FRT_ZV); st64(p + 8, a);
+    st64(p + 16, FRT_ZV); st64(p + 24, b);
+    if (n > 2) { st64(p + 32, FRT_ZV); st64(p + 40, st); }
+    php_throw_cls(php_str_new("ValueError", 10), m);
+    php_fr_pop();
+}
+
 uptr php_f_range(uptr a, uptr b, uptr st) {
     uptr r = php_arr_new(8);
-    i64 isf = 0;
-    if (php_zv_isdouble(a) || php_zv_isdouble(b) || php_zv_isdouble(st)) isf = 1;
-    // a single-character string range, php's own
-    if (php_zv_type(a) == IS_STRING && php_zv_type(b) == IS_STRING && !php_zv_isnum(a) && !php_zv_isnum(b)) {
-        i64 x = 0;
-        i64 y = 0;
-        if (php_strlen(ld64(a))) x = ld8(ld64(a) + ZS_HDR);
-        if (php_strlen(ld64(b))) y = ld8(ld64(b) + ZS_HDR);
-        i64 d = 1;
-        if (y < x) d = -1;
-        loop {
-            php_arr_push(r, php_zstr(php_chr(x)));
-            if (x == y) break;
-            x = x + d;
+    i64 n = 2;
+    if (php_zv_type(st) != IS_NULL) n = 3;
+    i64 isdbl = 0;
+    i64 neg = 0;
+    f64 sd = 1.0;
+    i64 s = 1;
+    if (n == 3) {
+        i64 tt = php_zv_type(st);
+        f64 sv = 0.0;
+        i64 dbl = tt == IS_DOUBLE;
+        if (tt == IS_DOUBLE) sv = ldf64(st);
+        if (tt == IS_STRING) {
+            u8 slb[8];
+            u8 sdb[8];
+            if (php_str_isnum(ld64(st), slb, sdb) == 2) { dbl = 1; sv = ldf64(sdb); }
         }
-        return r;
+        if (dbl) {
+            if (sv - sv != 0.0 && sv == sv) { php_valerr("range", "Argument #3 ($step) must be a finite number, INF provided", 3, a, b, st, 0); return r; }
+            if (sv != sv) { php_valerr("range", "Argument #3 ($step) must be a finite number, NAN provided", 3, a, b, st, 0); return r; }
+            if (sv < 0.0) { neg = 1; sv = 0.0 - sv; }
+            sd = sv;
+            s = 0;
+            if (sv < 9223372036854775808.0) s = (i64) sv;
+            if ((f64) s != sv) isdbl = 1;
+        } else {
+            s = php_zv_long(st);
+            if (s < 0) {
+                if (s == -9223372036854775807 - 1) {
+                    php_valerr("range", "Argument #3 ($step) must be greater than -9223372036854775808", 3, a, b, st, 0);
+                    return r;
+                }
+                neg = 1;
+                s = 0 - s;
+            }
+            sd = (f64) s;
+        }
+        if (sd == 0.0) { php_valerr("range", "Argument #3 ($step) cannot be 0", 3, a, b, st, 0); return r; }
     }
-    if (isf) {
-        f64 x = php_zv_double(a);
-        f64 y = php_zv_double(b);
-        f64 s = 1.0;
-        if (php_zv_type(st) != IS_NULL) s = php_abs_f(php_zv_double(st));
-        if (s == 0.0) s = 1.0;
-        if (y < x) s = 0.0 - s;
-        i64 n = (i64) (php_abs_f(y - x) / php_abs_f(s));
-        i64 i = 0;
-        loop { if (i > n) break; php_arr_push(r, php_zdouble(x + s * (f64) i)); i = i + 1; }
-        return r;
+    u8 sl[8];
+    u8 sdv[8];
+    u8 el[8];
+    u8 edv[8];
+    i64 stt = php_range_in(a, 1, sl, sdv, a, b, st, n);
+    if (!stt) return r;
+    i64 ett = php_range_in(b, 2, el, edv, a, b, st, n);
+    if (!ett) return r;
+    i64 err = 0;
+    i64 done = 0;
+    if (stt >= 6 || ett >= 6) {
+        if (stt < 6 || ett < 6) {
+            if (stt < 6) {
+                if (ett != 7) php_range_warn("Argument #1 ($start) must be a single byte string if argument #2 ($end) is a single byte string, argument #2 ($end) converted to 0");
+                ett = 4;
+            } else {
+                if (stt != 7) php_range_warn("Argument #2 ($end) must be a single byte string if argument #1 ($start) is a single byte string, argument #1 ($start) converted to 0");
+                stt = 4;
+            }
+        } else if (isdbl) {
+            if (stt == 6 || ett == 6) php_range_warn("Argument #3 ($step) must be of type int when generating an array of characters, inputs converted to 0");
+            stt = 4;
+            ett = 4;
+        } else {
+            err = php_range_chars(r, ld8(ld64(a) + ZS_HDR), ld8(ld64(b) + ZS_HDR), s, neg);
+            done = 1;
+        }
     }
-    i64 x2 = php_zv_long(a);
-    i64 y2 = php_zv_long(b);
-    i64 s2 = 1;
-    if (php_zv_type(st) != IS_NULL) s2 = php_abs_i(php_zv_long(st));
-    if (s2 == 0) s2 = 1;
-    if (y2 < x2) s2 = 0 - s2;
-    loop {
-        php_arr_push(r, php_zlong(x2));
-        if (s2 > 0 && x2 + s2 > y2) break;
-        if (s2 < 0 && x2 + s2 < y2) break;
-        x2 = x2 + s2;
+    if (!done) {
+        if (stt == 5 || ett == 5 || isdbl) err = php_range_floats(r, ldf64(sdv), ldf64(edv), sd, neg);
+        else err = php_range_ints(r, ld64(sl), ld64(el), s, neg);
     }
+    if (err == 1) php_valerr("range", "Argument #3 ($step) must be greater than 0 for increasing ranges", n, a, b, st, 0);
+    if (err == 2) php_valerr("range", "Argument #3 ($step) must be less than the range spanned by argument #1 ($start) and argument #2 ($end)", n, a, b, st, 0);
+    if (err == 3) php_range_size(a, b, st, n, 0, ld64(sl), ld64(el), s, 0.0, 0.0, 1.0);
+    if (err == 4) php_range_size(a, b, st, n, 1, 0, 0, 1, ldf64(sdv), ldf64(edv), sd);
+    if (err) return php_arr_new(8);
     return r;
 }
 
@@ -4621,19 +5358,36 @@ i64 php_rpos(uptr h, uptr nd, i64 off) {
     return last;
 }
 
+// strrpos()/strripos(): an offset past either end of the haystack is php's
+// ValueError
+i64 php_rpos_ok(uptr name, uptr hz, uptr nz, uptr oz, i64 off) {
+    i64 hn = php_strlen(php_zv_str(hz));
+    if ((off >= 0 && off > hn) || (off < 0 && (off < -9223372036854775807 || 0 - off > hn))) {
+        php_valerr(name, "Argument #3 ($offset) must be contained in argument #1 ($haystack)", 3, hz, nz, oz, 0);
+        return 0;
+    }
+    return 1;
+}
+
 i64 php_f_strrpos(uptr hz, uptr nz, uptr oz) {
     i64 off = 0;
     if (oz) { if (php_zv_type(oz) != IS_NULL) off = php_zv_long(oz); }
+    if (!php_rpos_ok("strrpos", hz, nz, oz, off)) return 0 - 1;
     return php_rpos(php_zv_str(hz), php_zv_str(nz), off);
 }
 
 i64 php_f_stripos(uptr hz, uptr nz, uptr oz) {
-    return php_strpos(php_case(php_zv_str(hz), 0), php_case(php_zv_str(nz), 0), php_zv_long(oz));
+    uptr h = php_zv_str(hz);
+    i64 o = 0;
+    if (php_zv_type(oz) != IS_NULL) o = php_strpos_off("stripos", h, php_zv_str(nz), php_zv_long(oz), oz);
+    if (o < 0) return 0 - 1;
+    return php_strpos(php_case(h, 0), php_case(php_zv_str(nz), 0), o);
 }
 
 i64 php_f_strripos(uptr hz, uptr nz, uptr oz) {
     i64 off2 = 0;
     if (oz) { if (php_zv_type(oz) != IS_NULL) off2 = php_zv_long(oz); }
+    if (!php_rpos_ok("strripos", hz, nz, oz, off2)) return 0 - 1;
     return php_rpos(php_case(php_zv_str(hz), 0), php_case(php_zv_str(nz), 0), off2);
 }
 
@@ -4740,7 +5494,10 @@ uptr php_f_str_split(uptr sz, uptr lz) {
     i64 n = php_strlen(s);
     i64 l = 1;
     if (php_zv_type(lz) != IS_NULL) l = php_zv_long(lz);
-    if (l < 1) l = 1;
+    if (l < 1) {
+        php_valerr("str_split", "Argument #2 ($length) must be greater than 0", 2, sz, lz, 0, 0);
+        return php_arr_new(8);
+    }
     uptr r = php_arr_new(8);
     i64 i = 0;
     loop {
@@ -4911,6 +5668,12 @@ uptr php_f_wordwrap(uptr sz, uptr wz, uptr bz, uptr cz) {
     if (php_zv_type(bz) != IS_NULL) brk = php_zv_str(bz);
     i64 bl = php_strlen(brk);
     i64 cut = php_zv_bool(cz);
+    i64 na = php_nargs(sz, wz, bz, cz);
+    if (!bl) { php_valerr("wordwrap", "Argument #3 ($break) must not be empty", na, sz, wz, bz, cz); return php_str_new("", 0); }
+    if (width == 0 && cut) {
+        php_valerr("wordwrap", "Argument #4 ($cut_long_words) cannot be true when argument #2 ($width) is 0", na, sz, wz, bz, cz);
+        return php_str_new("", 0);
+    }
     uptr o = php_str_alloc(n * 2 + bl * (n / 2 + 2));
     i64 w = 0;
     i64 line = 0;
@@ -5029,7 +5792,6 @@ uptr php_f_number_format(uptr nz, uptr dz, uptr pz, uptr tz) {
     i64 dn = php_strlen(digits);
     uptr dv = digits + ZS_HDR;
     i64 ipl = dn - dec;
-    uptr pad = 0;
     if (ipl <= 0) {
         uptr t2 = php_str_alloc(dec + 1);
         i64 z = 0;
@@ -5125,20 +5887,70 @@ f64 php_f_ceil(uptr z) {
     return r;
 }
 
-f64 php_f_round(uptr z, uptr pz, uptr _p3) {
+// php 8.5's _php_math_round (ext/standard/math.c), mode by mode: the value's
+// integral part at `places`, corrected when the scaling's error left it one
+// short (0.285 * 100 is 28.499999999999996), then pushed one away from zero
+// when the value reaches the edge the mode names. A float of 1e16 or more at
+// that scale has no fraction to round.
+f64 php_trunc_f(f64 x) { return (f64) ((i64) x); }
+f64 php_round_edge(f64 integral, f64 ex, i64 places, f64 add) {
+    f64 v = integral + add;
+    if (places > 0) v = v / ex;
+    if (places <= 0) v = v * ex;
+    if (v < 0.0) v = 0.0 - v;
+    return v;
+}
+f64 php_round_mode(f64 value, i64 places, i64 mode) {
+    if (value != value || value == 0.0 || value - value != 0.0) return value;
+    i64 ap = places;
+    if (ap < 0) ap = 0 - ap;
+    f64 ex = ph_pow10(ap);
+    f64 y = value / ex;
+    if (places > 0) y = value * ex;
+    f64 ay = y;
+    if (ay < 0.0) ay = 0.0 - ay;
+    if (ay >= 1e16) return value;
+    f64 t = php_trunc_f(y);
+    f64 t2 = t;
+    if (value >= 0.0) { if (t > y) t = t - 1.0; t2 = t + 1.0; }
+    if (value < 0.0) { if (t < y) t = t + 1.0; t2 = t - 1.0; }
+    f64 back = t2 * ex;
+    if (places > 0) back = t2 / ex;
+    if (back == value) t = t2;
+    f64 sg = 1.0;
+    if (t < 0.0 || (t == 0.0 && value < 0.0)) sg = -1.0;
+    f64 va = value;
+    if (va < 0.0) va = 0.0 - va;
+    f64 half = 0.5 * sg;
+    if (mode == 2) {                                   // HALF_DOWN
+        if (va > php_round_edge(t, ex, places, half)) t = t + sg;
+    } else if (mode == 3 || mode == 4) {               // HALF_EVEN / HALF_ODD
+        f64 ed = php_round_edge(t, ex, places, half);
+        if (va > ed) t = t + sg;
+        else if (va == ed) {
+            f64 hf = t / 2.0;
+            i64 even = php_trunc_f(hf) == hf;
+            if ((mode == 3 && !even) || (mode == 4 && even)) t = t + sg;
+        }
+    } else {                                           // HALF_UP
+        if (va >= php_round_edge(t, ex, places, half)) t = t + sg;
+    }
+    // ceil and floor keep the sign of a zero: -0.3 rounds to -0
+    if (t == 0.0 && value < 0.0) t = t * -1.0;
+    if (ap < 23) {
+        if (places > 0) return t / ex;
+        return t * ex;
+    }
+    return php_stof(php_str_concat(php_str_concat(php_itos((i64) t), php_str_new("e", 1)), php_itos(0 - places)));
+}
+
+f64 php_f_round(uptr z, uptr pz, uptr pm) {
     f64 x = php_zv_double(z);
     i64 p = 0;
     if (php_zv_type(pz) != IS_NULL) p = php_zv_long(pz);
-    f64 s = ph_pow10(p);
-    f64 y = x * s;
-    f64 h = 0.5;
-    if (y < 0.0) h = -0.5;
-    // php rounds half away from zero, after a pre-round that kills the noise
-    i64 iv = (i64) (y + h);
-    f64 d = y - (f64) iv;
-    if (d >= 0.5) iv = iv + 1;
-    if (d <= -0.5) iv = iv - 1;
-    return (f64) iv / s;
+    i64 m = 1;
+    if (php_zv_type(pm) == IS_LONG) m = php_zv_long(pm);
+    return php_round_mode(x, p, m);
 }
 
 f64 php_f_sqrt(uptr z) {
@@ -5353,8 +6165,10 @@ uptr php_f_strrev_z(uptr z) { return php_strrev(php_zv_str(z)); }
 // ============================================================================
 //  104 eng      the engine's zend_class_entry, for a class the module
 //               PUBLISHES (flag 64; lib/php_ext.mc § published classes)
-#define CE_SIZE 112
+#define CE_SIZE 120
 #define CE_ENG  104
+#define CE_TYP  112                      // the typed properties it declares: name -> php_ce_ptype's record
+#define CE_TYPED 1024                    // a flag: CE_TYP is not empty
 
 uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6);
 uptr php_obj_get(uptr o, uptr name, uptr scope);
@@ -5410,6 +6224,7 @@ uptr php_ce_alloc(uptr name) {
     st64(ce + 88, php_arr_new(8));
     st64(ce + 96, php_arr_new(8));
     st64(ce + CE_ENG, 0);
+    st64(ce + CE_TYP, 0);
     return ce;
 }
 
@@ -5443,6 +6258,108 @@ void php_ce_method(uptr ce, uptr name, i64 fn, i64 vis) {
     if (php_str_eq(l, php_str_new("__tostring", 10))) st64(ce + 16, fn);
     if (php_strlen(l) > 2 && ld8(l + ZS_HDR) == 95 && ld8(l + ZS_HDR + 1) == 95)
         php_zv_cp(php_arr_sslot(ld64(ce + 80), l), php_zlong(fn));
+}
+
+#define RT_INT      1
+#define RT_FLOAT    2
+#define RT_STRING   4
+#define RT_TRUE     8
+#define RT_FALSE    16
+#define RT_ARRAY    32
+#define RT_NULL     64
+#define RT_OBJECT   128
+#define RT_MIXED    256
+#define RT_CALLABLE 2048
+#define RT_STATIC   4096
+#define RT_STRICT   8192
+uptr php_type_coerce(uptr z, i64 m, uptr cls);
+uptr php_valname(uptr z);
+
+// ---- typed properties (php's property_info) --------------------------------
+// A declared property type is a record on the class that declares it -- the
+// mask src/types.mc recorded, its class names, php's spelling, the declaring
+// class's name -- and every write is checked against it as php checks one
+// (php_type_coerce, the caller's strict_types in `kind`). A typed property
+// with no default starts UNINITIALIZED: a null in its slot (which keeps php's
+// declaration order) with byte 11 of the zval marked, which every reader
+// tests -- a read is php's Error, and var_dump, print_r, foreach, json and
+// serialize do not see it.
+#define PROP_UNINIT 85
+uptr php_zuninit() { uptr z = php_alloc(ZV_SIZE); st64(z, 0); st64(z + 8, IS_NULL); st8(z + 11, PROP_UNINIT); return z; }
+i64 php_prop_uninit(uptr b) { return ld8(b + 11) == PROP_UNINIT; }
+i64 php_prop_live(uptr b) { return ld8(b + 8) != IS_UNDEF && ld8(b + 11) != PROP_UNINIT; }
+
+void php_ce_ptype(uptr ce, uptr name, i64 m, uptr cls, uptr tn) {
+    if (!ld64(ce + CE_TYP)) st64(ce + CE_TYP, php_arr_new(4));
+    uptr r = php_alloc(32);
+    st64(r, m);
+    st64(r + 8, cls);
+    st64(r + 16, tn);
+    st64(r + 24, ld64(ce));
+    php_zv_cp(php_arr_sslot(ld64(ce + CE_TYP), name), php_zlong(r));
+    st64(ce + 64, ld64(ce + 64) | CE_TYPED);
+}
+
+// the record of a typed property, the class or an ancestor declaring it
+uptr php_ptype_of(uptr ce, uptr name) {
+    uptr c = ce;
+    loop {
+        if (!c) break;
+        if (ld64(c + 64) & CE_TYPED) {
+            uptr b = php_ht_find(ld64(c + CE_TYP), php_str_hash(name), name);
+            if (b) return ld64(b);
+        }
+        c = ld64(c + 8);
+    }
+    return 0;
+}
+
+// the value v for the typed property `rec`: v, coerced, or 0 having thrown.
+// kind: 1 an increment, 2 a decrement (php's own sentence when an int
+// overflowed), RT_STRICT the caller's strict_types
+uptr php_ptype_check(uptr rec, uptr name, uptr v, i64 kind) {
+    i64 m = ld64(rec) | (kind & RT_STRICT);
+    // an increment that left the int range is php's own error whatever a
+    // float would coerce to (zend_incdec_typed_prop)
+    i64 ovf = (kind & 3) && php_zv_type(v) == IS_DOUBLE && !(ld64(rec) & RT_FLOAT);
+    uptr r = 0;
+    if (!ovf) r = php_type_coerce(v, m, ld64(rec + 8));
+    if (r) return r;
+    uptr msg = 0;
+    if (ovf) {
+        msg = php_str_new("Cannot increment property ", 26);
+        if (kind & 2) msg = php_str_new("Cannot decrement property ", 26);
+        msg = php_str_concat(msg, ld64(rec + 24));
+        msg = php_str_concat(msg, php_str_new("::$", 3));
+        msg = php_str_concat(msg, name);
+        msg = php_str_concat(msg, php_str_new(" of type ", 9));
+        msg = php_str_concat(msg, ld64(rec + 16));
+        if (kind & 2) msg = php_str_concat(msg, php_str_new(" past its minimal value", 23));
+        else msg = php_str_concat(msg, php_str_new(" past its maximal value", 23));
+    } else {
+        msg = php_str_concat(php_str_new("Cannot assign ", 14), php_valname(v));
+        msg = php_str_concat(msg, php_str_new(" to property ", 13));
+        msg = php_str_concat(msg, ld64(rec + 24));
+        msg = php_str_concat(msg, php_str_new("::$", 3));
+        msg = php_str_concat(msg, name);
+        msg = php_str_concat(msg, php_str_new(" of type ", 9));
+        msg = php_str_concat(msg, ld64(rec + 16));
+    }
+    php_throw_str(php_str_new("TypeError", 9), msg);
+    return 0;
+}
+
+void php_prop_uninit_err(uptr ce, uptr name, i64 stat) {
+    uptr rec = php_ptype_of(ce, name);
+    uptr dc = ld64(ce);
+    if (rec) dc = ld64(rec + 24);
+    uptr m = php_str_new("Typed property ", 15);
+    if (stat) m = php_str_new("Typed static property ", 22);
+    m = php_str_concat(m, dc);
+    m = php_str_concat(m, php_str_new("::$", 3));
+    m = php_str_concat(m, name);
+    m = php_str_concat(m, php_str_new(" must not be accessed before initialization", 43));
+    php_throw_str(php_str_new("Error", 5), m);
 }
 
 // `public readonly int $x`: the name, against the class that DECLARED it --
@@ -5531,12 +6448,19 @@ i64 php_ce_is(uptr ce, uptr name) {
     uptr lk = php_clskey(name);
     uptr c = ce;
     loop {
-        if (!c) return 0;
+        if (!c) break;
         if (php_str_eq(php_clskey(ld64(c)), lk)) return 1;
         if (php_ht_find(ld64(c + 48), php_str_hash(lk), lk)) return 1;
         // an interface can extend another: its own ifaces table carries them
         c = ld64(c + 8);
     }
+    // the two php implements by itself: Stringable on every class that
+    // declares __toString, and Traversable through Iterator and
+    // IteratorAggregate, which extend it
+    if (php_str_eq(lk, php_str_new("stringable", 10)))
+        return php_ce_lookup(ce, 24, php_str_new("__tostring", 10)) != 0;
+    if (php_str_eq(lk, php_str_new("traversable", 11)))
+        return php_ce_is(ce, php_str_new("Iterator", 8)) || php_ce_is(ce, php_str_new("IteratorAggregate", 17));
     return 0;
 }
 
@@ -5578,6 +6502,7 @@ uptr php_new_ce(uptr ce) {
 }
 
 uptr php_new_ce_at(uptr ce, uptr file, i64 line);
+void php_exc_trace(uptr o);
 
 uptr php_new_at(uptr name, uptr file, i64 line) {
     uptr ce = php_ce_find(name);
@@ -5592,6 +6517,7 @@ uptr php_new_at(uptr name, uptr file, i64 line) {
     if (php_ce_is(ce, php_str_new("Throwable", 9))) {
         php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)), php_zstr(file));
         php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(line));
+        php_exc_trace(o);
     }
     return o;
 }
@@ -5607,6 +6533,7 @@ uptr php_new_ce_at(uptr ce, uptr file, i64 line) {
     if (php_ce_is(ce, php_str_new("Throwable", 9))) {
         php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)), php_zstr(file));
         php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(line));
+        php_exc_trace(o);
     }
     return o;
 }
@@ -5705,6 +6632,7 @@ uptr php_obj_get(uptr o, uptr name, uptr scope) {
             php_vis_die(ce, name, php_str_new("property", 8));
             return php_znull();
         }
+        if (php_prop_uninit(b)) { php_prop_uninit_err(ce, name, 0); return php_znull(); }
         return b;
     }
     uptr g = php_ht_find(ld64(ce + 80), php_str_hash(php_str_new("__get", 5)), php_str_new("__get", 5));
@@ -5723,13 +6651,19 @@ uptr php_obj_get_q(uptr o, uptr name, uptr scope) {
     uptr ce = php_obj_ce(o);
     uptr b = php_ht_find(php_obj_props(o), php_str_hash(name), name);
     if (b && !php_vis_ok(ce, name, scope)) return php_znull();
+    if (b && php_prop_uninit(b)) return php_znull();
     if (b) return b;
     uptr g = php_ht_find(ld64(ce + 80), php_str_hash(php_str_new("__get", 5)), php_str_new("__get", 5));
     if (g) return callp(ld64(g), o, php_zstr(name));
     return php_znull();
 }
 
-void php_obj_set(uptr o, uptr name, uptr v, uptr scope) {
+void php_obj_set_k(uptr o, uptr name, uptr v, uptr scope, i64 kind);
+void php_obj_set(uptr o, uptr name, uptr v, uptr scope) { php_obj_set_k(o, name, v, scope, 0); }
+
+// the write, with how it was written: an increment or decrement, and the
+// writing file's strict_types (php_ptype_check)
+void php_obj_set_k(uptr o, uptr name, uptr v, uptr scope, i64 kind) {
     if (php_is_proxy(o)) { callp(ld64(ph_eng + 16), o, name, v, scope); return; }
     uptr ce = php_obj_ce(o);
     uptr b = php_ht_find(php_obj_props(o), php_str_hash(name), name);
@@ -5740,6 +6674,11 @@ void php_obj_set(uptr o, uptr name, uptr v, uptr scope) {
     if (b && !php_vis_ok(ce, name, scope)) {
         php_vis_die(ce, name, php_str_new("property", 8));
         return;
+    }
+    uptr tr = php_ptype_of(ce, name);
+    if (tr) {
+        v = php_ptype_check(tr, name, v, kind);
+        if (!v) return;
     }
     // readonly: refused from outside the declaring scope, and inside it only
     // while the property has not been written. The test used to be the
@@ -5787,22 +6726,41 @@ uptr php_zv_pget(uptr z, uptr name, uptr scope) {
     return php_obj_get(ld64(z), name, scope);
 }
 
-void php_zv_pset(uptr z, uptr name, uptr v, uptr scope) {
+void php_zv_pset_k(uptr z, uptr name, uptr v, uptr scope, i64 kind) {
     if (php_zv_type(z) != IS_OBJECT) {
         php_throw_str(php_str_new("Error", 5), php_str_new("Attempt to assign property on a non-object", 42));
         return;
     }
-    php_obj_set(ld64(z), name, v, scope);
+    php_obj_set_k(ld64(z), name, v, scope, kind);
 }
+void php_zv_pset(uptr z, uptr name, uptr v, uptr scope) { php_zv_pset_k(z, name, v, scope, 0); }
 
-// the array slot behind $o->p[k] = v
-uptr php_zv_parr(uptr z, uptr name, uptr scope) {
-    if (php_zv_type(z) != IS_OBJECT) return php_arr_new(8);
-    uptr b = php_obj_slot(ld64(z), name);
+// the array slot behind $o->p[k] = v: a typed property that is
+// uninitialized or null becomes an array only when its type takes one
+uptr php_obj_parr(uptr o, uptr name, uptr scope) {
+    uptr b = php_obj_slot(o, name);
+    i64 t = php_zv_type(b);
+    if (php_prop_uninit(b) || t == IS_NULL) {
+        uptr tr = php_ptype_of(php_obj_ce(o), name);
+        if (tr && !(ld64(tr) & RT_ARRAY)) {
+            uptr m = php_str_new("Cannot auto-initialize an array inside property ", 48);
+            m = php_str_concat(m, ld64(tr + 24));
+            m = php_str_concat(m, php_str_new("::$", 3));
+            m = php_str_concat(m, name);
+            m = php_str_concat(m, php_str_new(" of type ", 9));
+            m = php_str_concat(m, ld64(tr + 16));
+            php_throw_str(php_str_new("TypeError", 9), m);
+            return php_arr_new(8);
+        }
+        if (php_prop_uninit(b)) { st64(b, 0); st32(b + 8, IS_NULL); }
+    }
     return php_zv_arr_w(b);
 }
 
-uptr php_obj_parr(uptr o, uptr name, uptr scope) { return php_zv_arr_w(php_obj_slot(o, name)); }
+uptr php_zv_parr(uptr z, uptr name, uptr scope) {
+    if (php_zv_type(z) != IS_OBJECT) return php_arr_new(8);
+    return php_obj_parr(ld64(z), name, scope);
+}
 
 // ---- methods ---------------------------------------------------------------
 // Late static binding: `static::` is the class the call was made ON, not the
@@ -5822,6 +6780,46 @@ uptr php_f_called_class(uptr decl) {
     return php_zstr(ld64(ce));
 }
 
+// A method's frame (§ the trace): the DECLARING class, `->` or `::`, the name,
+// the zval arguments, and the call's position, which the caller announced. A
+// program only -- inside an extension call Zend has the frames. Answers 1
+// when a frame was pushed, for the pop after the call.
+uptr php_fr_push(uptr name, uptr cls, i64 type, uptr file, i64 line, i64 n);
+void php_fr_pop();
+// a php string's bytes as a C string: they are NUL-terminated (php_str_alloc)
+uptr php_cstr0(uptr s) { return s + ZS_HDR; }
+i64 php_fr_meth(uptr ce, uptr name, i64 type, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) return 0;
+    uptr own = php_ce_owner(ce, 24, php_case(name, 0));
+    if (!own) own = ce;
+    uptr cn = ld64(own);
+    uptr fl = ((uptr) ld64(phT + PHT_ph_dfile));
+    // past the sixth: the list php_targs left for this call
+    uptr xa = 0;
+    if (n > 6) xa = ((uptr) ld64(phT + PHT_ph_xa));
+    if (n > 6 && (!xa || ld64(xa) < n - 6)) n = 6;
+    if (n < 0) n = 0;
+    uptr p = php_fr_push(php_cstr0(name), php_cstr0(cn), type, fl, ld64(phT + PHT_ph_dline), n);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        uptr a = a1;
+        if (i == 1) a = a2;
+        if (i == 2) a = a3;
+        if (i == 3) a = a4;
+        if (i == 4) a = a5;
+        if (i == 5) a = a6;
+        if (i >= 6) a = ld64(xa + 16 + (i - 6) * 8);
+        st64(p + i * 16, 6);
+        st64(p + i * 16 + 8, a);
+        i = i + 1;
+    }
+    return 1;
+}
+
+void php_xargs_into(uptr args);
+void php_fr_coerced(i64 i, uptr c, uptr fn);
+uptr php_param_coerce_at(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname, uptr dfile, i64 dline);
 uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (php_is_proxy(o)) return callp(ld64(ph_eng + 24), o, name, n, a1, a2, a3, a4, a5, a6);
     uptr ce = php_obj_ce(o);
@@ -5834,7 +6832,10 @@ uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, 
         }
         uptr sv = ((uptr) ld64(phT + PHT_ph_lsb));
         st64(phT + PHT_ph_lsb, ce);
+        i64 fr = php_fr_meth(ce, name, 1, n, a1, a2, a3, a4, a5, a6);
+        if (n > 6) st64(phT + PHT_ph_xf, ld64(b));     // php_targs: the 7th argument on
         uptr r = callp(ld64(b), o, a1, a2, a3, a4, a5, a6);
+        if (fr) php_fr_pop();
         st64(phT + PHT_ph_lsb, sv);
         return r;
     }
@@ -5847,6 +6848,7 @@ uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, 
         if (n > 3) php_arr_push(args, a4);
         if (n > 4) php_arr_push(args, a5);
         if (n > 5) php_arr_push(args, a6);
+        if (n > 6) php_xargs_into(args);
         return callp(ld64(c), o, php_zstr(name), php_zarr(args));
     }
     uptr m2 = php_str_concat(php_str_new("Call to undefined method ", 25), ld64(ce));
@@ -5908,6 +6910,9 @@ uptr php_scall(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr 
             if (n > 1) php_arr_push(args, a2);
             if (n > 2) php_arr_push(args, a3);
             if (n > 3) php_arr_push(args, a4);
+            if (n > 4) php_arr_push(args, a5);
+            if (n > 5) php_arr_push(args, a6);
+            if (n > 6) php_xargs_into(args);
             return callp(ld64(c), 0, php_zstr(name), php_zarr(args));
         }
         uptr m = php_str_concat(php_str_new("Call to undefined method ", 25), ld64(ce));
@@ -5927,9 +6932,225 @@ uptr php_scall(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr 
     // a forwarding call (`parent::m()` from an instance method) carries
     // $this and keeps the caller's binding; a named one rebinds
     if (!thisp) st64(phT + PHT_ph_lsb, ce);
+    // php's frame says `::` for a static method and `->` for a forwarded
+    // instance call (parent::m() from a method: thisp is $this)
+    i64 fty = 2;
+    if (thisp) fty = 1;
+    i64 fr = php_fr_meth(ce, name, fty, n, a1, a2, a3, a4, a5, a6);
+    if (n > 6) st64(phT + PHT_ph_xf, ld64(b));         // php_targs: the 7th argument on
     uptr r = callp(ld64(b), thisp, a1, a2, a3, a4, a5, a6);
+    if (fr) php_fr_pop();
     st64(phT + PHT_ph_lsb, sv);
     return r;
+}
+
+// ---- a method call's arguments past the sixth --------------------------------
+// Every method is reached through callp with the receiver and six zval slots,
+// a missing argument arriving as 0. A call with more arguments than that --
+// written out, or spread -- keeps the first six in the slots exactly as before
+// and lists the rest in a TAIL: a vector of zval pointers, the caller's own
+// zvals as a slot holds them, so a by-reference parameter past the sixth
+// still writes through. php_targs fills the free slots from it and leaves what
+// is left (the same kind of vector) in the thread block, and php_mcall /
+// php_scall name the function it is for; the method's prologue takes it only
+// when it is that function (php_xargs_take): a variadic one appends it after
+// its own slots (php_va_m), a seventh parameter and on reads it (php_xarg_at).
+// A method with neither never looks, which is php's "extra arguments are
+// ignored", and the next such call replaces it.
+//
+// A vector: [0] count, [8] capacity, [16] the pointers.
+uptr php_tl_new() {
+    uptr t = php_alloc(16 + 8 * 8);
+    st64(t, 0);
+    st64(t + 8, 8);
+    return t;
+}
+uptr php_tl_add(uptr t, uptr z) {
+    i64 n = ld64(t);
+    i64 c = ld64(t + 8);
+    if (n >= c) {
+        uptr t2 = php_alloc(16 + 2 * c * 8);
+        i64 i = 0;
+        loop { if (i >= n) break; st64(t2 + 16 + i * 8, ld64(t + 16 + i * 8)); i = i + 1; }
+        st64(t2, n);
+        st64(t2 + 8, 2 * c);
+        t = t2;
+    }
+    st64(t + 16 + n * 8, z);
+    st64(t, n + 1);
+    return t;
+}
+// a spread: its values, in order (the operand was checked before,
+// php_unpack_check); the elements are copies, as a spread's slots always were
+uptr php_tl_addvals(uptr t, uptr z) {
+    if (php_zv_type(z) != IS_ARRAY) return t;
+    uptr s = ld64(z);
+    i64 i = php_it_next(s, 0);
+    loop {
+        if (i < 0) break;
+        t = php_tl_add(t, php_it_val(s, i));
+        i = php_it_next(s, i + 1);
+    }
+    return t;
+}
+
+// n leading arguments are in s[0..n) (n <= ns, the slot count: 6 for a
+// method, 5 for a closure); tail lists the ones after them (0 = none). Fills
+// the free slots from it, keeps what is left in the thread block, and answers
+// how many there are in all.
+i64 php_targs(i64 n, uptr s, uptr tail, i64 ns) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    st64(phT + PHT_ph_xa, 0);
+    if (!tail) return n;
+    uptr xa = 0;
+    i64 i = 0;
+    loop {
+        if (i >= ld64(tail)) break;
+        uptr v = ld64(tail + 16 + i * 8);
+        if (n < ns) st64(s + n * 8, v);
+        if (n >= ns) {
+            if (!xa) xa = php_tl_new();
+            xa = php_tl_add(xa, v);
+        }
+        n = n + 1;
+        i = i + 1;
+    }
+    st64(phT + PHT_ph_xa, xa);
+    return n;
+}
+
+// the prologue of a method that can take a 7th argument: the list of them
+// when this call passed some to it (self is the method's own address)
+uptr php_xargs_take(uptr self) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_xf)) != self) return 0;
+    st64(phT + PHT_ph_xf, 0);
+    uptr a = ((uptr) ld64(phT + PHT_ph_xa));
+    st64(phT + PHT_ph_xa, 0);
+    return a;
+}
+
+// __call / __callStatic: the arguments past the sixth, after the six
+void php_xargs_into(uptr args) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr xa = ((uptr) ld64(phT + PHT_ph_xa));
+    st64(phT + PHT_ph_xa, 0);
+    if (!xa) return;
+    i64 i = 0;
+    loop { if (i >= ld64(xa)) break; php_arr_push(args, ld64(xa + 16 + i * 8)); i = i + 1; }
+}
+
+// the j-th argument past the sixth, or 0 when it was not passed
+uptr php_xarg_at(uptr xa, i64 j) {
+    if (!xa) return 0;
+    if (j >= ld64(xa)) return 0;
+    return ld64(xa + 16 + j * 8);
+}
+
+// a variadic parameter, `...$rest` after k others, of a function reached
+// with ns slots (a method's 6, a closure's 5): the slots k.. up to the first
+// one not passed, then the arguments past the slots that are not one of the
+// k -- a copy of each, as a by-value parameter is
+uptr php_va_m(uptr xa, i64 k, i64 ns, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    uptr r = php_arr_new(8);
+    i64 i = k;
+    loop {
+        if (i >= ns) break;
+        uptr a = a1;
+        if (i == 1) a = a2;
+        if (i == 2) a = a3;
+        if (i == 3) a = a4;
+        if (i == 4) a = a5;
+        if (i == 5) a = a6;
+        if (!a) break;
+        php_arr_push(r, a);
+        i = i + 1;
+    }
+    if (xa) {
+        i64 j = k - ns;
+        if (j < 0) j = 0;
+        loop { if (j >= ld64(xa)) break; php_arr_push(r, ld64(xa + 16 + j * 8)); j = j + 1; }
+    }
+    return php_zarr(r);
+}
+
+// `int ...$rest`: every element checked and converted as the parameter's own
+// type says, numbered from the variadic's position; the first refusal is the
+// one raised (php_param_coerce stops once one is pending)
+uptr php_va_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr dfile, i64 dline) {
+    uptr a = ld64(z);
+    uptr nm = php_str_new("", 0);
+    i64 i = php_it_next(a, 0);
+    loop {
+        if (i < 0) break;
+        uptr b = php_ht_bkt(a, i);
+        uptr c = php_param_coerce_at(b, want, cls, fn, argno, nm, dfile, dline);
+        if (c != b) php_zv_cp(b, c);
+        php_fr_coerced(argno - 1, b, fn);
+        argno = argno + 1;
+        i = php_it_next(a, i + 1);
+    }
+    return z;
+}
+
+// `?int ...$rest`, `Foo ...$rest`: php_param_tcheck_at on every element
+uptr php_param_tcheck_at(uptr z, i64 m, uptr cls, uptr ccls, uptr fn, i64 argno, uptr argname, uptr tn, uptr dfile, i64 dline);
+uptr php_va_tcheck(uptr z, i64 m, uptr cls, uptr ccls, uptr fn, i64 argno, uptr argname, uptr tn, uptr dfile, i64 dline) {
+    uptr a = ld64(z);
+    i64 i = php_it_next(a, 0);
+    loop {
+        if (i < 0) break;
+        uptr b = php_ht_bkt(a, i);
+        uptr c = php_param_tcheck_at(b, m, cls, ccls, fn, argno, argname, tn, dfile, dline);
+        if (c != b) php_zv_cp(b, c);
+        php_fr_coerced(argno - 1, b, fn);
+        argno = argno + 1;
+        i = php_it_next(a, i + 1);
+    }
+    return z;
+}
+
+// the call shapes with a tail: the slots and the count as before, plus the
+// array of the arguments after them (src/class.mc ph_margs)
+uptr php_zv_mcall_t(uptr z, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6, uptr tail) {
+    u8 s[48];
+    st64(s, a1); st64(s + 8, a2); st64(s + 16, a3); st64(s + 24, a4); st64(s + 32, a5); st64(s + 40, a6);
+    n = php_targs(n, s, tail, 6);
+    return php_zv_mcall(z, name, scope, n, ld64(s), ld64(s + 8), ld64(s + 16), ld64(s + 24), ld64(s + 32), ld64(s + 40));
+}
+uptr php_zv_mcall_ns_t(uptr z, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6, uptr tail) {
+    if (php_zv_type(z) == IS_NULL) return php_znull();
+    return php_zv_mcall_t(z, name, scope, n, a1, a2, a3, a4, a5, a6, tail);
+}
+uptr php_scall_t(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6, uptr tail) {
+    u8 s[48];
+    st64(s, a1); st64(s + 8, a2); st64(s + 16, a3); st64(s + 24, a4); st64(s + 32, a5); st64(s + 40, a6);
+    n = php_targs(n, s, tail, 6);
+    return php_scall(ce, name, thisp, scope, n, ld64(s), ld64(s + 8), ld64(s + 16), ld64(s + 24), ld64(s + 32), ld64(s + 40));
+}
+uptr php_ctor(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6);
+uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5);
+// a callable value called with more than five arguments, or a spread
+uptr php_call_zv_t(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr tail) {
+    u8 s[48];
+    st64(s, a1); st64(s + 8, a2); st64(s + 16, a3); st64(s + 24, a4); st64(s + 32, a5); st64(s + 40, 0);
+    n = php_targs(n, s, tail, 5);
+    return php_call_zv(z, n, ld64(s), ld64(s + 8), ld64(s + 16), ld64(s + 24), ld64(s + 32));
+}
+// the first argument past the fifth, out of the list, for a call that goes
+// on to a method's six slots (__invoke): the rest stays the list
+uptr php_xargs_shift() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr xa = ((uptr) ld64(phT + PHT_ph_xa));
+    if (!xa) return 0;
+    uptr first = ld64(xa + 16);
+    uptr r = 0;
+    i64 i = 1;
+    loop { if (i >= ld64(xa)) break; if (!r) r = php_tl_new(); r = php_tl_add(r, ld64(xa + 16 + i * 8)); i = i + 1; }
+    st64(phT + PHT_ph_xa, r);
+    return first;
+}
+uptr php_ctor_t(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6, uptr tail) {
+    u8 s[48];
+    st64(s, a1); st64(s + 8, a2); st64(s + 16, a3); st64(s + 24, a4); st64(s + 32, a5); st64(s + 40, a6);
+    n = php_targs(n, s, tail, 6);
+    return php_ctor(o, name, scope, n, ld64(s), ld64(s + 8), ld64(s + 16), ld64(s + 24), ld64(s + 32), ld64(s + 40));
 }
 
 uptr php_ce_byname(uptr name) {
@@ -6083,6 +7304,28 @@ uptr php_ce_sslot_s(uptr ce, uptr name, uptr scope) {
 
 uptr php_ce_sslot(uptr ce, uptr name) { return php_ce_sslot_s(ce, name, 0); }
 
+// a static property READ: an uninitialized typed one is php's Error
+uptr php_sprop_get(uptr ce, uptr name, uptr scope) {
+    uptr b = php_ce_sslot_s(ce, name, scope);
+    if (php_prop_uninit(b)) { php_prop_uninit_err(ce, name, 1); return php_znull(); }
+    return b;
+}
+
+// a static property WRITE, checked against its declared type as an instance
+// property's is (php_obj_set_k): the slot, holding the value it took
+uptr php_sprop_set_k(uptr ce, uptr name, uptr scope, uptr v, i64 kind) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr had = ((uptr) ld64(phT + PHT_ph_exc));
+    uptr b = php_ce_sslot_s(ce, name, scope);
+    if (!had && ((uptr) ld64(phT + PHT_ph_exc))) return b;
+    uptr tr = php_ptype_of(ce, name);
+    if (tr) {
+        v = php_ptype_check(tr, name, v, kind);
+        if (!v) return php_znull();
+    }
+    php_zv_cpv(b, v);
+    return b;
+}
+
 // ---- enums -----------------------------------------------------------------
 uptr php_enum_case(uptr ce, uptr name, uptr val) {
     uptr o = php_obj_new(ce);
@@ -6127,15 +7370,222 @@ uptr php_enum_from(uptr ce, uptr v, i64 try) {
 // the STRING form of a callable; this is the value form.
 uptr ph_ce_closure;
 
-uptr php_closure_new(i64 fn, uptr bound, uptr thisp) {
+uptr php_closure_new(i64 fn, uptr bound, uptr thisp, uptr name) {
     // made on the first closure; php_thr_run makes it before another thread
     // runs, so only the booting thread ever writes it
     if (!ph_ce_closure) ph_ce_closure = php_ce_new(php_str_new("Closure", 7));
     uptr o = php_obj_new(ph_ce_closure);
+    // php's name for it, {closure:FILE:LINE}: its first property, and what
+    // a frame of a call to it says (§ the trace)
+    php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("name", 4)), php_zstr(name));
     php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("fn", 2)), php_zlong(fn));
     php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("use", 3)), php_zarr(bound));
     php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("this", 4)), php_zlong(thisp));
     return php_zobj(o);
+}
+
+// the class a closure was written in: its frame says `C->{closure:..}` when
+// it has a $this and `C::{closure:..}` when it does not, as php's does
+uptr php_closure_scope(uptr z, uptr cls) {
+    php_zv_cp(php_arr_sslot(php_obj_props(ld64(z)), php_str_new("scope", 5)), php_zstr(cls));
+    return z;
+}
+
+// a closure's frame: its name ({closure:FILE:LINE}), the zval arguments, the
+// call's announced position -- a program only, as php_fr_meth
+i64 php_fr_closure(uptr o, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) return 0;
+    uptr nb = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("name", 4)), php_str_new("name", 4));
+    if (!nb || php_zv_type(nb) != IS_STRING) return 0;
+    uptr xa = 0;
+    if (n > 5) xa = ((uptr) ld64(phT + PHT_ph_xa));
+    if (n > 5 && (!xa || ld64(xa) < n - 5)) n = 5;
+    if (n < 0) n = 0;
+    uptr p = php_fr_push(php_cstr0(ld64(nb)), 0, 0, ((uptr) ld64(phT + PHT_ph_dfile)), ld64(phT + PHT_ph_dline), n);
+    uptr sb = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("scope", 5)), php_str_new("scope", 5));
+    if (sb && php_zv_type(sb) == IS_STRING) {
+        uptr r = ((uptr) ld64(phT + PHT_ph_fr)) + (ld64(phT + PHT_ph_frn) - 1) * FR_SIZE;
+        st64(r + 8, php_cstr0(ld64(sb)));
+        uptr tb = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("this", 4)), php_str_new("this", 4));
+        st64(r + 16, 2);
+        if (tb && php_zv_long(tb)) st64(r + 16, 1);
+    }
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        uptr a = a1;
+        if (i == 1) a = a2;
+        if (i == 2) a = a3;
+        if (i == 3) a = a4;
+        if (i == 4) a = a5;
+        if (i >= 5) a = ld64(xa + 16 + (i - 5) * 8);
+        st64(p + i * 16, 6);
+        st64(p + i * 16 + 8, a);
+        i = i + 1;
+    }
+    return 1;
+}
+
+// ---- callables that are not closures ----------------------------------------
+// The class whose code is running: the innermost frame's (a method's
+// declaring class, a closure's scope), 0 at the top level or in a function.
+// It is php's "calling scope" for a callable's visibility.
+uptr php_cur_scope() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 k = ld64(phT + PHT_ph_frn);
+    uptr r = 0;
+    // a builtin running a callback (usort's) is not a scope: the code that
+    // called the builtin is
+    loop {
+        if (k <= 0) return 0;
+        r = ((uptr) ld64(phT + PHT_ph_fr)) + (k - 1) * FR_SIZE;
+        if (ld64(r + 16) != FR_INTERNAL) break;
+        k = k - 1;
+    }
+    uptr cn = ld64(r + 8);
+    if (!cn || !ld8(cn)) return 0;
+    return php_ce_find(php_str_new(cn, php_cstrlen(cn)));
+}
+
+// an array callable's two parts: [object or class name, method name]; 0
+// with php's Error raised when it is not one
+i64 php_cb_parts(uptr z, uptr out) {
+    uptr a = ld64(z);
+    i64 cnt = 0;
+    i64 it = php_it_next(a, 0);
+    loop { if (it < 0) break; cnt = cnt + 1; it = php_it_next(a, it + 1); }
+    uptr e0 = php_ht_find(a, 0, 0);
+    uptr e1 = php_ht_find(a, 1, 0);
+    if (cnt != 2 || !e0 || !e1) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("Array callback must have exactly two elements", 45));
+        return 0;
+    }
+    if (php_zv_type(e0) != IS_OBJECT && php_zv_type(e0) != IS_STRING) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("First array member is not a valid class name or object", 54));
+        return 0;
+    }
+    if (php_zv_type(e1) != IS_STRING) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("Second array member is not a valid method", 41));
+        return 0;
+    }
+    st64(out, e0);
+    st64(out + 8, ld64(e1));
+    return 1;
+}
+
+// call [object or class, method] with n arguments, six slots and the list
+// past them in the thread block (php_targs), from the calling scope
+uptr php_cb_call(uptr e0, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    if (php_zv_type(e0) == IS_OBJECT) return php_mcall(ld64(e0), name, scope, n, a1, a2, a3, a4, a5, a6);
+    uptr ce = php_ce_byname(ld64(e0));
+    if (!ce) return php_znull();
+    return php_scall(ce, name, 0, scope, n, a1, a2, a3, a4, a5, a6);
+}
+
+// the function every closure Closure::fromCallable / `$o->m(...)` makes is:
+// `use` is [object or class, method, scope as an int]; its arguments are a
+// closure's five slots and the list past them
+uptr php_cl_tramp(uptr use, uptr thisp, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr xa = php_xargs_take(&php_cl_tramp);
+    i64 n = 0;
+    if (a1) n = 1;
+    if (a1 && a2) n = 2;
+    if (a1 && a2 && a3) n = 3;
+    if (a1 && a2 && a3 && a4) n = 4;
+    if (a1 && a2 && a3 && a4 && a5) n = 5;
+    uptr a6 = 0;
+    if (xa && ld64(xa) > 0) {
+        n = 5 + ld64(xa);
+        a6 = ld64(xa + 16);
+        uptr rest = 0;
+        i64 i = 1;
+        loop { if (i >= ld64(xa)) break; if (!rest) rest = php_tl_new(); rest = php_tl_add(rest, ld64(xa + 16 + i * 8)); i = i + 1; }
+        st64(phT + PHT_ph_xa, rest);
+    }
+    uptr e0 = php_arr_iget(use, 0);
+    uptr nm = ld64(php_arr_iget(use, 1));
+    uptr sc = php_zv_long(php_arr_iget(use, 2));
+    return php_cb_call(e0, nm, sc, n, a1, a2, a3, a4, a5, a6);
+}
+
+// Closure::fromCallable(x) and a first-class callable `$o->m(...)`: a closure
+// stays itself; [object or class, method] and an object with __invoke become a
+// closure that calls it. It has no name of its own, so a call through it
+// shows the method's frame and not one for the closure, as php's does.
+uptr php_fcc(uptr z, uptr scope) {
+    uptr e0 = 0;
+    uptr nm = 0;
+    if (php_zv_type(z) == IS_OBJECT) {
+        uptr o = ld64(z);
+        if (php_ht_find(php_obj_props(o), php_str_hash(php_str_new("fn", 2)), php_str_new("fn", 2))) return z;
+        if (!php_ce_lookup(php_obj_ce(o), 24, php_str_new("__invoke", 8))) {
+            php_throw_str(php_str_new("TypeError", 9), php_str_new("Failed to create closure from callable: no array or string given", 64));
+            return php_znull();
+        }
+        e0 = z;
+        nm = php_str_new("__invoke", 8);
+    } else if (php_zv_type(z) == IS_ARRAY) {
+        u8 pr[16];
+        if (!php_cb_parts(z, pr)) return php_znull();
+        e0 = ld64(pr);
+        nm = ld64(pr + 8);
+        uptr ce = 0;
+        if (php_zv_type(e0) == IS_OBJECT) ce = php_obj_ce(ld64(e0));
+        if (php_zv_type(e0) == IS_STRING) ce = php_ce_byname(ld64(e0));
+        if (!ce) return php_znull();
+        uptr lk = php_case(nm, 0);
+        if (!php_ce_lookup(ce, 24, lk) && !php_ce_lookup(ce, 80, php_str_new("__call", 6)) && !php_ce_lookup(ce, 80, php_str_new("__callstatic", 12))) {
+            uptr m = php_str_new("Failed to create closure from callable: class ", 46);
+            m = php_str_concat(m, ld64(ce));
+            m = php_str_concat(m, php_str_new(" does not have a method \"", 25));
+            m = php_str_concat(m, nm);
+            m = php_str_concat(m, php_str_new("\"", 1));
+            php_throw_str(php_str_new("TypeError", 9), m);
+            return php_znull();
+        }
+    } else {
+        php_throw_str(php_str_new("TypeError", 9), php_str_new("Failed to create closure from callable: no array or string given", 64));
+        return php_znull();
+    }
+    if (!ph_ce_closure) ph_ce_closure = php_ce_new(php_str_new("Closure", 7));
+    uptr use = php_arr_new(4);
+    php_arr_push(use, e0);
+    php_arr_push(use, php_zstr(nm));
+    php_arr_push(use, php_zlong(scope));
+    uptr o2 = php_obj_new(ph_ce_closure);
+    php_zv_cp(php_arr_sslot(php_obj_props(o2), php_str_new("fn", 2)), php_zlong(&php_cl_tramp));
+    php_zv_cp(php_arr_sslot(php_obj_props(o2), php_str_new("use", 3)), php_zarr(use));
+    php_zv_cp(php_arr_sslot(php_obj_props(o2), php_str_new("this", 4)), php_zlong(0));
+    return php_zobj(o2);
+}
+// `f(...)`: the arrow function that calls f, with no name of its own, so a
+// call through it shows f's frame and not one for the closure
+uptr php_fcc_anon(uptr z) {
+    if (php_zv_type(z) != IS_OBJECT) return z;
+    uptr p = php_obj_props(ld64(z));
+    uptr b = php_ht_find(p, php_str_hash(php_str_new("name", 4)), php_str_new("name", 4));
+    if (b) php_zv_cp(b, php_zlong(0));
+    return z;
+}
+// `A::m(...)`: the class entry and the method's name
+uptr php_fcc_s(uptr ce, uptr name, uptr scope) {
+    uptr a = php_arr_new(4);
+    php_arr_push(a, php_zstr(ld64(ce)));
+    php_arr_push(a, php_zstr(name));
+    return php_fcc(php_zarr(a), scope);
+}
+// `$o->m(...)`: the receiver and the method's name
+uptr php_fcc_m(uptr z, uptr name, uptr scope) {
+    if (php_zv_type(z) != IS_OBJECT) {
+        uptr m = php_str_concat(php_str_new("Call to a member function ", 26), name);
+        m = php_str_concat(m, php_str_new("() on ", 6));
+        m = php_str_concat(m, php_f_get_debug_type(z));
+        php_throw_str(php_str_new("Error", 5), m);
+        return php_znull();
+    }
+    uptr a = php_arr_new(4);
+    php_arr_push(a, z);
+    php_arr_push(a, php_zstr(name));
+    return php_fcc(php_zarr(a), scope);
 }
 
 uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
@@ -6143,18 +7593,37 @@ uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     // call (lib/php_ext.mc's phx_vcall), the way the C twin calls it
     if (ph_eng && (php_zv_type(z) != IS_OBJECT || php_is_proxy(ld64(z))))
         return callp(ld64(ph_eng + 48), z, n, a1, a2, a3, a4, a5);
+    // [object or class, method]: a method call from the calling scope
+    if (php_zv_type(z) == IS_ARRAY) {
+        u8 pr[16];
+        if (!php_cb_parts(z, pr)) return php_znull();
+        uptr a6 = 0;
+        if (n > 5) a6 = php_xargs_shift();
+        return php_cb_call(ld64(pr), ld64(pr + 8), php_cur_scope(), n, a1, a2, a3, a4, a5, a6);
+    }
     if (php_zv_type(z) != IS_OBJECT) {
         php_throw_str(php_str_new("Error", 5), php_str_new("Value not callable", 18));
         return php_znull();
     }
     uptr o = ld64(z);
     uptr b = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("fn", 2)), php_str_new("fn", 2));
-    if (!b) return php_mcall(o, php_str_new("__invoke", 8), 0, n, a1, a2, a3, a4, a5, 0);
+    if (!b) {
+        uptr a6 = 0;
+        if (n > 5) a6 = php_xargs_shift();             // php_call_zv_t: the 6th is a slot here
+        return php_mcall(o, php_str_new("__invoke", 8), 0, n, a1, a2, a3, a4, a5, a6);
+    }
     uptr u = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("use", 3)), php_str_new("use", 3));
     uptr t = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("this", 4)), php_str_new("this", 4));
     uptr tp = 0;
     if (t) tp = ld64(t);
-    return callp(ld64(b), ld64(u), tp, a1, a2, a3, a4, a5);
+    i64 fr = php_fr_closure(o, n, a1, a2, a3, a4, a5);
+    if (n > 5) {                                        // php_call_zv_t: the 6th argument on
+        uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+        st64(phT + PHT_ph_xf, ld64(b));
+    }
+    uptr r = callp(ld64(b), ld64(u), tp, a1, a2, a3, a4, a5);
+    if (fr) php_fr_pop();
+    return r;
 }
 
 u8 php_f_is_callable(uptr z, uptr _p2, uptr _p3) {
@@ -6325,6 +7794,9 @@ uptr php_ce_parent(uptr ce) {
 #define PC_STRING 3
 #define PC_BOOL   4
 #define PC_ARRAY  5
+// declare(strict_types=1) in the file the check is for: the exact type, an
+// int where a float is declared being the one conversion php still makes
+#define PC_STRICT 16
 
 uptr php_pc_name(i64 want) {
     if (want == PC_INT)    return php_str_new("int", 3);
@@ -6332,6 +7804,14 @@ uptr php_pc_name(i64 want) {
     if (want == PC_STRING) return php_str_new("string", 6);
     if (want == PC_BOOL)   return php_str_new("bool", 4);
     return php_str_new("array", 5);
+}
+
+// how php names the value in a TypeError (zend_zval_value_name): its type as
+// get_debug_type says it, except a bool, which is `true` or `false`
+uptr php_valname(uptr z) {
+    if (php_zv_type(z) == IS_TRUE) return php_str_new("true", 4);
+    if (php_zv_type(z) == IS_FALSE) return php_str_new("false", 5);
+    return php_f_get_debug_type(z);
 }
 
 uptr php_param_err(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
@@ -6346,7 +7826,7 @@ uptr php_param_err(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname)
         m = php_str_concat(m, php_str_new("(): Return value must be of type ", 33));
         m = php_str_concat(m, php_pc_name(want));
         m = php_str_concat(m, php_str_new(", ", 2));
-        m = php_str_concat(m, php_f_get_debug_type(z));
+        m = php_str_concat(m, php_valname(z));
         m = php_str_concat(m, php_str_new(" returned", 9));
         php_throw_str(php_str_new("TypeError", 9), m);
         return php_znull();
@@ -6364,13 +7844,323 @@ uptr php_param_err(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname)
     m = php_str_concat(m, php_str_new(" must be of type ", 17));
     m = php_str_concat(m, php_pc_name(want));
     m = php_str_concat(m, php_str_new(", ", 2));
-    m = php_str_concat(m, php_f_get_debug_type(z));
+    m = php_str_concat(m, php_valname(z));
     m = php_str_concat(m, php_str_new(" given, called in ", 18));
     m = php_str_concat(m, php_str_new(((uptr) ld64(phT + PHT_ph_dfile)), php_cstrlen(((uptr) ld64(phT + PHT_ph_dfile)))));
     m = php_str_concat(m, php_str_new(" on line ", 9));
     m = php_str_concat(m, php_itos(ld64(phT + PHT_ph_dline)));
     php_throw_str(php_str_new("TypeError", 9), m);
     return php_znull();
+}
+
+// ---- a builtin's argument: php's ZPP ---------------------------------------
+// The parameter a builtin DECLARES (php-src's stub, src/arginfo.mc): which of
+// string, int, float, bool and array it takes, whether null is one of them,
+// whether an object is (count's Countable|array), and the caller's
+// strict_types. Weak mode coerces what php coerces -- and deprecates a null
+// for a non-nullable scalar and a float that loses precision on the way to an
+// int; anything else is the TypeError. Answers 0 when it threw, and checks
+// nothing once something is pending: php reports the FIRST argument it refused.
+#define ZP_S      1
+#define ZP_L      2
+#define ZP_D      4
+#define ZP_B      8
+#define ZP_A      16
+#define ZP_N      32
+#define ZP_O      64
+#define ZP_STRICT 128
+
+i64 php_zpp_err(uptr z, uptr fn, i64 k, uptr pn, uptr tn) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr given = php_valname(z);              // before the message buffer is in use
+    php_mreset();
+    php_mc(fn);
+    php_mc("(): Argument #");
+    php_mi(k);
+    if (php_cstrlen(pn)) { php_mc(" ($"); php_mc(pn); php_mc(")"); }
+    php_mc(" must be of type ");
+    php_mc(tn);
+    php_mc(", ");
+    php_ms(given);
+    php_mc(" given");
+    php_throw_str(php_str_new("TypeError", 9), php_str_new((phT + PHT_ph_msg), ld64(phT + PHT_ph_msgn)));
+    return 0;
+}
+
+// a float on its way to an int parameter: NaN and anything out of range is
+// the TypeError, a fraction the deprecation (the float's own text, or the
+// float-string's)
+i64 php_zpp_dtol(uptr z, f64 d, uptr s, uptr fn, i64 k, uptr pn, uptr tn) {
+    if (d != d || d >= 9223372036854775808.0 || d < -9223372036854775808.0) return php_zpp_err(z, fn, k, pn, tn);
+    if ((f64) ((i64) d) != d) {
+        php_mreset();
+        if (s) { php_mc("Implicit conversion from float-string \""); php_ms(s); php_mc("\""); }
+        if (!s) { php_mc("Implicit conversion from float "); php_ms(php_ftos(d)); }
+        php_mc(" to int loses precision");
+        php_raise_m(PHE_DEPRECATED);
+    }
+    return 1;
+}
+
+// an object given where the type names classes (count's Countable|array):
+// one of THOSE classes, by name -- a class name is the stub's capitalised word
+i64 php_zpp_isa(uptr o, uptr tn) {
+    uptr ce = php_obj_ce(o);
+    i64 n = php_cstrlen(tn);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        if (ld8(tn + i) == 63) i = i + 1;                    // `?`
+        i64 j = i;
+        loop { if (j >= n || ld8(tn + j) == 124) break; j = j + 1; }
+        i64 c = ld8(tn + i);
+        if (c >= 65 && c <= 90 && php_ce_is(ce, php_str_new(tn + i, j - i))) return 1;
+        i = j + 1;
+    }
+    return 0;
+}
+
+i64 php_zpp(uptr z, i64 spec, uptr fn, i64 k, uptr pn, uptr tn) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_exc))) return 0;
+    i64 t = php_zv_type(z);
+    i64 strict = spec & ZP_STRICT;
+    if (t == IS_UNDEF || t == IS_NULL) {
+        if (spec & ZP_N) return 1;
+        // the deprecation is for a SCALAR parameter: php coerces null to it.
+        // An array or a class takes no null at all
+        if (strict || !(spec & (ZP_S | ZP_L | ZP_D | ZP_B))) return php_zpp_err(z, fn, k, pn, tn);
+        php_mreset();
+        php_mc(fn);
+        php_mc("(): Passing null to parameter #");
+        php_mi(k);
+        if (php_cstrlen(pn)) { php_mc(" ($"); php_mc(pn); php_mc(")"); }
+        php_mc(" of type ");
+        php_mc(tn);
+        php_mc(" is deprecated");
+        php_raise_m(PHE_DEPRECATED);
+        return 1;
+    }
+    if (t == IS_ARRAY) {
+        if (spec & ZP_A) return 1;
+        return php_zpp_err(z, fn, k, pn, tn);
+    }
+    if (t == IS_OBJECT) {
+        if ((spec & ZP_O) && php_zpp_isa(ld64(z), tn)) return 1;
+        if ((spec & ZP_S) && !strict && php_ce_lookup(php_obj_ce(ld64(z)), 24, php_str_new("__tostring", 10))) return 1;
+        return php_zpp_err(z, fn, k, pn, tn);
+    }
+    i64 isb = t == IS_TRUE || t == IS_FALSE;
+    if ((spec & ZP_S) && t == IS_STRING) return 1;
+    if ((spec & ZP_L) && t == IS_LONG) return 1;
+    if ((spec & ZP_D) && t == IS_DOUBLE) return 1;
+    if ((spec & ZP_B) && isb) return 1;
+    if (strict) {
+        if ((spec & ZP_D) && t == IS_LONG) return 1;
+        return php_zpp_err(z, fn, k, pn, tn);
+    }
+    if (spec & (ZP_L | ZP_D)) {
+        if (t == IS_LONG || isb) return 1;
+        if (t == IS_DOUBLE) return php_zpp_dtol(z, ldf64(z), 0, fn, k, pn, tn);
+        if (t == IS_STRING) {
+            u8 lb[8];
+            u8 db[8];
+            i64 num = php_str_isnum(ld64(z), lb, db);
+            if (!num) {
+                if (spec & ZP_B) return 1;
+                return php_zpp_err(z, fn, k, pn, tn);
+            }
+            if (num == 2 && !(spec & ZP_D)) return php_zpp_dtol(z, ldf64(db), ld64(z), fn, k, pn, tn);
+            return 1;
+        }
+    }
+    if (spec & (ZP_S | ZP_B)) return 1;
+    return php_zpp_err(z, fn, k, pn, tn);
+}
+
+// ---- a declared return type, as php verifies it ----------------------------
+// zend_verify_return_type over the type the compiler recorded
+// (src/types.mc RT_*): the value is accepted as it is when its own type is in
+// the declaration -- an object by class, by `object`, by iterable's
+// Traversable -- and otherwise coerced in weak mode in php's preference
+// order, int, float, string, bool (zend_verify_weak_scalar_type_hint), with
+// the deprecation a float losing its fraction raises. Anything else is the
+// TypeError, in php's words: `f(): Return value must be of type T, X returned`.
+// `cls` is the class names, `|`-separated; fn and tn are php strings.
+
+uptr php_ret_err(uptr z, uptr fn, uptr tn) {
+    uptr m = php_str_concat(fn, php_str_new("(): Return value must be of type ", 33));
+    m = php_str_concat(m, tn);
+    m = php_str_concat(m, php_str_new(", ", 2));
+    m = php_str_concat(m, php_valname(z));
+    m = php_str_concat(m, php_str_new(" returned", 9));
+    php_throw_str(php_str_new("TypeError", 9), m);
+    return php_znull();
+}
+
+// is the object z one of the classes named in cls ("A|B")?
+i64 php_ret_isa(uptr z, uptr cls) {
+    i64 n = php_strlen(cls);
+    uptr v = cls + ZS_HDR;
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        i64 j = i;
+        loop { if (j >= n || ld8(v + j) == '|') break; j = j + 1; }
+        if (php_instanceof(z, php_str_new(v + i, j - i))) return 1;
+        i = j + 1;
+    }
+    return 0;
+}
+
+// a float on its way to int in weak mode: 0 when it cannot be one
+i64 php_ret_dtol(f64 d, uptr s, uptr pl) {
+    if (d != d || d >= 9223372036854775808.0 || d < -9223372036854775808.0) return 0;
+    if ((f64) ((i64) d) != d) {
+        php_mreset();
+        if (s) { php_mc("Implicit conversion from float-string \""); php_ms(s); php_mc("\""); }
+        if (!s) { php_mc("Implicit conversion from float "); php_ms(php_ftos(d)); }
+        php_mc(" to int loses precision");
+        php_raise_m(PHE_DEPRECATED);
+    }
+    st64(pl, (i64) d);
+    return 1;
+}
+
+// the value z against the declared type m/cls: z itself when its type is
+// declared, the coerced value in weak mode, 0 when php refuses it (nothing
+// raised but a deprecation a float losing its fraction makes)
+uptr php_type_coerce(uptr z, i64 m, uptr cls) {
+    i64 t = php_zv_type(z);
+    if (m & RT_MIXED) return z;
+    if (t == IS_UNDEF || t == IS_NULL) { if (m & RT_NULL) return z; return 0; }
+    if (t == IS_FALSE && (m & RT_FALSE)) return z;
+    if (t == IS_TRUE && (m & RT_TRUE)) return z;
+    if (t == IS_LONG && (m & RT_INT)) return z;
+    if (t == IS_DOUBLE && (m & RT_FLOAT)) return z;
+    if (t == IS_STRING && (m & RT_STRING)) return z;
+    if (t == IS_ARRAY && (m & RT_ARRAY)) return z;
+    if (t == IS_OBJECT) {
+        if (m & RT_OBJECT) return z;
+        if (php_strlen(cls) && php_ret_isa(z, cls)) return z;
+        if ((m & RT_CALLABLE) && php_f_is_callable(z, 0, 0)) return z;
+    }
+    if (m & RT_STRICT) {
+        if ((m & RT_FLOAT) && t == IS_LONG) return php_zdouble((f64) ld64(z));
+        return 0;
+    }
+    if (t == IS_ARRAY) return 0;
+    if (m & RT_INT) {
+        if ((m & RT_FLOAT) && t == IS_STRING) {
+            u8 lb[8];
+            u8 db[8];
+            i64 nt = php_str_isnum(ld64(z), lb, db);
+            if (nt == 1) return php_zlong(ld64(lb));
+            if (nt == 2) return php_zdouble(ldf64(db));
+        } else {
+            u8 rl[8];
+            if (t == IS_DOUBLE && php_ret_dtol(ldf64(z), 0, rl)) return php_zlong(ld64(rl));
+            if (t == IS_TRUE) return php_zlong(1);
+            if (t == IS_FALSE) return php_zlong(0);
+            if (t == IS_STRING) {
+                u8 lb2[8];
+                u8 db2[8];
+                i64 nt2 = php_str_isnum(ld64(z), lb2, db2);
+                if (nt2 == 1) return php_zlong(ld64(lb2));
+                if (nt2 == 2 && php_ret_dtol(ldf64(db2), ld64(z), rl)) return php_zlong(ld64(rl));
+            }
+        }
+    }
+    if (m & RT_FLOAT) {
+        if (t == IS_LONG) return php_zdouble((f64) ld64(z));
+        if (t == IS_TRUE) return php_zdouble(1.0);
+        if (t == IS_FALSE) return php_zdouble(0.0);
+        if (t == IS_STRING) {
+            u8 lb3[8];
+            u8 db3[8];
+            i64 nt3 = php_str_isnum(ld64(z), lb3, db3);
+            if (nt3 == 1) return php_zdouble((f64) ld64(lb3));
+            if (nt3 == 2) return php_zdouble(ldf64(db3));
+        }
+    }
+    if (m & RT_STRING) {
+        if (t == IS_LONG || t == IS_DOUBLE || t == IS_TRUE || t == IS_FALSE) return php_zstr(php_zv_str(z));
+        if (t == IS_OBJECT && php_ce_lookup(php_obj_ce(ld64(z)), 24, php_str_new("__tostring", 10)))
+            return php_zstr(php_obj_tostr(ld64(z)));
+    }
+    if ((m & (RT_TRUE | RT_FALSE)) == (RT_TRUE | RT_FALSE)) {
+        if (t == IS_LONG || t == IS_DOUBLE || t == IS_STRING) return php_zbool(php_zv_bool(z));
+    }
+    return 0;
+}
+
+// A parameter whose declaration is more than one plain scalar -- `?int`,
+// `int|string`, a class, `iterable`, `int $x = null` -- checked as php checks
+// it, with the RT_* bits and class names the return check uses (m, cls): the
+// value itself, the converted one in weak mode, or php's TypeError naming the
+// declaration tn, raised where the parameter is declared (dfile, dline). ccls
+// is the declaring class of a method, "" for a function. Not passed (0) is
+// left to the default or the count check; nothing is checked once something is
+// pending, as php reports the first argument it refused.
+uptr php_param_tcheck_at(uptr z, i64 m, uptr cls, uptr ccls, uptr fn, i64 argno, uptr argname, uptr tn, uptr dfile, i64 dline) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (!z) return z;
+    if (((uptr) ld64(phT + PHT_ph_exc))) return z;
+    // a deprecation the conversion raises (a float losing its fraction) is
+    // php's at the parameter's declaration
+    uptr sf = ((uptr) ld64(phT + PHT_ph_dfile));
+    i64 sl = ld64(phT + PHT_ph_dline);
+    if (dline > 0) { st64(phT + PHT_ph_dfile, php_cstr0(dfile)); st64(phT + PHT_ph_dline, dline); }
+    uptr r = php_type_coerce(z, m, cls);
+    st64(phT + PHT_ph_dfile, sf);
+    st64(phT + PHT_ph_dline, sl);
+    if (r) return r;
+    uptr msg = php_str_new("", 0);
+    if (php_strlen(ccls)) msg = php_str_concat(php_str_concat(msg, ccls), php_str_new("::", 2));
+    msg = php_str_concat(msg, fn);
+    msg = php_str_concat(msg, php_str_new("(): Argument #", 14));
+    msg = php_str_concat(msg, php_itos(argno));
+    if (php_strlen(argname)) {
+        msg = php_str_concat(msg, php_str_new(" ($", 3));
+        msg = php_str_concat(msg, argname);
+        msg = php_str_concat(msg, php_str_new(")", 1));
+    }
+    msg = php_str_concat(msg, php_str_new(" must be of type ", 17));
+    msg = php_str_concat(msg, tn);
+    msg = php_str_concat(msg, php_str_new(", ", 2));
+    msg = php_str_concat(msg, php_valname(z));
+    msg = php_str_concat(msg, php_str_new(" given, called in ", 18));
+    msg = php_str_concat(msg, php_str_new(((uptr) ld64(phT + PHT_ph_dfile)), php_cstrlen(((uptr) ld64(phT + PHT_ph_dfile)))));
+    msg = php_str_concat(msg, php_str_new(" on line ", 9));
+    msg = php_str_concat(msg, php_itos(ld64(phT + PHT_ph_dline)));
+    php_throw_str(php_str_new("TypeError", 9), msg);
+    uptr e = ((uptr) ld64(phT + PHT_ph_exc));
+    if (e && dline > 0) {
+        uptr o = ld64(e);
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)), php_zstr(dfile));
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(dline));
+    }
+    return php_znull();
+}
+
+uptr php_ret_check(uptr z, i64 m, uptr cls, uptr fn, uptr tn) {
+    uptr r = php_type_coerce(z, m, cls);
+    if (r) return r;
+    return php_ret_err(z, fn, tn);
+}
+
+// a function with a declared return type that fell off its end: php's
+// TypeError, `none returned` -- or, for `never`, its own sentence
+void php_ret_none_t(uptr fn, uptr tn, i64 never, i64 meth) {
+    uptr m = 0;
+    if (never) {
+        m = php_str_concat(fn, php_str_new("(): never-returning ", 20));
+        if (meth) m = php_str_concat(m, php_str_new("method", 6));
+        if (!meth) m = php_str_concat(m, php_str_new("function", 8));
+        m = php_str_concat(m, php_str_new(" must not implicitly return", 27));
+    } else {
+        m = php_str_concat(fn, php_str_new("(): Return value must be of type ", 33));
+        m = php_str_concat(m, tn);
+        m = php_str_concat(m, php_str_new(", none returned", 15));
+    }
+    php_throw_str(php_str_new("TypeError", 9), m);
 }
 
 // a function declared int/float/string/bool that fell off its end
@@ -6383,6 +8173,8 @@ void php_ret_none(uptr fn, i64 want) {
 
 uptr php_param_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (!z) return z;                          // not passed: the default fills it
+    i64 strict = want & PC_STRICT;
+    want = want & 15;
     // a whole argument list is checked before its call, with ONE check after
     // it: once something is pending the rest must not overwrite it, because
     // php reports the FIRST argument it refused
@@ -6394,6 +8186,16 @@ uptr php_param_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argna
     }
     if (t == IS_ARRAY || t == IS_NULL || t == IS_UNDEF)
         return php_param_err(z, want, cls, fn, argno, argname);
+    if (strict) {
+        i64 ok = 0;
+        if (want == PC_INT && t == IS_LONG) ok = 1;
+        if (want == PC_FLOAT && t == IS_DOUBLE) ok = 1;
+        if (want == PC_STRING && t == IS_STRING) ok = 1;
+        if (want == PC_BOOL && (t == IS_TRUE || t == IS_FALSE)) ok = 1;
+        if (want == PC_FLOAT && t == IS_LONG) return php_zdouble(php_zv_double(z));
+        if (!ok) return php_param_err(z, want, cls, fn, argno, argname);
+        return z;
+    }
     if (want == PC_INT) {
         if (t == IS_LONG) return z;
         if (t == IS_OBJECT) return php_param_err(z, want, cls, fn, argno, argname);
@@ -6429,6 +8231,23 @@ uptr php_param_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argna
     return php_zbool(php_zv_bool(z));
 }
 
+// The same check made where the CALL is, for a parameter whose declared type
+// the callee no longer has (a native int, string ...): php reports the error
+// where the parameter is DECLARED -- its exception's file and line are the
+// function's, "called in" names the call (src/builtin.mc, src/class.mc).
+// dfile is a php string (the compiler's literal), like fn
+uptr php_param_coerce_at(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname, uptr dfile, i64 dline) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 had = ((uptr) ld64(phT + PHT_ph_exc)) != 0;
+    uptr r = php_param_coerce(z, want, cls, fn, argno, argname);
+    uptr e = ((uptr) ld64(phT + PHT_ph_exc));
+    if (!had && e && dline > 0) {
+        uptr o = ld64(e);
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)), php_zstr(dfile));
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(dline));
+    }
+    return r;
+}
+
 // The same check for a BY-REFERENCE parameter. php coerces the caller's own
 // variable -- `f(int &$x)` with "5" leaves 6 behind, not '5' -- so the
 // coerced value is stored back into the SAME cell and that cell is what the
@@ -6444,13 +8263,53 @@ uptr php_param_coerce_ref(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr a
     return php_zv_store(z, c);
 }
 
-void php_argcount(uptr cls, uptr fn) {
-    uptr m = php_str_concat(php_str_new("Too few arguments to function ", 30), cls);
-    m = php_str_concat(m, php_str_new("::", 2));
-    m = php_str_concat(m, fn);
-    m = php_str_concat(m, php_str_new("()", 2));
-    php_throw_str(php_str_new("ArgumentCountError", 18), m);
+// php's message for a required parameter a call left out (zend_missing_arg_
+// error): the caller's position comes from the callee's own frame, which a
+// builtin calling back pushed with no file -- "N passed and ..." then. The
+// exception is placed at the parameter's declaration.
+// php_param_coerce_ref placed as php_param_coerce_at is: at the parameter
+uptr php_param_coerce_ref_at(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname, uptr dfile, i64 dline) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 had = ((uptr) ld64(phT + PHT_ph_exc)) != 0;
+    uptr r = php_param_coerce_ref(z, want, cls, fn, argno, argname);
+    uptr e = ((uptr) ld64(phT + PHT_ph_exc));
+    if (!had && e && dline > 0) {
+        uptr o = ld64(e);
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)), php_zstr(dfile));
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(dline));
+    }
+    return r;
 }
+
+void php_argcount_n(uptr disp, i64 passed, i64 min, i64 exact, uptr dfile, i64 dline) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_exc))) return;
+    uptr m = php_str_concat(php_str_new("Too few arguments to function ", 30), disp);
+    m = php_str_concat(m, php_str_new("(), ", 4));
+    m = php_str_concat(m, php_itos(passed));
+    m = php_str_concat(m, php_str_new(" passed", 7));
+    i64 k = ld64(phT + PHT_ph_frn);
+    if (k > 0) {
+        uptr r = ((uptr) ld64(phT + PHT_ph_fr)) + (k - 1) * FR_SIZE;
+        uptr cf = ld64(r + 24);
+        if (cf) {
+            m = php_str_concat(m, php_str_new(" in ", 4));
+            m = php_str_concat(m, php_str_new(cf, php_cstrlen(cf)));
+            m = php_str_concat(m, php_str_new(" on line ", 9));
+            m = php_str_concat(m, php_itos(ld64(r + 32)));
+        }
+    }
+    if (exact) m = php_str_concat(m, php_str_new(" and exactly ", 13));
+    if (!exact) m = php_str_concat(m, php_str_new(" and at least ", 14));
+    m = php_str_concat(m, php_itos(min));
+    m = php_str_concat(m, php_str_new(" expected", 9));
+    php_throw_str(php_str_new("ArgumentCountError", 18), m);
+    uptr e = ((uptr) ld64(phT + PHT_ph_exc));
+    if (e && dline > 0) {
+        uptr o = ld64(e);
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)), php_zstr(dfile));
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(dline));
+    }
+}
+
 
 uptr php_ce_name(uptr ce) { return ld64(ce); }
 
@@ -6538,6 +8397,408 @@ uptr php_throw(uptr z) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     return php_znull();
 }
 
+// ---- the trace ----------------------------------------------------------------
+// php records, when a throwable is CREATED, the calls that led there: one
+// frame per call not yet returned, innermost first, each with the CALL's file
+// and line, the function (and its class and `->`/`::`) and the arguments.
+// A compiled program keeps that stack itself (PHT_ph_fr, lib/php_tls.mc): the
+// caller pushes a frame around each call (src/builtin.mc, src/class.mc) and
+// pops it when the call returns, an exception's included. An extension pushes
+// nothing -- Zend has the frames, and builds its own trace.
+
+void php_fr_grow(uptr phT, i64 off, i64 cap, i64 need, i64 esz) {
+    i64 c = ld64(phT + cap);
+    if (c < 16) c = 16;
+    loop { if (c >= need) break; c = c * 2; }
+    uptr nb = php_alloc(c * esz);
+    uptr ob = ld64(phT + off);
+    if (ob) php_memcpy(nb, ob, ld64(phT + cap) * esz);
+    st64(phT + off, nb);
+    st64(phT + cap, c);
+}
+
+// the call's frame; answers where its n (tag, value) argument pairs go
+uptr php_fr_push(uptr name, uptr cls, i64 type, uptr file, i64 line, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 k = ld64(phT + PHT_ph_frn);
+    // called from inside a builtin that is running (array_map's callback):
+    // php's frame for it is `[internal function]`, no file and no line
+    if (k > 0) {
+        uptr q = ((uptr) ld64(phT + PHT_ph_fr)) + (k - 1) * FR_SIZE;
+        if (ld64(q + 16) == FR_INTERNAL && !ld64(q + 56)) { file = 0; line = 0; }
+    }
+    if (k >= ld64(phT + PHT_ph_frc)) php_fr_grow(phT, PHT_ph_fr, PHT_ph_frc, k + 1, FR_SIZE);
+    i64 a = ld64(phT + PHT_ph_fan);
+    if (a + n > ld64(phT + PHT_ph_fac)) php_fr_grow(phT, PHT_ph_fa, PHT_ph_fac, a + n, 16);
+    uptr r = ((uptr) ld64(phT + PHT_ph_fr)) + k * FR_SIZE;
+    st64(r, name);
+    st64(r + 8, cls);
+    st64(r + 16, type);
+    st64(r + 24, file);
+    st64(r + 32, line);
+    st64(r + 40, a);
+    st64(r + 48, n);
+    st64(r + 56, 0);                          // active
+    st64(phT + PHT_ph_frn, k + 1);
+    st64(phT + PHT_ph_fan, a + n);
+    return ((uptr) ld64(phT + PHT_ph_fa)) + a * 16;
+}
+
+// php's frame holds an argument as the parameter RECEIVED it: once the value
+// was converted to the declared type, its trace shows the converted one
+// (`f(1.0, 'x')` for f(float $a, float $b) called with 1 and 'x'). Argument
+// i (0-based) of the innermost frame becomes c, unless an exception is
+// pending (the refused argument keeps what it was, and so does every one php
+// never reached). fn, when not 0, is the function the caller believes that
+// frame is (a method's or a closure's prologue, where an extension call
+// pushes none): another name leaves it alone.
+void php_fr_coerced(i64 i, uptr c, uptr fn) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_exc))) return;
+    i64 k = ld64(phT + PHT_ph_frn);
+    if (k <= 0 || !c) return;
+    uptr r = ((uptr) ld64(phT + PHT_ph_fr)) + (k - 1) * FR_SIZE;
+    if (i < 0 || i >= ld64(r + 48)) return;
+    if (fn) {
+        uptr nm = ld64(r);
+        if (!nm) return;
+        i64 ln = php_strlen(fn);
+        i64 j = 0;
+        loop {
+            if (j >= ln) break;
+            i64 x = ld8(nm + j);
+            i64 y = ld8(fn + ZS_HDR + j);
+            if (x >= 65 && x <= 90) x = x + 32;
+            if (y >= 65 && y <= 90) y = y + 32;
+            if (x != y) return;
+            j = j + 1;
+        }
+        if (ld8(nm + ln)) return;
+    }
+    uptr slot = ((uptr) ld64(phT + PHT_ph_fa)) + (ld64(r + 40) + i) * 16;
+    st64(slot, 6);
+    st64(slot + 8, c);
+}
+
+// The position the frame was pushed at is the caller's, and it is what the
+// caller's next diagnostic must name: the callee announced its own lines into
+// the same two words, so they go back here -- `$t = f(9) + intdiv(1, 0)`
+// reported the last line f ran instead of its own.
+void php_fr_pop() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 k = ld64(phT + PHT_ph_frn) - 1;
+    if (k < 0) return;
+    uptr r = ((uptr) ld64(phT + PHT_ph_fr)) + k * FR_SIZE;
+    st64(phT + PHT_ph_fan, ld64(r + 40));
+    st64(phT + PHT_ph_frn, k);
+    if (ld64(r + 24)) { st64(phT + PHT_ph_dfile, ld64(r + 24)); st64(phT + PHT_ph_dline, ld64(r + 32)); }
+}
+
+// A user call's frame, built in the order php evaluates the call, inside the
+// expression and not ahead of it: php_frv(php_fr_open(..), f(php_fa(a0, ..),
+// ..)). The frame is opened first, INACTIVE (the trace skips it) while the
+// arguments are computed -- each one stored as it is, a nested call pushing
+// and popping its own frame above -- and active once the last one is stored;
+// php_frv pops it after the call and hands the answer through.
+i64 php_fr_open(uptr name, uptr file, i64 line, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    php_fr_push(name, 0, 0, file, line, n);
+    if (n > 0) st64(((uptr) ld64(phT + PHT_ph_fr)) + (ld64(phT + PHT_ph_frn) - 1) * FR_SIZE + 56, 1);
+    return 0;
+}
+// argument k of the innermost frame: its area is found again now, since a
+// nested call may have grown (moved) the argument table since the open
+uptr php_fa_at(uptr phT, i64 k, i64 last) {
+    uptr r = ((uptr) ld64(phT + PHT_ph_fr)) + (ld64(phT + PHT_ph_frn) - 1) * FR_SIZE;
+    if (last) st64(r + 56, 0);
+    return ((uptr) ld64(phT + PHT_ph_fa)) + (ld64(r + 40) + k) * 16;
+}
+i64 php_fa(i64 v, i64 tag, i64 k, i64 last) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr a = php_fa_at(phT, k, last);
+    st64(a, tag);
+    st64(a + 8, v);
+    return v;
+}
+f64 php_faf(f64 v, i64 k, i64 last) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr a = php_fa_at(phT, k, last);
+    st64(a, FRT_FLOAT);
+    stf64(a + 8, v);
+    return v;
+}
+// a native nullable scalar's flag, after its value: a null overrides the tag
+i64 php_fa_null(i64 isnull, i64 k, i64 last) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr a = php_fa_at(phT, k, last);
+    if (isnull & 255) st64(a, FRT_NULL);
+    return isnull;
+}
+// a builtin's own frame, opened the same way: the callbacks it runs are
+// called from inside it (php_fr_push)
+i64 php_fr_open_i(uptr name, uptr file, i64 line, i64 n) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    php_fr_open(name, file, line, n);
+    st64(((uptr) ld64(phT + PHT_ph_fr)) + (ld64(phT + PHT_ph_frn) - 1) * FR_SIZE + 16, FR_INTERNAL);
+    return 0;
+}
+i64 php_frv(i64 open, i64 r) { php_fr_pop(); return r; }
+f64 php_frvf(i64 open, f64 r) { php_fr_pop(); return r; }
+
+// a builtin that raises: php's trace names it as the innermost frame, at the
+// program's position, with its arguments. The frame exists only for the throw,
+// so a call that does not raise pays nothing for it. An extension's throwables
+// are the engine's, which builds their trace itself.
+void php_nat_throw(uptr cls, uptr msg, uptr name, i64 n, i64 t0, i64 v0, i64 t1, i64 v1, i64 t2, i64 v2) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) { php_throw_cls(cls, msg); return; }
+    uptr fl = ((uptr) ld64(phT + PHT_ph_dfile));
+    if (!fl) fl = "";
+    uptr p = php_fr_push(name, 0, 0, fl, ld64(phT + PHT_ph_dline), n);
+    if (n > 0) { st64(p, t0); st64(p + 8, v0); }
+    if (n > 1) { st64(p + 16, t1); st64(p + 24, v1); }
+    if (n > 2) { st64(p + 32, t2); st64(p + 40, v2); }
+    php_throw_cls(cls, msg);
+    php_fr_pop();
+}
+
+// a builtin's ValueError over its zval arguments (zend_argument_value_error):
+// `name(): tail`, the builtin php's innermost frame showing the first n of
+// a0..a3 as it was given them
+void php_valerr(uptr name, uptr tail, i64 n, uptr a0, uptr a1, uptr a2, uptr a3) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr msg = php_str_concat(php_str_new(name, php_cstrlen(name)), php_str_new("(): ", 4));
+    msg = php_str_concat(msg, php_str_new(tail, php_cstrlen(tail)));
+    if (((uptr) ld64(phT + PHT_ph_zalloc))) { php_throw_cls(php_str_new("ValueError", 10), msg); return; }
+    uptr fl = ((uptr) ld64(phT + PHT_ph_dfile));
+    if (!fl) fl = "";
+    uptr p = php_fr_push(name, 0, 0, fl, ld64(phT + PHT_ph_dline), n);
+    i64 i = 0;
+    loop {
+        if (i >= n) break;
+        uptr a = a0;
+        if (i == 1) a = a1;
+        if (i == 2) a = a2;
+        if (i == 3) a = a3;
+        st64(p + i * 16, FRT_ZV);
+        st64(p + i * 16 + 8, a);
+        i = i + 1;
+    }
+    php_throw_cls(php_str_new("ValueError", 10), msg);
+    php_fr_pop();
+}
+
+uptr php_fr_zv(i64 t, uptr p) {
+    i64 v = ld64(p);
+    if (t == FRT_INT)   return php_zlong(v);
+    if (t == FRT_FLOAT) return php_zdouble(ldf64(p));
+    if (t == FRT_STR)   return php_zstr(php_str_new(v + ZS_HDR, php_strlen(v)));
+    if (t == FRT_BOOL)  return php_zbool(v & 255);
+    if (t == FRT_ZV)    { if (!v) return php_znull(); return php_zv_dup(v); }
+    if (t == FRT_ARR)   return php_zv_dup(php_zarr(v));
+    if (t == FRT_OBJ)   return php_zobj(v);
+    return php_znull();
+}
+
+uptr php_cstr_z(uptr c) { return php_zstr(php_str_new(c, php_cstrlen(c))); }
+
+void php_exc_trace(uptr o) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr tr = php_arr_new(8);
+    i64 k = ld64(phT + PHT_ph_frn) - 1;
+    loop {
+        if (k < 0) break;
+        uptr r = ((uptr) ld64(phT + PHT_ph_fr)) + k * FR_SIZE;
+        if (ld64(r + 56)) { k = k - 1; continue; }   // a call still computing its arguments
+        uptr f = php_arr_new(8);
+        if (ld64(r + 24)) {
+            php_zv_cp(php_arr_sslot(f, php_str_new("file", 4)), php_cstr_z(ld64(r + 24)));
+            php_zv_cp(php_arr_sslot(f, php_str_new("line", 4)), php_zlong(ld64(r + 32)));
+        }
+        php_zv_cp(php_arr_sslot(f, php_str_new("function", 8)), php_cstr_z(ld64(r)));
+        if (ld64(r + 8)) {
+            php_zv_cp(php_arr_sslot(f, php_str_new("class", 5)), php_cstr_z(ld64(r + 8)));
+            uptr ty = "->";
+            if (ld64(r + 16) == 2) ty = "::";
+            php_zv_cp(php_arr_sslot(f, php_str_new("type", 4)), php_cstr_z(ty));
+        }
+        uptr args = php_arr_new(8);
+        uptr ap = ((uptr) ld64(phT + PHT_ph_fa)) + ld64(r + 40) * 16;
+        i64 i = 0;
+        loop {
+            if (i >= ld64(r + 48)) break;
+            if (ld64(ap + i * 16) == FRT_VAR) {
+                uptr h = ld64(ap + i * 16 + 8);
+                i64 used = php_ht_used(h);
+                i64 j = 0;
+                loop {
+                    if (j >= used) break;
+                    uptr b = php_ht_bkt(h, j);
+                    j = j + 1;
+                    if (ld8(b + 8) == IS_UNDEF) continue;
+                    php_arr_push(args, php_zv_dup(b));
+                }
+                i = i + 1;
+                continue;
+            }
+            php_arr_push(args, php_fr_zv(ld64(ap + i * 16), ap + i * 16 + 8));
+            i = i + 1;
+        }
+        php_zv_cp(php_arr_sslot(f, php_str_new("args", 4)), php_zarr(args));
+        php_arr_push(tr, php_zarr(f));
+        k = k - 1;
+    }
+    php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("trace", 5)), php_zarr(tr));
+}
+
+// one argument as getTraceAsString writes it (php's _build_trace_args): a
+// string quoted, escaped and cut at 15 bytes; a float as echo writes it at
+// precision 14, always with a fraction
+uptr php_trace_arg(uptr s, uptr z) {
+    i64 t = php_zv_type(z);
+    if (t == IS_NULL || t == IS_UNDEF) return php_str_concat(s, php_str_new("NULL", 4));
+    if (t == IS_FALSE) return php_str_concat(s, php_str_new("false", 5));
+    if (t == IS_TRUE) return php_str_concat(s, php_str_new("true", 4));
+    if (t == IS_LONG) return php_str_concat(s, php_itos(ld64(z)));
+    if (t == IS_DOUBLE) {
+        f64 d = ldf64(z);
+        uptr f = php_ftos(d);
+        s = php_str_concat(s, f);
+        i64 fin = d == d && d - d == 0.0;
+        i64 j = 0;
+        i64 plain = 1;
+        loop {
+            if (j >= php_strlen(f)) break;
+            i64 c = ld8(f + ZS_HDR + j);
+            if (c == '.' || c == 'e' || c == 'E') plain = 0;
+            j = j + 1;
+        }
+        if (fin && plain) s = php_str_concat(s, php_str_new(".0", 2));
+        return s;
+    }
+    if (t == IS_STRING) {
+        uptr v = ld64(z);
+        i64 n = php_strlen(v);
+        i64 m = n;
+        if (m > 15) m = 15;
+        s = php_str_concat(s, php_str_new("'", 1));
+        u8 hx[8];
+        i64 j = 0;
+        loop {
+            if (j >= m) break;
+            i64 c = ld8(v + ZS_HDR + j);
+            if (c == 10) s = php_str_concat(s, php_str_new("\\n", 2));
+            else if (c == 13) s = php_str_concat(s, php_str_new("\\r", 2));
+            else if (c == 9) s = php_str_concat(s, php_str_new("\\t", 2));
+            else if (c == 12) s = php_str_concat(s, php_str_new("\\f", 2));
+            else if (c == 11) s = php_str_concat(s, php_str_new("\\v", 2));
+            else if (c == 92) s = php_str_concat(s, php_str_new("\\\\", 2));
+            else if (c == 27) s = php_str_concat(s, php_str_new("\\e", 2));
+            else if (c < 32 || c > 126) {
+                st8(hx, 92);
+                st8(hx + 1, 'x');
+                st8(hx + 2, ld8("0123456789ABCDEF" + (c >> 4)));
+                st8(hx + 3, ld8("0123456789ABCDEF" + (c & 15)));
+                s = php_str_concat(s, php_str_new(hx, 4));
+            } else s = php_str_concat(s, php_str_new(v + ZS_HDR + j, 1));
+            j = j + 1;
+        }
+        if (n > 15) return php_str_concat(s, php_str_new("...'", 4));
+        return php_str_concat(s, php_str_new("'", 1));
+    }
+    if (t == IS_ARRAY) return php_str_concat(s, php_str_new("Array", 5));
+    if (t == IS_OBJECT) {
+        s = php_str_concat(s, php_str_new("Object(", 7));
+        s = php_str_concat(s, php_obj_cname(ld64(z)));
+        return php_str_concat(s, php_str_new(")", 1));
+    }
+    return php_str_concat(s, php_str_new("Resource", 8));
+}
+
+// getTraceAsString: "#i file(line): [class type]function(args)" per frame, then {main}
+uptr php_trace_str(uptr o) {
+    uptr tz = php_exm_get(o, php_str_new("trace", 5));
+    uptr s = php_str_new("", 0);
+    i64 num = 0;
+    if (php_zv_type(tz) == IS_ARRAY) {
+        uptr tr = ld64(tz);
+        i64 used = php_ht_used(tr);
+        i64 i = 0;
+        loop {
+            if (i >= used) break;
+            uptr b = php_ht_bkt(tr, i);
+            i = i + 1;
+            if (ld8(b + 8) != IS_ARRAY) continue;
+            uptr f = ld64(b);
+            s = php_str_concat(s, php_str_new("#", 1));
+            s = php_str_concat(s, php_itos(num));
+            s = php_str_concat(s, php_str_new(" ", 1));
+            num = num + 1;
+            uptr fz = php_ht_find(f, php_str_hash(php_str_new("file", 4)), php_str_new("file", 4));
+            if (fz && php_zv_type(fz) == IS_STRING) {
+                s = php_str_concat(s, ld64(fz));
+                s = php_str_concat(s, php_str_new("(", 1));
+                uptr lz = php_ht_find(f, php_str_hash(php_str_new("line", 4)), php_str_new("line", 4));
+                if (lz) s = php_str_concat(s, php_itos(php_zv_long(lz)));
+                s = php_str_concat(s, php_str_new("): ", 3));
+            } else s = php_str_concat(s, php_str_new("[internal function]: ", 21));
+            uptr cz = php_ht_find(f, php_str_hash(php_str_new("class", 5)), php_str_new("class", 5));
+            if (cz) {
+                s = php_str_concat(s, php_zv_str(cz));
+                uptr yz = php_ht_find(f, php_str_hash(php_str_new("type", 4)), php_str_new("type", 4));
+                if (yz) s = php_str_concat(s, php_zv_str(yz));
+            }
+            uptr nz = php_ht_find(f, php_str_hash(php_str_new("function", 8)), php_str_new("function", 8));
+            if (nz) s = php_str_concat(s, php_zv_str(nz));
+            s = php_str_concat(s, php_str_new("(", 1));
+            uptr az = php_ht_find(f, php_str_hash(php_str_new("args", 4)), php_str_new("args", 4));
+            if (az && php_zv_type(az) == IS_ARRAY) {
+                uptr aa = ld64(az);
+                i64 au = php_ht_used(aa);
+                i64 j = 0;
+                i64 first = 1;
+                loop {
+                    if (j >= au) break;
+                    uptr ab = php_ht_bkt(aa, j);
+                    j = j + 1;
+                    if (ld8(ab + 8) == IS_UNDEF) continue;
+                    if (!first) s = php_str_concat(s, php_str_new(", ", 2));
+                    first = 0;
+                    s = php_trace_arg(s, ab);
+                }
+            }
+            s = php_str_concat(s, php_str_new(")\n", 2));
+        }
+    }
+    s = php_str_concat(s, php_str_new("#", 1));
+    s = php_str_concat(s, php_itos(num));
+    return php_str_concat(s, php_str_new(" {main}", 7));
+}
+
+// Throwable::__toString, php's zend_exceptions.c: each throwable of the chain
+// "Class: message in file:line\nStack trace:\n<trace>", the previous ones
+// first and each later one after "\n\nNext "; a TypeError or an
+// ArgumentCountError whose message says where it was called reads "...
+// and defined in file:line". The text is kept in the private `string`.
+uptr php_exc_string(uptr o0) {
+    uptr str = php_str_new("", 0);
+    uptr o = o0;
+    i64 guard = 0;
+    loop {
+        if (!o || guard > 1000) break;
+        guard = guard + 1;
+        uptr prev = str;
+        uptr cn = php_obj_cname(o);
+        uptr msg = php_zv_str(php_exm_message(o));
+        if ((php_str_eq(cn, php_str_new("TypeError", 9)) || php_str_eq(cn, php_str_new("ArgumentCountError", 18)))
+            && php_strpos(msg, php_str_new(", called in ", 12), 0) >= 0)
+            msg = php_str_concat(msg, php_str_new(" and defined", 12));
+        str = cn;
+        if (php_strlen(msg)) { str = php_str_concat(str, php_str_new(": ", 2)); str = php_str_concat(str, msg); }
+        str = php_str_concat(str, php_str_new(" in ", 4));
+        str = php_str_concat(str, php_zv_str(php_exm_file(o)));
+        str = php_str_concat(str, php_str_new(":", 1));
+        str = php_str_concat(str, php_itos(php_zv_long(php_exm_line(o))));
+        str = php_str_concat(str, php_str_new("\nStack trace:\n", 14));
+        str = php_str_concat(str, php_trace_str(o));
+        if (php_strlen(prev)) { str = php_str_concat(str, php_str_new("\n\nNext ", 7)); str = php_str_concat(str, prev); }
+        uptr pz = php_exm_prev(o);
+        o = 0;
+        if (php_zv_type(pz) == IS_OBJECT) o = ld64(pz);
+    }
+    php_zv_cp(php_arr_sslot(php_obj_props(o0), php_str_new("string", 6)), php_zstr(str));
+    return str;
+}
+
 uptr php_exm_get(uptr o, uptr k) {
     uptr b = php_ht_find(php_obj_props(o), php_str_hash(k), k);
     if (!b) return php_znull();
@@ -6549,8 +8810,8 @@ uptr php_exm_code(uptr o) { return php_exm_get(o, php_str_new("code", 4)); }
 uptr php_exm_file(uptr o) { return php_exm_get(o, php_str_new("file", 4)); }
 uptr php_exm_line(uptr o) { return php_exm_get(o, php_str_new("line", 4)); }
 uptr php_exm_prev(uptr o) { return php_exm_get(o, php_str_new("previous", 8)); }
-uptr php_exm_trace(uptr o) { return php_zstr(php_str_new("#0 {main}", 9)); }
-uptr php_exm_tracearr(uptr o) { return php_zarr(php_arr_new(8)); }
+uptr php_exm_trace(uptr o) { return php_zstr(php_trace_str(o)); }
+uptr php_exm_tracearr(uptr o) { return php_zv_dup(php_exm_get(o, php_str_new("trace", 5))); }
 
 uptr php_exm_ctor(uptr o, uptr msg, uptr code, uptr prev) {
     if (msg) php_zv_cpv(php_arr_sslot(php_obj_props(o), php_str_new("message", 7)), msg);
@@ -6559,18 +8820,15 @@ uptr php_exm_ctor(uptr o, uptr msg, uptr code, uptr prev) {
     return php_znull();
 }
 
-uptr php_exm_tostring(uptr o) {
-    uptr s = php_obj_cname(o);
-    s = php_str_concat(s, php_str_new(": ", 2));
-    s = php_str_concat(s, php_zv_str(php_exm_message(o)));
-    return php_zstr(s);
-}
+uptr php_exm_tostring(uptr o) { return php_zstr(php_exc_string(o)); }
 
 void php_ex_members(uptr ce) {
     php_ce_prop(ce, php_str_new("message", 7), php_zstr(php_str_new("", 0)), V_PROTECTED);
+    php_ce_prop(ce, php_str_new("string", 6), php_zstr(php_str_new("", 0)), V_PRIVATE);
     php_ce_prop(ce, php_str_new("code", 4), php_zlong(0), V_PROTECTED);
     php_ce_prop(ce, php_str_new("file", 4), php_zstr(php_str_new("", 0)), V_PROTECTED);
     php_ce_prop(ce, php_str_new("line", 4), php_zlong(0), V_PROTECTED);
+    php_ce_prop(ce, php_str_new("trace", 5), php_zarr(php_arr_new(8)), V_PRIVATE);
     php_ce_prop(ce, php_str_new("previous", 8), php_znull(), V_PRIVATE);
     php_ce_method(ce, php_str_new("__construct", 11), &php_exm_ctor, V_PUBLIC);
     php_ce_method(ce, php_str_new("getMessage", 10), &php_exm_message, V_PUBLIC);
@@ -6636,7 +8894,7 @@ void php_bootstrap() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
 
     uptr le = php_sub("LogicException", 14, e);
     uptr re = php_sub("RuntimeException", 16, e);
-    uptr ia = php_sub("InvalidArgumentException", 24, le);
+    php_sub("InvalidArgumentException", 24, le);
     php_sub("DomainException", 15, le);
     php_sub("LengthException", 15, le);
     php_sub("OutOfRangeException", 19, le);
@@ -6661,24 +8919,19 @@ void php_uncaught() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
         st64(phT + PHT_ph_xhz, 0);
         uptr z = ((uptr) ld64(phT + PHT_ph_exc));
         st64(phT + PHT_ph_exc, 0);
+        // php calls it from the engine: its frame is `[internal function]`
+        st64(phT + PHT_ph_dfile, 0);
         php_call_zv(hz, 1, z, 0, 0, 0, 0);
         // measured on php 8.5.10: a handled uncaught exception exits 0
         if (!((uptr) ld64(phT + PHT_ph_exc))) { php_shutdown(); php_flush(); exit(0); }
     }
     uptr o = ld64(((uptr) ld64(phT + PHT_ph_exc)));
-    uptr s = php_str_concat(php_str_new("Uncaught ", 9), php_obj_cname(o));
-    uptr m = php_zv_str(php_exm_message(o));
-    if (php_strlen(m)) {
-        s = php_str_concat(s, php_str_new(": ", 2));
-        s = php_str_concat(s, m);
-    }
+    // php's zend_exception_error: Throwable::__toString's text (the chain,
+    // each with its trace), then where the outer one was created
+    uptr s = php_str_concat(php_str_new("Uncaught ", 9), php_exc_string(o));
     uptr f = php_zv_str(php_exm_file(o));
     i64 ln = php_zv_long(php_exm_line(o));
-    s = php_str_concat(s, php_str_new(" in ", 4));
-    s = php_str_concat(s, f);
-    s = php_str_concat(s, php_str_new(":", 1));
-    s = php_str_concat(s, php_itos(ln));
-    s = php_str_concat(s, php_str_new("\nStack trace:\n#0 {main}\n  thrown in ", 36));
+    s = php_str_concat(s, php_str_new("\n  thrown in ", 13));
     s = php_str_concat(s, f);
     s = php_str_concat(s, php_str_new(" on line ", 9));
     s = php_str_concat(s, php_itos(ln));
@@ -6703,6 +8956,7 @@ uptr php_exc_obj(uptr cls, uptr msg) { uptr phT = ph_tcur; if (!phT) phT = ph_ts
     php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)),
               php_zstr(php_str_new(fn, php_cstrlen(fn))));
     php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(ld64(phT + PHT_ph_dline)));
+    php_exc_trace(o);
     return php_zobj(o);
 }
 
@@ -7144,7 +9398,16 @@ i64 php_f_substr_compare(uptr mz, uptr nz, uptr oz, uptr lz, uptr _p5) {
     uptr m = php_zv_str(mz);
     uptr nd = php_zv_str(nz);
     i64 o = php_zv_long(oz);
-    if (o < 0) o = php_strlen(m) + o;
+    i64 na = php_nargs(mz, nz, oz, lz);
+    if (php_zv_type(lz) != IS_NULL && php_zv_long(lz) < 0) {
+        php_valerr("substr_compare", "Argument #4 ($length) must be greater than or equal to 0", na, mz, nz, oz, lz);
+        return 0;
+    }
+    if (o < 0) { o = php_strlen(m) + o; if (o < 0) o = 0; }
+    if (o > php_strlen(m)) {
+        php_valerr("substr_compare", "Argument #3 ($offset) must be contained in argument #1 ($haystack)", na, mz, nz, oz, lz);
+        return 0;
+    }
     uptr a = php_substr(m, o, 0, 0);
     uptr b = nd;
     if (php_zv_type(lz) != IS_NULL) {
@@ -7472,9 +9735,23 @@ uptr php_f_ucfirst(uptr z) { return php_ucfirst(php_zv_str(z)); }
 uptr php_implode(uptr sep, uptr a);
 uptr php_arr_new(i64 cap);
 
+// explode() with an empty separator is php's ValueError
+uptr php_explode(uptr sep, uptr s);
+uptr php_explode_c(uptr sep, uptr s) {
+    if (!php_strlen(sep)) {
+        php_valerr("explode", "Argument #1 ($separator) must not be empty", 2, php_zstr(sep), php_zstr(s), 0, 0);
+        return php_arr_new(8);
+    }
+    return php_explode(sep, s);
+}
+
 uptr php_f_explode3(uptr sz, uptr hz, uptr lz) {
     uptr sep = php_zv_str(sz);
     uptr s = php_zv_str(hz);
+    if (!php_strlen(sep)) {
+        php_valerr("explode", "Argument #1 ($separator) must not be empty", 3, sz, hz, lz, 0);
+        return php_arr_new(8);
+    }
     i64 lim = 9223372036854775807;
     if (php_zv_type(lz) != IS_NULL) lim = php_zv_long(lz);
     if (lim == 0) lim = 1;                       // php: a limit of 0 is a limit of 1
@@ -7512,19 +9789,37 @@ uptr php_f_explode3(uptr sz, uptr hz, uptr lz) {
     return r;
 }
 
+// how many arguments a library row was given: the trailing ones it was not
+// are php_znull's, and php's frame shows only what was passed
+i64 php_nargs(uptr a0, uptr a1, uptr a2, uptr a3) {
+    if (a3 && php_zv_type(a3) != IS_NULL) return 4;
+    if (a2 && php_zv_type(a2) != IS_NULL) return 3;
+    if (a1 && php_zv_type(a1) != IS_NULL) return 2;
+    return 1;
+}
+
 i64 php_f_substr_count(uptr hz, uptr nz, uptr oz, uptr lz) {
     uptr h = php_zv_str(hz);
     uptr nd = php_zv_str(nz);
     i64 hn = php_strlen(h);
+    i64 na = php_nargs(hz, nz, oz, lz);
+    if (!php_strlen(nd)) { php_valerr("substr_count", "Argument #2 ($needle) must not be empty", na, hz, nz, oz, lz); return 0; }
     i64 off = 0;
     if (php_zv_type(oz) != IS_NULL) off = php_zv_long(oz);
     if (off < 0) off = hn + off;
-    if (off < 0) off = 0;
+    if (off < 0 || off > hn) {
+        php_valerr("substr_count", "Argument #3 ($offset) must be contained in argument #1 ($haystack)", na, hz, nz, oz, lz);
+        return 0;
+    }
     i64 end = hn;
     if (php_zv_type(lz) != IS_NULL) {
         i64 len = php_zv_long(lz);
-        if (len < 0) end = hn + len;
-        if (len >= 0) end = off + len;
+        if (len < 0) len = len + (hn - off);
+        if (len < 0 || len > hn - off) {
+            php_valerr("substr_count", "Argument #4 ($length) must be contained in argument #1 ($haystack)", na, hz, nz, oz, lz);
+            return 0;
+        }
+        end = off + len;
     }
     if (end > hn) end = hn;
     i64 nn = php_strlen(nd);
@@ -7559,9 +9854,12 @@ u8 php_f_class_alias(uptr cz, uptr az, uptr autoz) { uptr phT = ph_tcur; if (!ph
     uptr cn = php_zv_str(cz);
     uptr ce = php_ce_find(cn);
     if (!ce) {
-        uptr m = php_str_concat(php_str_new("Class \"", 7), cn);
-        m = php_str_concat(m, php_str_new("\" not found", 11));
-        php_throw_str(php_str_new("Error", 5), m);
+        // php's answer is a warning and false, not a throw
+        php_mreset();
+        php_mc("Class \"");
+        php_ms(cn);
+        php_mc("\" not found");
+        php_raise_m(PHE_WARNING);
         return 0;
     }
     uptr an = php_case(php_zv_str(az), 0);
@@ -8115,7 +10413,10 @@ uptr php_f_array_chunk(uptr a, uptr sz, uptr pres) {
     uptr r = php_arr_new(8);
     if (php_zv_type(a) != IS_ARRAY) return r;
     i64 k = php_zv_long(sz);
-    if (k < 1) k = 1;
+    if (k < 1) {
+        php_valerr("array_chunk", "Argument #2 ($length) must be greater than 0", php_nargs(a, sz, pres, 0), a, sz, pres, 0);
+        return r;
+    }
     i64 keep = php_zv_bool(pres);
     uptr h = ld64(a);
     i64 used = php_ht_used(h);
@@ -8395,10 +10696,11 @@ uptr php_f_null2(uptr a, uptr b) { return php_znull(); }
 uptr php_f_hsd2(uptr a, uptr b) { return php_f_htmlspecialchars_decode(a, 0, 0); }
 
 // foreach over an object walks its properties, in declaration order
+uptr php_obj_live_props(uptr o);
 uptr php_zv_iter(uptr z) {
     i64 t = php_zv_type(z);
     if (t == IS_ARRAY) return ld64(z);
-    if (t == IS_OBJECT) return php_obj_props(ld64(z));
+    if (t == IS_OBJECT) return php_obj_live_props(ld64(z));
     php_mreset();
     php_mc("foreach() argument must be of type array|object, ");
     if (t == IS_TRUE) php_mc("true");
@@ -9284,8 +11586,6 @@ uptr php_f_stream_get_contents(uptr rz) { uptr phT = ph_tcur; if (!phT) phT = ph
 // through it exactly as php does.
 u8 php_f_settype(uptr vz, uptr tz) {
     uptr t = php_zv_str(tz);
-    i64 n = php_strlen(t);
-    uptr p = t + ZS_HDR;
     if (php_streq_c(t, "int", 3) || php_streq_c(t, "integer", 7)) {
         i64 v = php_zv_long(vz);
         st64(vz, v); php_zv_settype(vz, IS_LONG); return 1;
@@ -9312,7 +11612,8 @@ u8 php_f_settype(uptr vz, uptr tz) {
         st64(vz, a); php_zv_settype(vz, IS_ARRAY); return 1;
     }
     if (php_streq_c(t, "null", 4)) { st64(vz, 0); php_zv_settype(vz, IS_NULL); return 1; }
-    php_throw_str(php_str_new("ValueError", 10), php_str_new("settype(): Argument #2 ($type) must be a valid type", 51));
+    php_nat_throw(php_str_new("ValueError", 10), php_str_new("settype(): Argument #2 ($type) must be a valid type", 51),
+                  "settype", 2, FRT_ZV, vz, FRT_ZV, tz, 0, 0);
     return 0;
 }
 
@@ -9320,8 +11621,9 @@ uptr php_f_str_decrement(uptr sz) {
     uptr s = php_zv_str(sz);
     i64 n = php_strlen(s);
     if (!n) {
-        php_throw_str(php_str_new("ValueError", 10),
-            php_str_new("str_decrement(): Argument #1 ($string) must not be empty", 56));
+        php_nat_throw(php_str_new("ValueError", 10),
+            php_str_new("str_decrement(): Argument #1 ($string) must not be empty", 56),
+            "str_decrement", 1, FRT_ZV, sz, 0, 0, 0, 0);
         return php_zstr(s);
     }
     uptr o = php_str_new(s + ZS_HDR, n);
@@ -9335,8 +11637,9 @@ uptr php_f_str_decrement(uptr sz) {
         if (c == 'a') { st8(o + ZS_HDR + i, 'z'); i = i - 1; continue; }
         if (c == 'A') { st8(o + ZS_HDR + i, 'Z'); i = i - 1; continue; }
         if (c == '0') { st8(o + ZS_HDR + i, '9'); i = i - 1; continue; }
-        php_throw_str(php_str_new("ValueError", 10),
-            php_str_new("str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters", 93));
+        php_nat_throw(php_str_new("ValueError", 10),
+            php_str_new("str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters", 93),
+            "str_decrement", 1, FRT_ZV, sz, 0, 0, 0, 0);
         return php_zstr(s);
     }
     // every position wrapped: php drops the leading character
@@ -10023,7 +12326,7 @@ void php_ser(uptr z, i64 depth) {
     if (t == IS_OBJECT) {
         uptr o = ld64(z);
         uptr cn = php_obj_cname(o);
-        uptr pr = php_obj_props(o);
+        uptr pr = php_obj_live_props(o);
         php_write("O:", 2);
         php_echo_int(php_strlen(cn));
         php_write(":\"", 2);
@@ -10138,7 +12441,7 @@ void php_js(uptr z, i64 depth) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     uptr h = 0;
     i64 list = 0;
     if (t == IS_ARRAY) { h = ld64(z); list = php_f_array_is_list(z); }
-    if (t == IS_OBJECT) h = php_obj_props(ld64(z));
+    if (t == IS_OBJECT) h = php_obj_live_props(ld64(z));
     if (!h) { php_write("null", 4); return; }
     if (list) php_write("[", 1);
     if (!list) php_write("{", 1);
@@ -10148,7 +12451,7 @@ void php_js(uptr z, i64 depth) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     loop {
         if (i >= used) break;
         uptr b = php_ht_bkt(h, i);
-        if (ld8(b + 8) != IS_UNDEF) {
+        if (php_prop_live(b)) {
             if (!first) php_write(",", 1);
             first = 0;
             if (!list) {
@@ -10529,9 +12832,10 @@ uptr php_f_mb_internal_encoding(uptr z) {
     return php_zstr(php_str_new("UTF-8", 5));
 }
 
-uptr php_arg_range() {
-    php_throw_str(php_str_new("ValueError", 10),
-        php_str_new("func_get_arg(): Argument #1 ($position) must be less than the number of the arguments passed to the currently executed function", 127));
+uptr php_arg_range(i64 k) {
+    uptr m = php_str_new("func_get_arg(): Argument #1 ($position) must be less than the number of the arguments passed to the currently executed function", 127);
+    if (k < 0) m = php_str_new("func_get_arg(): Argument #1 ($position) must be greater than or equal to 0", 74);
+    php_nat_throw(php_str_new("ValueError", 10), m, "func_get_arg", 1, FRT_INT, k, 0, 0, 0, 0);
     return php_znull();
 }
 
@@ -10540,7 +12844,7 @@ uptr php_arg_range() {
 uptr php_arg_at(i64 k, i64 n, uptr a0, uptr a1, uptr a2, uptr a3, uptr a4,
                 uptr a5, uptr a6, uptr a7, uptr a8, uptr a9) {
     if (k < 0 || k >= n) {
-        return php_arg_range();
+        return php_arg_range(k);
     }
     if (k == 0) return a0;
     if (k == 1) return a1;
@@ -10623,6 +12927,22 @@ void php_unpack_check(uptr z, i64 cap) {
         }
         i = php_it_next(a, i + 1);
     }
+}
+
+// src/builtin.mc ph_spread_call: a spread into a builtin that reached a
+// count of arguments php takes and this implementation does not -- the same
+// kind of named limit a call's slots have (php_unpack_check)
+i64 php_spread_cap(uptr namez, uptr nz) {
+    uptr name = php_zv_str(namez);
+    php_flush();
+    write(2, "mc-php: ", 8);
+    uptr d = php_itos(php_zv_long(nz));
+    write(2, php_str_val(d), php_strlen(d));
+    write(2, " arguments by a spread into ", 28);
+    write(2, php_str_val(name), php_strlen(name));
+    write(2, "() is not implemented yet\n", 26);
+    exit(255);
+    return 0;
 }
 
 uptr php_unpack_at(uptr z, i64 k) {
@@ -10873,8 +13193,9 @@ uptr php_sr_subject(uptr sz, uptr rz, uptr subj, uptr cnt) {
 // array of replacements against a string search.
 uptr php_f_str_replace(uptr sz, uptr rz, uptr subz, uptr cz) {
     if (php_zv_type(sz) != IS_ARRAY && php_zv_type(rz) == IS_ARRAY) {
-        php_throw_str(php_str_new("TypeError", 9),
-            php_str_new("str_replace(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string", 99));
+        php_nat_throw(php_str_new("TypeError", 9),
+            php_str_new("str_replace(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string", 99),
+            "str_replace", 3, FRT_ZV, sz, FRT_ZV, rz, FRT_ZV, subz);
         return php_znull();
     }
     u8 cnt[8];
@@ -12574,4 +14895,66 @@ void ph_loop_destroy(uptr lp) {
     if (nio) ph_ev_drain(ld64(lp + LOOP_EV), nio);
     if (ld64(lp + LOOP_WAKE)) ph_ev_wake_close(ld64(lp + LOOP_EV), ld64(lp + LOOP_WAKE));
     ph_ev_close(ld64(lp + LOOP_EV));
+}
+
+// (array) and (object) of a value php's way. (array) of an object is its
+// initialized properties, a non-public one under php's mangled key -- NUL,
+// `*` or the declaring class, NUL, the name; (array) of null is empty, of a
+// scalar the one element. (object) of an array is a stdClass of its entries
+// (an integer key becomes the property's name), of a scalar a stdClass with
+// `scalar`, of null an empty one, of an object that object.
+uptr php_zv_to_arr(uptr z) {
+    i64 t = php_zv_type(z);
+    if (t == IS_ARRAY) return php_arr_copy(ld64(z));
+    uptr r = php_arr_new(8);
+    if (t == IS_NULL) return r;
+    if (t != IS_OBJECT) { php_zv_cpv(php_arr_islot(r, 0), z); return r; }
+    uptr o = ld64(z);
+    uptr ce = php_obj_ce(o);
+    uptr p = php_obj_live_props(o);
+    i64 used = php_ht_used(p);
+    i64 i = 0;
+    loop {
+        if (i >= used) break;
+        uptr b = php_ht_bkt(p, i);
+        i = i + 1;
+        if (ld8(b + 8) == IS_UNDEF) continue;
+        uptr k = ld64(b + 24);
+        if (!k) { php_zv_cpv(php_arr_islot(r, ld64(b + 16)), b); continue; }
+        i64 v = php_prop_vis(ce, k);
+        if (v == V_PROTECTED) k = php_str_concat(php_str_concat(php_str_concat(php_str_ch(0), php_str_new("*", 1)), php_str_ch(0)), k);
+        if (v == V_PRIVATE) {
+            uptr ow = php_ce_owner(ce, 72, k);
+            uptr on = php_str_new("", 0);
+            if (ow) on = ld64(ow);
+            uptr nul = php_str_ch(0);
+            k = php_str_concat(php_str_concat(php_str_concat(nul, on), nul), k);
+        }
+        php_zv_cpv(php_arr_sslot(r, k), b);
+    }
+    return r;
+}
+
+uptr php_zv_to_obj(uptr z) {
+    i64 t = php_zv_type(z);
+    if (t == IS_OBJECT) return php_zobj(ld64(z));
+    uptr o = php_obj_new(ph_ce_stdclass);
+    uptr p = php_obj_props(o);
+    if (t == IS_ARRAY) {
+        uptr a = ld64(z);
+        i64 used = php_ht_used(a);
+        i64 i = 0;
+        loop {
+            if (i >= used) break;
+            uptr b = php_ht_bkt(a, i);
+            i = i + 1;
+            if (ld8(b + 8) == IS_UNDEF) continue;
+            uptr k = ld64(b + 24);
+            if (!k) k = php_itos(ld64(b + 16));
+            // a property name is a string even when it looks like a number
+            php_zv_cpv(php_ht_slotfor(p, php_str_hash(k), k), b);
+        }
+    }
+    if (t != IS_ARRAY && t != IS_NULL) php_zv_cpv(php_arr_sslot(p, php_str_new("scalar", 6)), z);
+    return php_zobj(o);
 }

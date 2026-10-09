@@ -604,7 +604,7 @@ void phz_job_free(uptr job) {
 
 // a zend_string of these bytes, in the calling thread's Zend heap
 uptr phz_zs(uptr p, i64 n) {
-    uptr z = phx_em(ZSX_HDR + n + 1);
+    uptr z = phx_em(php_str_csz(n));
     st32(z, 1);
     st32(z + 4, ZSX_GC_STRING);
     st64(z + 8, 0);

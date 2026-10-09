@@ -75,7 +75,7 @@ echo PHP_OS, "|", PHP_OS_FAMILY, "|", DIRECTORY_SEPARATOR, "|", PATH_SEPARATOR, 
 var_dump(is_dir("."), is_file(__FILE__), filesize(__FILE__) > 0, strlen(getcwd()) > 0);
 var_dump(getenv("MCPHP_WIN_SMOKE"), sin(0.5), round(sqrt(2.0), 6));
 PHP
-PHPINI="-d display_errors=1 -d log_errors=1 -d html_errors=0 -d error_reporting=E_ALL"
+PHPINI="-d display_errors=1 -d log_errors=1 -d html_errors=0 -d error_reporting=E_ALL -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15"  # tests/fixtures.sh says why
 MCPHP_WIN_SMOKE=yes MCPHP_OUT=$tmp/smoke.bin MCPHP_BIN=$BIN \
     sh tests/mcphp.sh "$tmp/smoke.php" > "$tmp/m.out" 2>&1; mrc=$?
 MCPHP_WIN_SMOKE=yes "$PHP" $PHPINI "$tmp/smoke.php" > "$tmp/p.out" 2>&1; prc=$?

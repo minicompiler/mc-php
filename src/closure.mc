@@ -92,24 +92,61 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_narrow_ty = 0;
 
     // the parameters, read in the ENCLOSING scope's tokens but bound in the new one
-    u8 pnames[64];
-    u8 pdefs[64];
+    uptr pnames = xalloc(PH_MAXMARGS * 8 + 8);
+    uptr pdefs = xalloc(PH_MAXMARGS * 8 + 8);
+    uptr pdpre = xalloc(PH_MAXMARGS * 8 + 8);
+    uptr ppcw = xalloc(PH_MAXMARGS * 8 + 8);      // the declared scalar/array type, coerced in the prologue
+    uptr pptm = xalloc(PH_MAXMARGS * 8 + 8);
+    uptr ppln = xalloc(PH_MAXMARGS * 8 + 8);
+    uptr pdnul = xalloc(PH_MAXMARGS * 8 + 8);
+    uptr pptc = xalloc(PH_MAXMARGS * 8 + 8);      // the declaration's class names
+    uptr pptb = xalloc(PH_MAXMARGS * 8 + 8);
     i64 np = 0;
+    i64 vk = 0 - 1;                // the variadic parameter's position
     ph_want("(", 1, "expected ( in a php closure");
     loop {
         if (ph_at(")", 1)) break;
-        if (ph_at("...", 3)) ph_todo(fl, line, "a variadic parameter in a closure");
-        if (!ph_at("$", 1)) ph_skip_type();
+        if (vk >= 0) err_at(fl, line, "mc-php: only the last parameter can be variadic");
+        i64 variadic = 0;
+        if (ph_at("...", 3)) { ph_next(); variadic = 1; }
+        i64 pcw = 0;
+        i64 ptm = 0;
+        uptr ptc = "";
+        i64 ptb = 0;
+        if (!ph_at("$", 1) && !ph_at("&", 1)) {
+            i64 dt = ph_param_type();
+            ptm = ph_ptm;
+            ptc = ph_ptc;
+            ptb = ph_ptbad;
+            if (dt == PT_INT)    pcw = 1;
+            if (dt == PT_FLOAT)  pcw = 2;
+            if (dt == PT_STRING) pcw = 3;
+            if (dt == PT_BOOL)   pcw = 4;
+            if (dt == PT_ARR)    pcw = 5;
+        }
         if (ph_at("&", 1)) ph_todo(fl, line, "a by-reference parameter in a closure");
+        if (ph_at("...", 3)) { ph_next(); variadic = 1; }
         if (!ph_at("$", 1)) ph_todo2(fl, line, "a php parameter", ph_tname);
+        i64 pln = ph_tline;
         ph_next();
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
         i64 dflt = 0;
-        if (ph_accept("=", 1)) { i64 dv = ph_expr(0); dflt = ph_to_mixed(dv, ph_ety); }
-        if (np >= 5) ph_todo(fl, line, "more than five parameters in a closure");
+        i64 dpre = 0;
+        i64 dnul = 0;
+        if (variadic && ph_at("=", 1)) err_at(fl, line, "mc-php: variadic parameter cannot have a default value");
+        if (ph_accept("=", 1)) { i64 dv = ph_param_default(); dpre = ph_dflt_pre; dnul = ph_ety == PT_NULL; dflt = ph_to_mixed(dv, ph_ety); }
+        if (np >= PH_MAXMARGS) ph_todo(fl, line, "more than 256 parameters in a closure");
+        if (variadic) vk = np;
         st64(pnames + np * 8, d);
         st64(pdefs + np * 8, dflt);
+        st64(pdpre + np * 8, dpre);
+        st64(ppcw + np * 8, pcw);
+        st64(pptm + np * 8, ptm);
+        st64(ppln + np * 8, pln);
+        st64(pdnul + np * 8, dnul);
+        st64(pptc + np * 8, ptc);
+        st64(pptb + np * 8, ptb);
         np = np + 1;
         if (!ph_accept(",", 1)) break;
     }
@@ -169,7 +206,11 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
             ph_want(")", 1, "expected ) after use");
         }
     }
-    if (ph_at(":", 1)) { ph_next(); ph_skip_type(); }
+    i64 crt = 0;
+    i64 crtw = PT_MIXED;
+    i64 crm = 0;
+    uptr crc = 0;
+    if (ph_at(":", 1)) { ph_next(); crtw = ph_rtype_read(); crt = 1; crm = ph_rtr_m; crc = ph_rtr_cls; }
 
     // the creation site, built while the enclosing variables are still in scope
     ph_nonce = ph_nonce + 1;
@@ -186,7 +227,22 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     i64 aref = node_new(N_IDENT, line, fl);
     set_nd_name(aref, an);
     set_nd_type(aref, ty_parr);
-    i64 made = ph_c3("php_closure_new", fp, aref, thisp, ty_pzv);
+    // php's name for it, which its frames carry (Zend/zend_compile.c
+    // zend_begin_func_decl): {closure:WHERE:LINE}, WHERE being the closure it
+    // is written in, else the function -- `N\g()`, `N\C::m()` -- else the file
+    uptr cfl = ph_disp(ph_absfile(fl));
+    if (ph_cur_clo) cfl = ph_cur_clo;
+    if (!ph_cur_clo && ph_cur_fn) {
+        cfl = ph_cur_fn;
+        if (ph_cur_cls) cfl = p_cat(p_cat(ph_cur_cls, "::", 0, 2), ph_cur_fn, 0, cstrlen(ph_cur_fn));
+        cfl = p_cat(cfl, "()", 0, 2);
+    }
+    uptr cnm = p_cat("{closure:", cfl, 0, cstrlen(cfl));
+    cnm = p_cat(cnm, ":", 0, 1);
+    cnm = p_cat(cnm, php_dec(line), 0, cstrlen(php_dec(line)));
+    cnm = p_cat(cnm, "}", 0, 1);
+    i64 made = ph_c4("php_closure_new", fp, aref, thisp, ph_strlit(cnm, cstrlen(cnm)), ty_pzv);
+    if (ph_cur_cls) made = ph_c2("php_closure_scope", made, ph_strlit(ph_cur_cls, cstrlen(ph_cur_cls)), ty_pzv);
 
     // now the body, in its own scope
     uptr savenv = ph_scope_save();
@@ -195,6 +251,9 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     i64 sret = ph_fn_ret;
     i64 sm = ph_in_method;
     i64 sst = ph_in_static;
+    uptr sclo = ph_cur_clo;
+    ph_cur_clo = cnm;
+    uptr srtc = ph_rt_save();
     i64 stl = ph_toplevel;
     i64 sls = ph_nls;
     // a closure's body is a function of its own: the try it is written in
@@ -212,6 +271,17 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_hoist_tail = 0;
     ph_fn_ret = PT_MIXED;
     ph_fn_retref = 0;
+    i64 sfvc = ph_fn_void;
+    ph_fn_void = 0;
+    // its declared return type, checked as a function's is
+    ph_rtr_m = crm;
+    ph_rtr_cls = crc;
+    // php's messages name a closure written in a class with that scope:
+    // `C::{closure:C::m():2}()`
+    uptr cmsg = cnm;
+    if (ph_cur_cls) cmsg = p_cat(p_cat(ph_cur_cls, "::", 0, 2), cnm, 0, cstrlen(cnm));
+    ph_rt_set(crt, cmsg);
+    if (crt && crtw == PT_VOID) ph_fn_void = 1;
     ph_toplevel = 0;
     ph_nls = 0;
     ph_in_try = 0;
@@ -229,13 +299,159 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     i64 pre = 0;
     i64 pret = 0;
     i64 i2 = 0;
+    // a parameter past the fifth, or a variadic one, is not a slot: its
+    // values come from the list php_call_zv hands this closure
+    // (lib/php_rt.mc php_xargs_take), held in `xan`
+    uptr xan = 0;
+    if (vk >= 0 || np > 5) {
+        ph_nonce = ph_nonce + 1;
+        xan = p_cat("phxa_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+        ph_local(xan, TY_UPTR);
+        i64 me = node_new(N_ADDR, line, fl);
+        set_nd_name(me, cn);
+        set_nd_type(me, TY_UPTR);
+        pre = ph_set(xan, ph_c1("php_xargs_take", me, TY_UPTR));
+        pret = pre;
+    }
+    ph_ac_begin(cmsg, fl);
     loop {
         if (i2 >= np) break;
         uptr d2 = ld64(pnames + i2 * 8);
         ph_var_bind_raw(d2, PT_MIXED);
-        i64 pn = param_new(TY_UPTR, ph_mangle(d2, "v_"));
-        set_nd_next(tail, pn);
-        tail = pn;
+        if (i2 == vk) {
+            // `...$rest`: the slots from here to the fifth, then the list
+            ph_local(ph_mangle(d2, "v_"), ty_pzv);
+            u8 vav[72];
+            i64 xr = node_new(N_IDENT, line, fl);
+            set_nd_name(xr, xan);
+            set_nd_type(xr, TY_UPTR);
+            st64(vav, xr);
+            st64(vav + 8, ph_int(i2));
+            st64(vav + 16, ph_int(5));
+            i64 si = 0;
+            loop {
+                if (si >= 6) break;
+                i64 sv = ph_int(0);
+                if (si >= i2 && si < 5) {
+                    uptr sn = p_cat("phvs_", php_dec(si), 0, cstrlen(php_dec(si)));
+                    i64 sp = param_new(TY_UPTR, sn);
+                    set_nd_next(tail, sp);
+                    tail = sp;
+                    sv = node_new(N_IDENT, line, fl);
+                    set_nd_name(sv, sn);
+                    set_nd_type(sv, TY_UPTR);
+                }
+                st64(vav + 24 + si * 8, sv);
+                si = si + 1;
+            }
+            i64 vs = ph_set(ph_mangle(d2, "v_"), ph_calln("php_va_m", vav, 9, ty_pzv));
+            if (pret) set_nd_next(pret, vs);
+            if (!pret) pre = vs;
+            pret = vs;
+            i64 vpcw = ld64(ppcw + i2 * 8);
+            if (vpcw) {
+                i64 pv4 = node_new(N_IDENT, line, fl);
+                set_nd_name(pv4, ph_mangle(d2, "v_"));
+                set_nd_type(pv4, ty_pzv);
+                uptr vcls = "";
+                if (ph_cur_cls) vcls = ph_cur_cls;
+                uptr vdf = ph_disp(ph_absfile(fl));
+                u8 vcc[56];
+                st64(vcc, pv4);
+                st64(vcc + 8, ph_int(vpcw | ph_strict_bit(fl)));
+                st64(vcc + 16, ph_strlit(vcls, cstrlen(vcls)));
+                st64(vcc + 24, ph_strlit(cnm, cstrlen(cnm)));
+                st64(vcc + 32, ph_int(i2 + 1));
+                st64(vcc + 40, ph_strlit(vdf, cstrlen(vdf)));
+                st64(vcc + 48, ph_int(ld64(ppln + i2 * 8)));
+                i64 vc = ph_set(ph_mangle(d2, "v_"), ph_calln("php_va_coerce", vcc, 7, ty_pzv));
+                set_nd_next(pret, vc);
+                pret = vc;
+            }
+            if (!ph_ptscalar(ld64(pptm + i2 * 8), ld64(pptc + i2 * 8))) {
+                i64 pv6 = node_new(N_IDENT, line, fl);
+                set_nd_name(pv6, ph_mangle(d2, "v_"));
+                set_nd_type(pv6, ty_pzv);
+                uptr vcls2 = "";
+                if (ph_cur_cls) vcls2 = ph_cur_cls;
+                i64 vtk = ph_ptcheck(pv6, ld64(pptm + i2 * 8), ld64(pptc + i2 * 8), ld64(pptb + i2 * 8), 0, vcls2, cnm, i2 + 1, "",
+                                     ph_disp(ph_absfile(fl)), ld64(ppln + i2 * 8), fl);
+                if (vtk) {
+                    set_nd_name(vtk, "php_va_tcheck");
+                    i64 vt2 = ph_set(ph_mangle(d2, "v_"), vtk);
+                    set_nd_next(pret, vt2);
+                    pret = vt2;
+                }
+            }
+            i2 = i2 + 1;
+            continue;
+        }
+        if (i2 < 5) {
+            i64 pn = param_new(TY_UPTR, ph_mangle(d2, "v_"));
+            set_nd_next(tail, pn);
+            tail = pn;
+        } else {
+            // past the fifth: the caller's zval from the list, or 0
+            ph_local(ph_mangle(d2, "v_"), ty_pzv);
+            i64 xr2 = node_new(N_IDENT, line, fl);
+            set_nd_name(xr2, xan);
+            set_nd_type(xr2, TY_UPTR);
+            i64 xs = ph_set(ph_mangle(d2, "v_"), ph_c2("php_xarg_at", xr2, ph_int(i2 - 5), ty_pzv));
+            if (pret) set_nd_next(pret, xs);
+            if (!pret) pre = xs;
+            pret = xs;
+        }
+        // the declared type, checked as a method's is (a passed argument
+        // only: a missing one is 0 and php_param_coerce leaves it)
+        i64 pcw2 = ld64(ppcw + i2 * 8);
+        // `int $x = null` is implicitly nullable: the general check below
+        if (ld64(pdnul + i2 * 8)) pcw2 = 0;
+        if (pcw2) {
+            uptr bare2 = d2 + 1;
+            i64 pv3 = node_new(N_IDENT, line, fl);
+            set_nd_name(pv3, ph_mangle(d2, "v_"));
+            set_nd_type(pv3, ty_pzv);
+            u8 pca[64];
+            st64(pca, pv3);
+            st64(pca + 8, ph_int(pcw2 | ph_strict_bit(fl)));
+            uptr ccls = "";
+            if (ph_cur_cls) ccls = ph_cur_cls;
+            st64(pca + 16, ph_strlit(ccls, cstrlen(ccls)));
+            st64(pca + 24, ph_strlit(cnm, cstrlen(cnm)));
+            st64(pca + 32, ph_int(i2 + 1));
+            st64(pca + 40, ph_strlit(bare2, cstrlen(bare2)));
+            uptr afl2 = ph_disp(ph_absfile(fl));
+            st64(pca + 48, ph_strlit(afl2, cstrlen(afl2)));
+            st64(pca + 56, ph_int(ld64(ppln + i2 * 8)));
+            i64 cz = ph_set(ph_mangle(d2, "v_"), ph_calln("php_param_coerce_at", pca, 8, ty_pzv));
+            if (pret) set_nd_next(pret, cz);
+            if (!pret) pre = cz;
+            pret = cz;
+            // its frame shows the converted value (php_fr_coerced)
+            i64 fc = ph_stmt_of(ph_quiet("php_fr_coerced", 3, ph_int(i2), ph_tref(pv3), ph_strlit(cnm, cstrlen(cnm)), 0, TY_VOID));
+            set_nd_next(pret, fc);
+            pret = fc;
+        }
+        // anything else php checks (a nullable, a union, a class): the
+        // general check, as the return value's
+        if (ld64(pdnul + i2 * 8) || !ph_ptscalar(ld64(pptm + i2 * 8), ld64(pptc + i2 * 8))) {
+            i64 pv5 = node_new(N_IDENT, line, fl);
+            set_nd_name(pv5, ph_mangle(d2, "v_"));
+            set_nd_type(pv5, ty_pzv);
+            uptr ccls5 = "";
+            if (ph_cur_cls) ccls5 = ph_cur_cls;
+            i64 tck = ph_ptcheck(pv5, ld64(pptm + i2 * 8), ld64(pptc + i2 * 8), ld64(pptb + i2 * 8), ld64(pdnul + i2 * 8),
+                                 ccls5, cnm, i2 + 1, d2 + 1, ph_disp(ph_absfile(fl)), ld64(ppln + i2 * 8), fl);
+            if (tck) {
+                i64 tc2 = ph_set(ph_mangle(d2, "v_"), tck);
+                if (pret) set_nd_next(pret, tc2);
+                if (!pret) pre = tc2;
+                pret = tc2;
+                i64 fc4 = ph_stmt_of(ph_quiet("php_fr_coerced", 3, ph_int(i2), ph_tref(pv5), ph_strlit(cnm, cstrlen(cnm)), 0, TY_VOID));
+                set_nd_next(pret, fc4);
+                pret = fc4;
+            }
+        }
         i64 miss = node_new(N_UNARY, line, fl);
         set_nd_op(miss, ph_tok("!", 1));
         i64 pr = node_new(N_IDENT, line, fl);
@@ -243,15 +459,25 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         set_nd_type(pr, ty_pzv);
         set_nd_a(miss, pr);
         set_nd_type(miss, TY_U8);
+        // a required one raises (ph_ac_end), an optional one takes its default
         i64 dflt2 = ld64(pdefs + i2 * 8);
-        if (!dflt2) dflt2 = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
+        i64 fill2 = 0;
+        if (dflt2) fill2 = ph_param_fill(ph_mangle(d2, "v_"), dflt2, ld64(pdpre + i2 * 8));
         i64 iff = node_new(N_IF, line, fl);
         set_nd_a(iff, miss);
-        set_nd_b(iff, ph_set(ph_mangle(d2, "v_"), dflt2));
+        set_nd_b(iff, fill2);
         if (pret) set_nd_next(pret, iff);
         if (!pret) pre = iff;
         pret = iff;
+        ph_ac_param(iff, dflt2 != 0, ld64(pptm + i2 * 8), ld64(pdnul + i2 * 8), d2 + 1, ld64(ppln + i2 * 8));
         i2 = i2 + 1;
+    }
+    ph_ac_end();
+    // a refused or missing argument stops the closure before its body
+    if (pre) {
+        pre = ph_prefix_stmts(pre, ph_check(line, fl));
+        pret = pre;
+        loop { if (!nd_next(pret)) break; pret = nd_next(pret); }
     }
     // the captured variables: bound here, and read out of the use array
     // after the body, which for an arrow function says which ones it names
@@ -272,19 +498,57 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     // answer must not depend on that.
     uptr spk = pkx_names;
     uptr spf = pkx_fixed;
+    uptr sps = pkx_stable;
     pkx_names = 0;
     pkx_fixed = 0;
+    pkx_stable = 0;
     if (arrow) {
         ph_want("=>", 2, "expected => in a php arrow function");
+        // the body is an expression and no statement: it announces its own
+        // position as ph_stmt would, or a diagnostic or a throw inside it
+        // carried the line of the statement that CALLED the closure
+        i64 eline = ph_tline;
+        uptr efl = ph_tfile;
+        i64 sct = ph_can_throw;
+        ph_can_throw = 0;
         i64 rv = ph_expr(0);
-        i64 r = node_new(N_RETURN, line, fl);
-        set_nd_a(r, ph_to_mixed(ph_own(rv, ph_ety), ph_ety));
+        // the body IS the returned value: a void or never one is php's
+        // compile-time fatal, as `return EXPR;` is
+        uptr akind = "function";
+        if (ph_cur_cls) akind = "method";
+        if (ph_fn_void) {
+            if (ph_ety == PT_NULL && nd_kind(rv) == N_CALL && str_eq(nd_name(rv), "php_znull"))
+                ph_phpfatal_x(fl, line, p_cat(p_cat("A void ", akind, 0, cstrlen(akind)), " must not return a value (did you mean \"return;\" instead of \"return null;\"?)", 0, 76), 1);
+            ph_phpfatal_x(fl, line, p_cat(p_cat("A void ", akind, 0, cstrlen(akind)), " must not return a value", 0, 24), 1);
+        }
+        // `fn(): never => expr` is no compile error: php runs the expression
+        // and then refuses the implicit return, as a never function's end does
+        i64 r = 0;
+        if (ph_fn_rtm & RT_NEVER) {
+            if (nd_kind(rv) != N_INT) ph_pending_stmt(ph_expr_stmt_of(rv));
+            i64 scl = ph_close_line;
+            ph_close_line = eline;
+            r = ph_ret_null(line, fl);
+            ph_close_line = scl;
+        }
+        if (!r) {
+            r = node_new(N_RETURN, line, fl);
+            set_nd_a(r, ph_ret_checked(ph_to_mixed(ph_own(rv, ph_ety), ph_ety), efl));
+        }
+        i64 w = ph_wrap(r);
+        if (ph_can_throw && !ph_is_pos_at(w, efl, eline)) {
+            i64 pw = ph_posstmt(efl, eline);
+            set_nd_next(pw, w);
+            w = pw;
+        }
+        ph_can_throw = sct;
         body = node_new(N_BLOCK, line, fl);
-        set_nd_a(body, ph_wrap(r));
+        set_nd_a(body, w);
     }
     if (!arrow) body = ph_block();
     pkx_names = spk;
     pkx_fixed = spf;
+    pkx_stable = sps;
     // php's rule for fn(): capture, by value at creation, the variables the
     // body names and no other -- one it does not name is never read, and may
     // be a slot nothing assigned on this path (a catch's $e)
@@ -344,8 +608,11 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_hoist_head = hh;
     ph_hoist_tail = ht;
     ph_fn_ret = sret;
+    ph_fn_void = sfvc;
     ph_fn_retref = srrc;
+    ph_rt_restore(srtc);
     ph_in_method = sm;
+    ph_cur_clo = sclo;
     ph_in_static = sst;
     ph_toplevel = stl;
     ph_nls = sls;

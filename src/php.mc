@@ -34,6 +34,7 @@
 #include "rc.mc"
 #include "opt.mc"
 #include "expr.mc"
+#include "arginfo.mc"
 #include "builtin.mc"
 #include "stmt.mc"
 #include "lvalue.mc"

@@ -63,6 +63,7 @@ The buffers follow the scalars. Step 3 appends three words for the thread API: `
 | `ce_` | a class entry | built at bootstrap, and read-only after it. |
 | `phf_` | a call site's cache of php's function table | written only through `phx_flook`, which another thread cannot reach. |
 | `phst_` | a function `static` | shared by every thread since step 3, as a C `static` is. |
+| `phsi` | the function `static`s proved to hold only ints, one i64 slot each (`src/decl.mc`) | the same as `phst_`: shared by every thread since step 3, as a C `static` is. |
 
 One more shared write is allowed and is benign: the hash that a string caches in its own header.
 A literal is shared, and two threads can hash it at the same time. Both threads write the same
@@ -288,11 +289,11 @@ static memory. The module does the same with what the compiled PHP writes:
 | the constants | `ph_consts` |
 | the class registry, and `Closure` | `ph_classes` `ph_ce_closure` |
 | a class's static properties | a table per class (`phz_sp`), copied from the class's own |
-| a function's `static`s, and the list that resets them | the `phst_` slots, `ph_rsl` |
+| a function's `static`s, and the list that resets them | the `phst_` slots, `ph_rsl`; the int-only ones, the `phsi` slots (`phz_statics` for a ZTS module, `phx_nsnap` for an NTS one) |
 | a call site's cache of php's function table | the `phf_` slots |
 | the engine's executor globals | `phx_eg` |
 
-The `phst_` and `phf_` slots are module globals the compiler generates. For a ZTS output
+The `phst_`, `phsi` and `phf_` slots are module globals the compiler generates. For a ZTS output
 `src/tls.mc` moves them into an area of their own, one per php thread (`phz_mod`), and rewrites
 every use to read it. At RINIT, `phz_privatize` copies MINIT's arrays and objects into the
 thread's arena: arrays and objects deeply, with one identity map per request, so a value two roots

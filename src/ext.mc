@@ -216,6 +216,9 @@ i64  ph_bd_nul(i64 fi, i64 k) { return ld64(ph_fbnul + (fi * (PH_MAXP + 1) + k) 
 i64 ph_ext_plain(i64 fi, i64 k) {
     i64 np = ld64(ph_fnp + fi * 8);
     if (ld64(ph_fvar + fi * 8) && k == np - 1) return 0;
+    // a native nullable scalar admits null, which phx_chk's one-tag test does
+    // not: it keeps the phx_chk2 guard (null allowed) and the value+flag read
+    if (ld64(ph_fopt + (fi * PH_MAXP + k) * 8)) return 0;
     return ph_ext_scalar(ld64(ph_fpt + (fi * PH_MAXP + k) * 8));
 }
 
@@ -395,16 +398,47 @@ i64 ph_ext_noann(i64 s) {
     return h;
 }
 
-// the call to the php function, with every argument already checked
+// A native nullable-scalar argument k, read CALL-FREE after phx_chk2 validated
+// it (null / absent allowed, else int). The null flag is 1 when the argument
+// was not passed (NUM_ARGS <= k) or is IS_NULL -- the `||` reads the type byte
+// only when it was passed. The value is the int word of the engine arg; the
+// pointer is ex when absent (a valid in-bounds read whose value the flag then
+// discards) and the real slot otherwise, so no out-of-range read happens.
+i64 ph_ext_optflag(i64 k) {
+    i64 ck = 80 + k * 16;
+    i64 na = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR), 0, 0, 0, TY_I64);
+    i64 absent = ph_bin(ph_tok("<=", 2), na, ph_int(k), TY_U8);
+    i64 ty = ph_quiet("ld8", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(ck + 8), TY_UPTR), 0, 0, 0, TY_I64);
+    i64 isnull = ph_bin(ph_tok("==", 2), ty, ph_int(1), TY_U8);         // IS_NULL
+    return ph_bin(ph_tok("||", 2), absent, isnull, TY_U8);
+}
+i64 ph_ext_optval(i64 k) {
+    i64 ck = 80 + k * 16;
+    i64 na = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR), 0, 0, 0, TY_I64);
+    i64 present = ph_bin(ph_tok(">", 1), na, ph_int(k), TY_U8);
+    i64 ptr = ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_bin(ph_tok("*", 1), ph_int(ck), present, TY_I64), TY_UPTR);
+    return ph_quiet("ld64", 1, ptr, 0, 0, 0, TY_I64);
+}
+
+// the call to the php function, with every argument already checked. A native
+// nullable-scalar parameter contributes TWO arguments, value then flag, in the
+// slot order src/decl.mc and src/builtin.mc agree on.
 i64 ph_ext_body(i64 fi, uptr name, i64 np, i64 rt) {
-    u8 av[96];
+    u8 av[200];
     i64 k = 0;
+    i64 m = 0;
     loop {
         if (k >= np) break;
-        st64(av + k * 8, ph_ext_read(fi, k));
+        if (ld64(ph_fopt + (fi * PH_MAXP + k) * 8)) {
+            st64(av + m * 8, ph_ext_optval(k));  m = m + 1;
+            st64(av + m * 8, ph_ext_optflag(k)); m = m + 1;
+        } else {
+            st64(av + m * 8, ph_ext_read(fi, k));
+            m = m + 1;
+        }
         k = k + 1;
     }
-    return ph_ext_write(rt, ph_calln(ph_mangle(name, "f_"), av, np, ph_mcty(rt)));
+    return ph_ext_write(rt, ph_calln(ph_mangle(name, "f_"), av, m, ph_mcty(rt)));
 }
 
 // 1 iff every occurrence of `v` in `s` is the base of an ld32/ld64 field read
@@ -478,6 +512,49 @@ void ph_borrow_rewrite(i64 s, i64 fi, i64 root) {
     }
 }
 
+// May a borrowed string argument go without its escape reference
+// (phx_zarg_ro -> phx_zarg_rov)? ph_borrow_scan proved the body only reads
+// the argument's words; what a string read from them can still reach is a
+// call. When every call in the handler is one that neither keeps a string it
+// is handed nor answers one of its arguments -- the handler's own machinery
+// (phx_*, whose return writers take their own reference), mc's loads and
+// stores, and the few readers below (strspn's scans answer a count) -- the
+// string cannot outlive the call
+// nor be released by it, and the engine's reference holds it throughout.
+i64 ph_ext_pfx(uptr s, uptr p) {
+    i64 i = 0;
+    loop { i64 c = ld8(p + i); if (!c) return 1; if (ld8(s + i) != c) return 0; i = i + 1; }
+    return 0;
+}
+i64 ph_ext_noretain(i64 s) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_CALL) {
+            uptr c = nd_name(s);
+            i64 ok = phi_intrinsic(c) || ph_ext_pfx(c, "phx_") || str_eq(c, "ph_tslow")
+                || ph_ext_pfx(c, "php_spn") || str_eq(c, "php_strlen")
+                || str_eq(c, "php_chr") || str_eq(c, "php_argcount_n") || str_eq(c, "php_rc_drain")
+                || str_eq(c, "php_str_byte_c") || str_eq(c, "php_str_byte_d") || str_eq(c, "php_str_byte")
+                || str_eq(c, "php_str_lit") || str_eq(c, "php_bmap_lit");
+            if (!ok) return 0;
+        }
+        if (!ph_ext_noretain(nd_a(s)) || !ph_ext_noretain(nd_b(s)) || !ph_ext_noretain(nd_c(s)) || !ph_ext_noretain(nd_d(s))) return 0;
+        s = nd_next(s);
+    }
+    return 1;
+}
+void ph_ext_rov(i64 s) {
+    loop {
+        if (!s) break;
+        if (nd_kind(s) == N_CALL && str_eq(nd_name(s), "phx_zarg_ro")) set_nd_name(s, "phx_zarg_rov");
+        ph_ext_rov(nd_a(s));
+        ph_ext_rov(nd_b(s));
+        ph_ext_rov(nd_c(s));
+        ph_ext_rov(nd_d(s));
+        s = nd_next(s);
+    }
+}
+
 void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     uptr name = ld64(ph_fname + fi * 8);
     i64 np = ld64(ph_fnp + fi * 8);
@@ -510,7 +587,30 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
             st64(dv + 56, ph_raw(pn, cstrlen(pn)));
             uptr cf = "phx_chk2";
             if (ld64(ph_fvar + fi * 8) && k == np - 1) cf = "phx_chk_rest";
-            body = ph_ext_if(ph_calln(cf, dv, 8, TY_I64), body);
+            i64 c2 = ph_calln(cf, dv, 8, TY_I64);
+            // phx_chk2's common answers in place, as for a plain parameter: an
+            // argument not passed (its default fills it), the one tag an
+            // int, float or string declaration takes as it is, or null where
+            // the declaration admits it (bcmath's `?int $scale = null` on
+            // every function). Anything else -- a reference, an int for a
+            // float, a type to reject -- is phx_chk2's, which raises.
+            i64 dt = ph_bd_pt(fi, k);
+            i64 tg2 = 0;
+            if (dt == PT_INT) tg2 = 4;                    // IS_LONG
+            if (dt == PT_FLOAT) tg2 = 5;                  // IS_DOUBLE
+            if (dt == PT_STRING) tg2 = 6;                 // IS_STRING
+            if (str_eq(cf, "phx_chk2") && tg2 && ph_bd_k(fi, k) == BK_ANY) {
+                i64 ty2 = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
+                i64 fast = ph_bin(ph_tok("==", 2), ty2, ph_int(tg2), TY_U8);
+                if (ph_bd_nul(fi, k)) {
+                    i64 ty3 = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
+                    fast = ph_ext_or(fast, ph_bin(ph_tok("==", 2), ty3, ph_int(1), TY_U8));   // IS_NULL
+                }
+                i64 na2 = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR),
+                                   0, 0, 0, TY_I64);
+                c2 = ph_ext_or(ph_ext_or(ph_bin(ph_tok("<=", 2), na2, ph_int(k), TY_U8), fast), c2);
+            }
+            body = ph_ext_if(c2, body);
             continue;
         }
         u8 cv[48];
@@ -540,8 +640,17 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
                                    ph_c3("phx_arity", ph_ext_ident("ex", TY_UPTR), ph_int(np),
                                          ph_raw(name, cstrlen(name)), TY_I64)), body);
     } else {
-        body = ph_ext_if(ph_c4("phx_arity2", ph_ext_ident("ex", TY_UPTR), ph_int(nreq), ph_int(nmax),
-                               ph_raw(name, cstrlen(name)), TY_I64), body);
+        // the count in range is tested in place; phx_arity2 runs only to raise
+        i64 na3 = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR),
+                           0, 0, 0, TY_I64);
+        i64 inr = ph_bin(ph_tok(">=", 2), na3, ph_int(nreq), TY_U8);
+        if (nmax >= 0) {
+            i64 na4 = ph_quiet("ld32", 1, ph_bin(ph_tok("+", 1), ph_ext_ident("ex", TY_UPTR), ph_int(44), TY_UPTR),
+                               0, 0, 0, TY_I64);
+            inr = ph_bin(ph_tok("&&", 2), inr, ph_bin(ph_tok("<=", 2), na4, ph_int(nmax), TY_U8), TY_U8);
+        }
+        body = ph_ext_if(ph_ext_or(inr, ph_c4("phx_arity2", ph_ext_ident("ex", TY_UPTR), ph_int(nreq), ph_int(nmax),
+                               ph_raw(name, cstrlen(name)), TY_I64)), body);
     }
 
     i64 pre = ph_stmt_of(ph_call("phx_enter", 0, 0, 0, 0, 0, TY_VOID));
@@ -561,6 +670,22 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
         loop {
             if (k >= np) break;
             i64 pk = ld64(ph_fpt + (fi * PH_MAXP + k) * 8);
+            // a native ?int (src/decl.mc): every argument was passed, so its
+            // value and flag are read call-free (ph_ext_optval/optflag) once
+            // the tag is an int -- or null, for `?int` (fopt 1) but not for a
+            // plain `int $x = 5` (fopt 2), which php refuses a null
+            i64 fo = ld64(ph_fopt + (fi * PH_MAXP + k) * 8);
+            if (fo && pk == PT_INT) {
+                i64 ty0 = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
+                i64 ok0 = ph_bin(ph_tok("==", 2), ty0, ph_int(4), TY_U8);
+                if (fo == 1) {
+                    i64 ty1 = ph_quiet("ld8", 1, ph_ext_argz(k, 8), 0, 0, 0, TY_I64);
+                    ok0 = ph_bin(ph_tok("||", 2), ok0, ph_bin(ph_tok("==", 2), ty1, ph_int(1), TY_U8), TY_U8);
+                }
+                cond = ph_bin(ph_tok("&&", 2), cond, ok0, TY_U8);
+                k = k + 1;
+                continue;
+            }
             i64 tag = 0;
             if (pk == PT_INT) tag = 4;                    // IS_LONG
             if (pk == PT_STRING) tag = 6;                 // IS_STRING
@@ -600,6 +725,7 @@ void ph_ext_handler(i64 fi, uptr fl, i64 line) {
     // a plain mixed parameter whose temp is only ever field-read borrows the
     // engine zval in place (phx_zarg -> phx_zarg_ro) rather than copying it
     ph_borrow_rewrite(nd_a(nd_b(f)), fi, nd_a(nd_b(f)));
+    if (ph_ext_noretain(nd_a(nd_b(f)))) ph_ext_rov(nd_a(nd_b(f)));
     // the copy may have put declarations in front of it: unlinked where it is
     ph_ext_lazy = 0;
     if (bare && ph_ext_pure(nd_b(bare)) && ph_ext_lazy) {
@@ -791,11 +917,15 @@ void ph_ext_publish(uptr cname, uptr ceg, i64 flags, uptr fl, i64 line) {
         uptr hname = p_cat("x_", mfn, 0, cstrlen(mfn));
         uptr full = p_cat(cname, "::", 0, 2);
         full = p_cat(full, mname, 0, cstrlen(mname));
-        u8 hv[32];
+        // the most arguments it takes: its parameters, -1 when it is variadic
+        i64 mmax = ld64(ph_pm_np + i * 8);
+        if (ld64(ph_pm_var + i * 8)) mmax = 0 - 1;
+        u8 hv[40];
         st64(hv, ph_ext_ident("ex", TY_UPTR));
         st64(hv + 8, ph_ext_ident("rv", TY_UPTR));
         st64(hv + 16, ph_ext_addr(mfn));
         st64(hv + 24, ph_raw(full, cstrlen(full)));
+        st64(hv + 32, ph_int(mmax));
         i64 p0 = param_new(TY_UPTR, "ex");
         i64 p1 = param_new(TY_UPTR, "rv");
         set_nd_next(p0, p1);
@@ -803,7 +933,7 @@ void ph_ext_publish(uptr cname, uptr ceg, i64 flags, uptr fl, i64 line) {
         set_nd_name(h, hname);
         set_nd_type(h, TY_VOID);
         set_nd_a(h, p0);
-        set_nd_b(h, ph_ext_block(ph_stmt_of(ph_calln("phx_mh", hv, 4, TY_VOID))));
+        set_nd_b(h, ph_ext_block(ph_stmt_of(ph_calln("phx_mh", hv, 5, TY_VOID))));
         top_add(h);
         u8 mv[32];
         st64(mv, ph_raw(mname, cstrlen(mname)));
@@ -812,10 +942,13 @@ void ph_ext_publish(uptr cname, uptr ceg, i64 flags, uptr fl, i64 line) {
         st64(mv + 24, ph_int(ld64(ph_pm_vis + i * 8)));
         ph_cfill(ph_stmt_of(ph_calln("phx_meth", mv, 4, TY_VOID)));
         i64 k = 0;
+        i64 mnp = ld64(ph_pm_np + i * 8);
         loop {
-            if (k >= ld64(ph_pm_np + i * 8)) break;
-            uptr pn = ld64(ph_pm_pn + (i * 6 + k) * 8);
-            ph_cfill(ph_stmt_of(ph_c1("phx_marg", ph_raw(pn, cstrlen(pn)), TY_VOID)));
+            if (k >= mnp) break;
+            uptr pn = ld64(ld64(ph_pm_pn + i * 8) + k * 8);
+            uptr mf = "phx_marg";
+            if (k == mnp - 1 && ld64(ph_pm_var + i * 8)) mf = "phx_marg_v";
+            ph_cfill(ph_stmt_of(ph_c1(mf, ph_raw(pn, cstrlen(pn)), TY_VOID)));
             k = k + 1;
         }
         i = i + 1;

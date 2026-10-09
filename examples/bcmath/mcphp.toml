@@ -1,0 +1,53 @@
+# bcmath -- a PHP extension written in PHP, described by a file.
+#
+#     mc-php build examples/bcmath --config examples/bcmath/mcphp.toml
+#
+# and build/bcmath_port.so is what `php -d extension=...` loads. No make, no
+# cmake, no phpize, no ./configure, no php development headers -- the four
+# numbers in [php] are everything this compiler knows about the php it is
+# targeting, and `php -i` prints all four.
+#
+# The name is bcmath_port, NOT bcmath: php's own bcmath is loaded and php
+# refuses to redeclare an internal function, so the module could not even load
+# under the name bcmath. The functions are bc_add .. bc_scale; check.php and
+# bccheck.php compare each against the built-in bcX (docs the README).
+
+[project]
+entry = "bcmath.php"
+out = "build/bcmath_port.so"
+kind = "exe"
+# mc's optimizer (-O: its register allocator, its branch peephole and loop
+# hoisting), on for every extension this repository builds: an extension is
+# called from a php that is already warm, so the generated code is the whole
+# cost (docs/plan.md § 7 item 1).
+opt = 1
+
+# The escape hatch, and on macOS it is the only road: mc writes a Mach-O
+# EXECUTABLE by itself and php loads a BUNDLE, which is a different file type.
+[linker]
+cmd = "ld"
+args = ["-bundle", "-undefined", "dynamic_lookup",
+        "-arch", "arm64", "-platform_version", "macos", "13.0", "13.0",
+        "-syslibroot", "{sdk}", "-lSystem",
+        "-o", "{out}", "{obj}"]
+
+[extension]
+name = "bcmath_port"
+version = "0.1.0"
+
+# Read off the target php with `php -i`, and nothing else about it is
+# consulted. tests/ext.sh checks these on every run and names a stale minor.
+#
+#     PHP API             => 20250925        api
+#     PHP Extension Build => API20250925,NTS build_id
+#     Thread Safety       => disabled        thread_safety = "nts"
+#     Debug Build         => no              debug = false
+[php]
+api = 20250925
+build_id = "API20250925,NTS"
+thread_safety = "nts"
+debug = false
+# The reads a compiled program makes unchecked, as C does (docs/semantics.md):
+# off, the default. Every string/array index here is inside a parsed digit
+# string or a buffer the function itself sized; `false` proves it.
+checked_reads = false

@@ -146,17 +146,19 @@ if build "$EX" "$EX/mcphp$suf.toml" "decimal.$sx"; then
     # from 10300 to 1300 when _dec_udivmod took the twin's one remainder
     # buffer, compared and subtracted in place; and 400 400 500 200 1200 when
     # _dec_fmt carried the index of its first kept digit, as the twin moves
-    # its pointer, instead of a substr() of the rest.
+    # its pointer, instead of a substr() of the rest; and dec_mul's 500 to
+    # 400 when _dec_fmt's kept digits, `$w = ... ? '0' : substr(...)`, became
+    # a window of the product (src/opt.mc, ph_view_fn's count along paths).
     sb=
     for op in "dec_add('123456.78', '1093.75', 2)" "dec_sub('123456.78', '2682.24', 2)" \
               "dec_mul('123456.78', '0.004375000000', 2)" "dec_cmp('123456.78', '0')" "dec_div('5.25', '1200', 12)"; do
         n=$(MCPHP_STATS=1 "$PHP" -d extension="$dso" -r "for (\$i = 0; \$i < 100; \$i++) $op;" 2>&1 | tr -d '\r' | sed -n 's/.*strings built //p')
         sb="$sb${sb:+ }${n:-?}"
     done
-    if [ "$sb" = "400 400 500 200 1200" ]; then
+    if [ "$sb" = "400 400 400 200 1200" ]; then
         say "strings: 100 calls of add, sub, mul, cmp, div build $sb strings"
     else
-        bad "strings: 100 calls of add, sub, mul, cmp, div built $sb strings (want 400 400 500 200 1200)"
+        bad "strings: 100 calls of add, sub, mul, cmp, div built $sb strings (want 400 400 400 200 1200)"
     fi
     # the C twin (c/decimal.c): the same six functions written the ordinary
     # way, graded by the same check.php, and the reference the bench compares
@@ -241,6 +243,17 @@ elif build "$EX" "$EX/mcphp$suf.toml" "db.$sx"; then
         say "published: the eight db_* functions and none of the sqlite3_* declarations or _ helpers"
     else
         bad "db published: want the eight db_* functions, got: $vis"
+    fi
+    # a call leaves the request's memory where it found it: db.php's top-level
+    # `const _SQLITE_TRANSIENT = -1;` used to be glued to _out8's body, so every
+    # db_open, db_scalar and db_text registered the constant again and the
+    # request grew by ~500 bytes a call until php's memory limit
+    grow=$("$PHP" -d extension="$dbso" -r '$db = db_open(":memory:"); db_scalar($db, "SELECT 1"); db_text($db, "SELECT 1"); db_close(db_open(":memory:"));
+        $m = memory_get_usage(); for ($i = 0; $i < 2000; $i++) { db_scalar($db, "SELECT 1"); db_text($db, "SELECT 1"); db_close(db_open(":memory:")); } echo memory_get_usage() - $m;' 2>&1 | tr -d '\r')
+    if [ -n "$grow" ] && [ "$grow" -lt 4096 ] 2>/dev/null; then
+        say "memory: 2000 calls each of db_scalar, db_text and db_open+db_close grow the request by $grow bytes"
+    else
+        bad "db memory: 2000 calls grew the request by $grow bytes (want under 4 KiB)"
     fi
     # the C twin (c/db.c): the same eight db_* functions written the ordinary
     # way, graded by the same check.php against check.expect, and the reference
@@ -331,15 +344,107 @@ elif build "$EX" "$EX/mcphp$suf.toml" "ctype.$sx"; then
     fi
     # the bench: cty_* against php's own compiled-in ctype_* in the same process,
     # best of nine interleaved. The reference is the C extension itself, so the
-    # ratio is cty_* / ctype_*. It is over 2.0 -- a per-byte is*() call cannot
-    # reach ctype.c's inlined rune-table loop, and the whole-string strspn() that
-    # would close the gap hits an mc-php refcounting leak (README.md § The bench).
-    # Printed, not gated, like every bench here.
+    # ratio is cty_* / ctype_*, under 2.0 for every predicate (README.md
+    # § The bench has the per-predicate table). Printed, not gated, like every
+    # bench here.
     set -- $("$PHP" -d extension="$ctso" "$EX/bench.php" | tr -d '\r')
     if [ "$1" = cty ]; then
-        say "bench: cty $2 ms, ctype $4 ms, module/ctype.so $6 -- best of nine interleaved; over 2.0, see README.md § The bench; not gated"
+        say "bench: cty $2 ms, ctype $4 ms, module/ctype.so $6 (DONE < 2.0) -- best of nine interleaved; not gated"
     else
         bad "ctype bench.php: $*"
+    fi
+fi
+
+# --- bcmath: php-src's ext/bcmath ported to PHP ------------------------------
+# examples/bcmath/bcmath.php reproduces ext/bcmath (libbcmath) over digit
+# strings -- EXACT bcmath semantics, which means TRUNCATION at the scale, not
+# rounding (that is examples/decimal). bcmath is loaded in this php and an
+# internal name cannot be redeclared, so the port publishes bc_* and check.php
+# is the byte-for-byte differential (module vs bcmath.php required), bccheck.php
+# the second oracle against php's own built-in bcmath, then the C twin
+# (c/bcmath.c) graded the same way and the bench whose module/C ratio is the
+# DONE bar (README.md: < 2.0). SKIPPED on Windows only: it ships a
+# mcphp.windows.toml and would build, but the C twin and bccheck need the
+# host's bcmath, which the Windows legs' setup does not guarantee.
+echo "  -- bcmath"
+EX=examples/bcmath
+bso=$rootn/$EX/build/bcmath_port.$sx
+if build "$EX" "$EX/mcphp$suf.toml" "bcmath_port.$sx"; then
+    say "built: $(wc -c < "$bso" | tr -d ' ') bytes from $EX/bcmath.php"
+    differential check.php "$EX/check.php" -d extension="$bso"
+    vis=$("$PHP" -d extension="$bso" -r '$f = get_extension_funcs("bcmath_port"); sort($f); echo implode(" ", $f);' 2>&1 | tr -d '\r')
+    if [ "$vis" = "bc_add bc_ceil bc_comp bc_div bc_floor bc_mod bc_mul bc_pow bc_powmod bc_round bc_scale bc_sqrt bc_sub" ]; then
+        say "published: the thirteen bc_* functions and none of the _bc_* helpers"
+    else
+        bad "bcmath published: want the thirteen bc_* functions, got: $vis"
+    fi
+    if "$PHP" -m | tr -d '\r' | grep -qix bcmath; then
+        if "$PHP" -d extension="$bso" "$EX/bccheck.php" > "$tmp/bc.out" 2>&1 &&
+           [ "$(tr -d '\r' < "$tmp/bc.out")" = "bcmath agrees: 10570 results, 0 wrong" ]; then
+            say "$(tr -d '\r' < "$tmp/bc.out")"
+        else
+            bad "bcmath bccheck.php:"; sed 's/^/      /' "$tmp/bc.out"
+        fi
+    else
+        skip "the bcmath cross-check: this php has no bcmath"
+    fi
+    # the C twin (c/bcmath.c): the same functions written the ordinary way,
+    # bcmath.php's algorithm function by function, graded by the same check.php
+    # and bccheck.php, and the reference the bench's module/C ratio is measured
+    # against. It needs php-config and a C compiler; without them the bench has
+    # no C column and no DONE ratio.
+    cso=
+    CC=${CC:-cc}
+    if command -v php-config >/dev/null 2>&1 && command -v "$CC" >/dev/null 2>&1; then
+        inc=$(php-config --includes)
+        if "$CC" -O2 -bundle -undefined dynamic_lookup -o "$tmp/c-bcmath.so" "$EX/c/bcmath.c" $inc 2>"$tmp/c.err" ||
+           "$CC" -O2 -shared -fPIC -o "$tmp/c-bcmath.so" "$EX/c/bcmath.c" $inc 2>>"$tmp/c.err"; then
+            cso=$tmp/c-bcmath.so
+            differential "check.php (the C twin)" "$EX/check.php" -d extension="$cso"
+            if "$PHP" -m | tr -d '\r' | grep -qix bcmath; then
+                if "$PHP" -d extension="$cso" "$EX/bccheck.php" > "$tmp/bc.out" 2>&1 &&
+                   [ "$(tr -d '\r' < "$tmp/bc.out")" = "bcmath agrees: 10570 results, 0 wrong" ]; then
+                    say "the C twin (c/bcmath.c): $(tr -d '\r' < "$tmp/bc.out") against the built-in"
+                else
+                    bad "the C twin bccheck.php:"; sed 's/^/      /' "$tmp/bc.out"
+                fi
+            fi
+        else
+            bad "the C twin would not build:"; sed 's/^/      /' "$tmp/c.err"
+        fi
+    else
+        skip "the C twin: no php-config or no $CC here -- the bench has no C column"
+    fi
+    # the bench row: the mixed workload, three rounds interleaved, minimums; the
+    # module/C ratio is the DONE bar (README.md), printed with the row.
+    bi=; bc=; bt=; ai=; ac=
+    for r in 1 2 3; do
+        set -- $("$PHP" "$EX/bench.php" | tr -d '\r')
+        [ "$1" = interpreted ] || { bad "bench.php (interpreted): $*"; break; }
+        bi=$(awk -v a="$bi" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2; ai=$*
+        set -- $("$PHP" -d extension="$bso" "$EX/bench.php" | tr -d '\r')
+        [ "$1" = compiled ] || { bad "bench.php (compiled): $*"; break; }
+        bc=$(awk -v a="$bc" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2; ac=$*
+        [ "$ai" = "$ac" ] || bad "bench.php: the two answers differ: $ai / $ac"
+        if [ -n "$cso" ]; then
+            set -- $("$PHP" -d extension="$cso" "$EX/bench.php" c | tr -d '\r')
+            [ "$1" = c ] || { bad "bench.php (the C twin): $*"; break; }
+            bt=$(awk -v a="$bt" -v b="$2" 'BEGIN { print (a == "" || b < a) ? b : a }'); shift 2
+            [ "$ai" = "$*" ] || bad "bench.php: the C twin's answer differs: $*"
+        fi
+    done
+    if [ -n "$bc" ]; then
+        row="interpreted $bi ms, compiled $bc ms $(awk -v i="$bi" -v c="$bc" 'BEGIN { printf "(%.2fx)", i / c }')"
+        [ -n "$bt" ] && row="$row, C twin $bt ms, module/C $(awk -v m="$bc" -v c="$bt" 'BEGIN { printf "%.2fx", m / c }') (DONE < 2.0)"
+        say "bench: $row -- best of nine, three rounds interleaved; not gated"
+    fi
+    # the per-function module/C ratios (MCPHP_EACH), the real DONE evidence --
+    # each function under 2.0; printed, not gated
+    if [ -n "$cso" ]; then
+        MCPHP_EACH=1 "$PHP" -d extension="$bso" "$EX/bench.php" 2>/dev/null | tr -d '\r' > "$tmp/each.mod"
+        MCPHP_EACH=1 "$PHP" -d extension="$cso" "$EX/bench.php" c 2>/dev/null | tr -d '\r' > "$tmp/each.c"
+        pf=$(awk 'NR==FNR{if(NR>1)m[$1]=$2;next} FNR>1{printf "%s %.2f ", $1, m[$1]/$2}' "$tmp/each.mod" "$tmp/each.c")
+        say "per-function module/C: $pf(DONE each < 2.0; not gated)"
     fi
 fi
 
@@ -425,6 +530,9 @@ if build examples/hello "examples/hello/mcphp$suf.toml" "hello.$sx" && [ -f "$ds
     done
 fi
 
+# The program-road bench rows below (threads, sync, await, connect) build at
+# mc's -O (MCPHP_OPT=1), as every extension here does ([project].opt = 1):
+# their twins are cc -O2.
 # --- threads: the thread API on the program road --------------------------------
 # examples/threads/primes.php counts the primes below 2 000 000 in slices, one
 # thread each (docs/threads.md § Step 3), on 1 thread and on 4; the answer is
@@ -435,8 +543,8 @@ echo "  -- threads"
 EX=examples/threads
 tw="primes below 2000000: 148933"
 tb=$tmp/primes
-t1=$(PRIMES_THREADS=1 MCPHP_BIN=$BIN MCPHP_OUT=$tb sh "$here/mcphp.sh" "$EX/primes.php" 2>&1 | tr -d '\r')
-t4=$(PRIMES_THREADS=4 MCPHP_BIN=$BIN MCPHP_OUT=$tb sh "$here/mcphp.sh" "$EX/primes.php" 2>&1 | tr -d '\r')
+t1=$(PRIMES_THREADS=1 MCPHP_OPT=1 MCPHP_BIN=$BIN MCPHP_OUT=$tb sh "$here/mcphp.sh" "$EX/primes.php" 2>&1 | tr -d '\r')
+t4=$(PRIMES_THREADS=4 MCPHP_OPT=1 MCPHP_BIN=$BIN MCPHP_OUT=$tb sh "$here/mcphp.sh" "$EX/primes.php" 2>&1 | tr -d '\r')
 if [ "$t1" = "$tw" ] && [ "$t4" = "$tw" ]; then
     say "primes.php: $tw, on 1 thread and on 4"
 else
@@ -475,7 +583,7 @@ echo "  -- sync"
 EX=examples/sync
 sb=$tmp/sync
 sw="checksum 80000200000 expected 80000200000 ok"
-sr=$(MCPHP_BIN=$BIN MCPHP_OUT=$sb sh "$here/mcphp.sh" "$EX/sync.php" 2>&1 | tr -d '\r')
+sr=$(MCPHP_OPT=1 MCPHP_BIN=$BIN MCPHP_OUT=$sb sh "$here/mcphp.sh" "$EX/sync.php" 2>&1 | tr -d '\r')
 if [ "$sr" = "$sw" ]; then
     say "sync.php: the checksum is exact on 4 producers and 4 consumers"
 else
@@ -512,7 +620,7 @@ aw=$tmp/await
 # capture to a file (so the program's exit status survives, not tr's, and
 # trailing newlines are not stripped by $(...)), normalize CRs to another file,
 # and cmp byte for byte against the expected output
-MCPHP_BIN=$BIN MCPHP_OUT=$aw sh "$here/mcphp.sh" tests/c/18-await.php > "$tmp/await.raw" 2>&1; arc=$?
+MCPHP_OPT=1 MCPHP_BIN=$BIN MCPHP_OUT=$aw sh "$here/mcphp.sh" tests/c/18-await.php > "$tmp/await.raw" 2>&1; arc=$?
 aw_bin=$aw; [ -f "$aw.exe" ] && aw_bin=$aw.exe
 tr -d '\r' < tests/c/18-await.out > "$tmp/await.want"
 tr -d '\r' < "$tmp/await.raw" > "$tmp/await.got"
@@ -552,7 +660,7 @@ fi
 # backends' connect/read semantics independently.
 echo "  -- connect"
 cn=$tmp/connect
-MCPHP_BIN=$BIN MCPHP_OUT=$cn sh "$here/mcphp.sh" tests/c/22-connect.php > "$tmp/connect.raw" 2>&1; crc=$?
+MCPHP_OPT=1 MCPHP_BIN=$BIN MCPHP_OUT=$cn sh "$here/mcphp.sh" tests/c/22-connect.php > "$tmp/connect.raw" 2>&1; crc=$?
 cn_bin=$cn; [ -f "$cn.exe" ] && cn_bin=$cn.exe
 tr -d '\r' < tests/c/22-connect.out > "$tmp/connect.want"
 tr -d '\r' < "$tmp/connect.raw" > "$tmp/connect.got"

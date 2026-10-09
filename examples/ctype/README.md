@@ -94,20 +94,32 @@ at compile time** (`ph_bmap_of`). There is no per-call charmask rebuild and no
 module-global read: the hot loop moves php's peak **0 bytes/call**. This removed
 the earlier ~22x (a per-call rebuild of the mask from a non-literal global set).
 
-Per-predicate ratio, best of nine, 8-byte all-pass input (the realistic case):
+Per-predicate ratio (2026-10-08, macOS/arm64), best of nine, 200000 calls a
+round, on an all-pass input of four to eight bytes and on a FAILING input whose
+bad byte is first (where `ctype.so` returns at once). "direct" calls
+`cty_X($v)` by name; "dynamic" calls it through a variable, which is how
+`bench.php` reaches all eleven:
 
-| predicate | cty / ctype.so | predicate | cty / ctype.so |
-|---|---|---|---|
-| alnum | 1.88x | print | 1.87x |
-| alpha | 1.88x | punct | 1.95x |
-| cntrl | 1.88x | space | 1.92x |
-| digit | 1.87x | upper | 1.91x |
-| graph | 1.85x | xdigit | 1.96x |
-| lower | 1.89x | | |
+| predicate | direct, pass | direct, fail | dynamic, pass | dynamic, fail |
+|---|---|---|---|---|
+| alnum  | 1.58x | 1.73x | 1.13x | 1.07x |
+| alpha  | 1.60x | 1.76x | 1.12x | 1.06x |
+| cntrl  | 1.75x | 1.77x | 1.09x | 1.08x |
+| digit  | 1.65x | 1.91x | 1.12x | 1.13x |
+| graph  | 1.44x | 1.73x | 1.10x | 1.09x |
+| lower  | 1.52x | 1.74x | 1.08x | 1.08x |
+| print  | 1.49x | 1.74x | 1.08x | 1.14x |
+| punct  | 1.60x | 1.74x | 1.16x | 1.07x |
+| space  | 1.64x | 1.75x | 1.16x | 1.13x |
+| upper  | 1.45x | 1.73x | 1.10x | 1.08x |
+| xdigit | 1.85x | 1.87x | 1.14x | 1.08x |
 
-All eleven land **1.85–1.96x — under the 2.0 bar**, uniformly. What is left is
-**not** the scan (it is precomputed) but the fixed per-call cost of a
-compiled-PHP function that takes a `mixed` parameter. A faithful ctype port
+**Every predicate, every case, under the 2.0 bar** -- the closest is
+`digit` on a failing input called directly, 1.91x. `bench.php`'s own
+aggregate over its mixed token list is **1.62x** (`tests/examples.sh`).
+
+What is left is not the scan (it is precomputed) but the fixed per-call cost of
+a compiled-PHP function that takes a `mixed` parameter. A faithful ctype port
 **must** take `mixed`: `ctype_digit(48)` is the char-code quirk (true), not the
 string `"48"`, so an int argument has to reach the function un-coerced, and
 `ctype_digit(1.5 / null / [] / a resource)` must return `false`, not raise a
@@ -118,15 +130,12 @@ An earlier version of this port sat at ~2.4–2.6x, above the bar: binding a
 for every call. mc-php now **borrows** such an argument in place when the body
 only ever type-tests and coerces it (`phx_zarg_ro`, `lib/php_ext.mc`; the
 read-only proof is `ph_borrow_scan`, `src/ext.mc`) — no allocation, no copy, no
-proxy — which is what brings the eleven under 2.0. That is a change in **mc-php's
-own** `src/`/`lib/`, not in the mc compiler (`mini_compiler` is untouched), and
-it is inert for any parameter the borrow cannot prove safe.
-
-A note on `bench.php`'s own aggregate (it prints ~4.5x): it calls eight
-predicates over a mix of tokens, several of which **fail** mid-string. On a
-failing input `ctype.so` returns on the first bad byte while `cty_X` still pays
-the full per-call entry, so the aggregate is harsher than the per-predicate
-all-pass figure above. The all-pass per-predicate ratio is the comparable one.
+proxy. The failing-input column came under 2.0 later, with the extension
+handler's entry and exit: the arena is entered lazily, and a call that
+allocates nothing never sets its cursor (`phx_enter`, `lib/php_ext.mc`). Both
+are changes in **mc-php's own** `src/`/`lib/`, not in the mc compiler
+(`mini_compiler` is untouched), and each is inert where it cannot prove itself
+safe.
 
 ## Files
 

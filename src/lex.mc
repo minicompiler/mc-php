@@ -247,6 +247,17 @@ i64 ph_name_byte(i64 c, i64 first) {
     return 0;
 }
 
+// where the string's body starts and on which line: an interpolated variable
+// is php's expression at ITS line, which a string spread over lines moves
+uptr ph_dq_b0;
+i64  ph_dq_l0;
+void ph_dq_zl(uptr p) {
+    i64 l = ph_dq_l0;
+    uptr z = ph_dq_b0;
+    loop { if (z >= p) break; if (ld8(z) == 10) l = l + 1; z = z + 1; }
+    ph_zl = l;
+}
+
 // returns the node; writes the byte just past the closing quote through pend
 i64 ph_dq_read2(uptr q, uptr e, uptr pend, i64 term, i64 raw) {
     uptr p = q;
@@ -340,6 +351,7 @@ i64 ph_dq_read2(uptr q, uptr e, uptr pend, i64 term, i64 raw) {
             if (nx != 125 && nx != 91 && nx != 45) { ph_dq_put(c); p = p + 1; continue; }
         }
         acc = ph_dq_flush(acc);
+        ph_dq_zl(p);
         uptr d2 = xalloc(k4 - nstart + 2);
         st8(d2, 36);
         i64 z = 0;
@@ -423,7 +435,11 @@ i64 ph_dq_read2(uptr q, uptr e, uptr pend, i64 term, i64 raw) {
     return acc;
 }
 
-i64 ph_dq_read(uptr q, uptr e, uptr pend) { return ph_dq_read2(q + 1, e, pend, 34, 0); }
+i64 ph_dq_read(uptr q, uptr e, uptr pend) {
+    ph_dq_b0 = q + 1;
+    ph_dq_l0 = ph_tline;
+    return ph_dq_read2(q + 1, e, pend, 34, 0);
+}
 
 // <<<LABEL / <<<"LABEL" / <<<'LABEL' -- php 7.3's indented closing label is
 // stripped from every body line, and a nowdoc has no escapes and no
@@ -503,13 +519,39 @@ i64 ph_heredoc(uptr q, uptr e, uptr pend) {
     st64(pend, after);
     u8 dummy[8];
     i64 saveline = ph_tline;
+    ph_dq_b0 = body;
+    ph_dq_l0 = ph_tline + 1;
     i64 n = ph_dq_read2(body, body + blen, dummy, 0, raw);
     ph_tline = saveline;
     return n;
 }
 
+i64 ph_nl_between(uptr a, uptr b) {
+    i64 nl = 0;
+    loop { if (a >= b) break; if (ld8(a) == 10) nl = nl + 1; a = a + 1; }
+    return nl;
+}
+
 i64 ph_qpend;                   // the token was a qualified name read past the core lexer
+i64 ph_zl_ids;
+i64 ph_zl_rp;
+i64 ph_zl_rb;
+i64 ph_zl_rc;
+i64 ph_zl_cm;
+i64 ph_zl_sc;
+i64 ph_zl_close(i64 t) {
+    if (!ph_zl_ids) {
+        ph_zl_ids = 1;
+        ph_zl_rp = ph_tok(")", 1);
+        ph_zl_rb = ph_tok("]", 1);
+        ph_zl_rc = ph_tok("}", 1);
+        ph_zl_cm = ph_tok(",", 1);
+        ph_zl_sc = ph_tok(";", 1);
+    }
+    return t == ph_zl_rp || t == ph_zl_rb || t == ph_zl_rc || t == ph_zl_cm || t == ph_zl_sc;
+}
 void ph_next() {
+    if (!ph_zl_close(ph_tid)) ph_zl = ph_tline;
     if (ph_tid == PHT_PSTR || ph_tid == PHT_HTML || ph_tid == PHT_DSTR || ph_qpend) {
         ph_qpend = 0; p_next(); ph_sync(); return;
     }
@@ -611,7 +653,7 @@ void ph_next() {
     }
     if (quote == 2) {
         u8 eb2[8];
-        ph_tline = p_line();
+        ph_tline = p_line() + ph_nl_between(q0, q);
         ph_tfile = p_file();
         i64 n2 = ph_dq_read(q, e, eb2);
         p_skip_to(ld64(eb2));
@@ -621,7 +663,7 @@ void ph_next() {
     }
     if (quote == 3) {
         u8 eb3[8];
-        ph_tline = p_line();
+        ph_tline = p_line() + ph_nl_between(q0, q);
         ph_tfile = p_file();
         i64 n3 = ph_heredoc(q, e, eb3);
         p_skip_to(ld64(eb3));
