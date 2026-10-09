@@ -1441,7 +1441,7 @@ i64 ph_spread_call(uptr raw, uptr name, i64 line, uptr fl) {
         t = p_cat(t, ms3, 0, cstrlen(ms3));
         t = p_cat(t, ", ' . ", 0, 6);
         t = p_cat(t, cn, 0, cstrlen(cn));
-        t = p_cat(t, " . ' given') : __mcphp_spread_cap('", 0, 36);
+        t = p_cat(t, " . ' given') : __mcphp_spread_cap('", 0, 35);
         t = p_cat(t, name, 0, cstrlen(name));
         t = p_cat(t, "', ", 0, 3);
         t = p_cat(t, cn, 0, cstrlen(cn));

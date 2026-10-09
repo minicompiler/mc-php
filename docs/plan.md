@@ -1215,11 +1215,11 @@ interpreter on the same source), § 7 item 1. What already has code moves into
 
    | function | worst | median | function | worst | median | function | worst | median |
    |---|---|---|---|---|---|---|---|---|
-   | add | 1.53x | 1.48x | div | 1.30x | 1.28x | sqrt | 1.05x | 1.04x |
-   | sub | 1.55x | 1.53x | mod | 1.17x | 1.10x | comp | 1.53x | 1.49x |
-   | mul | 1.77x | 1.73x | pow | 1.80x | 1.79x | floor | 1.63x | 1.60x |
-   | round | 1.94x | 1.86x | powmod | 1.38x | 1.37x | ceil | 1.74x | 1.70x |
-   | scale | 1.37x | 1.32x | | | | | | |
+   | add | 1.54x | 1.49x | div | 1.33x | 1.31x | sqrt | 1.08x | 1.07x |
+   | sub | 1.59x | 1.51x | mod | 1.14x | 1.12x | comp | 1.55x | 1.51x |
+   | mul | 1.86x | 1.74x | pow | 1.85x | 1.83x | floor | 1.65x | 1.60x |
+   | round | 1.53x | 1.46x | powmod | 1.39x | 1.39x | ceil | 1.74x | 1.71x |
+   | scale | 1.40x | 1.36x | | | | | | |
 
    The mixed workload: interpreted 10.38 ms, compiled 0.73 ms (14.3x), the twin 0.53 ms --
    module/C **1.36x** (it was 3.54x at the first cut).
@@ -1290,8 +1290,8 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    rotated so its test is at the bottom (6% SLOWER: the allocator gives the moved locals worse
    registers), a machine peephole for the remainder (it never fired: the slow half's label is a
    barrier), and hoisting the fixed array's pointer out of `_bc_umul`'s loop by hand (4% slower,
-   for the same register reason). What is closest now is `round` (median 1.86x), whose time is
-   the string work around the digits, not a loop.
+   for the same register reason). What is closest now is `pow` (median 1.83x), the digit loop of
+   `_bc_umul`; `round` (once 1.86x) measures 1.46x.
 
    **Four gaps closed in the same PR** (each reproduced against php 8.5 on the head first, each
    with a fixture that fails on the commit before and passes after):

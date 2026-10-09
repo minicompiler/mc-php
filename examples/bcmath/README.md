@@ -104,13 +104,13 @@ bar being worst < 1.95 and median <= 1.90 for every function:
 
 | function | worst | median | function | worst | median |
 |---|---|---|---|---|---|
-| add    | 1.49x | **1.47x** | powmod | 1.42x | **1.37x** |
-| sub    | 1.57x | **1.53x** | sqrt   | 1.08x | **1.05x** |
-| mul    | 1.79x | **1.75x** | comp   | 1.51x | **1.50x** |
-| div    | 1.32x | **1.31x** | floor  | 1.59x | **1.59x** |
-| mod    | 1.15x | **1.14x** | ceil   | 1.70x | **1.68x** |
-| pow    | 1.84x | **1.80x** | round  | 1.49x | **1.46x** |
-| scale  | 1.39x | **1.37x** | | | |
+| add    | 1.54x | **1.49x** | powmod | 1.39x | **1.39x** |
+| sub    | 1.59x | **1.51x** | sqrt   | 1.08x | **1.07x** |
+| mul    | 1.86x | **1.74x** | comp   | 1.55x | **1.51x** |
+| div    | 1.33x | **1.31x** | floor  | 1.65x | **1.60x** |
+| mod    | 1.14x | **1.12x** | ceil   | 1.74x | **1.71x** |
+| pow    | 1.85x | **1.83x** | round  | 1.53x | **1.46x** |
+| scale  | 1.40x | **1.36x** | | | |
 
 Mixed workload (`tests/examples.sh`): interpreted 10.38 ms, compiled 0.73 ms
 (14.3x faster than interpreted), C twin 0.53 ms -- module/C **1.36x**.

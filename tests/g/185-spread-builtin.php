@@ -14,6 +14,6 @@ var_dump(implode(",", ...[[1, 2]]));
 var_dump(substr("abcdef", ...[1, 2]), strlen(...["abc"]), str_replace(...["a", "b", "aaa"]));
 $k = strlen(...); var_dump($k("abcd"));
 $up = strtoupper(...); var_dump(array_map($up, ["a", "b"]));
-foreach ([fn() => strlen(...[]), fn() => strlen(...["a", "b"]), fn() => substr(...["x"]), fn() => implode(...[1, 2, 3])] as $t) {
+foreach ([fn() => strlen(...[]), fn() => strlen(...["a", "b"]), fn() => substr(...["x"]), fn() => implode(...[1, 2, 3]), fn() => array_push(...[])] as $t) {
     try { var_dump($t()); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
 }
