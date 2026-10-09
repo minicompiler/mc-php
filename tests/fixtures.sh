@@ -24,7 +24,7 @@ P=tests
 # display_errors is Off prints no warning where mc-php prints one, and ten
 # fixtures "failed" on a CI runner for exactly that (2026-09-23).
 #
-# These four are the configuration mc-php IMPLEMENTS. It has no php.ini of its
+# These five are the configuration mc-php IMPLEMENTS. It has no php.ini of its
 # own, so its diagnostic channel is one fixed behaviour, and each of these was
 # MEASURED against it rather than assumed:
 #
@@ -36,10 +36,15 @@ P=tests
 #   error_reporting=E_ALL which on php 8.5 is 30719 and INCLUDES E_DEPRECATED
 #                         -- `E_ALL & ~E_DEPRECATED` is 22527 and made php drop
 #                         a str_getcsv() deprecation that mc-php emits
+#   zend.exception_ignore_args=0
+#                         php's own default: a trace keeps its arguments.
+#                         php.ini-production sets it On, which the CI
+#                         runners' php ships, and their oracle printed `b()`
+#                         where mc-php -- and php with no ini -- prints `b(1)`
 #
 # The GRID is a different thing and uses probes/t0/phpt-run.py's DEFAULT_INI,
 # which sets log_errors=0 -- correct there, because the grid ignores stderr.
-PHPINI="-d display_errors=1 -d log_errors=1 -d html_errors=0 -d error_reporting=E_ALL"
+PHPINI="-d display_errors=1 -d log_errors=1 -d html_errors=0 -d error_reporting=E_ALL -d zend.exception_ignore_args=0"
 BIN=${BIN:-build/mc-php}
 # A measurement takes a SNAPSHOT of the compiler (T7's note): an edit during
 # the run cannot then corrupt it.
