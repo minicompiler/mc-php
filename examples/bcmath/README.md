@@ -42,6 +42,9 @@ against the host php 8.5:
   `ValueError`); for `e >= 0` the exact power truncated to `min(scale,
   scale_base*e)`; for `e < 0`, `1/base^|e|` truncated to `scale`; `x^0` is `1`;
   a negative power of zero is `DivisionByZeroError("Negative power of zero")`.
+  The exponent is read into a C `long`, as php's own bcmath does: any magnitude
+  up to `LONG_MAX` in either sign (2^63-1 on macOS and Linux, 2^31-1 on
+  Windows, where a long is 32 bits); one past it is `ValueError` "is too large".
 - **powmod**: modular exponentiation, integers only, exponent `>= 0`.
 - **sqrt**: `floor(sqrt(num))` at `scale` fraction digits (an integer square
   root of `num` scaled by `10^(2*scale)`); a negative `num` is a `ValueError`.
@@ -73,7 +76,7 @@ between 0 and 2147483647")` -- the same class and message text as the built-in
 - `check.php` -- the byte-for-byte differential: the same script run with the
   module loaded and with `bcmath.php` required must print identical bytes.
 - `bccheck.php` -- the second oracle: every `bc_X` against the built-in `bcX`
-  over a large random corpus plus the quirk edge cases, **10564 results, 0
+  over a large random corpus plus the quirk edge cases, **10570 results, 0
   wrong**.
 - `leakmatrix.php` -- the leak gate: every function over every argument and
   error shape for 120 rounds, leak-free under the debug allocator.
@@ -84,7 +87,7 @@ between 0 and 2147483647")` -- the same class and message text as the built-in
 
 - `check.php` differential: **133 lines, byte for byte** (module vs
   interpreted), and the C twin graded the same way.
-- `bccheck.php` against php's own bcmath: **10564 results, 0 wrong** -- the
+- `bccheck.php` against php's own bcmath: **10570 results, 0 wrong** -- the
   module, the interpreted source, and the C twin all agree with the built-in.
 - `leakmatrix.php` under the ZTS debug allocator (`tests/leaks.sh`): every
   function, every argument shape, every error path, **no block left at the end

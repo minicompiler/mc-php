@@ -396,10 +396,13 @@ function bc_pow(string $num, string $exponent, ?int $scale = null): string {
     $xs = _bc_parse($num, 'bc_pow', 1, 'num');
     $es = _bc_parse($exponent, 'bc_pow', 2, 'exponent');
     $ed = _bc_intonly(_bc_digits($exponent, $es), $es, 'bc_pow', 2, 'exponent');
-    // php converts the exponent to a long: any magnitude up to PHP_INT_MAX,
-    // either sign ($ed has no leading zeros, so its length orders it)
+    // php converts the exponent to a C long (bc_num2long): any magnitude up to
+    // LONG_MAX, either sign -- 2^63-1 on macOS and Linux, 2^31-1 on Windows,
+    // where a long is 32 bits ($ed has no leading zeros, so its length orders it)
+    $lmax = PHP_OS_FAMILY === 'Windows' ? '2147483647' : '9223372036854775807';
     $el = strlen($ed);
-    if ($el > 19 || ($el === 19 && strcmp($ed, '9223372036854775807') > 0)) {
+    $ml = strlen($lmax);
+    if ($el > $ml || ($el === $ml && strcmp($ed, $lmax) > 0)) {
         throw new ValueError("bc_pow(): Argument #2 (\$exponent) is too large");
     }
     $e = (int) $ed;

@@ -91,9 +91,9 @@ foreach ([['2','10',0],['1.1','2',1],['1.1','2',5],['2','-2',4],['3','-3',10],['
           ['2','0',0],['123','0',4]] as [$a,$e,$s]) {
     check("pow($a,$e,$s)", fn()=>bc_pow($a,$e,$s), fn()=>bcpow($a,$e,$s));
 }
-// the exponent's range is a long's (review of #65): every magnitude up to
-// PHP_INT_MAX in either sign, 2^63 is "too large"; then bc_raise's digit-count
-// overflow. (A nonzero base whose digits do fit is php's memory-allocation
+// the exponent's range is a C long's (review of #65): every magnitude up to
+// LONG_MAX in either sign -- 2^63-1 on macOS and Linux, 2^31-1 on Windows --
+// and one past it is "too large"; then bc_raise's digit-count overflow. (A nonzero base whose digits do fit is php's memory-allocation
 // fatal, a resource limit and not an answer, so none is listed.)
 foreach ([['0','9223372036854775807',2],['0','9223372036854775806',0],['0','-9223372036854775807',2],
           ['0','9223372036854775808',2],['0','-9223372036854775808',2],['0','1000000000000000000',0],
@@ -101,7 +101,9 @@ foreach ([['0','9223372036854775807',2],['0','9223372036854775806',0],['0','-922
           ['100','9223372036854775807',0],['10.5','9223372036854775807',0],['1.25','9223372036854775807',4],
           ['-123','-9223372036854775807',3],['1000','4611686018427387904',0],
           ['12345678901234567890','1000000000000000000',0],['1.2345678901234567891','-1000000000000000000',5],
-          ['0.001','9223372036854775807',2],['100','9223372036854775808',0]] as [$a,$e,$s]) {
+          ['0.001','9223372036854775807',2],['100','9223372036854775808',0],
+          ['0','2147483647',0],['0','2147483648',0],['0','-2147483647',2],['0','-2147483648',2],
+          ['0','2147483649',3],['-0','4294967296',0]] as [$a,$e,$s]) {
     check("pow($a,$e,$s)", fn()=>bc_pow($a,$e,$s), fn()=>bcpow($a,$e,$s));
 }
 foreach ([['2','10','1000',0],['2','10','1000',2],['3','100','7',0],['5','0','7',0],

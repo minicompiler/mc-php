@@ -427,14 +427,19 @@ PHP_FUNCTION(bc_pow)
     if (!intonly(&y, 2)) { efree(ba); efree(be); RETURN_THROWS(); }
     const char *ed = y.d; size_t ne = y.n;
     skip0(&ed, &ne);
-    /* bc_num2long: any magnitude up to LONG_MAX, either sign */
-    if (ne > 19 || (ne == 19 && memcmp(ed, "9223372036854775807", 19) > 0)) {
+    /* bc_num2long: any magnitude up to LONG_MAX, either sign (a long is 32
+       bits on Windows, 64 elsewhere) */
+    unsigned long long ue = 0;
+    int big = ne > 20;
+    for (size_t i = 0; i < ne && !big; i++) {
+        if (ue > (ULLONG_MAX - 9) / 10) big = 1; else ue = ue * 10 + (unsigned) (ed[i] - '0');
+    }
+    if (big || ue > (unsigned long long) LONG_MAX) {
         efree(ba); efree(be);
         zend_argument_value_error(2, "is too large");
         RETURN_THROWS();
     }
-    long e = 0;
-    for (size_t i = 0; i < ne; i++) e = e * 10 + (ed[i] - '0');
+    long e = (long) ue;
     if (e == 0) { RETVAL_STR(bfmt(0, "1", 1, 0, (size_t) scale)); efree(ba); efree(be); return; }
     if (is_zero(x.d, x.n)) {
         if (y.neg) {
