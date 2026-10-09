@@ -97,43 +97,40 @@ roots and moduli) and, with `MCPHP_EACH=1`, each function on its own
 (steady-state, best of nine, interleaved). DONE is module / C-twin < 2.0, for
 EVERY function -- not an average.
 
-**DONE (2026-10-08).** Measured on this host (macOS/arm64), each row the best
-of five rounds, each round `bench.php`'s own best of nine, module and C twin
-interleaved:
+**DONE (2026-10-08).** Measured on this host (macOS/arm64): five runs, the
+module and the C twin alternated process by process, each run `bench.php`'s own
+best of nine with `MCPHP_EACH=1`; the WORST of the five and their median, the
+bar being worst < 1.95 and median <= 1.90 for every function:
 
-| function | module (ms) | C twin (ms) | module/C |
-|---|---|---|---|
-| add    |   4.004 |   2.638 | **1.52x** |
-| sub    |   4.124 |   2.571 | **1.60x** |
-| mul    |   6.160 |   3.372 | **1.83x** |
-| div    |  14.541 |  11.031 | **1.32x** |
-| mod    |  12.104 |  10.327 | **1.17x** |
-| pow    |  16.867 |   8.560 | **1.97x** |
-| powmod | 166.696 | 116.524 | **1.43x** |
-| sqrt   | 156.068 | 144.892 | **1.08x** |
-| comp   |   2.737 |   1.712 | **1.60x** |
-| floor  |   2.370 |   1.459 | **1.62x** |
-| ceil   |   3.082 |   1.777 | **1.73x** |
-| round  |   4.727 |   2.548 | **1.86x** |
-| scale  |   0.897 |   0.470 | **1.91x** |
+| function | worst | median | function | worst | median |
+|---|---|---|---|---|---|
+| add    | 1.53x | **1.48x** | powmod | 1.38x | **1.37x** |
+| sub    | 1.55x | **1.53x** | sqrt   | 1.05x | **1.04x** |
+| mul    | 1.77x | **1.73x** | comp   | 1.53x | **1.49x** |
+| div    | 1.30x | **1.28x** | floor  | 1.63x | **1.60x** |
+| mod    | 1.17x | **1.10x** | ceil   | 1.74x | **1.70x** |
+| pow    | 1.80x | **1.79x** | round  | 1.94x | **1.86x** |
+| scale  | 1.37x | **1.32x** | | | |
 
-Mixed workload (`tests/examples.sh`): interpreted 10.44 ms, compiled 0.76 ms
-(13.7x faster than interpreted), C twin 0.53 ms -- module/C **1.44x**.
+Mixed workload (`tests/examples.sh`): interpreted 10.38 ms, compiled 0.73 ms
+(14.3x faster than interpreted), C twin 0.53 ms -- module/C **1.36x**.
 
 The `scale` row came with the review of #65 and started at 5.3x: the default
 scale was a `global` (a by-name lookup and a zval per call), and a `bc_scale`
 that did nothing was already 1.72x because a `?int` argument kept the handler
 off its call-free road. Now the default is `_bc_dscale`'s `static`, which the
-compiler proves holds only ints and keeps in a native slot, and a `?int`
-argument may take the bare road (`docs/plan.md` item 4). It stays on the slow
-road -- its `ValueError` branch calls -- so 1.91x is that road's floor.
+compiler proves holds only ints and keeps in a native slot, a `?int` argument
+may take the bare road, and the handler tests its arity and each argument's tag
+in line before it calls anything (`docs/plan.md` item 4).
 
-The closest are `pow` (1.97x), `scale` (1.91x) and `round` (1.86x). `pow`'s time is `_bc_umul`'s
-inner loop (43% of a call): the twin's is the same algorithm, and clang
-vectorises its digit loads while mc's loop is thirteen scalar instructions an
-element (`examples/decimal/README.md` has the same loop measured). Hoisting the
-array's buffer pointer out of it was tried and is 4% SLOWER (the new local takes
-a register the outer loops held), so it was not kept.
+`pow` was the one at the edge (1.92-1.99x): its time is `_bc_umul`'s inner loop,
+which the twin's clang vectorises. Six back-end changes, each general, took it
+to 1.79x -- the fixed array's buffer pointer kept in a local when nothing
+appends to it, `% K` and `/ K` of one value computed once, a `continue`
+carrying its `for`'s step, a literal moved to the right of `+`/`*`, the
+handler's inline arity and tag tests, and `array_fill` two words a store.
+`docs/plan.md` item 4 has what each bought. The closest now is `round` (median
+1.86x), whose time is the string work around the digits.
 
 ### What got it there
 

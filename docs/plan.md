@@ -1208,20 +1208,20 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    module AND the twin AND interpreted; `leakmatrix.php` under the ZTS debug allocator
    **leak-free** over every function, argument shape and error path (`tests/leaks.sh`).
 
-   **The bench, per function, every one under 2.0** (macOS/arm64; each row the best of five
-   rounds, each round `bench.php`'s best of nine with `MCPHP_EACH=1`, module and twin
-   interleaved):
+   **The bench, per function, every one under 2.0 with margin** (macOS/arm64; five runs, module
+   and twin alternated process by process, each run `bench.php`'s best of nine with
+   `MCPHP_EACH=1`; the bar is the WORST of the five under 1.95 and their median at most 1.90):
 
-   | function | module/C | function | module/C | function | module/C |
-   |---|---|---|---|---|---|
-   | add | 1.52x | div | 1.32x | sqrt | 1.08x |
-   | sub | 1.60x | mod | 1.17x | comp | 1.60x |
-   | mul | 1.83x | pow | 1.97x | floor | 1.62x |
-   | round | 1.86x | powmod | 1.43x | ceil | 1.73x |
-   | scale | 1.91x | | | | |
+   | function | worst | median | function | worst | median | function | worst | median |
+   |---|---|---|---|---|---|---|---|---|
+   | add | 1.53x | 1.48x | div | 1.30x | 1.28x | sqrt | 1.05x | 1.04x |
+   | sub | 1.55x | 1.53x | mod | 1.17x | 1.10x | comp | 1.53x | 1.49x |
+   | mul | 1.77x | 1.73x | pow | 1.80x | 1.79x | floor | 1.63x | 1.60x |
+   | round | 1.94x | 1.86x | powmod | 1.38x | 1.37x | ceil | 1.74x | 1.70x |
+   | scale | 1.37x | 1.32x | | | | | | |
 
-   The mixed workload: interpreted 10.44 ms, compiled 0.76 ms (13.7x), the twin 0.53 ms --
-   module/C **1.44x** (it was 3.54x at the first cut).
+   The mixed workload: interpreted 10.38 ms, compiled 0.73 ms (14.3x), the twin 0.53 ms --
+   module/C **1.36x** (it was 3.54x at the first cut).
 
    **The review of #65** (seven findings, each reproduced before it was fixed and each with a test
    that fails on the commit before): a native `?int` parameter's null flag went stale after a
@@ -1269,12 +1269,70 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    | a native `?int` argument takes the handler's call-free bare road (IS_LONG or IS_NULL), and a native-`?int` default no longer stops the inliner | `src/ext.mc`, `src/decl.mc` | a do-nothing `bc_scale` 1.72x -> 1.0x |
    | a function `static` proved to hold only ints is a native slot of `phsi` (no `php_static`, pin or zval), per php thread and reset per request like a zval static | `src/decl.mc`, `src/lvalue.mc`, `src/tls.mc`, `lib/php_ext.mc` | scale 5.3 -> 1.91 (with the `_bc_dscale` static in `bcmath.php`) |
 
-   Measured and not kept: the fixed array's buffer pointer hoisted out of `_bc_umul`'s loop is 4%
-   slower (the new local takes a register the outer loops held). What is left closest to the bar is
-   `pow` (1.97x; 1.92-1.99x across this session's runs, the same with the compiler before the
-   review's changes): 43% of it is `_bc_umul`'s inner loop, thirteen scalar instructions an
-   element against a twin whose digit loads clang vectorises. Then `scale` (1.91x), which stays on
-   the handler's slow road because its `ValueError` branch calls.
+   **`pow` with margin.** `pow` stood at 1.92-1.99x, and the review's own commits did not move it:
+   the compiler at d1cf7c4 (before the review) and at 74cd087 measure within each other's noise
+   (median 1.94 against 1.96), so there was no regression to revert -- the margin had never been
+   there. It was instruction-bound (13 385 instructions a call at IPC 7.9 against the twin's 5 257
+   at 6.1, `/usr/bin/time -l`), so six general changes took instructions out:
+
+   | change | where | bought |
+   |---|---|---|
+   | a FIXED packed array nothing appends to (`$x[] =`) keeps its buffer pointer in a local of its own, reloaded where the array is rebuilt; an element read or write goes through it, with no key temporary for a pure key | `src/packed.mc`, `src/expr.mc`, `src/lvalue.mc`, `lib/php_rt.mc` | pow ~2.6% |
+   | `y = x / K` moves up to the statement computing `x % K`, which becomes `x - y * K`: one division where there were two | `src/opt.mc` (`phq_list`) | pow ~4% |
+   | a `continue` that names its own `for` carries a copy of the step, so the step is not a join every iteration pays; the unwinding-check placement follows a `continue` exactly | `src/stmt.mc`, `src/opt.mc` | pow, mul ~1% |
+   | a literal on the left of `+` or `*` moves to the right, where the machine takes it as an immediate | `src/expr.mc` | a few instructions a digit |
+   | the handler tests its arity and each scalar argument's tag in line, calling the slow check only when one fails | `src/ext.mc` | a do-nothing `bc_scale` 160 -> 96 ms over 5M calls; pow 453 -> 447 ms |
+   | `array_fill(0, n, v)` stores two words a step | `lib/php_rt.mc` | `_bc_umul`'s clear |
+
+   pow 1.96x -> **1.79x** median (498 -> 447 ms over 600k calls), and `scale` 1.91x -> 1.32x with
+   it. `tests/g/149` holds each lowering's shapes against php. Measured and not kept: the loop
+   rotated so its test is at the bottom (6% SLOWER: the allocator gives the moved locals worse
+   registers), a machine peephole for the remainder (it never fired: the slow half's label is a
+   barrier), and hoisting the fixed array's pointer out of `_bc_umul`'s loop by hand (4% slower,
+   for the same register reason). What is closest now is `round` (median 1.86x), whose time is
+   the string work around the digits, not a loop.
+
+   **Four gaps closed in the same PR** (each reproduced against php 8.5 on the head first, each
+   with a fixture that fails on the commit before and passes after):
+   (1) `function &f(): int` returned a COPY -- the declared scalar made the return a native int;
+   the return is now the cell and php's check converts the value IN it (`src/decl.mc`,
+   `src/lvalue.mc`, `tests/g/150`). (2) `--` and `++` on null, bool, `""`, an array and an object
+   on the zval road said nothing; php's warnings, deprecation and TypeError now (`lib/php_rt.mc`
+   `php_zv_inc`/`php_zv_dec`/`php_incdec_other`, `tests/g/151`). (3) an assignment in EXPRESSION
+   position into a mixed variable took the D4 refusal a statement does not -- it follows the
+   statement's rules now (`src/expr.mc`, `tests/g/152`). (4) a throwable's trailer and trace were
+   not php's: every throwable now carries php's `trace` (frames innermost first: file, line,
+   function, class, type, args), `getTraceAsString()`, `__toString()` with its `Next` chain and
+   the uncaught `Stack trace:` / `thrown in` lines are php's byte for byte, closures are
+   `{closure:FILE:LINE}`, a parameter's TypeError names `called in ... and defined in ...` at the
+   declaration's line, `true`/`false` given are named as php names them, and `declare(strict_types=1)`
+   is honoured -- the caller's file for an argument, the declaring file for a return
+   (`tests/g/153`, `tests/g/154`).
+
+   What closing (4) found, fixed in the same batch: a user call's frame is built INSIDE the
+   expression (`php_frv(php_fr_open(..), f(php_fa(a0, ..), ..))`, `src/builtin.mc`), because a
+   frame pushed ahead of the statement ran the call before its left-hand neighbours; a copied call
+   takes the whole frame with it (`src/opt.mc`); a builtin that raises is its own innermost frame
+   with its arguments (`php_nat_throw`: `intdiv`, `str_repeat`, `array_fill`, `str_decrement`,
+   `str_replace`, `settype`, `func_get_arg`, which also gained php's `must be greater than or equal
+   to 0`); a binary operator's left operand runs before the right's hoisted temporaries
+   (`src/expr.mc` `ph_spill_left`: `f(5) . intdiv(9, f(3))` printed f3 first); an arrow function's
+   body announces its own position; popping a frame puts the caller's position back, so a
+   diagnostic after a user call returned no longer names the callee's last line (T7's documented
+   inexactness); a void function called ahead of its definition answers null instead of stopping
+   the compile; `return EXPR;` in a `: void` function is php's compile-time fatal, `return null;`
+   with its own wording; `class_alias` of a missing class is php's warning and false; and every
+   throwable's file is the RESOLVED path (`tests/g/155`-`158`). The frames cost nothing measurable:
+   sync 1.65-1.72x, threads 1.00x, awaitable 1.02-1.07x, connect 1.04-1.12x against the same
+   numbers before them, and an extension builds none (php's engine does).
+
+   Left as they are, on purpose or measured as another milestone's: a statement spread over
+   several lines names its FIRST line where php names the call's (the position is per statement);
+   a builtin's wrong ARGUMENT type is still a warning where php raises a TypeError (builtin
+   argument typing is its own work); a callback php calls through an internal function
+   (`array_map('f', ..)`) has no `[internal function]` frame; a method's or a closure's declared
+   return type is not checked (`ph_skip_type`), so `return 5;` in a `: void` method is not refused;
+   `$s[N]` past the end is C's read by design (`docs/semantics.md`), not php's warning.
 5. **Port json.** `ext/json` cannot be built shared at all (T1), so this port is the only way a
    json extension exists outside php's own binary.
 6. **Distribution -- Composer, Packagist, PIE. To be designed with the owner**: the owner stops

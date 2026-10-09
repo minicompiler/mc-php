@@ -488,20 +488,20 @@ over per-call overheads, and none of it moved when attacked directly:
 * The code's layout: an unrelated change moves a hot loop and the result by 2-7%, which is also
   why several changes that remove instructions measured slower.
 
-**Per function, under 2x every one** (2026-10-08, the bcmath port's batch; macOS/arm64, each
-row the best of five rounds, each round `bench.php`'s own best of nine with `MCPHP_EACH=1`,
-module and twin interleaved):
+**Per function, under 2x every one** (2026-10-08, the bcmath port's batch; macOS/arm64; five
+runs, module and twin alternated process by process, each run `bench.php`'s own best of nine
+with `MCPHP_EACH=1`; the worst of the five and their median):
 
-| function | module (ms) | C twin (ms) | module/C |
-|---|---|---|---|
-| `dec_add`   |  3.940 |  2.661 | **1.48x** |
-| `dec_sub`   |  4.080 |  2.600 | **1.57x** |
-| `dec_mul`   |  5.888 |  3.357 | **1.75x** |
-| `dec_div`   | 15.892 | 11.516 | **1.38x** |
-| `dec_cmp`   |  2.975 |  1.635 | **1.82x** |
-| `dec_round` |  2.711 |  1.496 | **1.81x** |
+| function | worst | median |
+|---|---|---|
+| `dec_add`   | 1.52x | **1.45x** |
+| `dec_sub`   | 1.61x | **1.61x** |
+| `dec_mul`   | 1.72x | **1.71x** |
+| `dec_div`   | 1.37x | **1.33x** |
+| `dec_cmp`   | 1.91x | **1.86x** |
+| `dec_round` | 1.90x | **1.83x** |
 
-The loan workload (`tests/examples.sh`): compiled 0.373 ms against the twin's 0.240 (1.55x).
+The loan workload (`tests/examples.sh`): compiled 0.372 ms against the twin's 0.241 (1.54x).
 `decimal.php` is unchanged; the gains are the compiler's and the runtime's, made for
 `examples/bcmath` and general: views for a `substr()` local and windows counted along paths
 (`src/opt.mc`), fresh buffers written in place (`src/rc.mc`), string blocks kept per size class
