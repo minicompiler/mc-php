@@ -509,6 +509,8 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         i64 t = ph_var_type(d);
         i64 lv = ph_var_node(d, 0);         // the read: php_gread for a global
+        i64 io = ph_incdec_other(t, incdec < 0, lv);
+        if (io) return ph_wrap(io);
         i64 val = 0;
         if (t == PT_MIXED) {
             uptr f = "php_zv_inc";
@@ -1175,7 +1177,33 @@ i64 ph_stmt_1() {
             i64 sctr = ph_can_throw;
             ph_can_throw = 0;
             e = ph_expr(0);
+            // php refuses it while compiling, naming `return null;` apart
+            if (ph_fn_void) {
+                if (ph_ety == PT_NULL && nd_kind(e) == N_CALL && str_eq(nd_name(e), "php_znull"))
+                    ph_phpfatal_x(fl, line, "A void function must not return a value (did you mean \"return;\" instead of \"return null;\"?)", 1);
+                ph_phpfatal_x(fl, line, "A void function must not return a value", 1);
+            }
             if (ph_fn_ret == PT_MIXED && ph_fn_retref) e = ph_to_mixed(e, ph_ety);
+            // a by-reference function's declared scalar (src/decl.mc): php
+            // verifies the referenced value and converts it IN the cell, so
+            // the coerced value is stored back and the cell is returned
+            if (ph_fn_retref && ph_fn_retdecl >= 0) {
+                i64 rdw = 1;
+                if (ph_fn_retdecl == PT_FLOAT)  rdw = 2;
+                if (ph_fn_retdecl == PT_STRING) rdw = 3;
+                if (ph_fn_retdecl == PT_BOOL)   rdw = 4;
+                i64 rc = ph_temp(e, ty_pzv, "phrc_");
+                u8 rda[48];
+                st64(rda, ph_tref(rc));
+                st64(rda + 8, ph_int(rdw | ph_strict_bit(fl)));
+                st64(rda + 16, ph_strlit("", 0));
+                st64(rda + 24, ph_strlit(ph_cur_fn, cstrlen(ph_cur_fn)));
+                st64(rda + 32, ph_int(0));
+                st64(rda + 40, ph_strlit("", 0));
+                ph_pending_stmt(ph_expr_stmt_of(ph_c2("php_zv_store", ph_tref(rc), ph_calln("php_param_coerce", rda, 6, ty_pzv), ty_pzv)));
+                e = ph_tref(rc);
+                ph_can_throw = 1;
+            }
             if (ph_fn_ret == PT_MIXED && !ph_fn_retref) e = ph_to_mixed(ph_own(e, ph_ety), ph_ety);
             // A declared scalar return is CHECKED: php's own rule and php's
             // own TypeError, the same php_param_coerce every declared
@@ -1215,7 +1243,7 @@ i64 ph_stmt_1() {
                 if (!(rw == 2 && ph_ety == PT_INT)) {
                     u8 rca[48];
                     st64(rca, ph_to_mixed(e, ph_ety));
-                    st64(rca + 8, ph_int(rw));
+                    st64(rca + 8, ph_int(rw | ph_strict_bit(fl)));
                     st64(rca + 16, ph_strlit("", 0));
                     st64(rca + 24, ph_strlit(ph_cur_fn, cstrlen(ph_cur_fn)));
                     st64(rca + 32, ph_int(0));
@@ -1467,6 +1495,7 @@ i64 ph_stmt_1() {
             if (ph_tid == T_IDENT && str_eq(ph_tname, "strict_types")) st = 1;
             if (st == 3 && ph_tid == T_INT && ph_tval == 0)
                 ph_refuse(fl, line, "declare(strict_types=0)", "D4");
+            if (st == 3 && ph_tid == T_INT && ph_tval == 1) ph_strict_add(fl);
             if (st) st = st + 1;
             ph_next();
         }

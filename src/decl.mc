@@ -564,6 +564,8 @@ i64 ph_function() {
     st64(ph_fvpc + fi * 8, 0);
     st64(ph_fpr + fi * 8, 0);
     st64(ph_frr + fi * 8, retref);
+    st64(ph_fdfile + fi * 8, fl);
+    st64(ph_fdline + fi * 8, line);
 
     ph_opt_scan();                                // which ?int parameters stay native
     i64 sns = ph_nstn;                             // this body's native statics follow the outer's
@@ -742,8 +744,11 @@ i64 ph_function() {
                 st64(pcb + 24, ph_strlit(name, cstrlen(name)));
                 st64(pcb + 32, ph_int(np + 1));
                 st64(pcb + 40, ph_strlit(bare3, cstrlen(bare3)));
+                uptr afl = ph_disp(ph_absfile(fl));
+                st64(pcb + 48, ph_strlit(afl, cstrlen(afl)));
+                st64(pcb + 56, ph_int(line));
                 i64 cz2 = ph_set(ph_mangle(d, "v_"),
-                                 ph_calln("php_param_coerce", pcb, 6, ty_pzv));
+                                 ph_calln("php_param_coerce_at", pcb, 8, ty_pzv));
                 if (pret) set_nd_next(pret, cz2);
                 if (!pret) pre = cz2;
                 pret = cz2;
@@ -792,7 +797,16 @@ i64 ph_function() {
     if (ph_at(":", 1)) { ph_next(); rt = ph_type_word(1); drt = rt; }
     ph_bnd_set(fi, PH_MAXP, drt);
     if (fwd && rt != PT_VOID && rt != PT_MIXED) st64(ph_fwid + fi * 8, 1);
-    if (fwd && rt != PT_VOID) rt = PT_MIXED;
+    // a void function called ahead of its definition: that call was built
+    // to take a value (php's answer is null), so the function answers one
+    i64 dvoid = rt == PT_VOID;
+    if (fwd) rt = PT_MIXED;
+    // `function &f(): int` returns the callee's CELL, which only a zval is:
+    // the declared scalar would have made the return a native int, a copy,
+    // and `$r = &f(); $r = 9;` would write into nothing. The declared type
+    // stays php's check on the value (src/lvalue.mc's return).
+    i64 rdecl = 0 - 1;
+    if (retref && (rt == PT_INT || rt == PT_FLOAT || rt == PT_STRING || rt == PT_BOOL)) { rdecl = rt; rt = PT_MIXED; }
     st64(ph_fret + fi * 8, rt);
     uptr mn = ph_mangle(name, "f_");
     p_set_decl_name(mn);
@@ -802,6 +816,10 @@ i64 ph_function() {
     ph_fn_ret = rt;
     i64 srr = ph_fn_retref;
     ph_fn_retref = retref;
+    i64 srd = ph_fn_retdecl;
+    ph_fn_retdecl = rdecl;
+    i64 sfv = ph_fn_void;
+    ph_fn_void = dvoid;
     i64 stl2 = ph_toplevel;
     ph_toplevel = 0;
     i64 sls2 = ph_nls;
@@ -967,6 +985,8 @@ i64 ph_function() {
     ph_cur_fn = savefn;
     ph_fn_ret = sret;
     ph_fn_retref = srr;
+    ph_fn_retdecl = srd;
+    ph_fn_void = sfv;
     ph_toplevel = stl2;
     ph_nls = sls2;
     i64 f = node_new(N_FUNC, line, fl);

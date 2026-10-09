@@ -186,7 +186,13 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     i64 aref = node_new(N_IDENT, line, fl);
     set_nd_name(aref, an);
     set_nd_type(aref, ty_parr);
-    i64 made = ph_c3("php_closure_new", fp, aref, thisp, ty_pzv);
+    // php's name for it, which its frames carry: {closure:FILE:LINE}
+    uptr cfl = ph_disp(ph_absfile(fl));
+    uptr cnm = p_cat("{closure:", cfl, 0, cstrlen(cfl));
+    cnm = p_cat(cnm, ":", 0, 1);
+    cnm = p_cat(cnm, php_dec(line), 0, cstrlen(php_dec(line)));
+    cnm = p_cat(cnm, "}", 0, 1);
+    i64 made = ph_c4("php_closure_new", fp, aref, thisp, ph_strlit(cnm, cstrlen(cnm)), ty_pzv);
 
     // now the body, in its own scope
     uptr savenv = ph_scope_save();
@@ -212,6 +218,8 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_hoist_tail = 0;
     ph_fn_ret = PT_MIXED;
     ph_fn_retref = 0;
+    i64 sfvc = ph_fn_void;
+    ph_fn_void = 0;
     ph_toplevel = 0;
     ph_nls = 0;
     ph_in_try = 0;
@@ -278,11 +286,25 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     pkx_stable = 0;
     if (arrow) {
         ph_want("=>", 2, "expected => in a php arrow function");
+        // the body is an expression and no statement: it announces its own
+        // position as ph_stmt would, or a diagnostic or a throw inside it
+        // carried the line of the statement that CALLED the closure
+        i64 eline = ph_tline;
+        uptr efl = ph_tfile;
+        i64 sct = ph_can_throw;
+        ph_can_throw = 0;
         i64 rv = ph_expr(0);
         i64 r = node_new(N_RETURN, line, fl);
         set_nd_a(r, ph_to_mixed(ph_own(rv, ph_ety), ph_ety));
+        i64 w = ph_wrap(r);
+        if (ph_can_throw && !ph_is_pos_at(w, efl, eline)) {
+            i64 pw = ph_posstmt(efl, eline);
+            set_nd_next(pw, w);
+            w = pw;
+        }
+        ph_can_throw = sct;
         body = node_new(N_BLOCK, line, fl);
-        set_nd_a(body, ph_wrap(r));
+        set_nd_a(body, w);
     }
     if (!arrow) body = ph_block();
     pkx_names = spk;
@@ -347,6 +369,7 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_hoist_head = hh;
     ph_hoist_tail = ht;
     ph_fn_ret = sret;
+    ph_fn_void = sfvc;
     ph_fn_retref = srrc;
     ph_in_method = sm;
     ph_in_static = sst;

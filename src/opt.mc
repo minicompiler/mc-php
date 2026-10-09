@@ -1195,10 +1195,41 @@ i64 phi_arity_ok(i64 c) {
     return phi_len(nd_a(c)) == phi_len(nd_a(fc));
 }
 
+// A user call with its frame (src/builtin.mc ph_fr_wrap) is
+// php_frv(php_fr_open(..), f(php_fa(a0, ..), ..)): the frame opened before the
+// arguments and popped after the call. A copy takes the WHOLE of it -- the
+// open, then the arguments and the body, then the pop -- and its answer takes
+// the place of php_frv, so the frame is on the stack while the copied body
+// runs, as it is while the call does.
+i64 phi_wrapn;
+i64 phi_frv_inner(i64 n) {
+    if (nd_kind(n) != N_CALL) return 0;
+    if (!str_eq(nd_name(n), "php_frv") && !str_eq(nd_name(n), "php_frvf")) return 0;
+    i64 in = nd_next(nd_a(n));
+    loop { if (!in || nd_kind(in) != N_CAST) break; in = nd_a(in); }
+    if (!in || nd_kind(in) != N_CALL) return 0;
+    if (phi_find(nd_name(in)) < 0 || !phi_arity_ok(in)) return 0;
+    return in;
+}
+// the node that takes the copied call's place: php_frv when the call had a
+// frame (an i64 answer, cast as php_frv's was), else the call itself
+i64 phi_tgt(i64 c) { if (phi_wrapn) return phi_wrapn; return c; }
+i64 phi_tval(i64 v) {
+    if (!phi_wrapn || str_eq(nd_name(phi_wrapn), "php_frvf")) return v;
+    i64 cv = node_new(N_CAST, nd_line(v), nd_file(v));
+    set_nd_type(cv, TY_I64);
+    set_nd_a(cv, v);
+    return cv;
+}
+
 void phi_seek(i64 hold, i64 field, i64 n, i64 sel) {
     if (!n) return;
     if (phi_hit) return;
     i64 k = nd_kind(n);
+    if (k == N_CALL && sel && !phi_dirty) {
+        i64 fin = phi_frv_inner(n);
+        if (fin) { phi_hit = fin; phi_wrapn = n; phi_hold = hold; phi_field = field; return; }
+    }
     if (k == N_IDENT || k == N_INT || k == N_STR) return;
     if (k == N_UNARY || k == N_CAST) { phi_seek(n, 0, nd_a(n), sel); return; }
     if (k == N_BINARY) {
@@ -1575,7 +1606,7 @@ i64 phi_expand(i64 c) {
         i64 cv = node_new(N_CAST, line, fl);
         set_nd_type(cv, nd_type(fc));
         set_nd_a(cv, nd_a(body));
-        phi_put(phi_hold, phi_field, c, cv);
+        phi_put(phi_hold, phi_field, phi_tgt(c), phi_tval(cv));
         phi_drop = 0;
         return phi_list(ph);
     }
@@ -1596,7 +1627,7 @@ i64 phi_expand(i64 c) {
         i64 id = node_new(N_IDENT, line, fl);
         set_nd_name(id, rv);
         set_nd_type(id, nd_type(fc));
-        phi_put(phi_hold, phi_field, c, id);
+        phi_put(phi_hold, phi_field, phi_tgt(c), phi_tval(id));
     }
     // a return nested where its if's other branch goes on needs the flag:
     // found on a throwaway copy, since the lift rewrites what it reads
@@ -1662,11 +1693,27 @@ i64 phi_list(i64 s) {
             loop {
                 phi_hit = 0;
                 phi_dirty = 0;
+                phi_wrapn = 0;
                 phi_seek(s, 0, nd_a(s), 1);
                 if (!phi_hit) break;
                 i64 c = phi_hit;
                 i64 whole = k == N_EXPRSTMT && nd_a(s) == c;
+                i64 wn = phi_wrapn;
                 i64 ins = phi_expand(c);
+                phi_wrapn = 0;
+                if (wn) {
+                    // the frame around the copy: opened first, popped last
+                    i64 op = node_new(N_EXPRSTMT, nd_line(wn), nd_file(wn));
+                    i64 oc = nd_a(wn);
+                    set_nd_next(oc, 0);
+                    set_nd_a(op, oc);
+                    i64 pc = node_new(N_CALL, nd_line(wn), nd_file(wn));
+                    set_nd_name(pc, "php_fr_pop");
+                    set_nd_type(pc, TY_VOID);
+                    i64 pp = node_new(N_EXPRSTMT, nd_line(wn), nd_file(wn));
+                    set_nd_a(pp, pc);
+                    ins = phi_cat(phi_cat(op, ins), pp);
+                }
                 if (phi_drop) whole = 1;
                 if (ann && phi_announces(ins)) ins = phi_cat(ins, phi_copy1(ann));
                 if (ins) {

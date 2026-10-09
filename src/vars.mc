@@ -353,3 +353,26 @@ i64 ph_var_bind(uptr d, i64 ty) {
     return 0;
 }
 
+
+// ---- declare(strict_types=1), per file ----------------------------------------
+// php decides a call's argument checks by the CALLING file's mode and a
+// return's by the declaring file's: each file that says strict_types=1 is
+// listed here when its declare is parsed (its first statement), and a check
+// lowered in it carries PC_STRICT (lib/php_rt.mc php_param_coerce).
+#define PH_MAXSTRICT 256
+uptr ph_strictf[PH_MAXSTRICT];
+i64  ph_nstrict;
+void ph_strict_add(uptr fl) {
+    if (ph_nstrict >= PH_MAXSTRICT) err_at(fl, 1, "mc-php: too many files with declare(strict_types=1)");
+    st64(ph_strictf + ph_nstrict * 8, fl);
+    ph_nstrict = ph_nstrict + 1;
+}
+i64 ph_strict_bit(uptr fl) {
+    i64 i = 0;
+    loop {
+        if (i >= ph_nstrict) break;
+        if (str_eq(ld64(ph_strictf + i * 8), fl)) return 16;
+        i = i + 1;
+    }
+    return 0;
+}

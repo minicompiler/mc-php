@@ -59,6 +59,8 @@ i64  ph_fpr[PH_MAXFN];                  // bit i: parameter i is `&$x`
 // src/ext.mc reads it from the engine arg, src/builtin.mc marshals the pair.
 i64  ph_fopt[PH_MAXFN * PH_MAXP];
 i64  ph_frr[PH_MAXFN];                  // 1 when declared `function &f()`
+uptr ph_fdfile[PH_MAXFN];               // where it is declared: the file ...
+i64  ph_fdline[PH_MAXFN];               // ... and the line (0 until it is)
 // 1 when a CALL came before the declaration, so the declared types were
 // widened to mixed to match the signature that call was built against. The
 // extension back end reads it: the refusal it would otherwise print names the

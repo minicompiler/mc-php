@@ -553,6 +553,8 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     ph_hoist_tail = 0;
     ph_fn_ret = PT_MIXED;
     ph_fn_retref = 0;
+    i64 sfvm = ph_fn_void;
+    ph_fn_void = 0;
     ph_in_method = 1;
     i64 stl = ph_toplevel;
     ph_toplevel = 0;
@@ -699,6 +701,7 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
         ph_hoist_tail = ht;
         ph_fn_ret = sret;
         ph_fn_retref = srrm;
+        ph_fn_void = sfvm;
         ph_in_method = sm;
         return;
     }
@@ -745,6 +748,7 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     ph_hoist_tail = ht;
     ph_fn_ret = sret;
     ph_fn_retref = srrm;
+    ph_fn_void = sfvm;
     ph_in_method = sm;
     ph_toplevel = stl;
     ph_nls = sls;

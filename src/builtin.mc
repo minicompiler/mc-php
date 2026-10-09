@@ -38,6 +38,14 @@ i64 ph_uses_nargs;
 
 // inside a `function &f()`: a returned value is the callee's own cell
 i64 ph_fn_retref;
+// ... and its DECLARED scalar return type (PT_INT..PT_BOOL), or -1: the
+// return lowers as the cell (mixed), and the declared type is php's check
+// on the value, made in place (src/lvalue.mc)
+i64 ph_fn_retdecl;
+// the function being lowered was declared `: void`: `return EXPR;` is php's
+// compile-time fatal. Separate from ph_fn_ret because a function called
+// ahead of its definition answers a value anyway (src/decl.mc).
+i64 ph_fn_void;
 
 // 1 when the expression just parsed is a call to a `function &f()`. The
 // caller of `$a = &EXPR` reads it to decide whether php would give the
@@ -703,6 +711,174 @@ i64 ph_bi_async(uptr name, i64 line, uptr fl) {
         return c;
     }
     return 0;
+}
+
+// ---- the call's frame (lib/php_rt.mc § the trace) ---------------------------
+// A compiled PROGRAM keeps php's call stack itself: around a call of a php
+// function or method it pushes a frame -- the function, its class and `->` or
+// `::`, the call's own file and line, and the arguments as they were passed,
+// each a (tag, value) pair -- and pops it once the call returns, an exception
+// included. A throwable created meanwhile copies the stack into its `trace`.
+// An extension pushes nothing: Zend keeps the frames there.
+//
+// The arguments are evaluated once, before the frame: each one that is not a
+// plain name or integer goes into a temporary of its own, which the frame and
+// the call then both read. Answers the frame's argument area (a temporary),
+// or 0 when no frame is kept.
+// a statement of e alone: ph_expr_stmt_of would splice the pending queue in
+i64 ph_fr_st(i64 e) {
+    i64 st = node_new(N_EXPRSTMT, ph_tline, ph_tfile);
+    set_nd_a(st, e);
+    return st;
+}
+i64 ph_fr_tag(i64 t) {
+    if (t == PT_INT) return 1;
+    if (t == PT_FLOAT) return 2;
+    if (t == PT_STRING) return 3;
+    if (t == PT_BOOL) return 4;
+    if (t == PT_NULL) return 5;
+    if (t == PT_ARR) return 7;
+    if (t == PT_OBJ) return 8;
+    return 6;
+}
+i64 ph_fr_push(uptr fname, uptr cls, i64 ty, uptr av, i64 na, i64 line, uptr fl) {
+    if (ph_ext) return 0;
+    if (na > 0 && ph_had_spread) na = 0;      // a spread's values are the array's: not kept
+    i64 i = 0;
+    loop {
+        if (i >= na) break;
+        i64 a = ph_a(av, i);
+        i64 at = ph_aty(av, i);
+        if (at == PT_PK || at == PT_VOID) { na = i; break; }
+        if (nd_kind(a) != N_IDENT && nd_kind(a) != N_INT) {
+            i64 tmp = ph_temp(a, ph_mcty(at), "pha_");
+            st64(av + i * 24, tmp);
+        }
+        i = i + 1;
+    }
+    uptr cs = cls;
+    if (!cs) cs = "";
+    i64 cn = ph_int(0);
+    if (cls) cn = ph_raw(cls, cstrlen(cls));
+    u8 pa[48];
+    st64(pa, ph_raw(fname, cstrlen(fname)));
+    st64(pa + 8, cn);
+    st64(pa + 16, ph_int(ty));
+    uptr afl = ph_disp(ph_absfile(fl));      // php's frames name the resolved path
+    st64(pa + 24, ph_raw(afl, cstrlen(afl)));
+    st64(pa + 32, ph_int(line));
+    st64(pa + 40, ph_int(na));
+    i64 fp = ph_temp(ph_calln("php_fr_push", pa, 6, TY_UPTR), TY_UPTR, "phf_");
+    i = 0;
+    loop {
+        if (i >= na) break;
+        i64 a2 = ph_a(av, i);
+        i64 at2 = ph_aty(av, i);
+        i64 tg = ph_fr_tag(at2);
+        i64 vn = ph_tref(a2);
+        if (nd_kind(a2) == N_INT) vn = ph_int(nd_val(a2));
+        if (tg == 6) vn = ph_to_mixed(vn, at2);
+        ph_pending_stmt(ph_fr_st(ph_quiet("st64", 2, ph_bin(ph_tok("+", 1), ph_tref(fp), ph_int(i * 16), TY_UPTR),
+                                                 ph_int(tg), 0, 0, TY_VOID)));
+        i64 dst = ph_bin(ph_tok("+", 1), ph_tref(fp), ph_int(i * 16 + 8), TY_UPTR);
+        if (tg == 2) ph_pending_stmt(ph_fr_st(ph_quiet("stf64", 2, dst, vn, 0, 0, TY_VOID)));
+        if (tg != 2) ph_pending_stmt(ph_fr_st(ph_quiet("st64", 2, dst, ph_cast(TY_I64, vn), 0, 0, TY_VOID)));
+        i = i + 1;
+    }
+    return fp;
+}
+
+// the call c, run with its frame on the stack: its answer in a temporary,
+// then the frame popped. Answers what takes the call's place.
+i64 ph_fr_call(i64 c, i64 fp) {
+    if (!fp) return c;
+    i64 r = 0;
+    if (nd_type(c) == TY_VOID) ph_pending_stmt(ph_fr_st(c));
+    if (nd_type(c) != TY_VOID) r = ph_temp(c, nd_type(c), "phfr_");
+    ph_pending_stmt(ph_fr_st(ph_quiet("php_fr_pop", 0, 0, 0, 0, 0, TY_VOID)));
+    if (!r) return ph_int(0);
+    return ph_tref(r);
+}
+
+// Does a call's argument list go through a caller-side coercion (the check
+// in ph_builtin below, the same condition)? Those arguments are temporaries
+// computed AHEAD of the expression, with the check that refuses one, and a
+// TypeError's trace has the call it refused on top -- so that frame is opened
+// there too (ph_fr_push). Every other call opens it in place (ph_fr_wrap).
+i64 ph_fr_coerces(i64 fi, uptr av, i64 na, i64 np, i64 vararg) {
+    i64 i = 0;
+    loop {
+        if (i >= np || i >= na) break;
+        i64 fo = ld64(ph_fopt + (fi * PH_MAXP + i) * 8);
+        i64 want = ld64(ph_fpt + (fi * PH_MAXP + i) * 8);
+        if (fo != 1 && !(vararg && i == np - 1) && ph_aty(av, i) != want
+            && (want == PT_INT || want == PT_FLOAT || want == PT_STRING || want == PT_BOOL)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// one argument of the call c recorded in its frame as it is computed: the
+// value node wrapped, its type kept (a float through its own wrapper, since a
+// cast would convert it)
+i64 ph_fr_arg(i64 v, i64 tag, i64 k, i64 last) {
+    i64 t = nd_type(v);
+    if (t == ty_f64) return ph_quiet("php_faf", 3, v, ph_int(k), ph_int(last), 0, ty_f64);
+    return ph_cast(t, ph_quiet("php_fa", 4, ph_cast(TY_I64, v), ph_int(tag), ph_int(k), ph_int(last), TY_I64));
+}
+
+// the user call c with its frame built where php builds it: opened before the
+// arguments, each argument stored as it is computed, popped after the call --
+// one expression, so nothing around the call moves (a temporary ahead of the
+// statement would run the call before its left-hand neighbours). Only the
+// arguments the caller PASSED are shown, as php shows them.
+i64 ph_fr_wrap(i64 c, uptr name, i64 fi, i64 na, i64 np, i64 vararg, i64 line, uptr fl) {
+    if (ph_ext) return c;
+    i64 n = 0;
+    if (!ph_had_spread) {
+        loop {
+            if (n >= np || n >= na) break;
+            i64 w0 = ld64(ph_fpt + (fi * PH_MAXP + n) * 8);
+            if (w0 == PT_PK || w0 == PT_VOID) break;
+            n = n + 1;
+        }
+    }
+    i64 prev = 0;
+    i64 cur = nd_a(c);
+    i64 i = 0;
+    loop {
+        if (i >= n || !cur) break;
+        i64 fo = ld64(ph_fopt + (fi * PH_MAXP + i) * 8);
+        i64 want = ld64(ph_fpt + (fi * PH_MAXP + i) * 8);
+        i64 tag = ph_fr_tag(want);
+        if (vararg && i == np - 1) tag = 9;
+        i64 two = fo == 1 || fo == 2;          // the value and a null flag (or a literal 0)
+        i64 last = i == n - 1;
+        i64 nx = nd_next(cur);
+        set_nd_next(cur, 0);
+        i64 w = ph_fr_arg(cur, tag, i, last && !(fo == 1));
+        if (prev) set_nd_next(prev, w);
+        if (!prev) set_nd_a(c, w);
+        prev = w;
+        if (two && nx) {
+            i64 fx = nd_next(nx);
+            set_nd_next(nx, 0);
+            i64 fw = nx;
+            if (fo == 1) fw = ph_cast(TY_U8, ph_quiet("php_fa_null", 3, ph_cast(TY_I64, nx), ph_int(i), ph_int(last), 0, TY_I64));
+            set_nd_next(prev, fw);
+            prev = fw;
+            nx = fx;
+        }
+        set_nd_next(prev, nx);
+        cur = nx;
+        i = i + 1;
+    }
+    uptr afl = ph_disp(ph_absfile(fl));      // php's frames name the resolved path
+    i64 open = ph_quiet("php_fr_open", 4, ph_raw(name, cstrlen(name)), ph_raw(afl, cstrlen(afl)),
+                        ph_int(line), ph_int(n), TY_I64);
+    i64 ct = nd_type(c);
+    if (ct == ty_f64) return ph_quiet("php_frvf", 2, open, c, 0, 0, ty_f64);
+    return ph_cast(ct, ph_quiet("php_frv", 2, open, ph_cast(TY_I64, c), 0, 0, TY_I64));
 }
 
 i64 ph_builtin(uptr name, i64 line, uptr fl) {
@@ -1746,6 +1922,11 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     i64 vararg = ld64(ph_fvar + fi * 8);
     i64 spread = ph_had_spread;
     if (na > np && !vararg && !spread) ph_todo2(fl, line, "the wrong number of arguments for", name);
+    // a void call stays a statement of its own, and a coerced list is computed
+    // ahead (ph_fr_coerces): both keep the frame ahead with it
+    i64 frp = 0;
+    if (ph_mcty(ld64(ph_fret + fi * 8)) == TY_VOID || ph_fr_coerces(fi, av, na, np, vararg))
+        frp = ph_fr_push(name, 0, 0, av, na, line, fl);
     i64 head = 0;
     i64 tail = 0;
     i64 i = 0;
@@ -1828,7 +2009,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                 if (vpc) {
                     u8 vcb[64];
                     st64(vcb, el);
-                    st64(vcb + 8, ph_int(vpc));
+                    st64(vcb + 8, ph_int(vpc | ph_strict_bit(fl)));
                     st64(vcb + 16, ph_strlit("", 0));
                     st64(vcb + 24, ph_strlit(name, cstrlen(name)));
                     st64(vcb + 32, ph_int(j + 1));
@@ -1885,7 +2066,15 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                 st64(acb + 24, ph_strlit(name, cstrlen(name)));
                 st64(acb + 32, ph_int(i + 1));
                 st64(acb + 40, ph_strlit(pn, cstrlen(pn)));
-                v = ph_tref(ph_temp(ph_calln("php_param_coerce", acb, 6, ty_pzv),
+                // the caller's file decides strict_types; the error is placed
+                // where the parameter is declared (php_param_coerce_at)
+                st64(acb + 8, ph_int(cw | ph_strict_bit(fl)));
+                uptr dfl = ld64(ph_fdfile + fi * 8);
+                if (!dfl) dfl = "";
+                if (cstrlen(dfl)) dfl = ph_disp(ph_absfile(dfl));
+                st64(acb + 48, ph_strlit(dfl, cstrlen(dfl)));
+                st64(acb + 56, ph_int(ld64(ph_fdline + fi * 8)));
+                v = ph_tref(ph_temp(ph_calln("php_param_coerce_at", acb, 8, ty_pzv),
                                     ty_pzv, "phc_"));
                 have = PT_MIXED;
                 coerced = 1;
@@ -1910,6 +2099,18 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     // ONE check for the whole argument list: php_param_coerce is a no-op once
     // something is pending, so the FIRST refusal is the one that stands, and
     // this runs before the call, so the body is not reached with a filled-in 0
+    // the frame goes BEFORE the check leaves: the TypeError was created with
+    // it on the stack (php's #0 is the call it refused), and nothing leaves
+    // with it still there
+    if (coerced && frp) {
+        i64 pex = node_new(N_IDENT, line, fl);
+        set_nd_name(pex, "ph_exc");
+        set_nd_type(pex, TY_UPTR);
+        i64 pif = node_new(N_IF, line, fl);
+        set_nd_a(pif, ph_truthy(pex));
+        set_nd_b(pif, ph_fr_st(ph_quiet("php_fr_pop", 0, 0, 0, 0, 0, TY_VOID)));
+        ph_pending_stmt(pif);
+    }
     if (coerced) ph_pending_stmt(ph_check(line, fl));
     ph_can_throw = 1;
     i64 c = node_new(N_CALL, line, fl);
@@ -1919,7 +2120,8 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
     set_nd_type(c, ph_mcty(rt));
     ph_ety = rt;
     ph_ref_call = ld64(ph_frr + fi * 8);
-    return c;
+    if (frp) return ph_fr_call(c, frp);
+    return ph_fr_wrap(c, name, fi, na, np, vararg, line, fl);
 }
 
 

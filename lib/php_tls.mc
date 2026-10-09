@@ -104,26 +104,37 @@
 #define PHT_ph_xqh            12352   // uptr, 8 bytes  cross-thread completion queue head (docs/threads.md § Step 6b): another thread enqueues a completed future here under the runtime lock; this thread's loop drains it, deep-copying the value into this arena
 #define PHT_ph_xqt            12360   // uptr, 8 bytes  and its tail
 #define PHT_ph_scache        12368   // u64[], 272 bytes  freed string blocks kept for the next string of their size: a list head per 8-byte class (0..16), then a count per class (lib/php_ext.mc php_str_alloc)
-#define PHT_SIZE 12640
+// the program's CALL STACK as php reports it (lib/php_rt.mc § the trace):
+// one 64-byte record per call a compiled program made and has not returned
+// from -- name, class, type (1 `->`, 2 `::`), the CALL's file and line, where
+// its arguments start and how many -- and the arguments, a (tag, value) pair
+// each. An extension pushes none: Zend keeps its own frames.
+#define PHT_ph_fr            12640   // uptr  the records
+#define PHT_ph_frn           12648   // i64   in use
+#define PHT_ph_frc           12656   // i64   capacity
+#define PHT_ph_fa            12664   // uptr  the arguments
+#define PHT_ph_fan           12672   // i64   in use
+#define PHT_ph_fac           12680   // i64   capacity
+#define PHT_SIZE 12688
 
 // A ZTS module's words (lib/php_zts.mc, docs/threads.md § ZTS), after the NTS
 // block. src/program.mc makes PHT_SIZE cover them for a ZTS output only, so
 // an NTS module's block and every byte of it are what they were; a #define
 // emits nothing.
-#define PHT_phx_eg             12640   // uptr  this php thread's executor globals
-#define PHT_ph_globals         12648   // uptr  the global variable table, this request's
-#define PHT_ph_consts          12656   // uptr  the constants, this request's
-#define PHT_ph_classes         12664   // uptr  the class registry, this request's
-#define PHT_ph_ce_closure      12672   // uptr
-#define PHT_ph_rsl             12680   // uptr  the statics to reset at the end of the request
-#define PHT_phz_init           12688   // i64   1 once a php thread's block is set up
-#define PHT_phz_mod            12696   // uptr  this thread's copy of the module's own words (statics, call caches)
-#define PHT_phz_sp             12704   // uptr  this request's static-property tables: (class entry, table) pairs
-#define PHT_phz_spn            12712   // i64
-#define PHT_phz_idm            12720   // uptr  the identity map of a copy: (from, to) pairs
-#define PHT_phz_idn            12728   // i64
-#define PHT_phz_idc            12736   // i64   its capacity
-#define PHT_phx_egx            12744   // i64   EG(exception)'s offset, as this thread measured it
-#define PHT_phx_egx_done       12752   // i64   1 once it did (or while RINIT must not)
-#define PHT_phz_job            12760   // uptr  a php thread's job, while its call runs (lib/php_zts.mc § 3b)
-#define PHT_SIZE_ZTS           12768
+#define PHT_phx_eg             12688   // uptr  this php thread's executor globals
+#define PHT_ph_globals         12696   // uptr  the global variable table, this request's
+#define PHT_ph_consts          12704   // uptr  the constants, this request's
+#define PHT_ph_classes         12712   // uptr  the class registry, this request's
+#define PHT_ph_ce_closure      12720   // uptr
+#define PHT_ph_rsl             12728   // uptr  the statics to reset at the end of the request
+#define PHT_phz_init           12736   // i64   1 once a php thread's block is set up
+#define PHT_phz_mod            12744   // uptr  this thread's copy of the module's own words (statics, call caches)
+#define PHT_phz_sp             12752   // uptr  this request's static-property tables: (class entry, table) pairs
+#define PHT_phz_spn            12760   // i64
+#define PHT_phz_idm            12768   // uptr  the identity map of a copy: (from, to) pairs
+#define PHT_phz_idn            12776   // i64
+#define PHT_phz_idc            12784   // i64   its capacity
+#define PHT_phx_egx            12792   // i64   EG(exception)'s offset, as this thread measured it
+#define PHT_phx_egx_done       12800   // i64   1 once it did (or while RINIT must not)
+#define PHT_phz_job            12808   // uptr  a php thread's job, while its call runs (lib/php_zts.mc § 3b)
+#define PHT_SIZE_ZTS           12816

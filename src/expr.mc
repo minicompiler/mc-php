@@ -463,6 +463,21 @@ i64 ph_postfix(i64 v, i64 vt) {
     return v;
 }
 
+// ++/-- on a variable whose static type has none (php 8.5): a bool keeps its
+// value with a warning, an array or an object is a TypeError -- what the zval
+// road does in php_zv_inc/php_zv_dec. The statement that says so, or 0 for
+// an int or a float, which have their arithmetic.
+i64 ph_incdec_other(i64 t, i64 dec, i64 lv) {
+    i64 k = 0;
+    if (t == PT_BOOL) k = 1;
+    if (t == PT_ARR) k = 2;
+    if (t == PT_OBJ) k = 3;
+    if (!k) return 0;
+    i64 o = ph_int(0);
+    if (k == 3) o = lv;
+    return ph_expr_stmt_of(ph_c3("php_incdec_t", ph_int(k), ph_int(dec), o, TY_VOID));
+}
+
 i64 ph_primary() {
     ph_efresh = 0;
     i64 line = ph_tline;
@@ -528,6 +543,13 @@ i64 ph_primary() {
                 i64 rv = ph_expr(15);
                 i64 rt = ph_ety;
                 i64 known = ph_var_find(d);
+                // the statement's own rules (src/lvalue.mc ph_assign_stmt):
+                // null makes a zval, and a mixed variable takes any value --
+                // its type IS the union, so `($x = 4)` on a mixed $x is no
+                // change of type and D4 has nothing to refuse
+                if (rt == PT_VOID) ph_refuse(fl, line, "assigning the result of a void function", "D4");
+                if (rt == PT_NULL) { rv = ph_to_mixed(rv, rt); rt = PT_MIXED; }
+                if (known >= 0 && ph_var_type(d) == PT_MIXED && rt != PT_MIXED) { rv = ph_to_mixed(rv, rt); rt = PT_MIXED; }
                 ph_var_bind(d, rt);
                 i64 bt = ph_var_type(d);
                 i64 sv = ph_own(rv, rt);
@@ -639,6 +661,12 @@ i64 ph_primary() {
         if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
         i64 t = ph_var_type(d);
         i64 lv = ph_var_node(d, 0);         // the read: php_gread for a global
+        i64 io = ph_incdec_other(t, !up, lv);
+        if (io) {
+            ph_pending_stmt(io);
+            ph_ety = t;
+            return ph_var_node(d, 0);
+        }
         i64 val = 0;
         if (t == PT_MIXED) {
             uptr f = "php_zv_inc";
@@ -699,7 +727,7 @@ i64 ph_primary() {
             i64 anc = ph_anon_nargs;
             if (anc) anonargs = 1;
             if (anc < 0) anc = 0;
-            i64 aob = ph_c3("php_new_at", ph_strlit(cn, cstrlen(cn)), ph_strlit(fl, cstrlen(fl)), ph_int(line), TY_UPTR);
+            i64 aob = ph_c3("php_new_at", ph_strlit(cn, cstrlen(cn)), ph_strlit(ph_disp(ph_absfile(fl)), cstrlen(ph_disp(ph_absfile(fl)))), ph_int(line), TY_UPTR);
             i64 atmp = ph_temp(aob, TY_UPTR, "phw_");
             if (anonargs) {
                 u8 aall[80];
@@ -721,7 +749,7 @@ i64 ph_primary() {
         // `new static()` / `new self()` / `new parent()`: the class ENTRY
         if (str_eq(cn, "static") || str_eq(cn, "self") || str_eq(cn, "parent")) {
             i64 ceo = ph_ce_of(cn, fl, line);
-            i64 obs = ph_c3("php_new_ce_at", ceo, ph_strlit(fl, cstrlen(fl)), ph_int(line), TY_UPTR);
+            i64 obs = ph_c3("php_new_ce_at", ceo, ph_strlit(ph_disp(ph_absfile(fl)), cstrlen(ph_disp(ph_absfile(fl)))), ph_int(line), TY_UPTR);
             i64 tmps = ph_temp(obs, TY_UPTR, "phw_");
             i64 hasa = 0;
             if (ph_at("(", 1)) {
@@ -742,7 +770,7 @@ i64 ph_primary() {
             ph_ety = PT_OBJ;
             return ph_tref(tmps);
         }
-        i64 ob = ph_c3("php_new_at", ph_strlit(cn, cstrlen(cn)), ph_strlit(fl, cstrlen(fl)), ph_int(line), TY_UPTR);
+        i64 ob = ph_c3("php_new_at", ph_strlit(cn, cstrlen(cn)), ph_strlit(ph_disp(ph_absfile(fl)), cstrlen(ph_disp(ph_absfile(fl)))), ph_int(line), TY_UPTR);
         i64 tmp = ph_temp(ob, TY_UPTR, "phw_");
         i64 hasargs = 0;
         if (ph_at("(", 1)) hasargs = 1;
@@ -1214,6 +1242,31 @@ i64 ph_arith_op(i64 t) {
         || t == ph_tok("^", 1) || t == ph_tok("<<", 2) || t == ph_tok(">>", 2);
 }
 
+i64 ph_check(i64 line, uptr fl);
+// php evaluates a binary operator's operands left to right. A right operand
+// that needs statements ahead of the expression (a checked call's temporary,
+// an array literal) puts them in the pending queue, which runs BEFORE the
+// expression -- before a left operand still inside it: `f(5) . intdiv(9,
+// f(3))` printed f3 before f5. So when the right side added any, a left side
+// that calls something is computed first, in a temporary placed ahead of them
+// (after `mark`, the queue's tail before the right side), with the check a
+// call needs behind it.
+i64 ph_spill_left(i64 lhs, i64 mark) {
+    if (ph_pend_tail == mark || !phi_calls_any(lhs)) return lhs;
+    ph_nonce = ph_nonce + 1;
+    uptr tn = p_cat("phsp_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+    ph_local(tn, nd_type(lhs));
+    i64 as = ph_set(tn, lhs);
+    i64 ck = ph_check(nd_line(lhs), nd_file(lhs));
+    set_nd_next(as, ck);
+    if (mark) { set_nd_next(ck, nd_next(mark)); set_nd_next(mark, as); }
+    if (!mark) { set_nd_next(ck, ph_pend_head); ph_pend_head = as; }
+    i64 r = node_new(N_IDENT, nd_line(lhs), nd_file(lhs));
+    set_nd_name(r, tn);
+    set_nd_type(r, nd_type(lhs));
+    return r;
+}
+
 // the operator half of ph_expr, on a left-hand side somebody else already
 // has: what a STATEMENT starting with a $variable needs once it turns out
 // not to be an assignment (`$f();`, `$x or die();`).
@@ -1275,8 +1328,10 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
         // is 2 ** 9, not (2 ** 3) ** 2 (found while fixing `2 ** -1`).
         i64 rp = pr + 1;
         if (t == ph_tok("**", 2)) rp = pr;
+        i64 mark = ph_pend_tail;
         i64 rhs = ph_expr(rp);
         i64 rt = ph_ety;
+        lhs = ph_spill_left(lhs, mark);
         if (t == ph_tok(".", 1)) {
             i64 rs = ph_to_str(rhs, rt);
             // `a . b . c` is ONE string: the chain php_str_concat just built

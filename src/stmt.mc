@@ -163,10 +163,12 @@ i64 ph_inline_html(uptr fl, i64 line) {
 // runtime globals once per statement (php_pos); threading a file and a line
 // through all 173 library rows instead would touch every one of them.
 //
-// Known and written down in RESULTS.md: a diagnostic raised after a user
-// function RETURNED, inside the same statement, reports the line that callee
-// last set. A statement whose warning comes before any user call -- which is
-// nearly all of them -- is exact.
+// T7 wrote down that a diagnostic raised after a user function RETURNED,
+// inside the same statement, reported the line that callee last set. On a
+// program a call's frame (src/builtin.mc ph_fr_wrap) holds the caller's
+// position and php_fr_pop puts it back, so that is exact now; what stays
+// per-statement is a statement spread over several lines, which names its
+// first one where php names the line of the call.
 // realpath(3) is in libSystem and in musl and glibc alike, but only ONE of
 // mc's host layers declares it -- src/host_macos.mc does and src/host_linux.mc
 // does not -- so borrowing the host's declaration made this compiler buildable
