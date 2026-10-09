@@ -616,10 +616,17 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         i64 lv3 = node_new(N_IDENT, line, fl);
         set_nd_name(lv3, ph_mangle(d, "v_"));
         set_nd_type(lv3, ph_mcty(lt2));
+        // the right side runs only when the variable is null: the statements
+        // it needs ahead of itself (a call's check, a ?? temporary, a throw
+        // expression) go inside the branch
+        i64 oq3 = ph_take_pend();
         i64 r3 = ph_expr(0);
         i64 rt3 = ph_ety;
+        i64 rq3 = ph_take_pend();
+        ph_put_pend(oq3);
         if (semi) ph_semi("expected ; after ??=");
-        if (lt2 != PT_MIXED) ph_todo2(fl, line, "??= on a variable of type", ph_tyname(lt2));
+        // a variable with a native type is never null: nothing runs
+        if (lt2 != PT_MIXED) return ph_wrap(ph_empty());
         i64 nn3 = node_new(N_UNARY, line, fl);
         set_nd_op(nn3, ph_tok("!", 1));
         set_nd_a(nn3, ph_cast(TY_U8, ph_c1("php_zv_isset", lv3, TY_I64)));
@@ -629,8 +636,13 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
         i64 lv4 = node_new(N_IDENT, line, fl);
         set_nd_name(lv4, ph_mangle(d, "v_"));
         set_nd_type(lv4, ty_pzv);
-        if (ph_is_ref(d)) set_nd_b(iff3, ph_expr_stmt_of(ph_c2("php_zv_store", lv4, ph_to_mixed(r3, rt3), ty_pzv)));
-        if (!ph_is_ref(d)) set_nd_b(iff3, ph_set(ph_mangle(d, "v_"), ph_to_mixed(r3, rt3)));
+        i64 st3 = 0;
+        if (ph_is_ref(d)) {
+            st3 = node_new(N_EXPRSTMT, line, fl);
+            set_nd_a(st3, ph_c2("php_zv_store", lv4, ph_to_mixed(r3, rt3), ty_pzv));
+        }
+        if (!ph_is_ref(d)) st3 = ph_set(ph_mangle(d, "v_"), ph_to_mixed(r3, rt3));
+        set_nd_b(iff3, ph_blk(ph_prefix_stmts(rq3, st3)));
         return ph_wrap(iff3);
     }
 
@@ -712,6 +724,37 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
     i64 vt = ph_ety;
     if (semi) ph_semi("expected ; after a php assignment");
     if (vt == PT_VOID) ph_refuse(fl, line, "assigning the result of a void function", "D4");
+    // A native ?int parameter (src/decl.mc) is a value and a null flag, and
+    // ph_opt_scan admitted this write only when the right side is an int or
+    // one of the int-or-null forms handled here: `null`, another native ?int
+    // (its pair), a zval from a `: ?int` call (its null-ness, then its int).
+    // ph_opt_wflag clears the flag right after the value store; the flag
+    // store below comes after that, so it is the one that stands.
+    if (ph_var_find(d) >= 0 && ph_is_opt(d) && !ph_is_ref(d)) {
+        uptr oaf = 0;
+        if (nd_kind(v) == N_IDENT) oaf = ph_opt_flag_of(nd_name(v));
+        i64 ovv = 0;
+        i64 ofl = 0;
+        if (vt == PT_NULL) {
+            if (nd_kind(v) != N_INT) ph_pending_stmt(ph_expr_stmt_of(v));
+            ovv = ph_int(0);
+            ofl = ph_int(1);
+        } else if (vt == PT_INT && oaf) {
+            ovv = v;
+            ofl = node_new(N_IDENT, line, fl);
+            set_nd_name(ofl, oaf);
+            set_nd_type(ofl, TY_U8);
+        } else if (vt == PT_MIXED) {
+            i64 ozt = ph_temp(v, ty_pzv, "phopt_");
+            ofl = ph_c1("php_opt_isnull", ph_tref(ozt), TY_I64);
+            ovv = ph_c1("php_opt_long", ozt, TY_I64);
+        }
+        if (ovv) {
+            i64 ows = ph_set(ph_mangle(d, "v_"), ovv);
+            set_nd_next(ows, ph_set(ph_vflag(d), ph_cast(TY_U8, ofl)));
+            return ph_wrap(ows);
+        }
+    }
     // `$x = null` makes $x a zval: null is a value of mixed, which is what
     // D4 (c) says a union lowers to.
     if (vt == PT_NULL) { v = ph_to_mixed(v, vt); vt = PT_MIXED; }

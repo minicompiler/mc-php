@@ -396,7 +396,10 @@ function bc_pow(string $num, string $exponent, ?int $scale = null): string {
     $xs = _bc_parse($num, 'bc_pow', 1, 'num');
     $es = _bc_parse($exponent, 'bc_pow', 2, 'exponent');
     $ed = _bc_intonly(_bc_digits($exponent, $es), $es, 'bc_pow', 2, 'exponent');
-    if (strlen($ed) > 18) {
+    // php converts the exponent to a long: any magnitude up to PHP_INT_MAX,
+    // either sign ($ed has no leading zeros, so its length orders it)
+    $el = strlen($ed);
+    if ($el > 19 || ($el === 19 && strcmp($ed, '9223372036854775807') > 0)) {
         throw new ValueError("bc_pow(): Argument #2 (\$exponent) is too large");
     }
     $e = (int) $ed;
@@ -410,6 +413,22 @@ function bc_pow(string $num, string $exponent, ?int $scale = null): string {
             throw new DivisionByZeroError("Negative power of zero");
         }
         return _bc_fmt(false, '0', 0, $s);
+    }
+    // bc_raise's size checks, on bcmath's own lengths: the integer digits
+    // without leading zeros (at least one) and the fraction digits without
+    // trailing zeros. Each times $e must fit a size_t, i.e. be at most
+    // floor((2^64 - 1) / $e) = 2q + (r >= e - 1 - r) with PHP_INT_MAX = q*e + r.
+    $lq = intdiv(PHP_INT_MAX, $e);
+    if ($lq < 1099511627776) {
+        $lr = PHP_INT_MAX - $lq * $e;
+        $lim = 2 * $lq + ($lr >= $e - 1 - $lr ? 1 : 0);
+        $il = strlen($xd) - $xs;
+        $nl = $il - strspn($xd, '0', 0, $il);
+        if ($nl < 1) { $nl = 1; }
+        $ns = strlen(rtrim(substr($xd, $il), '0'));
+        if ($nl > $lim || $ns > $lim || $nl + $ns > $lim) {
+            throw new ValueError("bc_pow(): Argument #2 (\$exponent) exponent is too large, the number of digits overflowed");
+        }
     }
     $p = _bc_upow($xd, $e);
     $psc = $xs * $e;

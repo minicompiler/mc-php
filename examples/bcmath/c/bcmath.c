@@ -19,6 +19,7 @@
 #include "php.h"
 #include "zend_exceptions.h"
 #include <limits.h>
+#include <stdint.h>
 
 /* the request default scale (bcscale), set by bc_scale, used when the scale
  * argument is null. One CLI request, so a file-scope int matches the module's
@@ -426,7 +427,8 @@ PHP_FUNCTION(bc_pow)
     if (!intonly(&y, 2)) { efree(ba); efree(be); RETURN_THROWS(); }
     const char *ed = y.d; size_t ne = y.n;
     skip0(&ed, &ne);
-    if (ne > 18) {
+    /* bc_num2long: any magnitude up to LONG_MAX, either sign */
+    if (ne > 19 || (ne == 19 && memcmp(ed, "9223372036854775807", 19) > 0)) {
         efree(ba); efree(be);
         zend_argument_value_error(2, "is too large");
         RETURN_THROWS();
@@ -443,6 +445,20 @@ PHP_FUNCTION(bc_pow)
         RETVAL_STR(bfmt(0, "0", 1, 0, (size_t) scale));
         efree(ba); efree(be);
         return;
+    }
+    /* bc_raise's size checks on bcmath's lengths: integer digits without
+     * leading zeros (at least one), fraction digits without trailing zeros */
+    {
+        size_t il = x.n - x.sc, nl = il, ns = x.sc, lim = SIZE_MAX / (size_t) e;
+        const char *ip = x.d;
+        while (nl > 0 && *ip == '0') { ip++; nl--; }
+        if (nl == 0) nl = 1;
+        while (ns > 0 && x.d[il + ns - 1] == '0') ns--;
+        if (nl > lim || ns > lim || nl + ns > lim) {
+            efree(ba); efree(be);
+            zend_argument_value_error(2, "exponent is too large, the number of digits overflowed");
+            RETURN_THROWS();
+        }
     }
     mag p = mpow(x.d, x.n, e);
     size_t psc = x.sc * (size_t) e;

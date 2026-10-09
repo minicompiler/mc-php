@@ -126,6 +126,32 @@ for n, enc in rows:
     text += '    if (str_eq(n, "%s")) return "%s";\n' % (n, enc)
 text += "    return 0;\n}\n"
 
+# every builtin mc-php has, as php-src declares its arity: "MIN:MAX", MAX -1
+# when the last parameter is variadic. A spread into a builtin is dispatched
+# on its runtime count against these (src/builtin.mc ph_spread_call).
+counts = []
+for n in sorted(names):
+    if n not in stubs:
+        continue
+    ps = split_params(stubs[n])
+    mn = 0
+    mx = len(ps)
+    for i, p in enumerate(ps):
+        if "..." in p.split("$")[0]:
+            mx = -1
+            break
+        if "=" not in p:
+            mn = i + 1
+    counts.append((n, mn, mx))
+text += """
+// php's own arity of every builtin mc-php has: "MIN:MAX", MAX -1 for a
+// variadic one
+uptr ph_argn(uptr n) {
+"""
+for n, mn, mx in counts:
+    text += '    if (str_eq(n, "%s")) return "%d:%d";\n' % (n, mn, mx)
+text += "    return 0;\n}\n"
+
 if "--check" in sys.argv:
     have = open(out_path).read() if os.path.exists(out_path) else ""
     if have != text:

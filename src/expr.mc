@@ -496,24 +496,30 @@ i64 ph_postfix(i64 v, i64 vt) {
         // program has no function table to look it up in (D6), an extension
         // has php's (lib/php_ext.mc's phx_vcall)
         if (ph_at("(", 1) && vt == PT_STRING && !ph_ext) ph_refuse(ph_tfile, ph_tline, "a callable string", "D6");
-        if (ph_at("(", 1) && (vt == PT_MIXED || vt == PT_OBJ || vt == PT_STRING)) {
+        if (ph_at("(", 1) && (vt == PT_MIXED || vt == PT_OBJ || vt == PT_STRING || vt == PT_ARR)) {
             // a callable value: $f(...) and (expr)(...); an object is called
             // through its __invoke
             if (vt != PT_MIXED) v = ph_to_mixed(v, vt);
+            // five slots, and the rest in a list (src/class.mc ph_margs_n)
             u8 nb[8];
-            uptr av = ph_read_args(5, ph_tfile, ph_tline, nb);
-            u8 all[64];
+            uptr ca = ph_margs_n(5, nb, ph_tfile, ph_tline);
+            i64 ctl = ph_mtail;
+            if (ph_fcc) {
+                ph_fcc = 0;
+                v = ph_c2("php_fcc", v, ph_scope(), ty_pzv);
+                vt = PT_MIXED;
+                continue;
+            }
+            u8 all[72];
             st64(all, v);
             st64(all + 8, ph_int(ld64(nb)));
             i64 i = 0;
             loop {
                 if (i >= 5) break;
-                i64 a = ph_int(0);
-                if (i < ld64(nb)) a = ph_to_mixed(ph_a(av, i), ph_aty(av, i));
-                st64(all + 16 + i * 8, a);
+                st64(all + 16 + i * 8, ld64(ca + i * 8));
                 i = i + 1;
             }
-            v = ph_calln("php_call_zv", all, 7, ty_pzv);
+            v = ph_mcalln("php_call_zv", all, 7, ctl);
             vt = PT_MIXED;
             continue;
         }
@@ -815,6 +821,30 @@ i64 ph_primary() {
         ph_ety = at;
         return ph_tref(atmp);
     }
+    // `throw expr` as an expression (php 8: `$x ?? throw ...`, `fn() =>
+    // throw ...`, a match arm). The throw runs, with the unwinding check
+    // right behind it, among the statements the enclosing expression puts
+    // in front of itself -- inside a short circuit's branch when it is one,
+    // so it runs only on that branch. Its value is never reached; it is a
+    // null, which a conditional takes as the OTHER branch's type (ph_never).
+    if (ph_is("throw")) {
+        ph_next();
+        i64 tsave = ph_can_throw;
+        ph_can_throw = 0;
+        i64 te = ph_expr(0);
+        i64 tt = ph_ety;
+        // as the statement: a scalar operand that throws is that exception
+        if (ph_can_throw && tt != PT_OBJ && tt != PT_MIXED) te = ph_checked_now(te, ph_mcty(tt), line, fl);
+        i64 ts = node_new(N_EXPRSTMT, line, fl);
+        set_nd_a(ts, ph_c1("php_throw", ph_recv(te, tt), ty_pzv));
+        ph_pending_stmt(ts);
+        ph_pending_stmt(ph_check(line, fl));
+        ph_can_throw = 1;
+        if (tsave) ph_can_throw = 1;
+        ph_never = ph_int(0);
+        ph_ety = PT_NULL;
+        return ph_never;
+    }
     // `print expr` in an expression: the text printed, and 1 (a statement
     // `print` is lvalue.mc's, with echo)
     if (ph_is("print")) {
@@ -851,14 +881,14 @@ i64 ph_primary() {
             i64 aob = ph_c3("php_new_at", ph_strlit(cn, cstrlen(cn)), ph_strlit(ph_disp(ph_absfile(fl)), cstrlen(ph_disp(ph_absfile(fl)))), ph_int(line), TY_UPTR);
             i64 atmp = ph_temp(aob, TY_UPTR, "phw_");
             if (anonargs) {
-                u8 aall[80];
+                u8 aall[88];
                 st64(aall, ph_tref(atmp));
                 st64(aall + 8, ph_strlit("__construct", 11));
                 st64(aall + 16, ph_scope());
                 st64(aall + 24, ph_int(anc));
                 i64 ai = 0;
                 loop { if (ai >= 6) break; st64(aall + 32 + ai * 8, ld64(ama + ai * 8)); ai = ai + 1; }
-                ph_pending_stmt(ph_stmt_of(ph_calln("php_ctor", aall, 10, ty_pzv)));
+                ph_pending_stmt(ph_stmt_of(ph_mcalln("php_ctor", aall, 10, ph_anon_tail)));
             }
             if (!anonargs) ph_pending_stmt(ph_stmt_of(ph_c1("php_ctor0", ph_tref(atmp), ty_pzv)));
             ph_ety = PT_OBJ;
@@ -876,15 +906,16 @@ i64 ph_primary() {
             if (ph_at("(", 1)) {
                 u8 nbs[8];
                 uptr mas = ph_margs(nbs, fl, line);
+                i64 tls = ph_mtail;
                 i64 ncs = ld64(nbs);
-                u8 alls[80];
+                u8 alls[88];
                 st64(alls, ph_tref(tmps));
                 st64(alls + 8, ph_strlit("__construct", 11));
                 st64(alls + 16, ph_scope());
                 st64(alls + 24, ph_int(ncs));
                 i64 qi = 0;
                 loop { if (qi >= 6) break; st64(alls + 32 + qi * 8, ld64(mas + qi * 8)); qi = qi + 1; }
-                ph_pending_stmt(ph_stmt_of(ph_calln("php_ctor", alls, 10, ty_pzv)));
+                ph_pending_stmt(ph_stmt_of(ph_mcalln("php_ctor", alls, 10, tls)));
                 hasa = 1;
             }
             if (!hasa) ph_pending_stmt(ph_stmt_of(ph_c1("php_ctor0", ph_tref(tmps), ty_pzv)));
@@ -898,14 +929,15 @@ i64 ph_primary() {
         if (hasargs) {
             u8 nb[8];
             uptr ma = ph_margs(nb, fl, line);
-            u8 all[80];
+            i64 tln = ph_mtail;
+            u8 all[88];
             st64(all, ph_tref(tmp));
             st64(all + 8, ph_strlit("__construct", 11));
             st64(all + 16, ph_scope());
             st64(all + 24, ph_int(ld64(nb)));
             i64 i = 0;
             loop { if (i >= 6) break; st64(all + 32 + i * 8, ld64(ma + i * 8)); i = i + 1; }
-            ph_pending_stmt(ph_stmt_of(ph_calln("php_ctor", all, 10, ty_pzv)));
+            ph_pending_stmt(ph_stmt_of(ph_mcalln("php_ctor", all, 10, tln)));
         }
         if (!hasargs) ph_pending_stmt(ph_stmt_of(ph_c1("php_ctor0", ph_tref(tmp), ty_pzv)));
         ph_ety = PT_OBJ;
@@ -934,48 +966,95 @@ i64 ph_primary() {
         ph_want("{", 1, "expected { after match");
         i64 subj = ph_temp(ph_to_mixed(sv, svt), ty_pzv, "phm_");
         i64 res = ph_temp(ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv), ty_pzv, "phr_");
+        // Each arm's conditions are tried in order and its value computed
+        // only when it is the arm taken: whatever statements a condition or a
+        // value needs ahead of itself (a ?? temporary, a call's check, a
+        // throw expression) go inside that test or that arm, never in front of
+        // the whole match. `default` runs when nothing matched, wherever it is
+        // written.
+        i64 oq = ph_take_pend();
         i64 chain = 0;
         i64 last = 0;
-        i64 hasdef = 0;
+        i64 dflt = 0;
+        uptr cpre = xalloc(256 * 8);
+        uptr ccnd = xalloc(256 * 8);
         loop {
             if (ph_at("}", 1)) break;
             if (ph_tid == T_EOF) err_at(fl, line, "mc-php: unterminated match");
-            i64 cond = 0;
             i64 isdef = 0;
             if (ph_is("default")) { ph_next(); isdef = 1; }
+            i64 nc = 0;
+            i64 anyp = 0;
             if (!isdef) {
                 loop {
                     i64 cv = ph_expr(0);
                     i64 one = ph_cast(TY_U8, ph_c2("php_zv_identical", ph_tref(subj), ph_to_mixed(cv, ph_ety), TY_I64));
-                    if (!cond) cond = one;
-                    if (cond != one) cond = ph_bin(ph_tok("||", 2), cond, one, TY_U8);
+                    i64 cp = ph_take_pend();
+                    if (nc >= 256) ph_todo(fl, line, "more than 256 conditions in one match arm");
+                    st64(cpre + nc * 8, cp);
+                    st64(ccnd + nc * 8, one);
+                    if (cp) anyp = 1;
+                    nc = nc + 1;
                     if (!ph_accept(",", 1)) break;
                     if (ph_at("=>", 2)) break;
                 }
             }
             ph_want("=>", 2, "expected => in a match arm");
             i64 rv = ph_expr(0);
-            i64 asg = ph_set(nd_name(res), ph_to_mixed(rv, ph_ety));
-            if (isdef) {
-                hasdef = 1;
-                if (last) set_nd_c(last, asg);
-                if (!chain) chain = asg;
-                last = 0;
-            }
+            i64 rvt = ph_ety;
+            i64 vp = ph_take_pend();
+            i64 body = ph_blk(ph_prefix_stmts(vp, ph_set(nd_name(res), ph_to_mixed(rv, rvt))));
+            if (isdef) dflt = body;
             if (!isdef) {
+                i64 test = 0;
+                i64 cond = 0;
+                if (!anyp) {
+                    i64 k = 0;
+                    loop {
+                        if (k >= nc) break;
+                        i64 one2 = ld64(ccnd + k * 8);
+                        if (!cond) cond = one2;
+                        if (cond != one2) cond = ph_bin(ph_tok("||", 2), cond, one2, TY_U8);
+                        k = k + 1;
+                    }
+                } else {
+                    // a flag: condition k's statements run only when 0..k-1 missed
+                    ph_nonce = ph_nonce + 1;
+                    uptr fg = p_cat("phmf_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+                    ph_local(fg, TY_U8);
+                    i64 inner = 0;
+                    i64 k2 = nc - 1;
+                    loop {
+                        if (k2 < 0) break;
+                        i64 hit = node_new(N_IF, line, fl);
+                        set_nd_a(hit, ld64(ccnd + k2 * 8));
+                        set_nd_b(hit, ph_set(fg, ph_cast(TY_U8, ph_int(1))));
+                        if (inner) set_nd_c(hit, ph_blk(inner));
+                        inner = ph_prefix_stmts(ld64(cpre + k2 * 8), hit);
+                        k2 = k2 - 1;
+                    }
+                    test = ph_prefix_stmts(ph_set(fg, ph_cast(TY_U8, ph_int(0))), inner);
+                    cond = node_new(N_IDENT, line, fl);
+                    set_nd_name(cond, fg);
+                    set_nd_type(cond, TY_U8);
+                }
                 i64 iff = node_new(N_IF, line, fl);
                 set_nd_a(iff, cond);
-                set_nd_b(iff, asg);
-                if (last) set_nd_c(last, iff);
-                if (!chain) chain = iff;
+                set_nd_b(iff, body);
+                test = ph_prefix_stmts(test, iff);
+                if (last) set_nd_c(last, ph_blk(test));
+                if (!last) chain = test;
                 last = iff;
             }
             if (!ph_accept(",", 1)) break;
         }
         ph_want("}", 1, "expected } after match");
-        if (!hasdef && last)
-            set_nd_c(last, ph_stmt_of(ph_c1("php_unhandled_match", ph_tref(subj), ty_pzv)));
-        if (chain) ph_pending_stmt(chain);
+        i64 fin = dflt;
+        if (!fin) fin = ph_stmt_of(ph_c1("php_unhandled_match", ph_tref(subj), ty_pzv));
+        if (last) set_nd_c(last, fin);
+        if (!last) chain = fin;
+        ph_put_pend(oq);
+        ph_pending_stmt(chain);
         ph_ety = PT_MIXED;
         return ph_tref(res);
     }
@@ -1532,6 +1611,10 @@ i64 ph_expr_tail(i64 lhs, i64 lt, i64 minp) {
             i64 ct3 = ph_ety;
             i64 ic3 = ph_take_pend();
             ph_put_pend(oc3);
+            // a branch that is a throw expression has no value: the
+            // conditional's type is the other branch's
+            if (ph_never && b3 == ph_never && ct3 != PT_NULL) { bt3 = ct3; b3 = ph_cast(ph_mcty(ct3), ph_int(0)); }
+            if (ph_never && c3 == ph_never && bt3 != PT_NULL) { ct3 = bt3; c3 = ph_cast(ph_mcty(bt3), ph_int(0)); }
             i64 rt3 = PT_MIXED;
             if (bt3 == ct3 && (bt3 == PT_INT || bt3 == PT_FLOAT || bt3 == PT_BOOL || bt3 == PT_STRING))
                 rt3 = bt3;

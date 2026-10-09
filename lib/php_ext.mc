@@ -1800,12 +1800,23 @@ uptr phx_vcall(uptr f, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) { upt
             return php_znull();
         }
     }
-    u8 av[80];
+    u8 av5[80];
+    uptr av = av5;
+    // more than five (lib/php_rt.mc php_call_zv_t): the rest are the list
+    uptr xa = 0;
+    if (n > 5) {
+        xa = ((uptr) ld64(phT + PHT_ph_xa));
+        st64(phT + PHT_ph_xa, 0);
+        if (!xa || ld64(xa) < n - 5) n = 5;
+        if (n > 5) av = php_alloc(n * 16);
+    }
     if (n > 0) phx_r2e(a1, av);
     if (n > 1) phx_r2e(a2, av + 16);
     if (n > 2) phx_r2e(a3, av + 32);
     if (n > 3) phx_r2e(a4, av + 48);
     if (n > 4) phx_r2e(a5, av + 64);
+    i64 xk = 5;
+    loop { if (xk >= n) break; phx_r2e(ld64(xa + 16 + (xk - 5) * 8), av + xk * 16); xk = xk + 1; }
     u8 rv[16];
     st32(rv + ZVX_TYPE_INFO, IZ_UNDEF);
     i64 lz = ld64(phT + PHT_phx_lz);
@@ -2132,6 +2143,13 @@ void phx_marg(uptr name) {
     phx_nai = phx_nai + 1;
 }
 
+// the last parameter, variadic (Zend counts it and sets the method's flag)
+void phx_marg_v(uptr name) {
+    phx_marg(name);
+    uptr a = phx_ai + (phx_nai - 1) * AIX_SIZE;
+    st32(a + AIX_TYPE_MASK, ld32(a + AIX_TYPE_MASK) | ZTX_VARIADIC);
+}
+
 // The class, registered: `flags` is the runtime's (1 abstract, 2 final).
 void phx_cls_end(uptr rce, uptr name, i64 flags) {
     // the table's zero row
@@ -2196,17 +2214,28 @@ uptr phx_pnew(uptr rce) {
 // A published method's handler: $this the engine's object as a proxy, the
 // arguments as runtime zvals (0 for one not passed: the body raises php's
 // own error or takes the default), the compiled body, the answer back.
-void phx_mh(uptr ex, uptr rv, uptr fn, uptr mname) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+// `max` is the most arguments the method takes (its parameter count, or -1
+// when it is variadic); past the sixth they reach it as a compiled call's do
+// (lib/php_rt.mc php_targs: the list, named for this method).
+void phx_mh(uptr ex, uptr rv, uptr fn, uptr mname, i64 max) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     phx_enter();
     i64 n = phx_nargs(ex);
-    if (n > 6) {
-        phx_arity2(ex, 0, 6, mname);
+    i64 lim = max;
+    if (lim >= 0 && lim < 6) lim = 6;
+    if (lim >= 0 && n > lim) {
+        phx_arity2(ex, 0, lim, mname);
         phx_leave();
         return;
     }
     u8 a[48];
     i64 k = 0;
     loop { if (k >= 6) break; st64(a + k * 8, 0); if (k < n) st64(a + k * 8, phx_e2r(phx_argz(ex, k))); k = k + 1; }
+    if (n > 6) {
+        uptr xa = php_tl_new();
+        loop { if (k >= n) break; xa = php_tl_add(xa, phx_e2r(phx_argz(ex, k))); k = k + 1; }
+        st64(phT + PHT_ph_xa, xa);
+        st64(phT + PHT_ph_xf, fn);
+    }
     uptr o = phx_proxy(ld64(ex + EXX_THIS));
     uptr r = callp(fn, o, ld64(a), ld64(a + 8), ld64(a + 16), ld64(a + 24), ld64(a + 32), ld64(a + 40));
     if (!((uptr) ld64(phT + PHT_ph_exc)) && r) phx_r2e(r, rv);

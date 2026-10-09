@@ -380,7 +380,7 @@ if build "$EX" "$EX/mcphp$suf.toml" "bcmath_port.$sx"; then
     fi
     if "$PHP" -m | tr -d '\r' | grep -qix bcmath; then
         if "$PHP" -d extension="$bso" "$EX/bccheck.php" > "$tmp/bc.out" 2>&1 &&
-           [ "$(tr -d '\r' < "$tmp/bc.out")" = "bcmath agrees: 10546 results, 0 wrong" ]; then
+           [ "$(tr -d '\r' < "$tmp/bc.out")" = "bcmath agrees: 10564 results, 0 wrong" ]; then
             say "$(tr -d '\r' < "$tmp/bc.out")"
         else
             bad "bcmath bccheck.php:"; sed 's/^/      /' "$tmp/bc.out"
@@ -403,7 +403,7 @@ if build "$EX" "$EX/mcphp$suf.toml" "bcmath_port.$sx"; then
             differential "check.php (the C twin)" "$EX/check.php" -d extension="$cso"
             if "$PHP" -m | tr -d '\r' | grep -qix bcmath; then
                 if "$PHP" -d extension="$cso" "$EX/bccheck.php" > "$tmp/bc.out" 2>&1 &&
-                   [ "$(tr -d '\r' < "$tmp/bc.out")" = "bcmath agrees: 10546 results, 0 wrong" ]; then
+                   [ "$(tr -d '\r' < "$tmp/bc.out")" = "bcmath agrees: 10564 results, 0 wrong" ]; then
                     say "the C twin (c/bcmath.c): $(tr -d '\r' < "$tmp/bc.out") against the built-in"
                 else
                     bad "the C twin bccheck.php:"; sed 's/^/      /' "$tmp/bc.out"

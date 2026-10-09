@@ -100,24 +100,66 @@ i64 ph_recv(i64 v, i64 t) {
     return ph_to_mixed(v, t);
 }
 
-// the call arguments of a method: zvals, at most six (callp takes seven and
-// the receiver is the first)
-uptr ph_margs(uptr pn, uptr fl, i64 line) {
+// the call arguments of a method: zvals in six slots (callp takes seven and
+// the receiver is the first), and -- when there are more than six, or a
+// spread -- ph_mtail, an array of the ones after the slots, which the runtime
+// hands the method (lib/php_rt.mc php_targs). The slots hold the leading
+// arguments written out, as the caller's own zvals, exactly as before; only
+// what follows them goes in the array.
+i64 ph_mtail;
+uptr ph_margs(uptr pn, uptr fl, i64 line) { return ph_margs_n(6, pn, fl, line); }
+// the same for a call with ns slots: a closure is reached with five
+uptr ph_margs_n(i64 ns, uptr pn, uptr fl, i64 line) {
     u8 nb[8];
-    uptr av = ph_read_args(6, fl, line, nb);
+    ph_ra_tail = 1;
+    uptr av = ph_read_args(PH_MAXMARGS, fl, line, nb);
     i64 n = ld64(nb);
-    if (n > 6) ph_todo(fl, line, "more than six arguments to a method");
+    i64 lead = 0;
+    loop {
+        if (lead >= n || lead >= ns) break;
+        if (ph_aty(av, lead) == PH_SPREADT) break;
+        lead = lead + 1;
+    }
     uptr out = xalloc(6 * 8 + 8);
     i64 i = 0;
     loop {
         if (i >= 6) break;
         i64 a = ph_int(0);
-        if (i < n) a = ph_to_mixed(ph_a(av, i), ph_aty(av, i));
+        if (i < lead) a = ph_to_mixed(ph_a(av, i), ph_aty(av, i));
         st64(out + i * 8, a);
         i = i + 1;
     }
-    st64(pn, n);
+    ph_mtail = 0;
+    if (lead < n) {
+        ph_nonce = ph_nonce + 1;
+        uptr tn = p_cat("phmt_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+        ph_local(tn, TY_UPTR);
+        ph_pending_stmt(ph_set(tn, ph_call("php_tl_new", 0, 0, 0, 0, 0, TY_UPTR)));
+        i64 j = lead;
+        loop {
+            if (j >= n) break;
+            i64 ar = node_new(N_IDENT, line, fl);
+            set_nd_name(ar, tn);
+            set_nd_type(ar, TY_UPTR);
+            // a written-out argument is the caller's own zval, as a slot's is
+            if (ph_aty(av, j) == PH_SPREADT) ph_pending_stmt(ph_set(tn, ph_c2("php_tl_addvals", ar, ph_a(av, j), TY_UPTR)));
+            if (ph_aty(av, j) != PH_SPREADT) ph_pending_stmt(ph_set(tn, ph_c2("php_tl_add", ar, ph_to_mixed(ph_a(av, j), ph_aty(av, j)), TY_UPTR)));
+            j = j + 1;
+        }
+        ph_mtail = node_new(N_IDENT, line, fl);
+        set_nd_name(ph_mtail, tn);
+        set_nd_type(ph_mtail, TY_UPTR);
+    }
+    st64(pn, lead);
     return out;
+}
+
+// a method call shape: `fn` with its fixed arguments in all[0..n), or the
+// `_t` entry with ph_mtail after them when there is one
+i64 ph_mcalln(uptr fn, uptr all, i64 n, i64 tail) {
+    if (!tail) return ph_calln(fn, all, n, ty_pzv);
+    st64(all + n * 8, tail);
+    return ph_calln(p_cat(fn, "_t", 0, 2), all, n + 1, ty_pzv);
 }
 
 i64 ph_calln(uptr fn, uptr args, i64 n, i64 ty) {
@@ -145,7 +187,14 @@ i64 ph_calln(uptr fn, uptr args, i64 n, i64 ty) {
 i64 ph_mcall_ns(i64 recv, uptr name, uptr fl, i64 line, i64 ns) {
     u8 nb[8];
     uptr ma = ph_margs(nb, fl, line);
-    u8 all[80];
+    i64 tl = ph_mtail;
+    // `$o->m(...)`: a closure over the receiver and the method
+    if (ph_fcc) {
+        ph_fcc = 0;
+        ph_ety = PT_MIXED;
+        return ph_c3("php_fcc_m", recv, ph_strlit(name, cstrlen(name)), ph_scope(), ty_pzv);
+    }
+    u8 all[88];
     st64(all, recv);
     st64(all + 8, ph_strlit(name, cstrlen(name)));
     st64(all + 16, ph_scope());
@@ -155,7 +204,7 @@ i64 ph_mcall_ns(i64 recv, uptr name, uptr fl, i64 line, i64 ns) {
     ph_ety = PT_MIXED;
     uptr f = "php_zv_mcall";
     if (ns) f = "php_zv_mcall_ns";                          // `$o?->m()`
-    return ph_calln(f, all, 10, ty_pzv);
+    return ph_mcalln(f, all, 10, tl);
 }
 
 i64 ph_mcall_node(i64 recv, uptr name, uptr fl, i64 line) {
@@ -166,9 +215,16 @@ i64 ph_mcall_node(i64 recv, uptr name, uptr fl, i64 line) {
 i64 ph_scall_node(i64 ce, uptr name, uptr fl, i64 line) {
     u8 nb[8];
     uptr ma = ph_margs(nb, fl, line);
+    i64 tl = ph_mtail;
+    // `A::m(...)`
+    if (ph_fcc) {
+        ph_fcc = 0;
+        ph_ety = PT_MIXED;
+        return ph_c3("php_fcc_s", ce, ph_strlit(name, cstrlen(name)), ph_scope(), ty_pzv);
+    }
     i64 thisp = ph_int(0);
     if (ph_in_method && !ph_in_static) thisp = ph_this(fl, line);
-    u8 all[88];
+    u8 all[96];
     st64(all, ce);
     st64(all + 8, ph_strlit(name, cstrlen(name)));
     st64(all + 16, thisp);
@@ -177,7 +233,7 @@ i64 ph_scall_node(i64 ce, uptr name, uptr fl, i64 line) {
     i64 i = 0;
     loop { if (i >= 6) break; st64(all + 40 + i * 8, ld64(ma + i * 8)); i = i + 1; }
     ph_ety = PT_MIXED;
-    return ph_calln("php_scall", all, 11, ty_pzv);
+    return ph_mcalln("php_scall", all, 11, tl);
 }
 
 // ---- the member list -------------------------------------------------------
@@ -274,6 +330,7 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
 // and unique.
 uptr ph_anon_name;
 uptr ph_anon_args;                   // `new class (args)`: read where they are
+i64  ph_anon_tail;                   // and their ph_mtail
 i64  ph_anon_nargs;
 
 // A published class's methods, as the class body is read (src/ext.mc's
@@ -284,12 +341,14 @@ uptr ph_pm_fn[PH_MAXPM];
 i64  ph_pm_vis[PH_MAXPM];
 i64  ph_pm_np[PH_MAXPM];
 i64  ph_pm_nreq[PH_MAXPM];
-uptr ph_pm_pn[PH_MAXPM * 6];
+uptr ph_pm_pn[PH_MAXPM];                 // each: the parameters' names (ph_mb_pn)
+i64  ph_pm_var[PH_MAXPM];                // 1: the last one is variadic
 i64  ph_npm;
 // what ph_method_body read of the parameters of the method it just compiled
 i64  ph_mb_np;
 i64  ph_mb_nreq;
-uptr ph_mb_pn[6];
+uptr ph_mb_pn;
+i64  ph_mb_var;
 
 void ph_class(uptr fl, i64 line, i64 flags) {
     i64 pub = 0;
@@ -301,12 +360,14 @@ void ph_class(uptr fl, i64 line, i64 flags) {
     uptr cname = ph_anon_name;
     ph_anon_name = 0;
     ph_anon_args = 0;
+    ph_anon_tail = 0;
     ph_anon_nargs = 0;
     // the constructor arguments of `new class (args) ... {}` sit between the
     // keyword and `extends`, so they are read here and handed back
     if (cname && ph_at("(", 1)) {
         u8 nbb[8];
         ph_anon_args = ph_margs(nbb, fl, line);
+        ph_anon_tail = ph_mtail;
         ph_anon_nargs = ld64(nbb);
         if (!ph_anon_nargs) ph_anon_nargs = 0 - 1;   // `new class ()`: called, no args
     }
@@ -503,8 +564,8 @@ void ph_class(uptr fl, i64 line, i64 flags) {
                 st64(ph_pm_vis + ph_npm * 8, vis);
                 st64(ph_pm_np + ph_npm * 8, ph_mb_np);
                 st64(ph_pm_nreq + ph_npm * 8, ph_mb_nreq);
-                i64 q = 0;
-                loop { if (q >= ph_mb_np) break; st64(ph_pm_pn + (ph_npm * 6 + q) * 8, ld64(ph_mb_pn + q * 8)); q = q + 1; }
+                st64(ph_pm_pn + ph_npm * 8, ph_mb_pn);
+                st64(ph_pm_var + ph_npm * 8, ph_mb_var);
                 ph_npm = ph_npm + 1;
             }
             if (!isabs) {
@@ -640,8 +701,13 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     i64 np = 0;
     // the parameters' names and the count before the first default, for a
     // published class (ph_mb_*: set at the END, after a nested class's body)
-    u8 mbpn[48];
+    uptr mbpn = xalloc(PH_MAXMARGS * 8 + 8);
     i64 mbreq = -1;
+    // a parameter past the sixth, or a variadic one, is not a slot: its
+    // values come from the list the runtime hands this method
+    // (lib/php_rt.mc php_xargs_take), held in the local `xan`
+    uptr xan = 0;
+    i64 vk = 0 - 1;                 // the variadic parameter's position
     ph_ac_begin(p_cat(p_cat(cname, "::", 0, 2), ph_cur_fn, 0, cstrlen(ph_cur_fn)), fl);
     loop {
         if (ph_at(")", 1)) break;
@@ -653,7 +719,9 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
             if (ph_is("readonly")) { ph_next(); pro = 1; if (pvis < 0) pvis = V_PUBLIC; continue; }
             break;
         }
-        if (ph_at("...", 3)) ph_todo(fl, line, "a variadic parameter ...$args");
+        if (vk >= 0) err_at(fl, line, "mc-php: only the last parameter can be variadic");
+        i64 variadic = 0;
+        if (ph_at("...", 3)) { ph_next(); variadic = 1; }
         i64 byref = 0;
         // the declared type was SKIPPED, so a typed method parameter was
         // bound as a plain zval with no check and no conversion
@@ -666,10 +734,12 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
         uptr prc = "";
         uptr prn = "";
         i64 ptm = 0;
+        uptr ptc = "";                  // its class names, for the general check
+        i64 ptb = 0;
         if (!ph_at("$", 1) && !ph_at("&", 1)) {
             i64 dt = 0;
-            if (pvis < 0) { dt = ph_param_type(); ptm = ph_ptm; }
-            if (pvis >= 0) { ph_rtr_begin(); dt = ph_type_word(0); ptm = ph_rtr_m | 32768; }
+            if (pvis < 0) { dt = ph_param_type(); ptm = ph_ptm; ptc = ph_ptc; ptb = ph_ptbad; }
+            if (pvis >= 0) { ph_rtr_begin(); dt = ph_type_word(0); ptm = ph_rtr_m | 32768; ptc = ph_rtr_cls; ptb = ph_rtr_bad; }
             if (pvis >= 0) {
                 ph_rtr_on = 0;
                 if (!ph_rtr_bad && (ph_rtr_m || ld8(ph_rtr_cls)) && !(ph_rtr_m & RT_MIXED)) {
@@ -685,12 +755,90 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
             if (dt == PT_ARR)    pcw = 5;
         }
         if (ph_at("&", 1)) { ph_next(); byref = 1; }
+        if (ph_at("...", 3)) { ph_next(); variadic = 1; }
+        if (variadic && byref) ph_todo(fl, line, "a by-reference variadic parameter");
+        if (variadic && pvis >= 0) err_at(fl, line, "mc-php: cannot declare variadic promoted property");
         if (!ph_at("$", 1)) ph_todo2(fl, line, "a php parameter", ph_tname);
         i64 pln = ph_tline;
         ph_next();
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
-        if (np >= 6) ph_todo(fl, line, "more than six parameters in a method");
+        if (np >= PH_MAXMARGS) ph_todo(fl, line, "more than 256 parameters in a method");
+        if ((variadic || np >= 6) && !xan) {
+            ph_nonce = ph_nonce + 1;
+            xan = p_cat("phxa_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+            ph_local(xan, TY_UPTR);
+        }
+        if (variadic) {
+            // `...$rest`: the slots from here to the sixth, then the list; the
+            // array is new, so there is no by-value copy and nothing missing
+            vk = np;
+            if (ph_accept("=", 1)) err_at(fl, line, "mc-php: variadic parameter cannot have a default value");
+            st64(mbpn + np * 8, d + 1);
+            ph_var_bind_raw(d, PT_MIXED);
+            ph_local(ph_mangle(d, "v_"), ty_pzv);
+            u8 vav[72];
+            i64 xr = node_new(N_IDENT, line, fl);
+            set_nd_name(xr, xan);
+            set_nd_type(xr, TY_UPTR);
+            st64(vav, xr);
+            st64(vav + 8, ph_int(np));
+            st64(vav + 16, ph_int(6));
+            i64 si = 0;
+            loop {
+                if (si >= 6) break;
+                i64 sv = ph_int(0);
+                if (si >= np) {
+                    uptr sn = p_cat("phvs_", php_dec(si), 0, cstrlen(php_dec(si)));
+                    i64 sp = param_new(TY_UPTR, sn);
+                    if (tail) set_nd_next(tail, sp);
+                    if (!tail) head = sp;
+                    tail = sp;
+                    sv = node_new(N_IDENT, line, fl);
+                    set_nd_name(sv, sn);
+                    set_nd_type(sv, TY_UPTR);
+                }
+                st64(vav + 24 + si * 8, sv);
+                si = si + 1;
+            }
+            i64 vs = ph_set(ph_mangle(d, "v_"), ph_calln("php_va_m", vav, 9, ty_pzv));
+            if (pret) set_nd_next(pret, vs);
+            if (!pret) pre = vs;
+            pret = vs;
+            if (pcw) {
+                i64 pv4 = node_new(N_IDENT, line, fl);
+                set_nd_name(pv4, ph_mangle(d, "v_"));
+                set_nd_type(pv4, ty_pzv);
+                uptr vdf = ph_disp(ph_absfile(fl));
+                u8 vcc[56];
+                st64(vcc, pv4);
+                st64(vcc + 8, ph_int(pcw | ph_strict_bit(fl)));
+                st64(vcc + 16, ph_strlit(cname, cstrlen(cname)));
+                st64(vcc + 24, ph_strlit(ph_cur_fn, cstrlen(ph_cur_fn)));
+                st64(vcc + 32, ph_int(np + 1));
+                st64(vcc + 40, ph_strlit(vdf, cstrlen(vdf)));
+                st64(vcc + 48, ph_int(pln));
+                i64 vc = ph_set(ph_mangle(d, "v_"), ph_calln("php_va_coerce", vcc, 7, ty_pzv));
+                set_nd_next(pret, vc);
+                pret = vc;
+            }
+            if (!ph_ptscalar(ptm, ptc)) {
+                i64 pv6 = node_new(N_IDENT, line, fl);
+                set_nd_name(pv6, ph_mangle(d, "v_"));
+                set_nd_type(pv6, ty_pzv);
+                i64 vtk = ph_ptcheck(pv6, ptm, ptc, ptb, 0, cname, ph_cur_fn, np + 1, "", ph_disp(ph_absfile(fl)), pln, fl);
+                if (vtk) {
+                    // the same check, element by element (lib/php_rt.mc php_va_tcheck)
+                    set_nd_name(vtk, "php_va_tcheck");
+                    i64 vt2 = ph_set(ph_mangle(d, "v_"), vtk);
+                    set_nd_next(pret, vt2);
+                    pret = vt2;
+                }
+            }
+            np = np + 1;
+            if (!ph_accept(",", 1)) break;
+            continue;
+        }
         i64 dflt = 0;
         i64 dpre = 0;
         i64 dnul = 0;
@@ -702,17 +850,30 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
         // already the caller's zval pointer, so marking it a ref is all that
         // is needed to make the callee write THROUGH it
         if (byref) ph_set_ref(d);
-        i64 pn = param_new(TY_UPTR, ph_mangle(d, "v_"));
-        if (tail) set_nd_next(tail, pn);
-        if (!tail) head = pn;
-        tail = pn;
+        if (np < 6) {
+            i64 pn = param_new(TY_UPTR, ph_mangle(d, "v_"));
+            if (tail) set_nd_next(tail, pn);
+            if (!tail) head = pn;
+            tail = pn;
+        } else {
+            // past the sixth: the caller's zval from the list, or 0
+            ph_local(ph_mangle(d, "v_"), ty_pzv);
+            i64 xr2 = node_new(N_IDENT, line, fl);
+            set_nd_name(xr2, xan);
+            set_nd_type(xr2, TY_UPTR);
+            i64 xs = ph_set(ph_mangle(d, "v_"), ph_c2("php_xarg_at", xr2, ph_int(np - 6), ty_pzv));
+            if (pret) set_nd_next(pret, xs);
+            if (!pret) pre = xs;
+            pret = xs;
+        }
         if (!byref) {
             i64 bv = ph_byval(d, line, fl);
             if (pret) set_nd_next(pret, bv);
             if (!pret) pre = bv;
             pret = bv;
         }
-        if (pcw) {
+        // `int $x = null` is implicitly nullable: the general check below
+        if (pcw && !dnul) {
             uptr bare2 = d + 1;
             i64 pv3 = node_new(N_IDENT, line, fl);
             set_nd_name(pv3, ph_mangle(d, "v_"));
@@ -741,6 +902,30 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
             if (pret) set_nd_next(pret, cz);
             if (!pret) pre = cz;
             pret = cz;
+            // its frame shows the converted value (php_fr_coerced); a
+            // by-reference one IS the caller's cell, converted in place
+            if (!byref) {
+                i64 fc = ph_stmt_of(ph_quiet("php_fr_coerced", 3, ph_int(np), ph_tref(pv3), ph_strlit(ph_cur_fn, cstrlen(ph_cur_fn)), 0, TY_VOID));
+                set_nd_next(pret, fc);
+                pret = fc;
+            }
+        }
+        // anything else php checks (a nullable, a union, a class): the
+        // general check, as the return value's
+        if (!byref && (dnul || !ph_ptscalar(ptm, ptc))) {
+            i64 pv5 = node_new(N_IDENT, line, fl);
+            set_nd_name(pv5, ph_mangle(d, "v_"));
+            set_nd_type(pv5, ty_pzv);
+            i64 tck = ph_ptcheck(pv5, ptm, ptc, ptb, dnul, cname, ph_cur_fn, np + 1, d + 1, ph_disp(ph_absfile(fl)), pln, fl);
+            if (tck) {
+                i64 tc2 = ph_set(ph_mangle(d, "v_"), tck);
+                if (pret) set_nd_next(pret, tc2);
+                if (!pret) pre = tc2;
+                pret = tc2;
+                i64 fc4 = ph_stmt_of(ph_quiet("php_fr_coerced", 3, ph_int(np), ph_tref(pv5), ph_strlit(ph_cur_fn, cstrlen(ph_cur_fn)), 0, TY_VOID));
+                set_nd_next(pret, fc4);
+                pret = fc4;
+            }
         }
         // the prologue: a missing argument is 0
         i64 miss = node_new(N_UNARY, line, fl);
@@ -791,7 +976,18 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     }
     ph_want(")", 1, "expected ) in a php method");
     ph_ac_end();
+    if (xan) {
+        // first of all: nothing may call a method before the list is taken
+        i64 me = node_new(N_ADDR, line, fl);
+        set_nd_name(me, mcname);
+        set_nd_type(me, TY_UPTR);
+        i64 tk = ph_set(xan, ph_c1("php_xargs_take", me, TY_UPTR));
+        set_nd_next(tk, pre);
+        pre = tk;
+        if (!pret) pret = tk;
+    }
     if (mbreq < 0) mbreq = np;
+    if (vk >= 0 && mbreq > vk) mbreq = vk;       // the variadic one is never required
     i64 mrt = 0;
     i64 mrtw = PT_MIXED;
     if (ph_at(":", 1)) { ph_next(); mrtw = ph_rtype_read(); mrt = 1; }
@@ -804,6 +1000,8 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
         if (ph_at("{", 1)) ph_block();
         ph_mb_np = np;
         ph_mb_nreq = mbreq;
+        ph_mb_pn = mbpn;
+        ph_mb_var = vk >= 0;
         ph_scope_restore(savenv);
         ph_hoist_head = hh;
         ph_hoist_tail = ht;
@@ -866,8 +1064,8 @@ void ph_method_body(uptr mcname, uptr cname, uptr ceg, i64 vis, i64 stat, i64 li
     ph_narrow_ty = snt;
     ph_mb_np = np;
     ph_mb_nreq = mbreq;
-    i64 q = 0;
-    loop { if (q >= np) break; st64(ph_mb_pn + q * 8, ld64(mbpn + q * 8)); q = q + 1; }
+    ph_mb_pn = mbpn;
+    ph_mb_var = vk >= 0;
 }
 
 

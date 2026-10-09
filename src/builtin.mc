@@ -118,6 +118,14 @@ i64 ph_had_spread;
 // The first argument, when it is a string offset, is then read as its BYTE
 // (php_str_byte) before it can be hoisted, and ph_argbyte_done says so.
 i64 ph_argbyte;
+// 1 for a method call's arguments (src/class.mc ph_margs): a spread is one
+// entry, its operand, with the type PH_SPREADT -- the call hands the runtime
+// every value it holds, however many, and not a fixed number of slots
+i64 ph_ra_tail;
+#define PH_SPREADT (0 - 2)
+// 1 when the argument list just read was `(...)`: a first-class callable
+// (php 8.1), which the call shape turns into a closure (src/class.mc)
+i64 ph_fcc;
 i64 ph_argbyte_done;
 
 i64 ph_zl_args;                  // ph_zl as the last argument left it
@@ -132,6 +140,8 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
     ph_argref = 0;
     i64 byte = ph_argbyte;
     ph_argbyte = 0;
+    i64 tailm = ph_ra_tail;
+    ph_ra_tail = 0;
     i64 fused = 0;
     i64 n = 0;
     // THIS call's own answer, and nothing else. It used to be a save of the
@@ -149,6 +159,7 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
         if (ph_at(")", 1)) break;
         if (ph_at("...", 3)) {
             ph_next();
+            if (tailm && n == 0 && ph_at(")", 1)) { ph_fcc = 1; break; }
             // The same compute-then-check boundary the ordinary argument
             // below has. Without it a spread expression that THROWS --
             // `f(...boom())` -- left the pending exception uninspected and
@@ -161,6 +172,20 @@ uptr ph_read_args(i64 maxn, uptr fl, i64 line, uptr pn) {
             i64 tmp = ph_temp(ph_to_mixed(sp, spt), ty_pzv, "phu_");
             if (ph_can_throw) ph_pending_stmt(ph_check(ph_tline, ph_tfile));
             ph_can_throw = ph_can_throw | spct;
+            if (tailm) {
+                // the operand checked, as below, and kept whole
+                ph_pending_stmt(ph_stmt_of(ph_c2("php_unpack_check", ph_tref(tmp), ph_int(0), TY_VOID)));
+                ph_pending_stmt(ph_check(ph_tline, ph_tfile));
+                if (n >= maxn) ph_todo(fl, line, "too many arguments for this builtin");
+                st64(buf + n * 24, ph_tref(tmp));
+                st64(buf + n * 24 + 8, PH_SPREADT);
+                st64(buf + n * 24 + 16, 0);
+                n = n + 1;
+                mine = 1;
+                ph_had_spread = mine;
+                if (ph_accept(",", 1)) continue;
+                break;
+            }
             i64 nsp = PH_SPREADN;
             if (maxn < nsp) nsp = maxn;
             // what php checks before it enters the callee, and what this
@@ -833,6 +858,8 @@ i64 ph_fr_coerces(i64 fi, uptr av, i64 na, i64 np, i64 vararg) {
         i64 want = ld64(ph_fpt + (fi * PH_MAXP + i) * 8);
         if (fo != 1 && !(vararg && i == np - 1) && ph_aty(av, i) != want
             && (want == PT_INT || want == PT_FLOAT || want == PT_STRING || want == PT_BOOL)) return 1;
+        // a native ?int checks anything but an int or null (ph_ptcheck below)
+        if (fo == 1 && ph_aty(av, i) != PT_INT && ph_aty(av, i) != PT_NULL) return 1;
         i = i + 1;
     }
     return 0;
@@ -1248,13 +1275,248 @@ void ph_zpp_args(uptr name, uptr av, i64 na, i64 line, uptr fl, i64 noframe) {
     ph_pending_stmt(ph_check(line, fl));
 }
 
+// a and b equal, ASCII case folded (php's class and function names)
+i64 ph_ci_eq(uptr a, uptr b) {
+    i64 i = 0;
+    loop {
+        i64 x = ld8(a + i);
+        i64 y = ld8(b + i);
+        if (x >= 65 && x <= 90) x = x + 32;
+        if (y >= 65 && y <= 90) y = y + 32;
+        if (x != y) return 0;
+        if (!x) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// `f($a, ...$rest)` for a builtin: its implementation is lowered for a count
+// of arguments known while compiling, and a spread's count is not. So the
+// call is dispatched on that count, each arm the call written out
+// (`match (count($t = [...$rest])) { 0 => f($a), 1 => f($a, $t[0]), ... }`),
+// parsed from that text where the call stands; a count php refuses is its
+// ArgumentCountError, one past what the implementation takes mc-php's named
+// limit. The arguments before the first spread stay as written, so a
+// by-reference one (array_push's) is still the caller's variable. Answers 0
+// (nothing consumed) when the call has no spread or the arity is not known.
+i64 ph_spread_call(uptr raw, uptr name, i64 line, uptr fl) {
+    uptr src = p_cp();
+    uptr e = p_src_end();
+    i64 len = e - src;
+    i64 i = 0;
+    loop { if (i >= len || !ph_space(ld8(src + i))) break; i = i + 1; }
+    if (i >= len || ld8(src + i) != 40) return 0;
+    i64 open = i;
+    i = i + 1;
+    i64 dp = 0;
+    i64 argst = i;
+    i64 nargs = 0;
+    i64 first = 0 - 1;              // the first spread argument's index
+    i64 fstart = 0;                 // and where it starts
+    i64 close = 0 - 1;
+    loop {
+        if (i >= len) return 0;
+        i64 h = ph_scan_hop(src, len, i);
+        if (h != i) { i = h; continue; }
+        i64 c = ld8(src + i);
+        if (dp == 0 && (c == 44 || c == 41)) {
+            // one argument ends: does it start with `...`?
+            i64 k = argst;
+            loop { if (k >= i || !ph_space(ld8(src + k))) break; k = k + 1; }
+            if (k < i) {
+                if (first < 0 && k + 2 < i && ld8(src + k) == 46 && ld8(src + k + 1) == 46 && ld8(src + k + 2) == 46) {
+                    first = nargs;
+                    fstart = k;
+                }
+                nargs = nargs + 1;
+            }
+            if (c == 41) { close = i; break; }
+            argst = i + 1;
+            i = i + 1;
+            continue;
+        }
+        if (c == 40 || c == 91 || c == 123) dp = dp + 1;
+        if (c == 41 || c == 93 || c == 125) dp = dp - 1;
+        i = i + 1;
+    }
+    if (first < 0) return 0;
+    uptr ac = ph_argn(name);
+    if (!ac) return 0;
+    i64 mn = 0;
+    i64 j = 0;
+    loop { if (ld8(ac + j) == 58) break; mn = mn * 10 + ld8(ac + j) - 48; j = j + 1; }
+    j = j + 1;
+    i64 mx = 0 - 1;
+    if (ld8(ac + j) != 45) { mx = 0; loop { if (!ld8(ac + j)) break; mx = mx * 10 + ld8(ac + j) - 48; j = j + 1; } }
+    // the most the implementation takes: its library row, else php's own
+    i64 cap = mx;
+    i64 lmn = mn;
+    i64 li = ph_lib_find(name);
+    if (li >= 0) { cap = ld64(ph_lmax + li * 8); lmn = ld64(ph_lmin + li * 8); }
+    // a variadic builtin with no row lowers a spread itself (max, sprintf)
+    if (cap < 0) return 0;
+    if (mx >= 0 && cap > mx) cap = mx;
+    // the text: LEAD is the arguments before the first spread, REST the rest
+    i64 le = fstart;
+    loop { if (le <= open + 1) break; i64 lc = ld8(src + le - 1); if (lc == 44 || ph_space(lc)) { le = le - 1; continue; } break; }
+    uptr lead = xstrdup(src + open + 1, le - open - 1);
+    uptr rest = xstrdup(src + fstart, close - fstart);
+    ph_nonce = ph_nonce + 1;
+    uptr tn = p_cat("$phsp_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+    uptr cn = p_cat(tn, "_n", 0, 2);
+    uptr t = "";
+    i64 k2 = 1;
+    loop { if (k2 >= line) break; t = p_cat(t, "\n", 0, 1); k2 = k2 + 1; }
+    t = p_cat(t, "(match (", 0, 8);
+    t = p_cat(t, cn, 0, cstrlen(cn));
+    t = p_cat(t, " = ", 0, 3);
+    t = p_cat(t, php_dec(first), 0, cstrlen(php_dec(first)));
+    t = p_cat(t, " + count(", 0, 9);
+    t = p_cat(t, tn, 0, cstrlen(tn));
+    t = p_cat(t, " = [", 0, 4);
+    t = p_cat(t, rest, 0, cstrlen(rest));
+    t = p_cat(t, "])) {", 0, 5);
+    i64 cnt = first;
+    if (cnt < mn) cnt = mn;
+    if (cnt < lmn) cnt = lmn;
+    loop {
+        if (cnt > cap) break;
+        t = p_cat(t, php_dec(cnt), 0, cstrlen(php_dec(cnt)));
+        t = p_cat(t, " => ", 0, 4);
+        t = p_cat(t, raw, 0, cstrlen(raw));
+        t = p_cat(t, "(", 0, 1);
+        t = p_cat(t, lead, 0, cstrlen(lead));
+        i64 q = 0;
+        loop {
+            if (first + q >= cnt) break;
+            if (first + q > 0) t = p_cat(t, ", ", 0, 2);
+            t = p_cat(t, tn, 0, cstrlen(tn));
+            t = p_cat(t, "[", 0, 1);
+            t = p_cat(t, php_dec(q), 0, cstrlen(php_dec(q)));
+            t = p_cat(t, "]", 0, 1);
+            q = q + 1;
+        }
+        t = p_cat(t, "), ", 0, 3);
+        cnt = cnt + 1;
+    }
+    // php's ArgumentCountError for a count it refuses (zend_wrong_parameters_
+    // count_error), mc-php's limit past the implementation
+    uptr arg1 = "s";
+    t = p_cat(t, "default => ", 0, 11);
+    if (mx >= 0 && cap >= mx) {
+        uptr wd = "at most ";
+        if (mn == mx) wd = "exactly ";
+        uptr nn = php_dec(mx);
+        if (mx == 1) arg1 = "";
+        uptr msg = p_cat(p_cat(p_cat(name, "() expects ", 0, 11), wd, 0, cstrlen(wd)), nn, 0, cstrlen(nn));
+        msg = p_cat(p_cat(msg, " argument", 0, 9), arg1, 0, cstrlen(arg1));
+        uptr ms2 = p_cat(name, "() expects at least ", 0, 20);
+        ms2 = p_cat(ms2, php_dec(mn), 0, cstrlen(php_dec(mn)));
+        ms2 = p_cat(ms2, " argument", 0, 9);
+        if (mn != 1) ms2 = p_cat(ms2, "s", 0, 1);
+        t = p_cat(t, "throw new ArgumentCountError((", 0, 30);
+        t = p_cat(t, cn, 0, cstrlen(cn));
+        t = p_cat(t, " < ", 0, 3);
+        t = p_cat(t, php_dec(mn), 0, cstrlen(php_dec(mn)));
+        t = p_cat(t, " && ", 0, 4);
+        t = p_cat(t, php_dec(mn), 0, cstrlen(php_dec(mn)));
+        t = p_cat(t, " != ", 0, 4);
+        t = p_cat(t, php_dec(mx), 0, cstrlen(php_dec(mx)));
+        t = p_cat(t, " ? '", 0, 4);
+        t = p_cat(t, ms2, 0, cstrlen(ms2));
+        t = p_cat(t, "' : '", 0, 5);
+        t = p_cat(t, msg, 0, cstrlen(msg));
+        t = p_cat(t, "') . ', ' . ", 0, 12);
+        t = p_cat(t, cn, 0, cstrlen(cn));
+        t = p_cat(t, " . ' given')", 0, 12);
+    } else if (mn > 0) {
+        uptr ms3 = p_cat(name, "() expects at least ", 0, 20);
+        ms3 = p_cat(ms3, php_dec(mn), 0, cstrlen(php_dec(mn)));
+        ms3 = p_cat(ms3, " argument", 0, 9);
+        if (mn != 1) ms3 = p_cat(ms3, "s", 0, 1);
+        t = p_cat(t, cn, 0, cstrlen(cn));
+        t = p_cat(t, " < ", 0, 3);
+        t = p_cat(t, php_dec(mn), 0, cstrlen(php_dec(mn)));
+        t = p_cat(t, " ? throw new ArgumentCountError('", 0, 33);
+        t = p_cat(t, ms3, 0, cstrlen(ms3));
+        t = p_cat(t, ", ' . ", 0, 6);
+        t = p_cat(t, cn, 0, cstrlen(cn));
+        t = p_cat(t, " . ' given') : __mcphp_spread_cap('", 0, 36);
+        t = p_cat(t, name, 0, cstrlen(name));
+        t = p_cat(t, "', ", 0, 3);
+        t = p_cat(t, cn, 0, cstrlen(cn));
+        t = p_cat(t, ")", 0, 1);
+    } else {
+        t = p_cat(t, "__mcphp_spread_cap('", 0, 20);
+        t = p_cat(t, name, 0, cstrlen(name));
+        t = p_cat(t, "', ", 0, 3);
+        t = p_cat(t, cn, 0, cstrlen(cn));
+        t = p_cat(t, ")", 0, 1);
+    }
+    t = p_cat(t, "})", 0, 2);
+    p_skip_to(src + close + 1);
+    ph_pushing = 1;
+    p_push_source(fl, t, cstrlen(t));
+    ph_pushing = 0;
+    ph_nopeek = 1;
+    ph_next();
+    return ph_primary();
+}
+
 i64 ph_builtin(uptr name, i64 line, uptr fl) {
     // the name as written, resolved (src/ns.mc): as a function here, as a
     // constant where one is looked up, as a class before `::`. Outside a
     // namespace and unqualified, all three are the name itself.
     uptr raw = name;
+    // `f(...)`: a first-class callable (php 8.1) -- the closure
+    // `fn(...$a) => f(...$a)`, parsed from that text where the call stands,
+    // at the same line, so it names and resolves f exactly as the call would
+    {
+        uptr q = p_cp();
+        uptr e = p_src_end();
+        loop { if (q >= e || !ph_space(ld8(q))) break; q = q + 1; }
+        if (q < e && ld8(q) == 40) {
+            q = q + 1;
+            loop { if (q >= e || !ph_space(ld8(q))) break; q = q + 1; }
+            if (q + 2 < e && ld8(q) == 46 && ld8(q + 1) == 46 && ld8(q + 2) == 46) {
+                q = q + 3;
+                loop { if (q >= e || !ph_space(ld8(q))) break; q = q + 1; }
+                if (q < e && ld8(q) == 41) {
+                    if (str_eq(raw, "new") || str_eq(raw, "isset") || str_eq(raw, "empty") || str_eq(raw, "unset") || str_eq(raw, "list"))
+                        err_at(fl, line, "mc-php: cannot create a closure here");
+                    ph_nonce = ph_nonce + 1;
+                    uptr an = p_cat("$phfcc_", php_dec(ph_nonce), 0, cstrlen(php_dec(ph_nonce)));
+                    uptr txt = "";
+                    i64 k = 1;
+                    loop { if (k >= line) break; txt = p_cat(txt, "\n", 0, 1); k = k + 1; }
+                    txt = p_cat(txt, "(fn(...", 0, 7);
+                    txt = p_cat(txt, an, 0, cstrlen(an));
+                    txt = p_cat(txt, ") => ", 0, 5);
+                    txt = p_cat(txt, raw, 0, cstrlen(raw));
+                    txt = p_cat(txt, "(...", 0, 4);
+                    txt = p_cat(txt, an, 0, cstrlen(an));
+                    txt = p_cat(txt, "))", 0, 2);
+                    p_skip_to(q + 1);
+                    ph_pushing = 1;
+                    p_push_source(fl, txt, cstrlen(txt));
+                    ph_pushing = 0;
+                    ph_nopeek = 1;
+                    ph_next();
+                    i64 cv = ph_primary();
+                    ph_ety = PT_MIXED;
+                    // no frame of its own: a call through it shows f's
+                    return ph_c1("php_fcc_anon", ph_to_mixed(cv, PT_MIXED), ty_pzv);
+                }
+            }
+        }
+    }
     u8 fbb[8];
     name = ph_ns_fc(raw, 0, fbb);
+    // a spread into a builtin (not a function this program declares)
+    if (ph_fn_find0(name) < 0) {
+        i64 sc = ph_spread_call(raw, name, line, fl);
+        if (sc) return sc;
+    }
     u8 cfb[8];
     uptr cnm = ph_ns_fc(raw, 1, cfb);
     // D1 and D6: the named refusals, before anything else
@@ -1503,6 +1765,16 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         uptr mn = ph_tname;
         i64 mline = ph_tline;                    // php's call line: the method's name
         ph_next();
+        // Closure::fromCallable(x): a closure that calls x (lib/php_rt.mc
+        // php_fcc); a callable spelled as a string is D6's
+        if (ph_at("(", 1) && ph_ci_eq(name, "Closure") && ph_ci_eq(mn, "fromCallable")) {
+            u8 fnb[8];
+            uptr fav = ph_read_args(1, fl, mline, fnb);
+            if (ld64(fnb) != 1) ph_todo2(fl, line, "the wrong number of arguments for", "Closure::fromCallable");
+            if (ph_aty(fav, 0) == PT_STRING) ph_refuse(fl, line, "a callable spelled as a string", "D6");
+            ph_ety = PT_MIXED;
+            return ph_c2("php_fcc", ph_to_mixed(ph_a(fav, 0), ph_aty(fav, 0)), ph_scope(), ty_pzv);
+        }
         if (ph_at("(", 1)) return ph_scall_node(ce, mn, fl, mline);
         ph_ety = PT_MIXED;
         return ph_c2("php_ce_getconst", ce, ph_strlit(mn, cstrlen(mn)), ty_pzv);
@@ -2347,7 +2619,25 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
         // argument is omitted; a passed one is an ordinary native int below,
         // with its TypeError check, and a 0 flag after it
         i64 fo = ld64(ph_fopt + (fi * PH_MAXP + i) * 8);
-        if (fo == 1 || (fo == 2 && i >= na)) {
+        // a required parameter reached by a spread: missing is php's
+        // ArgumentCountError, at the parameter (php_spread_req)
+        if (spread && i < na && i < amin && ph_aty(av, i) == PT_MIXED && want != PT_MIXED) {
+            uptr sdf = ld64(ph_fdfile + fi * 8);
+            if (!sdf) sdf = fl;
+            u8 sra[64];
+            st64(sra, ph_a(av, i));
+            uptr sdn = ld64(ph_fname + fi * 8);
+            st64(sra + 8, ph_strlit(sdn, cstrlen(sdn)));
+            st64(sra + 16, ph_int(i));
+            st64(sra + 24, ph_int(amin));
+            st64(sra + 32, ph_int(amin == nfix));
+            uptr sdfa = ph_disp(ph_absfile(sdf));
+            st64(sra + 40, ph_strlit(sdfa, cstrlen(sdfa)));
+            st64(sra + 48, ph_int(ld64(ph_fpl + (fi * PH_MAXP + i) * 8)));
+            st64(av + i * 24, ph_tref(ph_temp(ph_calln("php_spread_req", sra, 7, ty_pzv), ty_pzv, "phsr_")));
+            coerced = 1;
+        }
+        if (fo == 1 || (fo == 2 && (i >= na || (spread && ph_aty(av, i) == PT_MIXED)))) {
             i64 vv = 0;
             i64 vfl = 0;
             if (i >= na) {
@@ -2372,10 +2662,23 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                     set_nd_name(ff, af);
                     set_nd_type(ff, TY_U8);
                     vfl = ff;
-                } else if (have == PT_MIXED) {
-                    // a zval arriving where a native nullable scalar is wanted:
-                    // the value once, then its null-ness and its int
-                    i64 zt = ph_temp(an, ty_pzv, "phopt_");
+                } else if (have != PT_INT) {
+                    // anything else where a native ?int is wanted: php's check
+                    // and conversion (`?int`, as declared), the value once,
+                    // then its null-ness and its int
+                    uptr pn9 = ld64(ph_fpn + (fi * PH_MAXP + i) * 8);
+                    if (!pn9) pn9 = "";
+                    uptr df9 = ld64(ph_fdfile + fi * 8);
+                    if (!df9) df9 = "";
+                    if (cstrlen(df9)) df9 = ph_disp(ph_absfile(df9));
+                    i64 pl9 = ld64(ph_fpl + (fi * PH_MAXP + i) * 8);
+                    if (!pl9) pl9 = ld64(ph_fdline + fi * 8);
+                    i64 m9 = RT_INT | RT_NULL | 32768;
+                    if (fo == 2) m9 = RT_INT | 32768;          // a spread that may have run out
+                    i64 ck9 = ph_ptcheck(ph_to_mixed(an, have), m9, "", 0, 0, "", name, i + 1, pn9, df9, pl9, fl);
+                    i64 zt = ph_temp(ck9, ty_pzv, "phopt_");
+                    coerced = 1;
+                    if (frp) ph_pending_stmt(ph_stmt_of(ph_quiet("php_fr_coerced", 3, ph_int(i), ph_tref(zt), ph_int(0), 0, TY_VOID)));
                     vfl = ph_c1("php_opt_isnull", ph_tref(zt), TY_I64);
                     vv = ph_c1("php_opt_long", zt, TY_I64);
                 } else {
@@ -2450,8 +2753,6 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
             // never read
             v = ph_cast(ph_mcty(want), ph_int(0));
         }
-        if (!v && spread && want != PT_MIXED)
-            ph_todo2(fl, line, "argument unpacking into a typed parameter of", name);
         if (!v) {
             i64 have = ph_aty(av, i);
             v = ph_a(av, i);
@@ -2467,6 +2768,7 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                 if (want == PT_FLOAT)  cw = 2;
                 if (want == PT_STRING) cw = 3;
                 if (want == PT_BOOL)   cw = 4;
+                if (want == PT_ARR && have == PT_MIXED) cw = 5;   // `array $a` given a zval
             }
             if (cw) {
                 uptr pn = ld64(ph_fpn + (fi * PH_MAXP + i) * 8);
@@ -2490,6 +2792,8 @@ i64 ph_builtin(uptr name, i64 line, uptr fl) {
                 st64(acb + 56, ph_int(pl));
                 v = ph_tref(ph_temp(ph_calln("php_param_coerce_at", acb, 8, ty_pzv),
                                     ty_pzv, "phc_"));
+                // the callee's frame (frp, pushed above) shows the converted value
+                if (frp) ph_pending_stmt(ph_stmt_of(ph_quiet("php_fr_coerced", 3, ph_int(i), ph_tref(v), ph_int(0), 0, TY_VOID)));
                 have = PT_MIXED;
                 coerced = 1;
             }

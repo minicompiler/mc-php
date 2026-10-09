@@ -205,6 +205,8 @@ i64 ph_type_tail(i64 t) {
 // gets its RT_* bits (ph_ptm, 32768 = a type was written): whether a `= null`
 // default makes it implicitly nullable is a question about the whole type
 i64 ph_ptm;
+uptr ph_ptc;                // and its class names, "A|B" (ph_rtr_cls)
+i64  ph_ptbad;              // 1 when the recorder could not follow it
 i64 ph_param_type() {
     i64 so = ph_rtr_on;
     i64 sm = ph_rtr_m;
@@ -213,6 +215,8 @@ i64 ph_param_type() {
     ph_rtr_begin();
     i64 t = ph_type_word(0);
     ph_ptm = ph_rtr_m | 32768;
+    ph_ptc = ph_rtr_cls;
+    ph_ptbad = ph_rtr_bad;
     ph_rtr_on = so;
     ph_rtr_m = sm;
     ph_rtr_cls = sc;
@@ -285,6 +289,45 @@ i64 ph_type_word(i64 must) {
     }
     if (must) ph_refuse2(ph_tfile, ph_tline, "a php type this compiler does not have", ph_tname, "D9");
     return -1;
+}
+
+// A parameter declared with something php checks that the scalar road
+// (php_param_coerce: int, float, string, bool, array) does not cover -- a
+// nullable, a union, a class, iterable, object, `int $x = null` -- gets
+// php_param_tcheck_at: the RT_* bits and class names the return check uses.
+// v is the parameter's zval, tm its recorded type (ph_ptm), tc its class
+// names (ph_ptc), dnul the `= null` default that makes it implicitly
+// nullable. 0 when there is nothing to check: no type, mixed, a type the
+// recorder could not follow, or callable (D6: a callable string or array is
+// not a value this compiler can test).
+i64 ph_ptcheck(i64 v, i64 tm, uptr tc, i64 bad, i64 dnul, uptr ccls, uptr fname, i64 argno, uptr bare, uptr dfile, i64 dline, uptr fl) {
+    if (bad) return 0;
+    i64 m = tm & 32767;
+    if (!m && !ld8(tc)) return 0;
+    if (m & (RT_MIXED | RT_CALLABLE | RT_STATIC | RT_VOID | RT_NEVER)) return 0;
+    if (dnul) m = m | RT_NULL;
+    uptr disp = ph_rtr_disp(m, tc);
+    if (ph_strict_bit(fl)) m = m | RT_STRICT;
+    u8 a[80];
+    st64(a, v);
+    st64(a + 8, ph_int(m));
+    st64(a + 16, ph_strlit(tc, cstrlen(tc)));
+    st64(a + 24, ph_strlit(ccls, cstrlen(ccls)));
+    st64(a + 32, ph_strlit(fname, cstrlen(fname)));
+    st64(a + 40, ph_int(argno));
+    st64(a + 48, ph_strlit(bare, cstrlen(bare)));
+    st64(a + 56, ph_strlit(disp, cstrlen(disp)));
+    st64(a + 64, ph_strlit(dfile, cstrlen(dfile)));
+    st64(a + 72, ph_int(dline));
+    return ph_calln("php_param_tcheck_at", a, 10, ty_pzv);
+}
+
+// the declaration is exactly one of the scalars php_param_coerce takes (or
+// array), with nothing else: the scalar road (pcw) is its check
+i64 ph_ptscalar(i64 tm, uptr tc) {
+    if (ld8(tc)) return 0;
+    i64 m = tm & 32767;
+    return m == RT_INT || m == RT_FLOAT || m == RT_STRING || m == (RT_TRUE | RT_FALSE) || m == RT_ARRAY;
 }
 
 // ---- type narrowing in a guarded branch ------------------------------------

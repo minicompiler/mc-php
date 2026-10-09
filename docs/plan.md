@@ -1195,7 +1195,8 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    **TRUNCATION** at the scale (not half-even -- that is `examples/decimal`), the permissive parse
    (`""`, `"."`, `"5."`, `".5"` all valid), the per-function scale rules (`bc_mul`'s
    `min(scale, s1+s2)`, `bc_div`/`bc_mod` truncate toward zero, `bc_mod`'s sign follows the
-   dividend, `bc_pow`'s negative/zero exponent and `'2.0'` integer check, `bc_powmod`, `bc_sqrt`'s
+   dividend, `bc_pow`'s negative/zero exponent, `'2.0'` integer check and exponent range (any magnitude up
+   to `PHP_INT_MAX` in either sign, then libbcmath's "the number of digits overflowed"), `bc_powmod`, `bc_sqrt`'s
    integer-sqrt-at-scale, `bc_comp` truncating to the scale before judging sign, `bc_round`
    HalfAwayFromZero with negative precision), the request default scale (`bc_scale`), and the
    exact exception class and message (`DivisionByZeroError`, `ValueError` "is not well-formed" /
@@ -1204,7 +1205,7 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    by function.
 
    The differential: `check.php` (module vs interpreted) **133 lines byte for byte**, the C twin
-   graded the same way; `bccheck.php` against the built-in **10546 results, 0 wrong** for the
+   graded the same way; `bccheck.php` against the built-in **10564 results, 0 wrong** for the
    module AND the twin AND interpreted; `leakmatrix.php` under the ZTS debug allocator
    **leak-free** over every function, argument shape and error path (`tests/leaks.sh`).
 

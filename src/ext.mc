@@ -917,11 +917,15 @@ void ph_ext_publish(uptr cname, uptr ceg, i64 flags, uptr fl, i64 line) {
         uptr hname = p_cat("x_", mfn, 0, cstrlen(mfn));
         uptr full = p_cat(cname, "::", 0, 2);
         full = p_cat(full, mname, 0, cstrlen(mname));
-        u8 hv[32];
+        // the most arguments it takes: its parameters, -1 when it is variadic
+        i64 mmax = ld64(ph_pm_np + i * 8);
+        if (ld64(ph_pm_var + i * 8)) mmax = 0 - 1;
+        u8 hv[40];
         st64(hv, ph_ext_ident("ex", TY_UPTR));
         st64(hv + 8, ph_ext_ident("rv", TY_UPTR));
         st64(hv + 16, ph_ext_addr(mfn));
         st64(hv + 24, ph_raw(full, cstrlen(full)));
+        st64(hv + 32, ph_int(mmax));
         i64 p0 = param_new(TY_UPTR, "ex");
         i64 p1 = param_new(TY_UPTR, "rv");
         set_nd_next(p0, p1);
@@ -929,7 +933,7 @@ void ph_ext_publish(uptr cname, uptr ceg, i64 flags, uptr fl, i64 line) {
         set_nd_name(h, hname);
         set_nd_type(h, TY_VOID);
         set_nd_a(h, p0);
-        set_nd_b(h, ph_ext_block(ph_stmt_of(ph_calln("phx_mh", hv, 4, TY_VOID))));
+        set_nd_b(h, ph_ext_block(ph_stmt_of(ph_calln("phx_mh", hv, 5, TY_VOID))));
         top_add(h);
         u8 mv[32];
         st64(mv, ph_raw(mname, cstrlen(mname)));
@@ -938,10 +942,13 @@ void ph_ext_publish(uptr cname, uptr ceg, i64 flags, uptr fl, i64 line) {
         st64(mv + 24, ph_int(ld64(ph_pm_vis + i * 8)));
         ph_cfill(ph_stmt_of(ph_calln("phx_meth", mv, 4, TY_VOID)));
         i64 k = 0;
+        i64 mnp = ld64(ph_pm_np + i * 8);
         loop {
-            if (k >= ld64(ph_pm_np + i * 8)) break;
-            uptr pn = ld64(ph_pm_pn + (i * 6 + k) * 8);
-            ph_cfill(ph_stmt_of(ph_c1("phx_marg", ph_raw(pn, cstrlen(pn)), TY_VOID)));
+            if (k >= mnp) break;
+            uptr pn = ld64(ld64(ph_pm_pn + i * 8) + k * 8);
+            uptr mf = "phx_marg";
+            if (k == mnp - 1 && ld64(ph_pm_var + i * 8)) mf = "phx_marg_v";
+            ph_cfill(ph_stmt_of(ph_c1(mf, ph_raw(pn, cstrlen(pn)), TY_VOID)));
             k = k + 1;
         }
         i = i + 1;

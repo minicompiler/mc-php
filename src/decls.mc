@@ -21,6 +21,7 @@
 #define PT_ARR     8      // php's ordered hash; every element is a zval
 #define PT_OBJ     9      // a raw object handle: $this, and nothing else
 #define PT_PK      10     // a PACKED int array src/packed.mc proved: php_pk_*, never a zval
+#define PH_MAXMARGS 256   // the most arguments one call writes out, parameters one function declares
 
 // the visibility codes, shared with php_rt.txt
 #define V_PUBLIC    0
@@ -190,6 +191,7 @@ i64  ph_loop_pre;
 i64 ph_lstack[PH_MAXLS];
 i64 ph_nls;
 i64 ph_can_throw;              // this statement contains a call
+i64 ph_never;                  // the value node of the last throw expression (never read)
 i64 ph_in_try;
 // php runs a `finally` on the way out of a `return` in the try or the catch.
 // The try body is a one-iteration mc loop, so a `return` inside it left the

@@ -1720,8 +1720,18 @@ uptr php_zobj(uptr o) { uptr z = php_zv_alloc(); st64(z, o); php_zv_settype(z, I
 uptr php_opt_box(i64 v, i64 isnull) { if (isnull) return php_znull(); return php_zlong(v); }
 uptr php_opt_str(i64 v, i64 isnull) { if (isnull) return php_str_new("", 0); return php_itos(v); }
 // the reverse, for a zval arriving where a native nullable scalar is wanted
-i64 php_opt_isnull(uptr z) { return php_zv_type(z) == IS_NULL; }
-i64 php_opt_long(uptr z) { if (php_zv_type(z) == IS_NULL) return 0; return php_zv_long(z); }
+// (0 is an argument a spread did not reach: not passed, i.e. null here)
+i64 php_opt_isnull(uptr z) { if (!z) return 1; return php_zv_type(z) == IS_NULL; }
+i64 php_opt_long(uptr z) { if (!z) return 0; if (php_zv_type(z) == IS_NULL) return 0; return php_zv_long(z); }
+void php_argcount_n(uptr disp, i64 passed, i64 min, i64 exact, uptr dfile, i64 dline);
+// a required parameter filled from a spread (`f(...$args)`): the values are
+// consecutive, so when the k-th is missing exactly k were passed -- php's
+// ArgumentCountError, raised where the parameter is declared
+uptr php_spread_req(uptr z, uptr disp, i64 passed, i64 min, i64 exact, uptr dfile, i64 dline) {
+    if (z) return z;
+    php_argcount_n(disp, passed, min, exact, dfile, dline);
+    return php_znull();
+}
 
 // ---- the ordered hash: PHP's zend_array, field for field -------------------
 //  0 gc      refcount u32, type_info u32
@@ -6438,12 +6448,19 @@ i64 php_ce_is(uptr ce, uptr name) {
     uptr lk = php_clskey(name);
     uptr c = ce;
     loop {
-        if (!c) return 0;
+        if (!c) break;
         if (php_str_eq(php_clskey(ld64(c)), lk)) return 1;
         if (php_ht_find(ld64(c + 48), php_str_hash(lk), lk)) return 1;
         // an interface can extend another: its own ifaces table carries them
         c = ld64(c + 8);
     }
+    // the two php implements by itself: Stringable on every class that
+    // declares __toString, and Traversable through Iterator and
+    // IteratorAggregate, which extend it
+    if (php_str_eq(lk, php_str_new("stringable", 10)))
+        return php_ce_lookup(ce, 24, php_str_new("__tostring", 10)) != 0;
+    if (php_str_eq(lk, php_str_new("traversable", 11)))
+        return php_ce_is(ce, php_str_new("Iterator", 8)) || php_ce_is(ce, php_str_new("IteratorAggregate", 17));
     return 0;
 }
 
@@ -6777,7 +6794,10 @@ i64 php_fr_meth(uptr ce, uptr name, i64 type, i64 n, uptr a1, uptr a2, uptr a3, 
     if (!own) own = ce;
     uptr cn = ld64(own);
     uptr fl = ((uptr) ld64(phT + PHT_ph_dfile));
-    if (n > 6) n = 6;
+    // past the sixth: the list php_targs left for this call
+    uptr xa = 0;
+    if (n > 6) xa = ((uptr) ld64(phT + PHT_ph_xa));
+    if (n > 6 && (!xa || ld64(xa) < n - 6)) n = 6;
     if (n < 0) n = 0;
     uptr p = php_fr_push(php_cstr0(name), php_cstr0(cn), type, fl, ld64(phT + PHT_ph_dline), n);
     i64 i = 0;
@@ -6789,6 +6809,7 @@ i64 php_fr_meth(uptr ce, uptr name, i64 type, i64 n, uptr a1, uptr a2, uptr a3, 
         if (i == 3) a = a4;
         if (i == 4) a = a5;
         if (i == 5) a = a6;
+        if (i >= 6) a = ld64(xa + 16 + (i - 6) * 8);
         st64(p + i * 16, 6);
         st64(p + i * 16 + 8, a);
         i = i + 1;
@@ -6796,6 +6817,9 @@ i64 php_fr_meth(uptr ce, uptr name, i64 type, i64 n, uptr a1, uptr a2, uptr a3, 
     return 1;
 }
 
+void php_xargs_into(uptr args);
+void php_fr_coerced(i64 i, uptr c, uptr fn);
+uptr php_param_coerce_at(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr argname, uptr dfile, i64 dline);
 uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
     if (php_is_proxy(o)) return callp(ld64(ph_eng + 24), o, name, n, a1, a2, a3, a4, a5, a6);
     uptr ce = php_obj_ce(o);
@@ -6809,6 +6833,7 @@ uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, 
         uptr sv = ((uptr) ld64(phT + PHT_ph_lsb));
         st64(phT + PHT_ph_lsb, ce);
         i64 fr = php_fr_meth(ce, name, 1, n, a1, a2, a3, a4, a5, a6);
+        if (n > 6) st64(phT + PHT_ph_xf, ld64(b));     // php_targs: the 7th argument on
         uptr r = callp(ld64(b), o, a1, a2, a3, a4, a5, a6);
         if (fr) php_fr_pop();
         st64(phT + PHT_ph_lsb, sv);
@@ -6823,6 +6848,7 @@ uptr php_mcall(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, 
         if (n > 3) php_arr_push(args, a4);
         if (n > 4) php_arr_push(args, a5);
         if (n > 5) php_arr_push(args, a6);
+        if (n > 6) php_xargs_into(args);
         return callp(ld64(c), o, php_zstr(name), php_zarr(args));
     }
     uptr m2 = php_str_concat(php_str_new("Call to undefined method ", 25), ld64(ce));
@@ -6884,6 +6910,9 @@ uptr php_scall(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr 
             if (n > 1) php_arr_push(args, a2);
             if (n > 2) php_arr_push(args, a3);
             if (n > 3) php_arr_push(args, a4);
+            if (n > 4) php_arr_push(args, a5);
+            if (n > 5) php_arr_push(args, a6);
+            if (n > 6) php_xargs_into(args);
             return callp(ld64(c), 0, php_zstr(name), php_zarr(args));
         }
         uptr m = php_str_concat(php_str_new("Call to undefined method ", 25), ld64(ce));
@@ -6908,10 +6937,220 @@ uptr php_scall(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr 
     i64 fty = 2;
     if (thisp) fty = 1;
     i64 fr = php_fr_meth(ce, name, fty, n, a1, a2, a3, a4, a5, a6);
+    if (n > 6) st64(phT + PHT_ph_xf, ld64(b));         // php_targs: the 7th argument on
     uptr r = callp(ld64(b), thisp, a1, a2, a3, a4, a5, a6);
     if (fr) php_fr_pop();
     st64(phT + PHT_ph_lsb, sv);
     return r;
+}
+
+// ---- a method call's arguments past the sixth --------------------------------
+// Every method is reached through callp with the receiver and six zval slots,
+// a missing argument arriving as 0. A call with more arguments than that --
+// written out, or spread -- keeps the first six in the slots exactly as before
+// and lists the rest in a TAIL: a vector of zval pointers, the caller's own
+// zvals as a slot holds them, so a by-reference parameter past the sixth
+// still writes through. php_targs fills the free slots from it and leaves what
+// is left (the same kind of vector) in the thread block, and php_mcall /
+// php_scall name the function it is for; the method's prologue takes it only
+// when it is that function (php_xargs_take): a variadic one appends it after
+// its own slots (php_va_m), a seventh parameter and on reads it (php_xarg_at).
+// A method with neither never looks, which is php's "extra arguments are
+// ignored", and the next such call replaces it.
+//
+// A vector: [0] count, [8] capacity, [16] the pointers.
+uptr php_tl_new() {
+    uptr t = php_alloc(16 + 8 * 8);
+    st64(t, 0);
+    st64(t + 8, 8);
+    return t;
+}
+uptr php_tl_add(uptr t, uptr z) {
+    i64 n = ld64(t);
+    i64 c = ld64(t + 8);
+    if (n >= c) {
+        uptr t2 = php_alloc(16 + 2 * c * 8);
+        i64 i = 0;
+        loop { if (i >= n) break; st64(t2 + 16 + i * 8, ld64(t + 16 + i * 8)); i = i + 1; }
+        st64(t2, n);
+        st64(t2 + 8, 2 * c);
+        t = t2;
+    }
+    st64(t + 16 + n * 8, z);
+    st64(t, n + 1);
+    return t;
+}
+// a spread: its values, in order (the operand was checked before,
+// php_unpack_check); the elements are copies, as a spread's slots always were
+uptr php_tl_addvals(uptr t, uptr z) {
+    if (php_zv_type(z) != IS_ARRAY) return t;
+    uptr s = ld64(z);
+    i64 i = php_it_next(s, 0);
+    loop {
+        if (i < 0) break;
+        t = php_tl_add(t, php_it_val(s, i));
+        i = php_it_next(s, i + 1);
+    }
+    return t;
+}
+
+// n leading arguments are in s[0..n) (n <= ns, the slot count: 6 for a
+// method, 5 for a closure); tail lists the ones after them (0 = none). Fills
+// the free slots from it, keeps what is left in the thread block, and answers
+// how many there are in all.
+i64 php_targs(i64 n, uptr s, uptr tail, i64 ns) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    st64(phT + PHT_ph_xa, 0);
+    if (!tail) return n;
+    uptr xa = 0;
+    i64 i = 0;
+    loop {
+        if (i >= ld64(tail)) break;
+        uptr v = ld64(tail + 16 + i * 8);
+        if (n < ns) st64(s + n * 8, v);
+        if (n >= ns) {
+            if (!xa) xa = php_tl_new();
+            xa = php_tl_add(xa, v);
+        }
+        n = n + 1;
+        i = i + 1;
+    }
+    st64(phT + PHT_ph_xa, xa);
+    return n;
+}
+
+// the prologue of a method that can take a 7th argument: the list of them
+// when this call passed some to it (self is the method's own address)
+uptr php_xargs_take(uptr self) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_xf)) != self) return 0;
+    st64(phT + PHT_ph_xf, 0);
+    uptr a = ((uptr) ld64(phT + PHT_ph_xa));
+    st64(phT + PHT_ph_xa, 0);
+    return a;
+}
+
+// __call / __callStatic: the arguments past the sixth, after the six
+void php_xargs_into(uptr args) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr xa = ((uptr) ld64(phT + PHT_ph_xa));
+    st64(phT + PHT_ph_xa, 0);
+    if (!xa) return;
+    i64 i = 0;
+    loop { if (i >= ld64(xa)) break; php_arr_push(args, ld64(xa + 16 + i * 8)); i = i + 1; }
+}
+
+// the j-th argument past the sixth, or 0 when it was not passed
+uptr php_xarg_at(uptr xa, i64 j) {
+    if (!xa) return 0;
+    if (j >= ld64(xa)) return 0;
+    return ld64(xa + 16 + j * 8);
+}
+
+// a variadic parameter, `...$rest` after k others, of a function reached
+// with ns slots (a method's 6, a closure's 5): the slots k.. up to the first
+// one not passed, then the arguments past the slots that are not one of the
+// k -- a copy of each, as a by-value parameter is
+uptr php_va_m(uptr xa, i64 k, i64 ns, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    uptr r = php_arr_new(8);
+    i64 i = k;
+    loop {
+        if (i >= ns) break;
+        uptr a = a1;
+        if (i == 1) a = a2;
+        if (i == 2) a = a3;
+        if (i == 3) a = a4;
+        if (i == 4) a = a5;
+        if (i == 5) a = a6;
+        if (!a) break;
+        php_arr_push(r, a);
+        i = i + 1;
+    }
+    if (xa) {
+        i64 j = k - ns;
+        if (j < 0) j = 0;
+        loop { if (j >= ld64(xa)) break; php_arr_push(r, ld64(xa + 16 + j * 8)); j = j + 1; }
+    }
+    return php_zarr(r);
+}
+
+// `int ...$rest`: every element checked and converted as the parameter's own
+// type says, numbered from the variadic's position; the first refusal is the
+// one raised (php_param_coerce stops once one is pending)
+uptr php_va_coerce(uptr z, i64 want, uptr cls, uptr fn, i64 argno, uptr dfile, i64 dline) {
+    uptr a = ld64(z);
+    uptr nm = php_str_new("", 0);
+    i64 i = php_it_next(a, 0);
+    loop {
+        if (i < 0) break;
+        uptr b = php_ht_bkt(a, i);
+        uptr c = php_param_coerce_at(b, want, cls, fn, argno, nm, dfile, dline);
+        if (c != b) php_zv_cp(b, c);
+        php_fr_coerced(argno - 1, b, fn);
+        argno = argno + 1;
+        i = php_it_next(a, i + 1);
+    }
+    return z;
+}
+
+// `?int ...$rest`, `Foo ...$rest`: php_param_tcheck_at on every element
+uptr php_param_tcheck_at(uptr z, i64 m, uptr cls, uptr ccls, uptr fn, i64 argno, uptr argname, uptr tn, uptr dfile, i64 dline);
+uptr php_va_tcheck(uptr z, i64 m, uptr cls, uptr ccls, uptr fn, i64 argno, uptr argname, uptr tn, uptr dfile, i64 dline) {
+    uptr a = ld64(z);
+    i64 i = php_it_next(a, 0);
+    loop {
+        if (i < 0) break;
+        uptr b = php_ht_bkt(a, i);
+        uptr c = php_param_tcheck_at(b, m, cls, ccls, fn, argno, argname, tn, dfile, dline);
+        if (c != b) php_zv_cp(b, c);
+        php_fr_coerced(argno - 1, b, fn);
+        argno = argno + 1;
+        i = php_it_next(a, i + 1);
+    }
+    return z;
+}
+
+// the call shapes with a tail: the slots and the count as before, plus the
+// array of the arguments after them (src/class.mc ph_margs)
+uptr php_zv_mcall_t(uptr z, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6, uptr tail) {
+    u8 s[48];
+    st64(s, a1); st64(s + 8, a2); st64(s + 16, a3); st64(s + 24, a4); st64(s + 32, a5); st64(s + 40, a6);
+    n = php_targs(n, s, tail, 6);
+    return php_zv_mcall(z, name, scope, n, ld64(s), ld64(s + 8), ld64(s + 16), ld64(s + 24), ld64(s + 32), ld64(s + 40));
+}
+uptr php_zv_mcall_ns_t(uptr z, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6, uptr tail) {
+    if (php_zv_type(z) == IS_NULL) return php_znull();
+    return php_zv_mcall_t(z, name, scope, n, a1, a2, a3, a4, a5, a6, tail);
+}
+uptr php_scall_t(uptr ce, uptr name, uptr thisp, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6, uptr tail) {
+    u8 s[48];
+    st64(s, a1); st64(s + 8, a2); st64(s + 16, a3); st64(s + 24, a4); st64(s + 32, a5); st64(s + 40, a6);
+    n = php_targs(n, s, tail, 6);
+    return php_scall(ce, name, thisp, scope, n, ld64(s), ld64(s + 8), ld64(s + 16), ld64(s + 24), ld64(s + 32), ld64(s + 40));
+}
+uptr php_ctor(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6);
+uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5);
+// a callable value called with more than five arguments, or a spread
+uptr php_call_zv_t(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr tail) {
+    u8 s[48];
+    st64(s, a1); st64(s + 8, a2); st64(s + 16, a3); st64(s + 24, a4); st64(s + 32, a5); st64(s + 40, 0);
+    n = php_targs(n, s, tail, 5);
+    return php_call_zv(z, n, ld64(s), ld64(s + 8), ld64(s + 16), ld64(s + 24), ld64(s + 32));
+}
+// the first argument past the fifth, out of the list, for a call that goes
+// on to a method's six slots (__invoke): the rest stays the list
+uptr php_xargs_shift() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr xa = ((uptr) ld64(phT + PHT_ph_xa));
+    if (!xa) return 0;
+    uptr first = ld64(xa + 16);
+    uptr r = 0;
+    i64 i = 1;
+    loop { if (i >= ld64(xa)) break; if (!r) r = php_tl_new(); r = php_tl_add(r, ld64(xa + 16 + i * 8)); i = i + 1; }
+    st64(phT + PHT_ph_xa, r);
+    return first;
+}
+uptr php_ctor_t(uptr o, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6, uptr tail) {
+    u8 s[48];
+    st64(s, a1); st64(s + 8, a2); st64(s + 16, a3); st64(s + 24, a4); st64(s + 32, a5); st64(s + 40, a6);
+    n = php_targs(n, s, tail, 6);
+    return php_ctor(o, name, scope, n, ld64(s), ld64(s + 8), ld64(s + 16), ld64(s + 24), ld64(s + 32), ld64(s + 40));
 }
 
 uptr php_ce_byname(uptr name) {
@@ -7158,7 +7397,9 @@ i64 php_fr_closure(uptr o, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     if (((uptr) ld64(phT + PHT_ph_zalloc))) return 0;
     uptr nb = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("name", 4)), php_str_new("name", 4));
     if (!nb || php_zv_type(nb) != IS_STRING) return 0;
-    if (n > 5) n = 5;
+    uptr xa = 0;
+    if (n > 5) xa = ((uptr) ld64(phT + PHT_ph_xa));
+    if (n > 5 && (!xa || ld64(xa) < n - 5)) n = 5;
     if (n < 0) n = 0;
     uptr p = php_fr_push(php_cstr0(ld64(nb)), 0, 0, ((uptr) ld64(phT + PHT_ph_dfile)), ld64(phT + PHT_ph_dline), n);
     uptr sb = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("scope", 5)), php_str_new("scope", 5));
@@ -7177,6 +7418,7 @@ i64 php_fr_closure(uptr o, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
         if (i == 2) a = a3;
         if (i == 3) a = a4;
         if (i == 4) a = a5;
+        if (i >= 5) a = ld64(xa + 16 + (i - 5) * 8);
         st64(p + i * 16, 6);
         st64(p + i * 16 + 8, a);
         i = i + 1;
@@ -7184,23 +7426,201 @@ i64 php_fr_closure(uptr o, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     return 1;
 }
 
+// ---- callables that are not closures ----------------------------------------
+// The class whose code is running: the innermost frame's (a method's
+// declaring class, a closure's scope), 0 at the top level or in a function.
+// It is php's "calling scope" for a callable's visibility.
+uptr php_cur_scope() { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    i64 k = ld64(phT + PHT_ph_frn);
+    uptr r = 0;
+    // a builtin running a callback (usort's) is not a scope: the code that
+    // called the builtin is
+    loop {
+        if (k <= 0) return 0;
+        r = ((uptr) ld64(phT + PHT_ph_fr)) + (k - 1) * FR_SIZE;
+        if (ld64(r + 16) != FR_INTERNAL) break;
+        k = k - 1;
+    }
+    uptr cn = ld64(r + 8);
+    if (!cn || !ld8(cn)) return 0;
+    return php_ce_find(php_str_new(cn, php_cstrlen(cn)));
+}
+
+// an array callable's two parts: [object or class name, method name]; 0
+// with php's Error raised when it is not one
+i64 php_cb_parts(uptr z, uptr out) {
+    uptr a = ld64(z);
+    i64 cnt = 0;
+    i64 it = php_it_next(a, 0);
+    loop { if (it < 0) break; cnt = cnt + 1; it = php_it_next(a, it + 1); }
+    uptr e0 = php_ht_find(a, 0, 0);
+    uptr e1 = php_ht_find(a, 1, 0);
+    if (cnt != 2 || !e0 || !e1) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("Array callback must have exactly two elements", 45));
+        return 0;
+    }
+    if (php_zv_type(e0) != IS_OBJECT && php_zv_type(e0) != IS_STRING) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("First array member is not a valid class name or object", 54));
+        return 0;
+    }
+    if (php_zv_type(e1) != IS_STRING) {
+        php_throw_str(php_str_new("Error", 5), php_str_new("Second array member is not a valid method", 41));
+        return 0;
+    }
+    st64(out, e0);
+    st64(out + 8, ld64(e1));
+    return 1;
+}
+
+// call [object or class, method] with n arguments, six slots and the list
+// past them in the thread block (php_targs), from the calling scope
+uptr php_cb_call(uptr e0, uptr name, uptr scope, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5, uptr a6) {
+    if (php_zv_type(e0) == IS_OBJECT) return php_mcall(ld64(e0), name, scope, n, a1, a2, a3, a4, a5, a6);
+    uptr ce = php_ce_byname(ld64(e0));
+    if (!ce) return php_znull();
+    return php_scall(ce, name, 0, scope, n, a1, a2, a3, a4, a5, a6);
+}
+
+// the function every closure Closure::fromCallable / `$o->m(...)` makes is:
+// `use` is [object or class, method, scope as an int]; its arguments are a
+// closure's five slots and the list past them
+uptr php_cl_tramp(uptr use, uptr thisp, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    uptr xa = php_xargs_take(&php_cl_tramp);
+    i64 n = 0;
+    if (a1) n = 1;
+    if (a1 && a2) n = 2;
+    if (a1 && a2 && a3) n = 3;
+    if (a1 && a2 && a3 && a4) n = 4;
+    if (a1 && a2 && a3 && a4 && a5) n = 5;
+    uptr a6 = 0;
+    if (xa && ld64(xa) > 0) {
+        n = 5 + ld64(xa);
+        a6 = ld64(xa + 16);
+        uptr rest = 0;
+        i64 i = 1;
+        loop { if (i >= ld64(xa)) break; if (!rest) rest = php_tl_new(); rest = php_tl_add(rest, ld64(xa + 16 + i * 8)); i = i + 1; }
+        st64(phT + PHT_ph_xa, rest);
+    }
+    uptr e0 = php_arr_iget(use, 0);
+    uptr nm = ld64(php_arr_iget(use, 1));
+    uptr sc = php_zv_long(php_arr_iget(use, 2));
+    return php_cb_call(e0, nm, sc, n, a1, a2, a3, a4, a5, a6);
+}
+
+// Closure::fromCallable(x) and a first-class callable `$o->m(...)`: a closure
+// stays itself; [object or class, method] and an object with __invoke become a
+// closure that calls it. It has no name of its own, so a call through it
+// shows the method's frame and not one for the closure, as php's does.
+uptr php_fcc(uptr z, uptr scope) {
+    uptr e0 = 0;
+    uptr nm = 0;
+    if (php_zv_type(z) == IS_OBJECT) {
+        uptr o = ld64(z);
+        if (php_ht_find(php_obj_props(o), php_str_hash(php_str_new("fn", 2)), php_str_new("fn", 2))) return z;
+        if (!php_ce_lookup(php_obj_ce(o), 24, php_str_new("__invoke", 8))) {
+            php_throw_str(php_str_new("TypeError", 9), php_str_new("Failed to create closure from callable: no array or string given", 64));
+            return php_znull();
+        }
+        e0 = z;
+        nm = php_str_new("__invoke", 8);
+    } else if (php_zv_type(z) == IS_ARRAY) {
+        u8 pr[16];
+        if (!php_cb_parts(z, pr)) return php_znull();
+        e0 = ld64(pr);
+        nm = ld64(pr + 8);
+        uptr ce = 0;
+        if (php_zv_type(e0) == IS_OBJECT) ce = php_obj_ce(ld64(e0));
+        if (php_zv_type(e0) == IS_STRING) ce = php_ce_byname(ld64(e0));
+        if (!ce) return php_znull();
+        uptr lk = php_case(nm, 0);
+        if (!php_ce_lookup(ce, 24, lk) && !php_ce_lookup(ce, 80, php_str_new("__call", 6)) && !php_ce_lookup(ce, 80, php_str_new("__callstatic", 12))) {
+            uptr m = php_str_new("Failed to create closure from callable: class ", 46);
+            m = php_str_concat(m, ld64(ce));
+            m = php_str_concat(m, php_str_new(" does not have a method \"", 25));
+            m = php_str_concat(m, nm);
+            m = php_str_concat(m, php_str_new("\"", 1));
+            php_throw_str(php_str_new("TypeError", 9), m);
+            return php_znull();
+        }
+    } else {
+        php_throw_str(php_str_new("TypeError", 9), php_str_new("Failed to create closure from callable: no array or string given", 64));
+        return php_znull();
+    }
+    if (!ph_ce_closure) ph_ce_closure = php_ce_new(php_str_new("Closure", 7));
+    uptr use = php_arr_new(4);
+    php_arr_push(use, e0);
+    php_arr_push(use, php_zstr(nm));
+    php_arr_push(use, php_zlong(scope));
+    uptr o2 = php_obj_new(ph_ce_closure);
+    php_zv_cp(php_arr_sslot(php_obj_props(o2), php_str_new("fn", 2)), php_zlong(&php_cl_tramp));
+    php_zv_cp(php_arr_sslot(php_obj_props(o2), php_str_new("use", 3)), php_zarr(use));
+    php_zv_cp(php_arr_sslot(php_obj_props(o2), php_str_new("this", 4)), php_zlong(0));
+    return php_zobj(o2);
+}
+// `f(...)`: the arrow function that calls f, with no name of its own, so a
+// call through it shows f's frame and not one for the closure
+uptr php_fcc_anon(uptr z) {
+    if (php_zv_type(z) != IS_OBJECT) return z;
+    uptr p = php_obj_props(ld64(z));
+    uptr b = php_ht_find(p, php_str_hash(php_str_new("name", 4)), php_str_new("name", 4));
+    if (b) php_zv_cp(b, php_zlong(0));
+    return z;
+}
+// `A::m(...)`: the class entry and the method's name
+uptr php_fcc_s(uptr ce, uptr name, uptr scope) {
+    uptr a = php_arr_new(4);
+    php_arr_push(a, php_zstr(ld64(ce)));
+    php_arr_push(a, php_zstr(name));
+    return php_fcc(php_zarr(a), scope);
+}
+// `$o->m(...)`: the receiver and the method's name
+uptr php_fcc_m(uptr z, uptr name, uptr scope) {
+    if (php_zv_type(z) != IS_OBJECT) {
+        uptr m = php_str_concat(php_str_new("Call to a member function ", 26), name);
+        m = php_str_concat(m, php_str_new("() on ", 6));
+        m = php_str_concat(m, php_f_get_debug_type(z));
+        php_throw_str(php_str_new("Error", 5), m);
+        return php_znull();
+    }
+    uptr a = php_arr_new(4);
+    php_arr_push(a, z);
+    php_arr_push(a, php_zstr(name));
+    return php_fcc(php_zarr(a), scope);
+}
+
 uptr php_call_zv(uptr z, i64 n, uptr a1, uptr a2, uptr a3, uptr a4, uptr a5) {
     // an extension: a name, an array callable or an engine object is php's to
     // call (lib/php_ext.mc's phx_vcall), the way the C twin calls it
     if (ph_eng && (php_zv_type(z) != IS_OBJECT || php_is_proxy(ld64(z))))
         return callp(ld64(ph_eng + 48), z, n, a1, a2, a3, a4, a5);
+    // [object or class, method]: a method call from the calling scope
+    if (php_zv_type(z) == IS_ARRAY) {
+        u8 pr[16];
+        if (!php_cb_parts(z, pr)) return php_znull();
+        uptr a6 = 0;
+        if (n > 5) a6 = php_xargs_shift();
+        return php_cb_call(ld64(pr), ld64(pr + 8), php_cur_scope(), n, a1, a2, a3, a4, a5, a6);
+    }
     if (php_zv_type(z) != IS_OBJECT) {
         php_throw_str(php_str_new("Error", 5), php_str_new("Value not callable", 18));
         return php_znull();
     }
     uptr o = ld64(z);
     uptr b = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("fn", 2)), php_str_new("fn", 2));
-    if (!b) return php_mcall(o, php_str_new("__invoke", 8), 0, n, a1, a2, a3, a4, a5, 0);
+    if (!b) {
+        uptr a6 = 0;
+        if (n > 5) a6 = php_xargs_shift();             // php_call_zv_t: the 6th is a slot here
+        return php_mcall(o, php_str_new("__invoke", 8), 0, n, a1, a2, a3, a4, a5, a6);
+    }
     uptr u = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("use", 3)), php_str_new("use", 3));
     uptr t = php_ht_find(php_obj_props(o), php_str_hash(php_str_new("this", 4)), php_str_new("this", 4));
     uptr tp = 0;
     if (t) tp = ld64(t);
     i64 fr = php_fr_closure(o, n, a1, a2, a3, a4, a5);
+    if (n > 5) {                                        // php_call_zv_t: the 6th argument on
+        uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+        st64(phT + PHT_ph_xf, ld64(b));
+    }
     uptr r = callp(ld64(b), ld64(u), tp, a1, a2, a3, a4, a5);
     if (fr) php_fr_pop();
     return r;
@@ -7672,6 +8092,54 @@ uptr php_type_coerce(uptr z, i64 m, uptr cls) {
     return 0;
 }
 
+// A parameter whose declaration is more than one plain scalar -- `?int`,
+// `int|string`, a class, `iterable`, `int $x = null` -- checked as php checks
+// it, with the RT_* bits and class names the return check uses (m, cls): the
+// value itself, the converted one in weak mode, or php's TypeError naming the
+// declaration tn, raised where the parameter is declared (dfile, dline). ccls
+// is the declaring class of a method, "" for a function. Not passed (0) is
+// left to the default or the count check; nothing is checked once something is
+// pending, as php reports the first argument it refused.
+uptr php_param_tcheck_at(uptr z, i64 m, uptr cls, uptr ccls, uptr fn, i64 argno, uptr argname, uptr tn, uptr dfile, i64 dline) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (!z) return z;
+    if (((uptr) ld64(phT + PHT_ph_exc))) return z;
+    // a deprecation the conversion raises (a float losing its fraction) is
+    // php's at the parameter's declaration
+    uptr sf = ((uptr) ld64(phT + PHT_ph_dfile));
+    i64 sl = ld64(phT + PHT_ph_dline);
+    if (dline > 0) { st64(phT + PHT_ph_dfile, php_cstr0(dfile)); st64(phT + PHT_ph_dline, dline); }
+    uptr r = php_type_coerce(z, m, cls);
+    st64(phT + PHT_ph_dfile, sf);
+    st64(phT + PHT_ph_dline, sl);
+    if (r) return r;
+    uptr msg = php_str_new("", 0);
+    if (php_strlen(ccls)) msg = php_str_concat(php_str_concat(msg, ccls), php_str_new("::", 2));
+    msg = php_str_concat(msg, fn);
+    msg = php_str_concat(msg, php_str_new("(): Argument #", 14));
+    msg = php_str_concat(msg, php_itos(argno));
+    if (php_strlen(argname)) {
+        msg = php_str_concat(msg, php_str_new(" ($", 3));
+        msg = php_str_concat(msg, argname);
+        msg = php_str_concat(msg, php_str_new(")", 1));
+    }
+    msg = php_str_concat(msg, php_str_new(" must be of type ", 17));
+    msg = php_str_concat(msg, tn);
+    msg = php_str_concat(msg, php_str_new(", ", 2));
+    msg = php_str_concat(msg, php_valname(z));
+    msg = php_str_concat(msg, php_str_new(" given, called in ", 18));
+    msg = php_str_concat(msg, php_str_new(((uptr) ld64(phT + PHT_ph_dfile)), php_cstrlen(((uptr) ld64(phT + PHT_ph_dfile)))));
+    msg = php_str_concat(msg, php_str_new(" on line ", 9));
+    msg = php_str_concat(msg, php_itos(ld64(phT + PHT_ph_dline)));
+    php_throw_str(php_str_new("TypeError", 9), msg);
+    uptr e = ((uptr) ld64(phT + PHT_ph_exc));
+    if (e && dline > 0) {
+        uptr o = ld64(e);
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("file", 4)), php_zstr(dfile));
+        php_zv_cp(php_arr_sslot(php_obj_props(o), php_str_new("line", 4)), php_zlong(dline));
+    }
+    return php_znull();
+}
+
 uptr php_ret_check(uptr z, i64 m, uptr cls, uptr fn, uptr tn) {
     uptr r = php_type_coerce(z, m, cls);
     if (r) return r;
@@ -7973,6 +8441,41 @@ uptr php_fr_push(uptr name, uptr cls, i64 type, uptr file, i64 line, i64 n) { up
     st64(phT + PHT_ph_frn, k + 1);
     st64(phT + PHT_ph_fan, a + n);
     return ((uptr) ld64(phT + PHT_ph_fa)) + a * 16;
+}
+
+// php's frame holds an argument as the parameter RECEIVED it: once the value
+// was converted to the declared type, its trace shows the converted one
+// (`f(1.0, 'x')` for f(float $a, float $b) called with 1 and 'x'). Argument
+// i (0-based) of the innermost frame becomes c, unless an exception is
+// pending (the refused argument keeps what it was, and so does every one php
+// never reached). fn, when not 0, is the function the caller believes that
+// frame is (a method's or a closure's prologue, where an extension call
+// pushes none): another name leaves it alone.
+void php_fr_coerced(i64 i, uptr c, uptr fn) { uptr phT = ph_tcur; if (!phT) phT = ph_tslow();
+    if (((uptr) ld64(phT + PHT_ph_exc))) return;
+    i64 k = ld64(phT + PHT_ph_frn);
+    if (k <= 0 || !c) return;
+    uptr r = ((uptr) ld64(phT + PHT_ph_fr)) + (k - 1) * FR_SIZE;
+    if (i < 0 || i >= ld64(r + 48)) return;
+    if (fn) {
+        uptr nm = ld64(r);
+        if (!nm) return;
+        i64 ln = php_strlen(fn);
+        i64 j = 0;
+        loop {
+            if (j >= ln) break;
+            i64 x = ld8(nm + j);
+            i64 y = ld8(fn + ZS_HDR + j);
+            if (x >= 65 && x <= 90) x = x + 32;
+            if (y >= 65 && y <= 90) y = y + 32;
+            if (x != y) return;
+            j = j + 1;
+        }
+        if (ld8(nm + ln)) return;
+    }
+    uptr slot = ((uptr) ld64(phT + PHT_ph_fa)) + (ld64(r + 40) + i) * 16;
+    st64(slot, 6);
+    st64(slot + 8, c);
 }
 
 // The position the frame was pushed at is the caller's, and it is what the
@@ -12424,6 +12927,22 @@ void php_unpack_check(uptr z, i64 cap) {
         }
         i = php_it_next(a, i + 1);
     }
+}
+
+// src/builtin.mc ph_spread_call: a spread into a builtin that reached a
+// count of arguments php takes and this implementation does not -- the same
+// kind of named limit a call's slots have (php_unpack_check)
+i64 php_spread_cap(uptr namez, uptr nz) {
+    uptr name = php_zv_str(namez);
+    php_flush();
+    write(2, "mc-php: ", 8);
+    uptr d = php_itos(php_zv_long(nz));
+    write(2, php_str_val(d), php_strlen(d));
+    write(2, " arguments by a spread into ", 28);
+    write(2, php_str_val(name), php_strlen(name));
+    write(2, "() is not implemented yet\n", 26);
+    exit(255);
+    return 0;
 }
 
 uptr php_unpack_at(uptr z, i64 k) {
