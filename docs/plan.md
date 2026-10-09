@@ -1326,13 +1326,42 @@ interpreter on the same source), § 7 item 1. What already has code moves into
    sync 1.65-1.72x, threads 1.00x, awaitable 1.02-1.07x, connect 1.04-1.12x against the same
    numbers before them, and an extension builds none (php's engine does).
 
-   Left as they are, on purpose or measured as another milestone's: a statement spread over
-   several lines names its FIRST line where php names the call's (the position is per statement);
-   a builtin's wrong ARGUMENT type is still a warning where php raises a TypeError (builtin
-   argument typing is its own work); a callback php calls through an internal function
-   (`array_map('f', ..)`) has no `[internal function]` frame; a method's or a closure's declared
-   return type is not checked (`ph_skip_type`), so `return 5;` in a `: void` method is not refused;
-   `$s[N]` past the end is C's read by design (`docs/semantics.md`), not php's warning.
+   The four that batch left open, closed in PR #65 (`tests/g/159`-`173`): (1) a statement spread
+   over several lines names the line php names -- the call's name, the operand's, the
+   interpolated variable's -- and not its first (`src/lex.mc` keeps php's `CG(zend_lineno)`,
+   `src/node.mc` records it per runtime call, `src/lvalue.mc` `ph_relines` stores it right
+   before the call that needs it). (2) a builtin given the wrong argument type is php's ZPP:
+   every parameter's type and name come from php-src's own stubs (`tests/arginfo.py` writes
+   `src/arginfo.mc`, `tests/run.sh` checks it is current), coerced in weak mode with php's null
+   and float-to-int deprecations, a TypeError under `strict_types` or when nothing coerces, the
+   builtin's frame on top (`lib/php_rt.mc` `php_zpp`). (3) a callback a builtin calls
+   (`array_map`, `array_filter`, `array_reduce`, `usort`, `uasort`, `uksort`) runs under
+   `#N [internal function]: f(..)` with the builtin's own frame below it. (4) a method's, a
+   closure's and an arrow function's declared return type is checked as a function's is --
+   php's compile-time fatals, its weak coercion and its TypeError (`src/types.mc` records the
+   declared type, `lib/php_rt.mc` `php_ret_check`).
+
+   What closing those found, fixed in the same PR: a typed PROPERTY is checked on every write
+   and is `uninitialized(T)` until written (`php_ce_ptype`, `php_ptype_check`); a missing
+   required argument is php's ArgumentCountError with its counts and the caller's position,
+   placed at the parameter, for functions, methods, closures and callbacks, and php's
+   optional-before-required and implicitly-nullable deprecations are raised while compiling; a
+   closure's typed parameter is checked; a parameter's TypeError is placed at the parameter's
+   line; `(array)` and `(object)` casts, and the non-canonical cast names' deprecation (php's
+   compile-time diagnostics run before the program, `src/decls.mc` `ph_cdiag`); `print` as an
+   expression; a property and a static property assigned inside an expression stop at a
+   refused write and answer the value as written; `var_dump()` used as a value is null; an
+   arrow function declared `never` runs its body and then refuses the implicit return; the
+   out-of-range offsets, empty needles and zero steps that are php's ValueErrors; `range()`
+   as php builds it; objects compared property by property; and a method no longer counts as
+   a global function in the pre-scan (`src/program.mc` `ph_scan_cls`). The runtime this added
+   moved every function after it, and `bc_round` -- unchanged code, all string work -- swung
+   from 1.84x to 2.16x with where its callees landed (a padding experiment measured it): its
+   common case now reads the kept digits out of the argument and adds one in place
+   (`examples/bcmath` `_bc_up1`), worst 1.49x, median 1.46x (`examples/bcmath/README.md`).
+
+   `$s[N]` past the end stays C's read by design (`docs/semantics.md` section 2), not php's
+   warning.
 5. **Port json.** `ext/json` cannot be built shared at all (T1), so this port is the only way a
    json extension exists outside php's own binary.
 6. **Distribution -- Composer, Packagist, PIE. To be designed with the owner**: the owner stops

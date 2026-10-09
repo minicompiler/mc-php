@@ -89,6 +89,12 @@ void ph_class(uptr fl, i64 line, i64 flags);
 i64  ph_scope();
 uptr ph_cur_cls;               // the class being parsed, 0 outside one
 uptr ph_cur_fn;                // the php function or method being parsed, 0 outside one
+uptr ph_cur_clo;               // the closure being parsed: php's name for it, 0 outside one
+// php's CG(zend_lineno) as the parser goes (Zend/zend_compile.c sets it to
+// each expression's line as it compiles it): the line of the last token
+// consumed that is not a closing bracket, a comma or a semicolon. A runtime
+// call built now raises at this line (src/lvalue.mc ph_relines).
+i64 ph_zl;
 i64  ph_pre_find(uptr n);
 i64  ph_stmt_of(i64 c);
 i64  ph_nmb(i64 c, i64 first);
@@ -97,6 +103,10 @@ i64  ph_tref(i64 t);
 i64  ph_mcall_node(i64 recv, uptr name, uptr fl, i64 line);
 i64  ph_mcall_ns(i64 recv, uptr name, uptr fl, i64 line, i64 ns);
 i64  ph_scall_node(i64 ce, uptr name, uptr fl, i64 line);
+i64  ph_pset_kind(i64 incdec, uptr fl);
+i64  ph_pset_node(i64 cur, uptr prop, i64 zv, i64 kind);
+i64  ph_check(i64 line, uptr fl);
+i64  ph_ac_raise(uptr disp, i64 passed, i64 min, i64 exact, uptr dfl, i64 dln);
 i64  ph_ce_of(uptr name, uptr fl, i64 line);
 uptr ph_ns_scan(uptr q, uptr e);
 i64  ph_this(uptr fl, i64 line);
@@ -284,6 +294,26 @@ void ph_phpfatal_x(uptr fl, i64 line, uptr msg, i64 st) {
 }
 
 void ph_phpfatal(uptr fl, i64 line, uptr msg) { ph_phpfatal_x(fl, line, msg, 0); }
+
+// A php COMPILE-TIME diagnostic that is not fatal (a deprecation): php raises
+// it while compiling, before the program runs, at the line it compiled. So
+// it is a statement at the very start of `main` (src/program.mc), raised
+// with that position (lib/php_rt.mc php_raise_at). An extension is not
+// compiled by php at all: nothing there.
+i64 ph_cdiag_head;
+i64 ph_cdiag_tail;
+i64 ph_call(uptr name, i64 nargs, i64 a0, i64 a1, i64 a2, i64 a3, i64 ty);
+i64 ph_stmt_of(i64 c);
+i64 ph_int(i64 v);
+i64 ph_raw(uptr bytes, i64 len);
+void ph_cdiag(i64 lv, uptr msg, uptr fl, i64 line) {
+    if (ph_ext) return;
+    uptr a = ph_disp(ph_absfile(fl));
+    i64 s = ph_stmt_of(ph_call("php_raise_at", 4, ph_int(lv), ph_raw(msg, cstrlen(msg)), ph_raw(a, cstrlen(a)), ph_int(line), TY_VOID));
+    if (ph_cdiag_tail) set_nd_next(ph_cdiag_tail, s);
+    if (!ph_cdiag_tail) ph_cdiag_head = s;
+    ph_cdiag_tail = s;
+}
 
 // NOT a refusal: something T5 has not built yet. It is an ordinary compile
 // error (the grid counts it `wrong`), because inflating the refused column

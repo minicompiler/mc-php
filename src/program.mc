@@ -86,6 +86,13 @@ void ph_program() {
     if (ph_ovr_head) {
         if (ph_cnew_tail) set_nd_next(ph_cnew_tail, ph_ovr_head);
         if (!ph_cnew_tail) ph_cnew_head = ph_ovr_head;
+        ph_cnew_tail = ph_ovr_tail;
+    }
+    // what php raised while compiling, before anything runs (ph_cdiag)
+    if (ph_cdiag_head) {
+        if (ph_cnew_tail) set_nd_next(ph_cnew_tail, ph_cdiag_head);
+        if (!ph_cnew_tail) ph_cnew_head = ph_cdiag_head;
+        ph_cnew_tail = ph_cdiag_tail;
     }
     i64 boot = ph_stmt_of(ph_call("php_bootstrap", 0, 0, 0, 0, 0, TY_VOID));
     set_nd_next(boot, ph_cnew_head);
@@ -318,6 +325,57 @@ void ph_scan_refs(uptr src, i64 len) {
 
 // pass 1 of the by-reference scan: which function names take one. A call may
 // come before the declaration, so this is its own pass over the buffer.
+// Which bytes of a source are inside a class, interface, trait or enum body:
+// a method is not a global function, and the declaration scan took `function
+// m(` there for one -- a class with a count() method made a call to the
+// builtin count() look like a call to the program's own function. (The
+// by-reference scan keeps methods: a method call's by-reference arguments
+// are found by the method's name.)
+uptr ph_cls_map;
+i64 ph_scan_word(uptr src, i64 len, i64 i, uptr w, i64 n) {
+    if (i + n > len || !mem_eq(src + i, w, n)) return 0;
+    if (i + n < len && ph_nmb(ld8(src + i + n), 0)) return 0;
+    if (i > 0 && (ph_nmb(ld8(src + i - 1), 0) || ld8(src + i - 1) == 36)) return 0;
+    return 1;
+}
+void ph_scan_cls(uptr src, i64 len) {
+    ph_cls_map = xalloc(len + 1);
+    mem_zero(ph_cls_map, len + 1);
+    u8 st[512];
+    i64 ns = 0;
+    i64 bd = 0;
+    i64 pend = 0;
+    i64 i = 0;
+    loop {
+        if (i >= len) break;
+        i64 hop = ph_scan_hop(src, len, i);
+        if (hop != i) {
+            if (ns) { i64 q = i; loop { if (q >= hop) break; st8(ph_cls_map + q, 1); q = q + 1; } }
+            i = hop;
+            continue;
+        }
+        i64 c = ld8(src + i);
+        if (ns) st8(ph_cls_map + i, 1);
+        if (c == 123) {
+            if (pend) { if (ns < 64) st64(st + ns * 8, bd); ns = ns + 1; pend = 0; }
+            bd = bd + 1;
+        }
+        if (c == 125) {
+            bd = bd - 1;
+            if (ns > 0 && ns <= 64 && ld64(st + (ns - 1) * 8) == bd) ns = ns - 1;
+        }
+        if (c == 59) pend = 0;
+        if (ph_scan_word(src, len, i, "class", 5) || ph_scan_word(src, len, i, "interface", 9)
+            || ph_scan_word(src, len, i, "trait", 5) || ph_scan_word(src, len, i, "enum", 4)) {
+            // not `Foo::class` nor `$o->class`
+            i64 b = i;
+            loop { if (b <= 0) break; if (!ph_space(ld8(src + b - 1))) break; b = b - 1; }
+            if (b == 0 || (ld8(src + b - 1) != 58 && ld8(src + b - 1) != 62)) pend = 1;
+        }
+        i = i + 1;
+    }
+}
+
 void ph_scan_brf(uptr src, i64 len) {
     i64 i = 0;
     loop {
@@ -421,7 +479,8 @@ void ph_scan_decl(uptr src, i64 len) {
         if (ld8(src + i) == 102 && ld8(src + i + 1) == 117 && ld8(src + i + 2) == 110
             && ld8(src + i + 3) == 99 && ld8(src + i + 4) == 116 && ld8(src + i + 5) == 105
             && ld8(src + i + 6) == 111 && ld8(src + i + 7) == 110
-            && !ph_nmb(ld8(src + i + 8), 0) && (i == 0 || !ph_nmb(ld8(src + i - 1), 0))) {
+            && !ph_nmb(ld8(src + i + 8), 0) && (i == 0 || !ph_nmb(ld8(src + i - 1), 0))
+            && !ld8(ph_cls_map + i)) {
             i64 j = i + 8;
             loop { if (j >= len) break; if (!ph_space(ld8(src + j))) break; j = j + 1; }
             if (j < len && ld8(src + j) == 38) {              // function &name()
@@ -584,6 +643,7 @@ void ph_scan_globals(uptr name, uptr src, i64 len) {
 
 void ph_on_source(uptr name, uptr src, i64 len) {
     if (ph_pushing || ph_ends(name, ".php")) ph_scan_globals(name, src, len);
+    ph_scan_cls(src, len);
     ph_scan_decl(src, len);
     ph_scan_brf(src, len);
     ph_scan_refs(src, len);

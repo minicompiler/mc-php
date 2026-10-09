@@ -587,6 +587,7 @@ i64 ph_function() {
     u8 bvn[96];
     u8 bvm[96];
     i64 nbv = 0;
+    ph_ac_begin(name, fl);
     loop {
         if (ph_at(")", 1)) break;
         i64 variadic = 0;
@@ -597,7 +598,8 @@ i64 ph_function() {
         ph_lt_k = BK_ANY;
         ph_lt_n = 0;
         ph_lt_null = 0;
-        if (!ph_at("$", 1) && !ph_at("...", 3)) pt = ph_type_word(0);
+        i64 ptm = 0;
+        if (!ph_at("$", 1) && !ph_at("...", 3)) { pt = ph_param_type(); ptm = ph_ptm; }
         ph_bnd_set(fi, np, pt);
         // The DECLARED primitive, kept for the coercion below: a parameter
         // with a default -- or one a forward call already fixed -- is forced
@@ -615,6 +617,7 @@ i64 ph_function() {
         // `int ...$n`: the type comes first and the ... after it
         if (ph_at("...", 3)) { ph_next(); variadic = 1; }
         if (!ph_at("$", 1)) ph_todo2(fl, line, "a php parameter", ph_tname);
+        i64 pln = ph_tline;
         ph_next();
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
@@ -624,8 +627,10 @@ i64 ph_function() {
         i64 dint = 0;
         i64 dlit = 0;
         i64 dnul = 0;
+        i64 dpre = 0;
         if (ph_accept("=", 1)) {
-            i64 dv = ph_expr(0);
+            i64 dv = ph_param_default();
+            dpre = ph_dflt_pre;
             if (ph_ety == PT_INT && nd_kind(dv) == N_INT) { dlit = 1; dint = nd_val(dv); }
             if (ph_ety == PT_NULL) dnul = 1;
             dflt = ph_to_mixed(dv, ph_ety);
@@ -660,6 +665,7 @@ i64 ph_function() {
         // (php_param_coerce / phx_chk2 refuse a null: the declaration is not
         // nullable) and the prologue below fills the literal. The variable
         // itself is never null, so it is NOT bound as an opt one.
+        i64 aciff = 0;
         i64 dfill = 0;
         if (!isopt && pt == PT_INT && dlit && !ph_lt_null && !byref && !variadic && !fwd) {
             isopt = 2;
@@ -696,6 +702,7 @@ i64 ph_function() {
         st64(ph_fopt + (fi * PH_MAXP + np) * 8, isopt);
         st64(ph_fpn + (fi * PH_MAXP + np) * 8, d + 1);
         st64(ph_fpd + (fi * PH_MAXP + np) * 8, dflt);
+        st64(ph_fpl + (fi * PH_MAXP + np) * 8, pln);
         np = np + 1;
         i64 pn = param_new(ph_mcty(pt), ph_mangle(d, "v_"));
         if (tail) set_nd_next(tail, pn);
@@ -746,7 +753,7 @@ i64 ph_function() {
                 st64(pcb + 40, ph_strlit(bare3, cstrlen(bare3)));
                 uptr afl = ph_disp(ph_absfile(fl));
                 st64(pcb + 48, ph_strlit(afl, cstrlen(afl)));
-                st64(pcb + 56, ph_int(line));
+                st64(pcb + 56, ph_int(pln));             // php places it at the parameter
                 i64 cz2 = ph_set(ph_mangle(d, "v_"),
                                  ph_calln("php_param_coerce_at", pcb, 8, ty_pzv));
                 if (pret) set_nd_next(pret, cz2);
@@ -761,17 +768,18 @@ i64 ph_function() {
             set_nd_type(pr, ty_pzv);
             set_nd_a(miss, pr);
             set_nd_type(miss, TY_U8);
+            // a required one raises (ph_ac_end decides which are)
             i64 fill = 0;
-            if (dflt) fill = ph_set(ph_mangle(d, "v_"), dflt);
-            if (!dflt) fill = ph_stmt_of(ph_c2("php_argcount", ph_strlit("", 0),
-                                               ph_strlit(name, cstrlen(name)), TY_VOID));
+            if (dflt) fill = ph_param_fill(ph_mangle(d, "v_"), dflt, dpre);
             i64 iff = node_new(N_IF, line, fl);
             set_nd_a(iff, miss);
             set_nd_b(iff, fill);
             if (pret) set_nd_next(pret, iff);
             if (!pret) pre = iff;
             pret = iff;
+            aciff = iff;
         }
+        if (!variadic) ph_ac_param(aciff, dflt != 0, ptm, dnul, d + 1, pln);
         if (variadic) {
             st64(ph_fvar + fi * 8, 1);
             // `int ...$xs` is an array of ints to the callee, so the declared
@@ -786,6 +794,7 @@ i64 ph_function() {
         if (!ph_accept(",", 1)) break;
     }
     ph_want(")", 1, "expected ) in a php function");
+    ph_ac_end();
     ph_ncp = np;
     if (np > PH_MAXCP) ph_ncp = PH_MAXCP;
     st64(ph_fnp + fi * 8, np);
@@ -794,7 +803,8 @@ i64 ph_function() {
     ph_lt_n = 0;
     ph_lt_null = 0;
     i64 drt = -1;
-    if (ph_at(":", 1)) { ph_next(); rt = ph_type_word(1); drt = rt; }
+    i64 hasrt = 0;
+    if (ph_at(":", 1)) { ph_next(); rt = ph_rtype_read(); drt = rt; hasrt = 1; }
     ph_bnd_set(fi, PH_MAXP, drt);
     if (fwd && rt != PT_VOID && rt != PT_MIXED) st64(ph_fwid + fi * 8, 1);
     // a void function called ahead of its definition: that call was built
@@ -812,6 +822,8 @@ i64 ph_function() {
     p_set_decl_name(mn);
     uptr savefn = ph_cur_fn;
     ph_cur_fn = name;
+    uptr srtf = ph_rt_save();
+    ph_rt_set(hasrt, name);
     i64 sret = ph_fn_ret;
     ph_fn_ret = rt;
     i64 srr = ph_fn_retref;
@@ -829,7 +841,7 @@ i64 ph_function() {
     ph_hoist_head = 0;
     ph_hoist_tail = 0;
     i64 nap = ph_nargs_prologue(fl, line);
-    // a missing required argument makes `php_argcount` raise, and the body
+    // a missing required argument makes `php_argcount_n` raise, and the body
     // must not run after it (docs/review-backlog.md section 2). The check is
     // the one every statement uses; `ph_in_try` is cleared around a body for
     // the same reason -- a `function` declared inside a try block would
@@ -983,6 +995,7 @@ i64 ph_function() {
     ph_cpzv = scz;
     ph_nargs_local = snl;
     ph_cur_fn = savefn;
+    ph_rt_restore(srtf);
     ph_fn_ret = sret;
     ph_fn_retref = srr;
     ph_fn_retdecl = srd;

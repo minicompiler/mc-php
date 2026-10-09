@@ -533,7 +533,7 @@ i64 ph_ext_noretain(i64 s) {
             uptr c = nd_name(s);
             i64 ok = phi_intrinsic(c) || ph_ext_pfx(c, "phx_") || str_eq(c, "ph_tslow")
                 || ph_ext_pfx(c, "php_spn") || str_eq(c, "php_strlen")
-                || str_eq(c, "php_chr") || str_eq(c, "php_argcount") || str_eq(c, "php_rc_drain")
+                || str_eq(c, "php_chr") || str_eq(c, "php_argcount_n") || str_eq(c, "php_rc_drain")
                 || str_eq(c, "php_str_byte_c") || str_eq(c, "php_str_byte_d") || str_eq(c, "php_str_byte")
                 || str_eq(c, "php_str_lit") || str_eq(c, "php_bmap_lit");
             if (!ok) return 0;

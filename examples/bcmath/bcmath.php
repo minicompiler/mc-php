@@ -156,6 +156,16 @@ function _bc_uadd(string $a, string $b): string {
     return $out;
 }
 
+// one added at digit $k of $d, in place: walking left from $k the nines
+// become zeros and the first other digit goes up; all nines grow a leading 1
+// (and an empty $d is 1)
+function _bc_up1(string $d, int $k): string {
+    while ($k >= 0 && ord($d[$k]) === 57) { $d[$k] = '0'; $k--; }
+    if ($k < 0) { return '1' . $d; }
+    $d[$k] = chr(ord($d[$k]) + 1);
+    return $d;
+}
+
 // a >= b; na digits
 function _bc_usub(string $a, string $b): string {
     $na = strlen($a);
@@ -576,6 +586,18 @@ function bc_round(string $num, int $precision = 0): string {
         throw new ValueError("bc_round(): Argument #2 (\$precision) must be between -9223372036854775808 and 2147483647");
     }
     $xs = _bc_parse($num, 'bc_round', 1, 'num');
+    // the common case, rounding inside the fraction: the kept digits are read
+    // straight out of $num, one is added in place when the first dropped
+    // digit is 5 or more, and _bc_fmt writes the result -- no canonical copy
+    // of the whole number first
+    if ($precision >= 0 && $xs > $precision) {
+        $dot = strlen($num) - $xs - 1;
+        $s0 = ($num[0] === '-' || $num[0] === '+') ? 1 : 0;
+        $d = substr($num, $s0, $dot - $s0) . substr($num, $dot + 1, $precision);
+        if (ord($num[$dot + 1 + $precision]) >= 53) { $d = _bc_up1($d, strlen($d) - 1); }
+        elseif ($d === '') { $d = '0'; }
+        return _bc_fmt($num[0] === '-', $d, $precision, $precision);
+    }
     $xd = _bc_digits($num, $xs);
     $neg = _bc_neg($num, $xd);
     // canonical digits: integer part leading zeros removed (>= 1 digit),

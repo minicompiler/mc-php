@@ -11,6 +11,7 @@
 // a php array is a value (see php_rt.txt "array value semantics").
 i64 ph_own(i64 v, i64 t) {
     if (t == PT_ARR && !ph_efresh)   return ph_c1("php_arr_copy", v, ty_parr);
+    if (t == PT_NULL && nd_kind(v) == N_INT) return ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
     if (t == PT_MIXED || t == PT_NULL) {
         if (ph_zv_fresh(v)) return v;
         return ph_c1("php_zv_val", v, ty_pzv);
@@ -150,8 +151,43 @@ i64 ph_lv_walk(uptr d, uptr fl, i64 line, uptr pkey, i64 hoist) {
 // ph_lv_prop and is passed rather than read from the global: the OTHER
 // caller (ph_obj_stmt's `$o->p[k] =`) would otherwise see a stale one, which
 // is how `$t->x[0] = "q"` wrote a property named after an earlier statement's.
+// a property write says how it was written: an increment or a decrement
+// (set by the caller just before, then spent) and the writing file's
+// strict_types -- what a typed property is checked with (php_zv_pset_k)
+i64 ph_store_kind;
+i64 ph_pset_kind(i64 incdec, uptr fl) {
+    i64 k = 0;
+    if (incdec > 0) k = 1;
+    if (incdec < 0) k = 2;
+    if (ph_strict_bit(fl)) k = k | RT_STRICT;
+    return k;
+}
+i64 ph_pset_at;
+i64 ph_stmt_ln;                 // the line the statement being built starts on
+i64 ph_pset_node(i64 cur, uptr prop, i64 zv, i64 kind) {
+    u8 a[40];
+    st64(a, cur);
+    st64(a + 8, ph_strlit(prop, cstrlen(prop)));
+    st64(a + 16, zv);
+    st64(a + 24, ph_scope());
+    st64(a + 32, ph_int(kind));
+    i64 c = ph_calln("php_zv_pset_k", a, 5, TY_VOID);
+    // php reports a property assignment at the line its target starts on,
+    // not at the value's last token: the statement's line, or ph_pset_at
+    // for one inside an expression
+    i64 at = ph_pset_at;
+    if (!at) at = ph_stmt_ln;
+    ph_rz_set(c, at);
+    ph_pset_at = 0;
+    return c;
+}
+
 i64 ph_store(i64 cur, i64 k, i64 zv, uptr prop) {
-    if (prop) return ph_c4("php_zv_pset", cur, ph_strlit(prop, cstrlen(prop)), zv, ph_scope(), TY_VOID);
+    if (prop) {
+        i64 kd = ph_pset_kind(ph_store_kind, ph_tfile);
+        ph_store_kind = 0;
+        return ph_pset_node(cur, prop, zv, kd);
+    }
     if (k) return ph_c3("php_arr_set", cur, k, zv, TY_VOID);
     // zv is the caller's own (ph_own), as php_arr_set takes it: an array
     // value was copied there, and php_arr_push would copy it again
@@ -464,6 +500,7 @@ i64 ph_assign_stmt(uptr fl, i64 line, i64 semi) {
                 if (semi) ph_semi("expected ; after ++/--");
                 if (incdec > 0) nv = ph_c1("php_zv_inc", rd, ty_pzv);
                 if (incdec < 0) nv = ph_c1("php_zv_dec", rd, ty_pzv);
+                ph_store_kind = incdec;
             }
             if (!incdec) {
                 ph_next();
@@ -810,16 +847,294 @@ void ph_require(i64 once, uptr fl, i64 line) {
 // the safe direction, since a call that cannot raise still asks for both --
 // and php_pos itself is the one call exempt from it, for the reason
 // ph_posstmt gives.
+// ---- a parameter's default ---------------------------------------------------
+// Parsed where it is written, but run where php runs it: in the callee, when
+// the argument is missing. An array literal (`$a = []`) builds into a
+// temporary -- a local declaration and statements -- and those went to
+// whatever was being lowered around the declaration: the enclosing function
+// declared the local the callee then named ("unknown name"), and a method
+// read a temporary nothing had built (a crash). Both go into the fill now, in
+// a block of its own, ahead of the store (ph_param_fill).
+i64 ph_dflt_pre;
+i64 ph_param_default() {
+    i64 sp = ph_take_pend();
+    i64 sh = ph_hoist_head;
+    i64 st = ph_hoist_tail;
+    ph_hoist_head = 0;
+    ph_hoist_tail = 0;
+    i64 dv = ph_expr(0);
+    i64 dt = ph_ety;
+    i64 pend = ph_take_pend();
+    i64 hh = ph_hoist_head;
+    ph_hoist_head = sh;
+    ph_hoist_tail = st;
+    ph_put_pend(sp);
+    ph_dflt_pre = ph_prefix_stmts(hh, pend);
+    ph_ety = dt;
+    return dv;
+}
+// the store of a missing argument's default, with what that default needs
+i64 ph_param_fill(uptr vname, i64 dflt, i64 pre) {
+    i64 set = ph_set(vname, dflt);
+    if (!pre) return set;
+    i64 b = node_new(N_BLOCK, ph_tline, ph_tfile);
+    set_nd_a(b, ph_prefix_stmts(pre, set));
+    return b;
+}
+
+// ---- a missing argument ---------------------------------------------------
+// php's rule for a parameter list: a parameter with a default that a REQUIRED
+// one follows is "implicitly treated as a required parameter" (a compile-time
+// deprecation, unless it is php 5's `Type $x = null`), and `Type $x = null`
+// with a non-nullable Type is itself deprecated. A call that leaves a required
+// parameter out is an ArgumentCountError raised where that parameter is
+// declared: "Too few arguments to function f(), N passed in FILE on line L and
+// exactly|at least M expected". The prologue's `if (!$p)` for each zval
+// parameter is recorded while the list is read and decided once it is done.
+#define PH_ACMAX 64
+u8  ph_ac_iff[512];
+u8  ph_ac_dfl[512];
+u8  ph_ac_inul[512];
+u8  ph_ac_nm[512];
+u8  ph_ac_ln[512];
+i64 ph_ac_n;
+uptr ph_ac_name;
+uptr ph_ac_fl;
+
+void ph_ac_begin(uptr disp, uptr fl) { ph_ac_n = 0; ph_ac_name = disp; ph_ac_fl = fl; }
+
+// one parameter: its prologue `if` (0 for a native one), whether it was
+// written with a default, its declared type's RT_* bits (0 = untyped) and
+// whether the default is the null literal
+void ph_ac_param(i64 iff, i64 dflt, i64 tm, i64 dnul, uptr bare, i64 ln) {
+    i64 inul = 0;
+    if (dflt && dnul && tm && !(tm & (RT_NULL | RT_MIXED))) {
+        inul = 1;
+        uptr m = p_cat(ph_ac_name, "(): Implicitly marking parameter $", 0, 34);
+        m = p_cat(m, bare, 0, cstrlen(bare));
+        m = p_cat(m, " as nullable is deprecated, the explicit nullable type must be used instead", 0, 75);
+        ph_cdiag(8192, m, ph_ac_fl, ln);
+    }
+    if (ph_ac_n >= PH_ACMAX) { ph_ac_n = ph_ac_n + 1; return; }
+    st64(ph_ac_iff + ph_ac_n * 8, iff);
+    st64(ph_ac_dfl + ph_ac_n * 8, dflt);
+    st64(ph_ac_inul + ph_ac_n * 8, inul);
+    st64(ph_ac_nm + ph_ac_n * 8, bare);
+    st64(ph_ac_ln + ph_ac_n * 8, ln);
+    ph_ac_n = ph_ac_n + 1;
+}
+
+// the raise itself: the parameter's position, how many were passed, how many
+// php requires (exact when every non-variadic parameter is)
+i64 ph_ac_raise(uptr disp, i64 passed, i64 min, i64 exact, uptr dfl, i64 dln) {
+    u8 a[48];
+    st64(a, ph_strlit(disp, cstrlen(disp)));
+    st64(a + 8, ph_int(passed));
+    st64(a + 16, ph_int(min));
+    st64(a + 24, ph_int(exact));
+    uptr af = ph_disp(ph_absfile(dfl));
+    st64(a + 32, ph_strlit(af, cstrlen(af)));
+    st64(a + 40, ph_int(dln));
+    return ph_stmt_of(ph_calln("php_argcount_n", a, 6, TY_VOID));
+}
+
+// the list is read: answers php's required count, and makes every required
+// zval parameter's `if (!$p)` raise
+i64 ph_ac_end() {
+    i64 n = ph_ac_n;
+    if (n > PH_ACMAX) n = PH_ACMAX;
+    i64 last = -1;
+    i64 i = 0;
+    loop { if (i >= n) break; if (!ld64(ph_ac_dfl + i * 8)) last = i; i = i + 1; }
+    i64 min = last + 1;
+    i64 exact = min == ph_ac_n;
+    i = 0;
+    loop {
+        if (i >= n) break;
+        i64 d = ld64(ph_ac_dfl + i * 8);
+        if (d && i < last && !ld64(ph_ac_inul + i * 8)) {
+            uptr m = p_cat(ph_ac_name, "(): Optional parameter $", 0, 24);
+            uptr b = ld64(ph_ac_nm + i * 8);
+            uptr r = ld64(ph_ac_nm + last * 8);
+            m = p_cat(m, b, 0, cstrlen(b));
+            m = p_cat(m, " declared before required parameter $", 0, 37);
+            m = p_cat(m, r, 0, cstrlen(r));
+            m = p_cat(m, " is implicitly treated as a required parameter", 0, 46);
+            ph_cdiag(8192, m, ph_ac_fl, ld64(ph_ac_ln + i * 8));
+        }
+        i64 iff = ld64(ph_ac_iff + i * 8);
+        if (iff && i < min)
+            set_nd_b(iff, ph_ac_raise(ph_ac_name, i, min, exact, ph_ac_fl, ld64(ph_ac_ln + i * 8)));
+        i = i + 1;
+    }
+    return min;
+}
+
+// a returned zval checked against the declared return type (ph_fn_rt*): a
+// function whose return lowers to a zval -- a method, a closure, a union, a
+// class, ?T -- has its declaration verified as php verifies it
+i64 ph_ret_checked(i64 e, uptr fl) {
+    if (!ph_fn_rtm || (ph_fn_rtm & (RT_MIXED | RT_VOID | RT_NEVER))) return e;
+    if (ph_fn_ret != PT_MIXED || ph_fn_retref) return e;
+    i64 st = 0;
+    if (ph_strict_bit(fl)) st = RT_STRICT;
+    u8 a[40];
+    st64(a, e);
+    st64(a + 8, ph_int(ph_fn_rtm | st));
+    st64(a + 16, ph_strlit(ph_fn_rtc, cstrlen(ph_fn_rtc)));
+    st64(a + 24, ph_strlit(ph_fn_rtq, cstrlen(ph_fn_rtq)));
+    st64(a + 32, ph_strlit(ph_fn_rtn, cstrlen(ph_fn_rtn)));
+    return ph_calln("php_ret_check", a, 5, ty_pzv);
+}
+
+// ---- the line inside a statement ------------------------------------------
+// A statement announces ONE position, its first line; php reports a
+// diagnostic at the line of the operation that raised it (ph_zl, recorded per
+// runtime call in ph_rz). Where the two differ -- a statement spread over
+// several lines -- the line is stored just before that call runs: after its
+// arguments are computed, in a pass-through wrapped around the last one
+// (php_lnk). The walk follows the statement in execution order, knowing which
+// line the position holds: its own announcement, a nested statement's, a
+// call's frame that put its caller's back, or a store this pass made -- and,
+// where two paths join and disagree, none. A one-line statement never differs
+// and is left exactly as it was built.
+#define PH_RLDEP 256
+u8  ph_rlst[2048];
+i64 ph_rln;
+
+void ph_rl_push(i64 l) { if (ph_rln < PH_RLDEP) st64(ph_rlst + ph_rln * 8, l); ph_rln = ph_rln + 1; }
+i64 ph_rl_pop() {
+    if (ph_rln <= 0) return -1;
+    ph_rln = ph_rln - 1;
+    if (ph_rln >= PH_RLDEP) return -1;
+    return ld64(ph_rlst + ph_rln * 8);
+}
+i64 ph_rl_argval(i64 c, i64 k) {
+    i64 a = nd_a(c);
+    loop { if (!a || k == 0) break; a = nd_next(a); k = k - 1; }
+    if (!a || nd_kind(a) != N_INT) return -1;
+    return nd_val(a);
+}
+
+// the last argument of c becomes php_lnk(L, it): the line is stored once it
+// is computed, right before c runs
+void ph_rl_wrap(i64 c, i64 last, i64 l) {
+    i64 prev = 0;
+    i64 a = nd_a(c);
+    loop { if (a == last) break; prev = a; a = nd_next(a); }
+    i64 t = nd_type(last);
+    i64 ln = node_new(N_INT, nd_line(last), nd_file(last));
+    set_nd_val(ln, l);
+    set_nd_type(ln, TY_I64);
+    i64 w = node_new(N_CALL, nd_line(last), nd_file(last));
+    set_nd_a(w, ln);
+    if (t == ty_f64) {
+        set_nd_name(w, "php_lnkf");
+        set_nd_next(ln, last);
+        set_nd_type(w, ty_f64);
+    } else {
+        set_nd_name(w, "php_lnk");
+        i64 ci = node_new(N_CAST, nd_line(last), nd_file(last));
+        set_nd_a(ci, last);
+        set_nd_type(ci, TY_I64);
+        set_nd_next(ln, ci);
+        set_nd_type(w, TY_I64);
+        if (t != TY_I64) {
+            i64 co = node_new(N_CAST, nd_line(last), nd_file(last));
+            set_nd_a(co, w);
+            set_nd_type(co, t);
+            w = co;
+        }
+    }
+    if (prev) set_nd_next(prev, w);
+    if (!prev) set_nd_a(c, w);
+}
+
+i64 ph_rl(i64 n, i64 cur);
+i64 ph_rl_chain(i64 n, i64 cur) {
+    loop { if (!n) break; cur = ph_rl(n, cur); n = nd_next(n); }
+    return cur;
+}
+
+i64 ph_rl(i64 n, i64 cur) {
+    if (!n) return cur;
+    i64 k = nd_kind(n);
+    if (k == N_CALL) {
+        uptr nm = nd_name(n);
+        i64 a = nd_a(n);
+        i64 last = 0;
+        loop { if (!a) break; cur = ph_rl(a, cur); last = a; a = nd_next(a); }
+        if (str_eq(nm, "php_lnk") || str_eq(nm, "php_lnkf")) return ph_rl_argval(n, 0);
+        if (str_eq(nm, "php_fr_open") || str_eq(nm, "php_fr_open_i")) { ph_rl_push(ph_rl_argval(n, 2)); return cur; }
+        if (str_eq(nm, "php_fr_push")) { ph_rl_push(ph_rl_argval(n, 4)); return cur; }
+        if (str_eq(nm, "php_frv") || str_eq(nm, "php_frvf") || str_eq(nm, "php_fr_pop")) return ph_rl_pop();
+        i64 l = ph_rz_get(n);
+        if (l > 0 && l != cur && last) { ph_rl_wrap(n, last, l); return l; }
+        return cur;
+    }
+    if (k == N_BINARY) {
+        cur = ph_rl(nd_a(n), cur);
+        i64 op = nd_op(n);
+        if (op == ph_tok("&&", 2) || op == ph_tok("||", 2)) {
+            if (ph_rl(nd_b(n), cur) != cur) return -1;
+            return cur;
+        }
+        return ph_rl(nd_b(n), cur);
+    }
+    if (k == N_INDEX) return ph_rl(nd_b(n), ph_rl(nd_a(n), cur));
+    if (k == N_ASSIGN) {
+        if (str_eq(nd_name(n), "ph_dline") && nd_a(n) && nd_kind(nd_a(n)) == N_INT) return nd_val(nd_a(n));
+        return ph_rl(nd_a(n), cur);
+    }
+    if (k == N_UNARY || k == N_CAST || k == N_RETURN || k == N_EXPRSTMT || k == N_VAR) return ph_rl(nd_a(n), cur);
+    if (k == N_BLOCK) return ph_rl_chain(nd_a(n), cur);
+    if (k == N_IF) {
+        cur = ph_rl(nd_a(n), cur);
+        i64 dep = ph_rln;
+        i64 t = ph_rl_chain(nd_b(n), cur);
+        ph_rln = dep;
+        i64 e = ph_rl_chain(nd_c(n), cur);
+        ph_rln = dep;
+        if (t != e) return -1;
+        return t;
+    }
+    // a loop's next round starts where its body left the position: the
+    // announcements its body and its condition make are what keep them right
+    if (k == N_LOOP) {
+        i64 dep2 = ph_rln;
+        i64 r = ph_rl_chain(nd_a(n), cur);
+        ph_rln = dep2;
+        if (r != cur) return -1;
+        return cur;
+    }
+    return cur;
+}
+
+void ph_relines(i64 s, i64 line) {
+    if (ph_ext) return;
+    ph_rln = 0;
+    ph_rl_chain(s, line);
+}
+
 i64 ph_stmt() {
     i64 line = ph_tline;
     uptr fl = ph_tfile;
     i64 save = ph_can_throw;
     ph_can_throw = 0;
+    // the line ph_zl held before this statement is what comes back after it:
+    // a compound statement builds part of its code after its body (a loop's
+    // step, a foreach's next element), and that part is at its own header
+    i64 szl = ph_zl;
+    i64 sln = ph_stmt_ln;
+    ph_stmt_ln = line;
     i64 s = ph_stmt_1();
+    ph_stmt_ln = sln;
+    ph_zl = szl;
     i64 raises = ph_can_throw;
     ph_can_throw = raises | save;
     if (nd_kind(s) == N_BLOCK && !nd_a(s) && !nd_next(s)) return s;
     if (!raises) return s;
+    ph_relines(s, line);
     if (ph_is_pos_at(s, fl, line)) return s;
     i64 p = ph_posstmt(fl, line);
     set_nd_next(p, s);
@@ -1177,12 +1492,17 @@ i64 ph_stmt_1() {
             i64 sctr = ph_can_throw;
             ph_can_throw = 0;
             e = ph_expr(0);
-            // php refuses it while compiling, naming `return null;` apart
+            // php refuses it while compiling, naming `return null;` apart --
+            // and saying `method` for one written in a class
+            uptr fkind = "function";
+            if (ph_cur_cls) fkind = "method";
             if (ph_fn_void) {
                 if (ph_ety == PT_NULL && nd_kind(e) == N_CALL && str_eq(nd_name(e), "php_znull"))
-                    ph_phpfatal_x(fl, line, "A void function must not return a value (did you mean \"return;\" instead of \"return null;\"?)", 1);
-                ph_phpfatal_x(fl, line, "A void function must not return a value", 1);
+                    ph_phpfatal_x(fl, line, p_cat(p_cat("A void ", fkind, 0, cstrlen(fkind)), " must not return a value (did you mean \"return;\" instead of \"return null;\"?)", 0, 76), 1);
+                ph_phpfatal_x(fl, line, p_cat(p_cat("A void ", fkind, 0, cstrlen(fkind)), " must not return a value", 0, 24), 1);
             }
+            if (ph_fn_rtm & RT_NEVER)
+                ph_phpfatal_x(fl, line, p_cat(p_cat("A never-returning ", fkind, 0, cstrlen(fkind)), " must not return", 0, 16), 1);
             if (ph_fn_ret == PT_MIXED && ph_fn_retref) e = ph_to_mixed(e, ph_ety);
             // a by-reference function's declared scalar (src/decl.mc): php
             // verifies the referenced value and converts it IN the cell, so
@@ -1204,7 +1524,7 @@ i64 ph_stmt_1() {
                 e = ph_tref(rc);
                 ph_can_throw = 1;
             }
-            if (ph_fn_ret == PT_MIXED && !ph_fn_retref) e = ph_to_mixed(ph_own(e, ph_ety), ph_ety);
+            if (ph_fn_ret == PT_MIXED && !ph_fn_retref) e = ph_ret_checked(ph_to_mixed(ph_own(e, ph_ety), ph_ety), fl);
             // A declared scalar return is CHECKED: php's own rule and php's
             // own TypeError, the same php_param_coerce every declared
             // parameter goes through (argno 0 is its return-value sentence).
@@ -1274,8 +1594,19 @@ i64 ph_stmt_1() {
         // `return;` in a function with a declared return type is php's
         // COMPILE-TIME fatal, not a value: the native return had nothing to
         // carry and answered whatever the register held (the review of #19)
-        if (!e && ph_fn_ret != PT_MIXED && ph_fn_ret != PT_VOID && ph_fn_ret != PT_NULL)
-            ph_phpfatal_x(fl, line, "A function with return type must return a value", 1);
+        if (!e && (ph_fn_rtm & RT_NEVER)) {
+            uptr nk = "function";
+            if (ph_cur_cls) nk = "method";
+            ph_phpfatal_x(fl, line, p_cat(p_cat("A never-returning ", nk, 0, cstrlen(nk)), " must not return", 0, 16), 1);
+        }
+        if (!e && ((ph_fn_ret != PT_MIXED && ph_fn_ret != PT_VOID && ph_fn_ret != PT_NULL)
+                   || (ph_fn_rtm && !(ph_fn_rtm & RT_VOID)))) {
+            uptr rk = "function";
+            if (ph_cur_cls) rk = "method";
+            uptr rm = p_cat(p_cat("A ", rk, 0, cstrlen(rk)), " with return type must return a value", 0, 37);
+            if (ph_fn_rtm & RT_NULL) rm = p_cat(rm, " (did you mean \"return null;\" instead of \"return;\"?)", 0, 52);
+            ph_phpfatal_x(fl, line, rm, 1);
+        }
         if (!e && ph_fn_ret == PT_MIXED) e = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
         ph_semi("expected ; after return");
         // T8: the unwinding check has to go BETWEEN computing the value and
@@ -1955,6 +2286,9 @@ i64 ph_stmt_1() {
     // (ph_pending_stmt) and their value is a constant: dropping it keeps the
     // statement list free of dead expressions. A VOID CALL is not that.
     if (nd_kind(e) == N_INT) return ph_wrap(ph_empty());
+    // an expression's value copied for its USE (a static property's
+    // assignment answers its slot's copy): a statement uses nothing
+    if (nd_kind(e) == N_CALL && str_eq(nd_name(e), "php_zv_val")) e = nd_a(e);
     return ph_expr_stmt_of(e);
 }
 

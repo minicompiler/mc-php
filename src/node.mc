@@ -77,7 +77,7 @@ i64 ph_rt_pure(uptr name) {
 // Checked against lib/php_rt.mc: a type-tag read, a byte scan, the cached
 // chr() string (php_str_ch, interned, never pooled), an explicit integer cast
 // (php_zv_long -> php_stoi/php_count, no allocation), and ld64 (the narrowed
-// borrow of a zval's embedded string/long, src/types.mc). php_argcount builds
+// borrow of a zval's embedded string/long, src/types.mc). php_argcount_n builds
 // its error message only on the THROW path and those temporaries are covered
 // by the caller's drain or by RSHUTDOWN (the pool is a stack); it never loops,
 // so it accumulates nothing. Default is NOT no-push: a name absent here keeps
@@ -102,7 +102,7 @@ i64 ph_rt_nopush(uptr name) {
     if (str_eq(name, "php_zv_bool"))    return 1;
     if (str_eq(name, "php_zv_type"))    return 1;
     if (str_eq(name, "php_chr"))        return 1;
-    if (str_eq(name, "php_argcount"))   return 1;
+    if (str_eq(name, "php_argcount_n")) return 1;
     if (str_eq(name, "php_spn"))        return 1;
     if (str_eq(name, "php_spn_r"))      return 1;
     if (str_eq(name, "php_spn_o"))      return 1;
@@ -117,10 +117,40 @@ i64 ph_rt_nopush(uptr name) {
 // omits it (and the watermark and result-across-drain it forces).
 i64 ph_fn_pushes;
 
+// The line php would report a runtime call's diagnostic at (ph_zl when it
+// was built), by node, for every call into the runtime that may raise: 0 for
+// any other node. src/lvalue.mc ph_relines makes the position say it.
+uptr ph_rzl;
+i64  ph_rzcap;
+void ph_rz_set(i64 n, i64 l) {
+    if (n >= ph_rzcap) {
+        if (!l) return;
+        i64 nc = ph_rzcap * 2;
+        if (nc < 65536) nc = 65536;
+        loop { if (nc > n) break; nc = nc * 2; }
+        uptr nb = xalloc(nc * 8);
+        i64 i = 0;
+        loop { if (i >= ph_rzcap) break; st64(nb + i * 8, ld64(ph_rzl + i * 8)); i = i + 1; }
+        loop { if (i >= nc) break; st64(nb + i * 8, 0); i = i + 1; }
+        ph_rzl = nb;
+        ph_rzcap = nc;
+    }
+    st64(ph_rzl + n * 8, l);
+}
+i64 ph_rz_get(i64 n) {
+    if (n >= ph_rzcap) return 0;
+    return ld64(ph_rzl + n * 8);
+}
+void ph_rz_mark(i64 c, uptr name) {
+    if (ld8(name) == 'p' && ld8(name + 1) == 'h' && ld8(name + 2) == 'p' && ld8(name + 3) == '_' && !ph_rt_pure(name))
+        ph_rz_set(c, ph_zl);
+}
+
 i64 ph_call(uptr name, i64 nargs, i64 a0, i64 a1, i64 a2, i64 a3, i64 ty) {
     if (!ph_rt_pure(name)) ph_can_throw = 1;
     if (!ph_rt_nopush(name)) ph_fn_pushes = 1;
     i64 c = node_new(N_CALL, ph_tline, ph_tfile);
+    ph_rz_mark(c, name);
     set_nd_name(c, name);
     if (nargs >= 1) set_nd_a(c, a0);
     if (nargs >= 2) set_nd_next(a0, a1);
@@ -139,6 +169,7 @@ i64 ph_quiet(uptr name, i64 nargs, i64 a0, i64 a1, i64 a2, i64 a3, i64 ty) {
     i64 save = ph_can_throw;
     i64 c = ph_call(name, nargs, a0, a1, a2, a3, ty);
     ph_can_throw = save;
+    ph_rz_set(c, 0);
     return c;
 }
 

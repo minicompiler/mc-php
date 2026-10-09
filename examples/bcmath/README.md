@@ -97,20 +97,20 @@ roots and moduli) and, with `MCPHP_EACH=1`, each function on its own
 (steady-state, best of nine, interleaved). DONE is module / C-twin < 2.0, for
 EVERY function -- not an average.
 
-**DONE (2026-10-08).** Measured on this host (macOS/arm64): five runs, the
+**DONE (2026-10-09).** Measured on this host (macOS/arm64): five runs, the
 module and the C twin alternated process by process, each run `bench.php`'s own
 best of nine with `MCPHP_EACH=1`; the WORST of the five and their median, the
 bar being worst < 1.95 and median <= 1.90 for every function:
 
 | function | worst | median | function | worst | median |
 |---|---|---|---|---|---|
-| add    | 1.53x | **1.48x** | powmod | 1.38x | **1.37x** |
-| sub    | 1.55x | **1.53x** | sqrt   | 1.05x | **1.04x** |
-| mul    | 1.77x | **1.73x** | comp   | 1.53x | **1.49x** |
-| div    | 1.30x | **1.28x** | floor  | 1.63x | **1.60x** |
-| mod    | 1.17x | **1.10x** | ceil   | 1.74x | **1.70x** |
-| pow    | 1.80x | **1.79x** | round  | 1.94x | **1.86x** |
-| scale  | 1.37x | **1.32x** | | | |
+| add    | 1.49x | **1.47x** | powmod | 1.42x | **1.37x** |
+| sub    | 1.57x | **1.53x** | sqrt   | 1.08x | **1.05x** |
+| mul    | 1.79x | **1.75x** | comp   | 1.51x | **1.50x** |
+| div    | 1.32x | **1.31x** | floor  | 1.59x | **1.59x** |
+| mod    | 1.15x | **1.14x** | ceil   | 1.70x | **1.68x** |
+| pow    | 1.84x | **1.80x** | round  | 1.49x | **1.46x** |
+| scale  | 1.39x | **1.37x** | | | |
 
 Mixed workload (`tests/examples.sh`): interpreted 10.38 ms, compiled 0.73 ms
 (14.3x faster than interpreted), C twin 0.53 ms -- module/C **1.36x**.
@@ -129,8 +129,17 @@ to 1.79x -- the fixed array's buffer pointer kept in a local when nothing
 appends to it, `% K` and `/ K` of one value computed once, a `continue`
 carrying its `for`'s step, a literal moved to the right of `+`/`*`, the
 handler's inline arity and tag tests, and `array_fill` two words a store.
-`docs/plan.md` item 4 has what each bought. The closest now is `round` (median
-1.86x), whose time is the string work around the digits.
+`docs/plan.md` item 4 has what each bought.
+
+`round` was the next at the edge (median 1.86x), and PR #65's runtime growth
+moved it past the bar: the code it runs did not change, but every function
+after the new runtime code moved, and `round` -- all string work around the
+digits -- swung between 1.84x and 2.16x with where its callees landed (a
+padding experiment measured the swing). It now has real margin instead: the
+common case, rounding inside the fraction, reads the kept digits straight out
+of the argument, adds one in place when the first dropped digit is 5 or more
+(`_bc_up1`, the carried digits only), and lets `_bc_fmt` write the result --
+no canonical copy of the whole number first. 1.46x. The closest now is `pow`.
 
 ### What got it there
 

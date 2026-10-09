@@ -94,22 +94,45 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     // the parameters, read in the ENCLOSING scope's tokens but bound in the new one
     u8 pnames[64];
     u8 pdefs[64];
+    u8 pdpre[64];
+    u8 ppcw[64];                   // the declared scalar/array type, coerced in the prologue
+    u8 pptm[64];
+    u8 ppln[64];
+    u8 pdnul[64];
     i64 np = 0;
     ph_want("(", 1, "expected ( in a php closure");
     loop {
         if (ph_at(")", 1)) break;
         if (ph_at("...", 3)) ph_todo(fl, line, "a variadic parameter in a closure");
-        if (!ph_at("$", 1)) ph_skip_type();
+        i64 pcw = 0;
+        i64 ptm = 0;
+        if (!ph_at("$", 1) && !ph_at("&", 1)) {
+            i64 dt = ph_param_type();
+            ptm = ph_ptm;
+            if (dt == PT_INT)    pcw = 1;
+            if (dt == PT_FLOAT)  pcw = 2;
+            if (dt == PT_STRING) pcw = 3;
+            if (dt == PT_BOOL)   pcw = 4;
+            if (dt == PT_ARR)    pcw = 5;
+        }
         if (ph_at("&", 1)) ph_todo(fl, line, "a by-reference parameter in a closure");
         if (!ph_at("$", 1)) ph_todo2(fl, line, "a php parameter", ph_tname);
+        i64 pln = ph_tline;
         ph_next();
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
         i64 dflt = 0;
-        if (ph_accept("=", 1)) { i64 dv = ph_expr(0); dflt = ph_to_mixed(dv, ph_ety); }
+        i64 dpre = 0;
+        i64 dnul = 0;
+        if (ph_accept("=", 1)) { i64 dv = ph_param_default(); dpre = ph_dflt_pre; dnul = ph_ety == PT_NULL; dflt = ph_to_mixed(dv, ph_ety); }
         if (np >= 5) ph_todo(fl, line, "more than five parameters in a closure");
         st64(pnames + np * 8, d);
         st64(pdefs + np * 8, dflt);
+        st64(pdpre + np * 8, dpre);
+        st64(ppcw + np * 8, pcw);
+        st64(pptm + np * 8, ptm);
+        st64(ppln + np * 8, pln);
+        st64(pdnul + np * 8, dnul);
         np = np + 1;
         if (!ph_accept(",", 1)) break;
     }
@@ -169,7 +192,11 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
             ph_want(")", 1, "expected ) after use");
         }
     }
-    if (ph_at(":", 1)) { ph_next(); ph_skip_type(); }
+    i64 crt = 0;
+    i64 crtw = PT_MIXED;
+    i64 crm = 0;
+    uptr crc = 0;
+    if (ph_at(":", 1)) { ph_next(); crtw = ph_rtype_read(); crt = 1; crm = ph_rtr_m; crc = ph_rtr_cls; }
 
     // the creation site, built while the enclosing variables are still in scope
     ph_nonce = ph_nonce + 1;
@@ -186,13 +213,22 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     i64 aref = node_new(N_IDENT, line, fl);
     set_nd_name(aref, an);
     set_nd_type(aref, ty_parr);
-    // php's name for it, which its frames carry: {closure:FILE:LINE}
+    // php's name for it, which its frames carry (Zend/zend_compile.c
+    // zend_begin_func_decl): {closure:WHERE:LINE}, WHERE being the closure it
+    // is written in, else the function -- `N\g()`, `N\C::m()` -- else the file
     uptr cfl = ph_disp(ph_absfile(fl));
+    if (ph_cur_clo) cfl = ph_cur_clo;
+    if (!ph_cur_clo && ph_cur_fn) {
+        cfl = ph_cur_fn;
+        if (ph_cur_cls) cfl = p_cat(p_cat(ph_cur_cls, "::", 0, 2), ph_cur_fn, 0, cstrlen(ph_cur_fn));
+        cfl = p_cat(cfl, "()", 0, 2);
+    }
     uptr cnm = p_cat("{closure:", cfl, 0, cstrlen(cfl));
     cnm = p_cat(cnm, ":", 0, 1);
     cnm = p_cat(cnm, php_dec(line), 0, cstrlen(php_dec(line)));
     cnm = p_cat(cnm, "}", 0, 1);
     i64 made = ph_c4("php_closure_new", fp, aref, thisp, ph_strlit(cnm, cstrlen(cnm)), ty_pzv);
+    if (ph_cur_cls) made = ph_c2("php_closure_scope", made, ph_strlit(ph_cur_cls, cstrlen(ph_cur_cls)), ty_pzv);
 
     // now the body, in its own scope
     uptr savenv = ph_scope_save();
@@ -201,6 +237,9 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     i64 sret = ph_fn_ret;
     i64 sm = ph_in_method;
     i64 sst = ph_in_static;
+    uptr sclo = ph_cur_clo;
+    ph_cur_clo = cnm;
+    uptr srtc = ph_rt_save();
     i64 stl = ph_toplevel;
     i64 sls = ph_nls;
     // a closure's body is a function of its own: the try it is written in
@@ -220,6 +259,15 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_fn_retref = 0;
     i64 sfvc = ph_fn_void;
     ph_fn_void = 0;
+    // its declared return type, checked as a function's is
+    ph_rtr_m = crm;
+    ph_rtr_cls = crc;
+    // php's messages name a closure written in a class with that scope:
+    // `C::{closure:C::m():2}()`
+    uptr cmsg = cnm;
+    if (ph_cur_cls) cmsg = p_cat(p_cat(ph_cur_cls, "::", 0, 2), cnm, 0, cstrlen(cnm));
+    ph_rt_set(crt, cmsg);
+    if (crt && crtw == PT_VOID) ph_fn_void = 1;
     ph_toplevel = 0;
     ph_nls = 0;
     ph_in_try = 0;
@@ -237,6 +285,7 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     i64 pre = 0;
     i64 pret = 0;
     i64 i2 = 0;
+    ph_ac_begin(cmsg, fl);
     loop {
         if (i2 >= np) break;
         uptr d2 = ld64(pnames + i2 * 8);
@@ -244,6 +293,31 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         i64 pn = param_new(TY_UPTR, ph_mangle(d2, "v_"));
         set_nd_next(tail, pn);
         tail = pn;
+        // the declared type, checked as a method's is (a passed argument
+        // only: a missing one is 0 and php_param_coerce leaves it)
+        i64 pcw2 = ld64(ppcw + i2 * 8);
+        if (pcw2) {
+            uptr bare2 = d2 + 1;
+            i64 pv3 = node_new(N_IDENT, line, fl);
+            set_nd_name(pv3, ph_mangle(d2, "v_"));
+            set_nd_type(pv3, ty_pzv);
+            u8 pca[64];
+            st64(pca, pv3);
+            st64(pca + 8, ph_int(pcw2 | ph_strict_bit(fl)));
+            uptr ccls = "";
+            if (ph_cur_cls) ccls = ph_cur_cls;
+            st64(pca + 16, ph_strlit(ccls, cstrlen(ccls)));
+            st64(pca + 24, ph_strlit(cnm, cstrlen(cnm)));
+            st64(pca + 32, ph_int(i2 + 1));
+            st64(pca + 40, ph_strlit(bare2, cstrlen(bare2)));
+            uptr afl2 = ph_disp(ph_absfile(fl));
+            st64(pca + 48, ph_strlit(afl2, cstrlen(afl2)));
+            st64(pca + 56, ph_int(ld64(ppln + i2 * 8)));
+            i64 cz = ph_set(ph_mangle(d2, "v_"), ph_calln("php_param_coerce_at", pca, 8, ty_pzv));
+            if (pret) set_nd_next(pret, cz);
+            if (!pret) pre = cz;
+            pret = cz;
+        }
         i64 miss = node_new(N_UNARY, line, fl);
         set_nd_op(miss, ph_tok("!", 1));
         i64 pr = node_new(N_IDENT, line, fl);
@@ -251,15 +325,25 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         set_nd_type(pr, ty_pzv);
         set_nd_a(miss, pr);
         set_nd_type(miss, TY_U8);
+        // a required one raises (ph_ac_end), an optional one takes its default
         i64 dflt2 = ld64(pdefs + i2 * 8);
-        if (!dflt2) dflt2 = ph_call("php_znull", 0, 0, 0, 0, 0, ty_pzv);
+        i64 fill2 = 0;
+        if (dflt2) fill2 = ph_param_fill(ph_mangle(d2, "v_"), dflt2, ld64(pdpre + i2 * 8));
         i64 iff = node_new(N_IF, line, fl);
         set_nd_a(iff, miss);
-        set_nd_b(iff, ph_set(ph_mangle(d2, "v_"), dflt2));
+        set_nd_b(iff, fill2);
         if (pret) set_nd_next(pret, iff);
         if (!pret) pre = iff;
         pret = iff;
+        ph_ac_param(iff, dflt2 != 0, ld64(pptm + i2 * 8), ld64(pdnul + i2 * 8), d2 + 1, ld64(ppln + i2 * 8));
         i2 = i2 + 1;
+    }
+    ph_ac_end();
+    // a refused or missing argument stops the closure before its body
+    if (pre) {
+        pre = ph_prefix_stmts(pre, ph_check(line, fl));
+        pret = pre;
+        loop { if (!nd_next(pret)) break; pret = nd_next(pret); }
     }
     // the captured variables: bound here, and read out of the use array
     // after the body, which for an arrow function says which ones it names
@@ -294,8 +378,29 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
         i64 sct = ph_can_throw;
         ph_can_throw = 0;
         i64 rv = ph_expr(0);
-        i64 r = node_new(N_RETURN, line, fl);
-        set_nd_a(r, ph_to_mixed(ph_own(rv, ph_ety), ph_ety));
+        // the body IS the returned value: a void or never one is php's
+        // compile-time fatal, as `return EXPR;` is
+        uptr akind = "function";
+        if (ph_cur_cls) akind = "method";
+        if (ph_fn_void) {
+            if (ph_ety == PT_NULL && nd_kind(rv) == N_CALL && str_eq(nd_name(rv), "php_znull"))
+                ph_phpfatal_x(fl, line, p_cat(p_cat("A void ", akind, 0, cstrlen(akind)), " must not return a value (did you mean \"return;\" instead of \"return null;\"?)", 0, 76), 1);
+            ph_phpfatal_x(fl, line, p_cat(p_cat("A void ", akind, 0, cstrlen(akind)), " must not return a value", 0, 24), 1);
+        }
+        // `fn(): never => expr` is no compile error: php runs the expression
+        // and then refuses the implicit return, as a never function's end does
+        i64 r = 0;
+        if (ph_fn_rtm & RT_NEVER) {
+            if (nd_kind(rv) != N_INT) ph_pending_stmt(ph_expr_stmt_of(rv));
+            i64 scl = ph_close_line;
+            ph_close_line = eline;
+            r = ph_ret_null(line, fl);
+            ph_close_line = scl;
+        }
+        if (!r) {
+            r = node_new(N_RETURN, line, fl);
+            set_nd_a(r, ph_ret_checked(ph_to_mixed(ph_own(rv, ph_ety), ph_ety), efl));
+        }
         i64 w = ph_wrap(r);
         if (ph_can_throw && !ph_is_pos_at(w, efl, eline)) {
             i64 pw = ph_posstmt(efl, eline);
@@ -371,7 +476,9 @@ i64 ph_closure(uptr fl, i64 line, i64 arrow) {
     ph_fn_ret = sret;
     ph_fn_void = sfvc;
     ph_fn_retref = srrc;
+    ph_rt_restore(srtc);
     ph_in_method = sm;
+    ph_cur_clo = sclo;
     ph_in_static = sst;
     ph_toplevel = stl;
     ph_nls = sls;

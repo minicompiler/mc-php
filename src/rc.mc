@@ -711,7 +711,10 @@ i64 ph_pin_isread(uptr fn) {
         || str_eq(fn, "php_zv_shr") || str_eq(fn, "php_zv_bnot")
         || str_eq(fn, "php_zv_add_zi") || str_eq(fn, "php_zv_add_iz") || str_eq(fn, "php_zv_sub_zi")
         || str_eq(fn, "php_zv_sub_iz") || str_eq(fn, "php_zv_mul_zi") || str_eq(fn, "php_zv_mul_iz")
-        || str_eq(fn, "php_zv_mod_zi");
+        || str_eq(fn, "php_zv_mod_zi")
+        // a builtin's argument check (src/builtin.mc ph_zpp_args): it reads
+        // the type and, refusing, names it in a message -- nothing kept
+        || str_eq(fn, "php_zpp");
 }
 
 // is a0 a pure field read of v's zval -- the ident `v`, or `v + <const>`
@@ -742,9 +745,10 @@ i64 ph_pin_used(i64 s, uptr v) {
         }
         if (k == N_CALL) {
             i64 a0 = nd_a(s);
-            // a pure field read, ld32/ld64 of v or v + const: reads the zval,
-            // never writes or escapes it (the is_string tag test, src/builtin.mc)
-            if ((str_eq(nd_name(s), "ld32") || str_eq(nd_name(s), "ld64")) && ph_pin_fieldarg(a0, v)) {
+            // a pure field read, ld8/ld32/ld64 of v or v + const: reads the
+            // zval, never writes or escapes it (the is_string tag test, and the
+            // ZPP check's type-byte test, src/builtin.mc)
+            if ((str_eq(nd_name(s), "ld8") || str_eq(nd_name(s), "ld32") || str_eq(nd_name(s), "ld64")) && ph_pin_fieldarg(a0, v)) {
                 if (ph_pin_used(nd_next(a0), v)) return 1;
                 s = nd_next(s);
                 continue;

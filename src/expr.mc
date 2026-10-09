@@ -424,6 +424,66 @@ i64 ph_postfix(i64 v, i64 vt) {
             i64 recv = ph_recv(v, vt);
             i64 iscall = 0;
             if (ph_at("(", 1)) iscall = 1;
+            // `($o->p = v)`: php's assignment is an expression here too. The
+            // store is a pending statement, the receiver computed once, and
+            // the value is the property READ back -- what the write left in
+            // it, a typed property's coerced value included
+            if (!iscall && !ns && ph_at("=", 1) && !ph_at("==", 2) && !ph_at("=>", 2) && !ph_at("===", 3)) {
+                ph_next();
+                if (ph_at("&", 1)) ph_todo(fl2, line2, "a reference assigned to a property inside an expression");
+                i64 rtmp = ph_temp(recv, ty_pzv, "pho_");
+                i64 rv = ph_expr(15);
+                i64 rvt = ph_ety;
+                ph_pset_at = line2;
+                ph_pending_stmt(ph_expr_stmt_of(ph_pset_node(ph_tref(rtmp), pn, ph_to_mixed(ph_own(rv, rvt), rvt), ph_pset_kind(0, fl2))));
+                ph_pending_stmt(ph_check(line2, fl2));    // a refused store unwinds before the read
+                v = ph_tref(ph_temp(ph_c1("php_zv_val", ph_c3("php_zv_pget", ph_tref(rtmp), ph_strlit(pn, cstrlen(pn)), ph_scope(), ty_pzv), ty_pzv), ty_pzv, "phov_"));
+                vt = PT_MIXED;
+                continue;
+            }
+            // `$o->p++` / `$o->p--`: the OLD value is the answer, copied first
+            if (!iscall && !ns && (ph_at("++", 2) || ph_at("--", 2))) {
+                i64 pup = ph_at("++", 2);
+                ph_next();
+                i64 rtq = ph_temp(recv, ty_pzv, "pho_");
+                i64 old = ph_temp(ph_c1("php_zv_val", ph_c3("php_zv_pget", ph_tref(rtq), ph_strlit(pn, cstrlen(pn)), ph_scope(), ty_pzv), ty_pzv), ty_pzv, "phov_");
+                uptr fo = "php_zv_inc";
+                i64 ok = 1;
+                if (!pup) { fo = "php_zv_dec"; ok = -1; }
+                ph_pset_at = line2;
+                ph_pending_stmt(ph_expr_stmt_of(ph_pset_node(ph_tref(rtq), pn, ph_c1(fo, ph_tref(old), ty_pzv), ph_pset_kind(ok, fl2))));
+                ph_pending_stmt(ph_check(line2, fl2));
+                v = ph_tref(old);
+                vt = PT_MIXED;
+                continue;
+            }
+            // `$o->p op= v` in an expression: the new value is the answer
+            if (!iscall && !ns) {
+                i64 cop = 0;
+                if (ph_at(".=", 2))  cop = ph_tok(".", 1);
+                if (ph_at("+=", 2))  cop = ph_tok("+", 1);
+                if (ph_at("-=", 2))  cop = ph_tok("-", 1);
+                if (ph_at("*=", 2))  cop = ph_tok("*", 1);
+                if (ph_at("/=", 2))  cop = ph_tok("/", 1);
+                if (ph_at("%=", 2))  cop = ph_tok("%", 1);
+                if (ph_at("**=", 3)) cop = ph_tok("**", 2);
+                if (cop) {
+                    ph_next();
+                    i64 rtc = ph_temp(recv, ty_pzv, "pho_");
+                    i64 cur = ph_c3("php_zv_pget", ph_tref(rtc), ph_strlit(pn, cstrlen(pn)), ph_scope(), ty_pzv);
+                    i64 crv = ph_expr(15);
+                    i64 crt = ph_ety;
+                    i64 nv2 = 0;
+                    if (cop == ph_tok(".", 1)) nv2 = ph_c2("php_zv_concat", cur, ph_to_mixed(crv, crt), ty_pzv);
+                    if (cop != ph_tok(".", 1)) nv2 = ph_arith_zv(cop, cur, PT_MIXED, crv, crt);
+                    ph_pset_at = line2;
+                    ph_pending_stmt(ph_expr_stmt_of(ph_pset_node(ph_tref(rtc), pn, nv2, ph_pset_kind(0, fl2))));
+                    ph_pending_stmt(ph_check(line2, fl2));
+                    v = ph_tref(ph_temp(ph_c1("php_zv_val", ph_c3("php_zv_pget", ph_tref(rtc), ph_strlit(pn, cstrlen(pn)), ph_scope(), ty_pzv), ty_pzv), ty_pzv, "phov_"));
+                    vt = PT_MIXED;
+                    continue;
+                }
+            }
             if (iscall)  v = ph_mcall_ns(recv, pn, fl2, line2, ns);
             uptr pg = "php_zv_pget";
             if (ns) pg = "php_zv_pget_ns";                  // `$o?->p`
@@ -576,14 +636,30 @@ i64 ph_primary() {
             i64 ct = -1;
             if (ph_is("int") || ph_is("integer")) ct = PT_INT;
             if (ph_is("float") || ph_is("double")) ct = PT_FLOAT;
-            if (ph_is("string")) ct = PT_STRING;
+            if (ph_is("string") || ph_is("binary")) ct = PT_STRING;
             if (ph_is("bool") || ph_is("boolean")) ct = PT_BOOL;
+            if (ph_is("array")) ct = PT_ARR;
+            if (ph_is("object")) ct = PT_OBJ;
+            // php 8.5 deprecates the long spellings while compiling
+            uptr noncan = 0;
+            uptr canon = 0;
+            if (ph_is("integer")) { noncan = "integer"; canon = "int"; }
+            if (ph_is("double"))  { noncan = "double"; canon = "float"; }
+            if (ph_is("boolean")) { noncan = "boolean"; canon = "bool"; }
+            if (ph_is("binary"))  { noncan = "binary"; canon = "string"; }
+            uptr cfl = ph_tfile;
+            i64 cline = ph_tline;
             if (ct >= 0) {
                 // only a cast if the ) follows immediately
                 uptr q = p_cp();
                 uptr e = p_src_end();
                 loop { if (q >= e) break; if (!ph_space(ld8(q))) break; q = q + 1; }
                 if (q < e && ld8(q) == 41) {
+                    if (noncan) {
+                        uptr nm = p_cat(p_cat("Non-canonical cast (", noncan, 0, cstrlen(noncan)), ") is deprecated, use the (", 0, 26);
+                        nm = p_cat(p_cat(nm, canon, 0, cstrlen(canon)), ") cast instead", 0, 14);
+                        ph_cdiag(8192, nm, cfl, cline);
+                    }
                     ph_next();
                     ph_next();                     // the )
                     // a cast binds as tightly as unary minus: `(int) $s - 1`
@@ -605,6 +681,20 @@ i64 ph_primary() {
                     if (ct == PT_INT)    return ph_to_int(v, vt);
                     if (ct == PT_FLOAT)  return ph_to_float(v, vt);
                     if (ct == PT_STRING) return ph_to_str(v, vt);
+                    // (array): an array stays one, an object becomes its
+                    // properties (php's mangled keys), null nothing, a scalar
+                    // the one element; (object): stdClass of an array's
+                    // entries, a scalar as `scalar`, an object itself
+                    if (ct == PT_ARR) {
+                        if (vt == PT_ARR) return v;
+                        if (vt == PT_PK) ph_pk_disagree(ph_tfile, ph_tline, "a packed array cast to array");
+                        ph_efresh = 1;
+                        return ph_c1("php_zv_to_arr", ph_to_mixed(v, vt), ty_parr);
+                    }
+                    if (ct == PT_OBJ) {
+                        ph_ety = PT_MIXED;
+                        return ph_c1("php_zv_to_obj", ph_to_mixed(v, vt), ty_pzv);
+                    }
                     return ph_to_bool(v, vt);
                 }
             }
@@ -659,6 +749,25 @@ i64 ph_primary() {
         uptr d = p_cat("$", ph_tname, 0, cstrlen(ph_tname));
         ph_next();
         if (ph_var_find(d) < 0) ph_bind_undef(d, fl, line, 0);
+        // `++$o->p`: the property incremented, its new value the answer
+        if (ph_at("->", 2)) {
+            ph_next();
+            if (ph_tid != T_IDENT) err_at2(ph_tfile, ph_tline, "mc-php: a php property needs a name", ph_tname);
+            uptr ppn = ph_tname;
+            ph_next();
+            if (ph_at("->", 2) || ph_at("[", 1) || ph_at("(", 1)) ph_todo(fl, line, "++ on a property of a property");
+            i64 rtp = ph_temp(ph_recv(ph_var_ref(d), ph_ety), ty_pzv, "pho_");
+            uptr fi = "php_zv_inc";
+            if (!up) fi = "php_zv_dec";
+            i64 nv = ph_c1(fi, ph_c3("php_zv_pget", ph_tref(rtp), ph_strlit(ppn, cstrlen(ppn)), ph_scope(), ty_pzv), ty_pzv);
+            i64 ik = 1;
+            if (!up) ik = -1;
+            ph_pset_at = line;
+            ph_pending_stmt(ph_expr_stmt_of(ph_pset_node(ph_tref(rtp), ppn, nv, ph_pset_kind(ik, fl))));
+            ph_pending_stmt(ph_check(line, fl));
+            ph_ety = PT_MIXED;
+            return ph_tref(ph_temp(ph_c1("php_zv_val", ph_c3("php_zv_pget", ph_tref(rtp), ph_strlit(ppn, cstrlen(ppn)), ph_scope(), ty_pzv), ty_pzv), ty_pzv, "phov_"));
+        }
         i64 t = ph_var_type(d);
         i64 lv = ph_var_node(d, 0);         // the read: php_gread for a global
         i64 io = ph_incdec_other(t, !up, lv);
@@ -705,6 +814,18 @@ i64 ph_primary() {
         ph_pending_stmt(ph_stmt_of(ph_call("php_quiet_off", 0, 0, 0, 0, 0, TY_VOID)));
         ph_ety = at;
         return ph_tref(atmp);
+    }
+    // `print expr` in an expression: the text printed, and 1 (a statement
+    // `print` is lvalue.mc's, with echo)
+    if (ph_is("print")) {
+        uptr pfl = ph_tfile;
+        i64 pline = ph_tline;
+        ph_next();
+        i64 pv = ph_expr(0);
+        i64 pt = ph_ety;
+        ph_pending_stmt(ph_stmt_of(ph_echo_of(pv, pt, pfl, pline)));
+        ph_ety = PT_INT;
+        return ph_int(1);
     }
     if (ph_is("new")) {
         ph_next();
@@ -1097,6 +1218,9 @@ i64 ph_compare(i64 t, i64 lhs, i64 lt, i64 rhs, i64 rt, uptr fl, i64 line) {
     if (lt == PT_MIXED || rt == PT_MIXED || lt == PT_NULL || rt == PT_NULL
         || ph_is_arr(lt) || ph_is_arr(rt))
         return ph_cmp_zv(t, lhs, lt, rhs, rt);
+    // an object compared loosely is php's property-by-property comparison
+    // (php_zv_cmp), not its handle's; `===` of two is the same object
+    if ((lt == PT_OBJ || rt == PT_OBJ) && (!strict || lt != rt)) return ph_cmp_zv(t, lhs, lt, rhs, rt);
     if (lt == PT_STRING && rt != PT_STRING) return ph_cmp_zv(t, lhs, lt, rhs, rt);
     if (rt == PT_STRING && lt != PT_STRING) return ph_cmp_zv(t, lhs, lt, rhs, rt);
     if (strict && lt != rt) {
@@ -1242,7 +1366,6 @@ i64 ph_arith_op(i64 t) {
         || t == ph_tok("^", 1) || t == ph_tok("<<", 2) || t == ph_tok(">>", 2);
 }
 
-i64 ph_check(i64 line, uptr fl);
 // php evaluates a binary operator's operands left to right. A right operand
 // that needs statements ahead of the expression (a checked call's temporary,
 // an array literal) puts them in the pending queue, which runs BEFORE the

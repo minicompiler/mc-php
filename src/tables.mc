@@ -48,6 +48,7 @@ i64  ph_fret[PH_MAXFN];
 i64  ph_fnp[PH_MAXFN];
 i64  ph_fpt[PH_MAXFN * PH_MAXP];
 i64  ph_fpd[PH_MAXFN * PH_MAXP];        // the default value node, 0 = none
+i64  ph_fpl[PH_MAXFN * PH_MAXP];        // the line the parameter is declared on (0 = not yet)
 uptr ph_fpn[PH_MAXFN * PH_MAXP];        // the bare parameter name, for a message
 i64  ph_fvar[PH_MAXFN];                 // 1 when the last parameter is ...$rest
 i64  ph_fvpc[PH_MAXFN];                 // the DECLARED element type of ...$rest
